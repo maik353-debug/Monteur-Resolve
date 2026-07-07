@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.9">
+  <resources>
+    <format id="r1" name="FFVideoFormat1080p25" frameDuration="100/2500s" width="1920" height="1080"/>
+    <asset id="r2" name="Interview Anna" start="3600s" duration="60s" hasVideo="1" hasAudio="1" audioSources="1" audioChannels="2" format="r1" src="file:///media/interview_anna.mov"/>
+    <asset id="r3" name="B-Roll Street" start="7200s" duration="30s" hasVideo="1" format="r1" src="file:///media/broll_street.mov"/>
+    <asset id="r4" name="Sunset Drone" start="60s" duration="120s" hasVideo="1" format="r1" src="file:///media/sunset_drone.mov"/>
+  </resources>
+  <library location="file:///Users/editor/Movies/Fable.fcpbundle/">
+    <event name="Fable Event">
+      <project name="Fable Sample Project">
+        <sequence format="r1" duration="12s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
+          <spine>
+            <asset-clip ref="r2" name="Interview Anna" offset="0s" duration="4s" start="3600s" format="r1" tcFormat="NDF"/>
+            <asset-clip ref="r3" name="B-Roll Street" offset="4s" duration="3s" start="7200s" format="r1" tcFormat="NDF"/>
+            <gap name="Gap" offset="7s" duration="2s" start="0s">
+              <asset-clip ref="r4" name="Sunset Drone" lane="1" offset="1s" duration="1s" start="60s" format="r1" tcFormat="NDF"/>
+            </gap>
+            <clip name="Vox Pop" offset="9s" duration="3s" start="0s" format="r1" tcFormat="NDF">
+              <video name="Vox Pop" offset="0s" duration="3s"/>
+            </clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>

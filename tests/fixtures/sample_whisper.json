@@ -1,0 +1,48 @@
+{
+  "text": " Welcome back to the cutting room. Today we look at the rough cut. I always start with the interview.",
+  "language": "en",
+  "segments": [
+    {
+      "id": 0,
+      "seek": 0,
+      "start": 1.0,
+      "end": 3.5,
+      "text": " Welcome back to the cutting room.",
+      "temperature": 0.0,
+      "avg_logprob": -0.21,
+      "no_speech_prob": 0.01
+    },
+    {
+      "id": 1,
+      "seek": 0,
+      "start": 4.0,
+      "end": 6.25,
+      "text": " Today we look at the rough cut.",
+      "temperature": 0.0,
+      "avg_logprob": -0.18,
+      "no_speech_prob": 0.02
+    },
+    {
+      "id": 2,
+      "seek": 600,
+      "start": 7.0,
+      "end": 11.8,
+      "text": " I always start with the interview.",
+      "speaker": "ANNA",
+      "temperature": 0.0,
+      "avg_logprob": -0.25,
+      "no_speech_prob": 0.01
+    },
+    {
+      "id": 3,
+      "seek": 600,
+      "start": 12.3,
+      "end": 14.0,
+      "text": " That gives you a spine.",
+      "speaker": "ANNA",
+      "temperature": 0.0,
+      "avg_logprob": -0.19,
+      "no_speech_prob": 0.03
+    }
+  ]
+}
