@@ -65,9 +65,10 @@ def _print_stats(stats) -> None:
 
 
 def cmd_analyze(args: argparse.Namespace) -> None:
-    from fable.analysis import analyze_timeline, compare
+    from fable.analysis import analyze_scenes, analyze_timeline, compare
 
-    stats = analyze_timeline(_load_timeline(args.timeline, args.fps), track=args.track)
+    timeline = _load_timeline(args.timeline, args.fps)
+    stats = analyze_timeline(timeline, track=args.track)
     other = None
     if args.compare:
         other = analyze_timeline(
@@ -83,6 +84,20 @@ def cmd_analyze(args: argparse.Namespace) -> None:
         if other is not None:
             result = compare(other, stats)
             print(f"\nvs {args.compare}: {result['verdict']}")
+        if args.scenes:
+            print("\nScenes:")
+            for scene in analyze_scenes(timeline, track=args.track):
+                s = scene.stats
+                print(
+                    f"  {int(scene.start // 60)}:{int(scene.start % 60):02d}"
+                    f"  {scene.heading[:36]:<36} {s.shot_count:>3} shots"
+                    f"  ASL {s.avg_shot_seconds:5.2f}s"
+                )
+        if args.reference:
+            from fable.references import compare_to_reference
+
+            result = compare_to_reference(stats, args.reference)
+            print(f"\n{result['profile']}: {result['verdict']}")
     if args.report:
         from fable.report import save_report
 
@@ -205,6 +220,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--compare", help="second timeline to compare against")
     p.add_argument("--report", help="write an HTML pacing report to this path")
     p.add_argument("--json", action="store_true", help="print stats as JSON")
+    p.add_argument("--scenes", action="store_true", help="per-scene pacing (uses timeline markers)")
+    p.add_argument("--reference", help="compare against a genre profile (e.g. thriller, drama)")
     p.set_defaults(func=cmd_analyze)
 
     p = sub.add_parser("papercut", help="text-based rough cutting from transcripts")

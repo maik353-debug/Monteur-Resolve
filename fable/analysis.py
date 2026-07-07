@@ -18,7 +18,7 @@ A quick glossary for editors:
 from __future__ import annotations
 
 import statistics
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from fable.model import Timeline, frames_to_seconds
 
@@ -205,6 +205,61 @@ def rhythm_signature(stats: PacingStats, buckets: int = 20) -> list[float]:
             sums[index] += shot.length
             counts[index] += 1
     return [sums[i] / counts[i] if counts[i] else 0.0 for i in range(buckets)]
+
+
+@dataclass
+class ScenePacing:
+    """Pacing of one scene (a marker-delimited stretch of the timeline)."""
+
+    heading: str
+    start: float  # seconds
+    end: float
+    stats: PacingStats
+
+
+def analyze_scenes(timeline: Timeline, track: str | None = None) -> list[ScenePacing]:
+    """Per-scene pacing, using timeline markers as scene boundaries.
+
+    Every marker starts a new scene named after the marker; material before
+    the first marker becomes "Opening". A timeline without markers returns a
+    single scene spanning the whole cut. Clips are assigned to the scene in
+    which they start; scene stats are computed as if the scene were its own
+    timeline (positions relative to the scene start).
+    """
+    fps = timeline.fps
+    markers = sorted(timeline.markers, key=lambda m: m.frame)
+    boundaries: list[tuple[str, int]] = [
+        (m.name or f"Scene {i + 1}", m.frame) for i, m in enumerate(markers)
+    ]
+    if not boundaries:
+        boundaries = [(timeline.name or "Full cut", 0)]
+    elif boundaries[0][1] > 0:
+        boundaries.insert(0, ("Opening", 0))
+
+    clips = _select_shot_clips(timeline, track)
+    scenes: list[ScenePacing] = []
+    end_frame = timeline.duration
+    for i, (heading, start_frame) in enumerate(boundaries):
+        next_frame = boundaries[i + 1][1] if i + 1 < len(boundaries) else end_frame
+        scene_clips = [
+            replace(
+                c,
+                record_in=c.record_in - start_frame,
+                record_out=c.record_out - start_frame,
+            )
+            for c in clips
+            if start_frame <= c.record_in < next_frame
+        ]
+        sub = Timeline(name=heading, fps=fps, clips=scene_clips)
+        scenes.append(
+            ScenePacing(
+                heading=heading,
+                start=frames_to_seconds(start_frame, fps),
+                end=frames_to_seconds(next_frame, fps),
+                stats=analyze_timeline(sub, track=None),
+            )
+        )
+    return scenes
 
 
 def _select_shot_clips(timeline: Timeline, track: str | None) -> list:
