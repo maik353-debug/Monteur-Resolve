@@ -6,6 +6,11 @@ Fable gives editors objective feedback on the rhythm of a cut — and tracks
 how it evolves, version by version. Built for narrative film, works with
 DaVinci Resolve.
 
+- **Auto-assembly** — from screenplay to first cut. Fable transcribes your
+  takes, matches every dialogue line of your script against them, scores
+  each take (coverage, accuracy, restarts/fluffs), picks the best material
+  and builds the scene assembly as a timeline for Resolve. You start from
+  a cut, not from zero.
 - **Fable Studio** — a local app in your browser. Drop a timeline export
   (EDL/FCPXML) or pull the current timeline from a running Resolve, and see
   your cut's pacing: shot-length stats, a pacing curve, fast/medium/slow
@@ -39,12 +44,25 @@ Everything below is also available from the command line.
 
 ## Quick start (CLI)
 
+### 0. Auto-assembly: screenplay + takes → first cut
+
+```bash
+fable transcribe footage/scene12/          # whisper, writes .json per clip
+fable assembly script.fountain footage/scene12/ -o scene12.fcpxml --fps 25
+# -> import scene12.fcpxml in Resolve: best takes, in script order
+```
+
+Clips named like `S12_T03.mov` are routed to scene 12 automatically. Try it
+on the included demo: `fable assembly examples/demo/script.fountain
+examples/demo/takes -o assembly.edl`
+
 ### 1. Analyze the pacing of a cut
 
 ```bash
 fable analyze my_cut.edl --fps 25
 fable analyze my_cut_v4.edl --compare my_cut_v3.edl --fps 25
 fable analyze my_cut.fcpxml --report pacing.html   # shareable HTML report
+fable analyze my_cut.edl --fps 25 --scenes --reference thriller
 ```
 
 ### 2. Rough cut from a transcript (dialogue/doc scenes)

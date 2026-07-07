@@ -1,0 +1,15 @@
+1
+00:00:04,200 --> 00:00:08,100
+Du bist spät. Ich hab dreimal versucht dich zu erreichen.
+
+2
+00:00:09,000 --> 00:00:11,400
+Ich weiß. Es ist was dazwischengekommen.
+
+3
+00:00:12,500 --> 00:00:17,200
+Es kommt immer was dazwischen. Hast du das Geld dabei oder nicht?
+
+4
+00:00:18,000 --> 00:00:21,100
+Nicht alles. Aber genug für den Anfang.

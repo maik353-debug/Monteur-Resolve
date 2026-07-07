@@ -176,6 +176,80 @@ def cmd_resolve(args: argparse.Namespace) -> None:
         _fail(str(exc))
 
 
+def cmd_transcribe(args: argparse.Namespace) -> None:
+    import json as json_module
+    from dataclasses import asdict
+
+    from fable.transcribe import FableTranscribeError, transcribe_directory, transcribe_file
+
+    target = Path(args.path)
+    try:
+        if target.is_dir():
+            results = transcribe_directory(target, model=args.model, language=args.language)
+        else:
+            results = {str(target): transcribe_file(target, model=args.model, language=args.language)}
+    except (FableTranscribeError, FileNotFoundError, ValueError) as exc:
+        _fail(str(exc))
+    for media, transcript in results.items():
+        out = Path(media).with_suffix(".json")
+        if not out.exists():
+            payload = {
+                "segments": [asdict(s) | {"start": s.start, "end": s.end} for s in transcript.segments],
+                "language": transcript.language,
+            }
+            out.write_text(json_module.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        print(f"{media} -> {out.name} ({len(transcript.segments)} segments)")
+
+
+def cmd_assembly(args: argparse.Namespace) -> None:
+    from fable import io
+    from fable.assembly import TakeSource, assembly_to_timeline, plan_assembly
+    from fable.screenplay import parse_fountain
+    from fable.transcribe import scene_take_from_name
+
+    try:
+        screenplay = parse_fountain(Path(args.script).read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError) as exc:
+        _fail(str(exc))
+    takes = []
+    takes_dir = Path(args.takes)
+    for path in sorted(takes_dir.glob("*")):
+        if path.suffix.lower() not in (".srt", ".json"):
+            continue
+        try:
+            transcript = io.load_transcript(path)
+        except ValueError as exc:
+            print(f"fable: skipping {path.name}: {exc}", file=sys.stderr)
+            continue
+        scene_hint, take_hint = scene_take_from_name(path.name)
+        takes.append(
+            TakeSource(name=path.stem, transcript=transcript, scene_hint=scene_hint, take_hint=take_hint)
+        )
+    if not takes:
+        _fail(f"no .srt/.json transcripts found in {takes_dir} — run 'fable transcribe' first")
+
+    plan = plan_assembly(screenplay, takes, max_takes_per_scene=args.max_takes)
+    print(f"Assembly plan — {plan.coverage() * 100:.0f}% of dialogue covered\n")
+    for scene in plan.scenes:
+        print(f"  {scene.heading or '(untitled scene)'}")
+        for score in sorted(scene.take_scores, key=lambda s: s.total, reverse=True)[:3]:
+            print(
+                f"    {score.take}: coverage {score.coverage * 100:.0f}%, "
+                f"accuracy {score.accuracy * 100:.0f}%, fluffs {score.fluffs}"
+            )
+        for note in scene.notes:
+            print(f"    note: {note}")
+
+    timeline = assembly_to_timeline(plan, takes, fps=args.fps, handles=args.handles)
+    if not timeline.clips:
+        _fail("nothing matched — check scene numbers in the script and file names")
+    io.save_timeline(timeline, args.output)
+    print(
+        f"\n{len(timeline.track_clips('V1'))} segments -> {args.output} "
+        f"({timeline.duration_seconds:.1f}s at {args.fps:g} fps)"
+    )
+
+
 def cmd_ui(args: argparse.Namespace) -> None:
     from fable.web import serve
 
@@ -248,6 +322,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action", choices=["status", "import", "analyze"])
     p.add_argument("file", nargs="?", help="file for 'import'")
     p.set_defaults(func=cmd_resolve)
+
+    p = sub.add_parser("transcribe", help="transcribe media files (whisper)")
+    p.add_argument("path", help="media file or directory")
+    p.add_argument("--model", default="small", help="whisper model (default: small)")
+    p.add_argument("--language", default=None)
+    p.set_defaults(func=cmd_transcribe)
+
+    p = sub.add_parser("assembly", help="build a first cut from screenplay + take transcripts")
+    p.add_argument("script", help="screenplay (.fountain or plain text)")
+    p.add_argument("takes", help="directory with take transcripts (.srt/.json), named like the clips")
+    p.add_argument("-o", "--output", required=True, help="output .edl/.fcpxml")
+    p.add_argument("--fps", type=float, default=25.0)
+    p.add_argument("--handles", type=float, default=0.5, help="seconds of handle per side")
+    p.add_argument("--max-takes", type=int, default=1, help="takes per scene to draw from")
+    p.set_defaults(func=cmd_assembly)
 
     p = sub.add_parser("ui", help="launch Fable Studio (local web app)")
     p.add_argument("--port", type=int, default=8765)
