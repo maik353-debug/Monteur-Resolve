@@ -1,36 +1,53 @@
 # Fable 🎬
 
-**AI-assisted editing room toolkit for DaVinci Resolve.**
+**The pacing assistant for film editors.**
 
-Fable helps film editors get from raw footage to a strong cut, faster:
+Fable gives editors objective feedback on the rhythm of a cut — and tracks
+how it evolves, version by version. Built for narrative film, works with
+DaVinci Resolve.
 
-- **Papercut** — text-based rough cutting. Turn transcripts into a markdown
-  checklist, tick and reorder the takes you want, and Fable renders a real
-  timeline (EDL/FCPXML) you can import straight into DaVinci Resolve.
-- **Pacing analytics** — objective rhythm data for a cut: average shot
-  length, pacing curve, fast/medium/slow sections, shot-length histogram,
-  and A/B comparison between two versions of a cut.
-- **HTML pacing reports** — a self-contained, shareable report with charts,
-  in light and dark mode.
-- **Resolve bridge** — read timelines from a running DaVinci Resolve, import
-  rendered rough cuts, all via Resolve's scripting API.
-- **AI assistance (optional)** — Claude suggests selects from your
-  transcript against an editorial brief, writes pacing notes on your cut,
-  and logs footage summaries.
+- **Fable Studio** — a local app in your browser. Drop a timeline export
+  (EDL/FCPXML) or pull the current timeline from a running Resolve, and see
+  your cut's pacing: shot-length stats, a pacing curve, fast/medium/slow
+  sections, histogram.
+- **Version history** — save every cut as a version and watch your film's
+  tempo evolve across weeks of editing. Compare any two versions and get a
+  plain-language verdict ("v5 is cut faster, with a more even rhythm, and
+  runs 40s shorter").
+- **Resolve bridge** — talks directly to a running DaVinci Resolve via its
+  scripting API: read timelines, import cuts.
+- **Papercut** — bonus for dialogue scenes and documentary work: turn
+  transcripts into a tickable checklist and render your selects as a real
+  timeline.
+- **AI assistance (optional)** — Claude writes editorial pacing notes on
+  your cut and suggests selects from transcripts.
 
-Pure Python 3.10+, standard library only (the AI features optionally use the
-`anthropic` package).
+Pure Python 3.10+, zero required dependencies (AI features optionally use
+the `anthropic` package).
 
-## Install
+## Install & launch
 
 ```bash
 pip install -e .          # core
 pip install -e '.[ai]'    # with AI features (needs ANTHROPIC_API_KEY)
+
+cd ~/my-film-project
+fable ui                  # launches Fable Studio in your browser
 ```
 
-## Quick start
+Everything below is also available from the command line.
 
-### 1. Rough cut from a transcript
+## Quick start (CLI)
+
+### 1. Analyze the pacing of a cut
+
+```bash
+fable analyze my_cut.edl --fps 25
+fable analyze my_cut_v4.edl --compare my_cut_v3.edl --fps 25
+fable analyze my_cut.fcpxml --report pacing.html   # shareable HTML report
+```
+
+### 2. Rough cut from a transcript (dialogue/doc scenes)
 
 ```bash
 # Transcribe your footage (e.g. with Whisper), then:
@@ -43,14 +60,6 @@ fable papercut create interview.srt -o cut.md --fps 25
 
 fable papercut render cut.md -o rough_cut.fcpxml --handles 0.5
 # -> import rough_cut.fcpxml in DaVinci Resolve
-```
-
-### 2. Analyze the pacing of a cut
-
-```bash
-fable analyze my_cut.edl --fps 25
-fable analyze my_cut_v4.edl --compare my_cut_v3.edl --fps 25
-fable analyze my_cut.fcpxml --report pacing.html   # charts, sections, histogram
 ```
 
 ### 3. Talk to DaVinci Resolve

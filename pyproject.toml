@@ -28,5 +28,8 @@ fable = "fable.cli:main"
 [tool.setuptools.packages.find]
 include = ["fable*"]
 
+[tool.setuptools.package-data]
+"fable.web" = ["app.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

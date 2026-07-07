@@ -1,41 +1,47 @@
 # Fable Roadmap
 
-Vision: the AI editing-room assistant for DaVinci Resolve editors — from raw
-footage to a strong cut, faster, with objective feedback on rhythm and
-dramaturgy. Personally useful first, marketable second.
+Vision: the pacing assistant for narrative film editors — objective feedback
+on the rhythm of a cut, version by version, integrated with DaVinci Resolve.
+Personally useful first, marketable second. The GUI (Fable Studio) is the
+product; the CLI is the workbench underneath.
 
 ## v0.1 — Foundation (this release)
 
 - Core data model: timecode (incl. drop-frame), timelines, clips, transcripts
 - I/O: CMX3600 EDL, FCPXML 1.x, SRT, Whisper JSON
-- Papercut: transcript → checklist → EDL/FCPXML rough cut
 - Pacing analytics: ASL, pacing curve, sections, histogram, A/B compare
+- Fable Studio: local web app — drag & drop analysis, version history with
+  tempo trend, Resolve panel
+- Project version store (`.fable/versions.json` per film project)
 - Self-contained HTML pacing report (light/dark)
 - DaVinci Resolve bridge (read timelines, import cuts)
+- Papercut: transcript → checklist → EDL/FCPXML rough cut (for dialogue/doc)
 - Optional Claude-powered selects, pacing notes, footage logs
-- CLI: `fable analyze | papercut | convert | resolve | ai`
+- CLI: `fable ui | analyze | papercut | convert | resolve | ai`
 
-## v0.2 — In the editor's daily loop
+## v0.2 — In the editor's daily loop (Studio-first)
 
-- [ ] Whisper integration: `fable transcribe footage/` (local whisper.cpp or API)
-- [ ] Multicam/multi-clip papercuts with speaker-based source mapping
-- [ ] Marker round-trip with Resolve (notes ↔ timeline markers)
+- [ ] Scene-level view: pacing per scene (from Resolve markers / clip names)
 - [ ] Reference pacing profiles: compare your cut against genre baselines
-- [ ] Watch mode: re-analyze on export, keep a version history of pacing stats
+      and reference films
+- [ ] One-click "pull & save" from Resolve on every export (watch mode)
+- [ ] Notes on versions ("director saw this one", "tightened act 2")
+- [ ] AI pacing notes inside Studio (opt-in, per version)
 - [ ] Windows/macOS install docs + Resolve scripts-menu integration
 
-## v0.3 — The assistant becomes proactive
+## v0.3 — Deeper dramaturgy
 
-- [ ] Scene/act detection from transcript + cut structure
-- [ ] "Story sync": papercut sections mapped to a beat sheet / outline
-- [ ] AI rough-cut proposals directly from footage transcripts (multi-source)
-- [ ] Local web UI (FastAPI) for papercut editing with waveform preview
+- [ ] Act/sequence structure overlay on the pacing curve
+- [ ] Audio-aware analysis: dialogue density, music vs. dialogue balance
+- [ ] Marker round-trip with Resolve (notes ↔ timeline markers)
+- [ ] Whisper integration for the papercut workflow
 
 ## v1.0 — Product
 
-- [ ] Packaged installers, Resolve plugin panel
+- [ ] Package Studio as a desktop app (installers, no Python required)
+- [ ] Resolve plugin panel (Workflow Integration)
 - [ ] Licensing/pricing model (indie editors first)
-- [ ] Team features: shared papercuts, review links, feedback threads
+- [ ] Team features: shared version history, review links, feedback threads
 
 ## Design principles
 

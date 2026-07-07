@@ -161,6 +161,15 @@ def cmd_resolve(args: argparse.Namespace) -> None:
         _fail(str(exc))
 
 
+def cmd_ui(args: argparse.Namespace) -> None:
+    from fable.web import serve
+
+    try:
+        serve(port=args.port, project_root=args.project, open_browser=not args.no_browser)
+    except OSError as exc:
+        _fail(f"could not start Fable Studio on port {args.port}: {exc}")
+
+
 def cmd_ai(args: argparse.Namespace) -> None:
     from fable.ai import FableAIError, pacing_notes, suggest_selects, summarize_footage
 
@@ -222,6 +231,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action", choices=["status", "import", "analyze"])
     p.add_argument("file", nargs="?", help="file for 'import'")
     p.set_defaults(func=cmd_resolve)
+
+    p = sub.add_parser("ui", help="launch Fable Studio (local web app)")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--project", default=".", help="project directory for version history")
+    p.add_argument("--no-browser", action="store_true", help="don't open a browser")
+    p.set_defaults(func=cmd_ui)
 
     p = sub.add_parser("ai", help="Claude-powered editorial assistance")
     p.add_argument("action", choices=["selects", "notes", "log"])
