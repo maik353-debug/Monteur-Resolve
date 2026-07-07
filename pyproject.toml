@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fable-tool"
+version = "0.1.0"
+description = "Fable — AI-assisted editing room toolkit for DaVinci Resolve: transcript-based rough cuts, pacing analytics, and project organization."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Maik" }]
+keywords = ["film", "editing", "davinci-resolve", "edl", "fcpxml", "pacing", "rough-cut", "transcript"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Other Audience",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Video :: Non-Linear Editor",
+]
+dependencies = []
+
+[project.optional-dependencies]
+ai = ["anthropic>=0.40"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+fable = "fable.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["fable*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
