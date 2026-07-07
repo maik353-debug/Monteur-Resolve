@@ -1,0 +1,1457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fable Studio</title>
+<style>
+/* ---------- theme ------------------------------------------------------ */
+:root {
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --surface-2: #f3f2ef;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --ink-muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --series-1: #2a78d6;
+  --series-2: #1baf7a;
+  --tempo-fast: #0d366b;
+  --tempo-medium: #2a78d6;
+  --tempo-slow: #86b6ef;
+  --good: #006300;
+  --critical: #d03b3b;
+  --btn-bg: #2a78d6;
+  --btn-ink: #ffffff;
+  --veil: rgba(249, 249, 247, 0.82);
+  --shadow: 0 8px 28px rgba(11, 11, 11, 0.14);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #232322;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --ink-muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --series-1: #3987e5;
+    --series-2: #199e70;
+    --tempo-fast: #9ec5f4;
+    --tempo-medium: #3987e5;
+    --tempo-slow: #184f95;
+    --good: #0ca30c;
+    --critical: #d03b3b;
+    --btn-bg: #256abf;
+    --btn-ink: #ffffff;
+    --veil: rgba(13, 13, 13, 0.82);
+    --shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  }
+}
+
+/* ---------- base ------------------------------------------------------- */
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+}
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; border-radius: 4px; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+h1, h2, h3, p { margin: 0; }
+
+.app { display: flex; height: 100vh; }
+
+/* ---------- sidebar ---------------------------------------------------- */
+.sidebar {
+  width: 276px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  overflow: hidden;
+}
+.brand { padding: 20px 18px 14px; border-bottom: 1px solid var(--border); }
+.brand-name { font-size: 17px; font-weight: 700; letter-spacing: 0.01em; display: flex; align-items: center; gap: 9px; }
+.brand-mark { width: 20px; height: 20px; flex: none; display: block; }
+.brand-sub { margin-top: 3px; font-size: 12px; color: var(--ink-muted); }
+.side-section { padding: 16px 18px; }
+.side-section h2 {
+  font-size: 11px; font-weight: 650; letter-spacing: 0.07em;
+  text-transform: uppercase; color: var(--ink-muted); margin-bottom: 10px;
+}
+#versions-section { flex: 1; overflow-y: auto; min-height: 0; }
+.side-hint { font-size: 12.5px; color: var(--ink-muted); }
+.version-list { list-style: none; margin: 0; padding: 0; }
+.version-row {
+  display: flex; align-items: center; gap: 6px;
+  border-radius: 8px; padding: 2px 4px 2px 6px; margin: 0 -6px 2px;
+}
+.version-row:hover { background: var(--surface-2); }
+.version-row.active { background: var(--surface-2); box-shadow: inset 2px 0 0 var(--series-1); }
+.v-check { width: 14px; height: 14px; accent-color: var(--series-1); flex: none; cursor: pointer; }
+.v-open {
+  flex: 1; min-width: 0; text-align: left; background: none; border: 0;
+  padding: 6px 4px; cursor: pointer; border-radius: 6px;
+}
+.v-label { display: block; font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.v-meta { display: block; font-size: 11.5px; color: var(--ink-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.v-del {
+  flex: none; width: 24px; height: 24px; border: 0; background: none;
+  color: var(--ink-muted); border-radius: 6px; cursor: pointer;
+  font-size: 15px; line-height: 1; opacity: 0;
+}
+.version-row:hover .v-del, .v-del:focus-visible { opacity: 1; }
+.v-del:hover { color: var(--critical); background: var(--surface-2); }
+.v-confirm { flex: 1; display: flex; align-items: center; gap: 6px; padding: 5px 2px; font-size: 12.5px; }
+.v-confirm span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink-2); }
+.compare-note { margin-top: 8px; font-size: 11.5px; color: var(--ink-muted); }
+#trend-block { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+#trend-block h3 { font-size: 11px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase; color: var(--ink-muted); }
+.side-sub { font-size: 11.5px; color: var(--ink-muted); margin: 2px 0 6px; }
+#resolve-panel { border-top: 1px solid var(--border); flex: none; }
+.resolve-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+.resolve-dot.on { background: var(--series-2); }
+.resolve-dot.off { background: var(--ink-muted); }
+.resolve-project { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.resolve-field { display: block; font-size: 11.5px; color: var(--ink-muted); margin-bottom: 10px; }
+.resolve-field select {
+  display: block; width: 100%; margin-top: 4px; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 7px; background: var(--page); color: var(--ink);
+}
+#resolve-panel details { margin-top: 6px; font-size: 12px; color: var(--ink-muted); }
+#resolve-panel summary { cursor: pointer; }
+#resolve-panel details p { margin-top: 6px; line-height: 1.5; word-break: break-word; }
+
+/* ---------- buttons ---------------------------------------------------- */
+.btn {
+  border: 0; border-radius: 8px; padding: 7px 13px; font-size: 13px; font-weight: 600;
+  cursor: pointer; background: var(--btn-bg); color: var(--btn-ink);
+  display: inline-flex; align-items: center; gap: 7px;
+}
+.btn:hover { filter: brightness(1.07); }
+.btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--border); }
+.btn.ghost:hover { background: var(--surface-2); filter: none; }
+.btn.small { padding: 4px 10px; font-size: 12px; }
+.btn.danger { background: var(--critical); color: #fff; }
+.btn[disabled] { opacity: 0.55; cursor: default; pointer-events: none; }
+.btn .spin {
+  width: 12px; height: 12px; flex: none; border-radius: 50%;
+  border: 2px solid currentColor; border-right-color: transparent;
+  animation: spin 0.7s linear infinite; display: none;
+}
+.btn.busy .spin { display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- main / welcome -------------------------------------------- */
+.main { flex: 1; overflow-y: auto; min-width: 0; }
+.welcome { min-height: 100%; display: flex; align-items: center; justify-content: center; padding: 40px; }
+.dropzone {
+  width: min(560px, 100%); padding: 64px 40px; text-align: center; cursor: pointer;
+  border: 1.5px dashed var(--axis); border-radius: 16px; background: var(--surface);
+  color: var(--ink-2); transition: border-color 0.15s, background 0.15s;
+}
+.dropzone:hover, .dropzone.over, .dropzone:focus-visible { border-color: var(--series-1); background: var(--surface-2); }
+.dz-icon { width: 44px; height: 44px; margin: 0 auto 14px; display: block; color: var(--ink-muted); }
+.dz-title { font-size: 16px; font-weight: 650; color: var(--ink); }
+.dz-sub { margin-top: 6px; font-size: 13px; color: var(--ink-muted); }
+.dz-busy { margin-top: 14px; font-size: 13px; color: var(--series-1); display: none; }
+.dropzone[aria-busy="true"] .dz-busy { display: block; }
+
+/* ---------- dashboard --------------------------------------------------- */
+#dashboard { max-width: 960px; margin: 0 auto; padding: 26px 28px 56px; }
+.dash-head { display: flex; flex-wrap: wrap; gap: 14px 20px; align-items: flex-end; justify-content: space-between; margin-bottom: 18px; }
+.eyebrow { font-size: 11px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase; color: var(--ink-muted); margin-bottom: 3px; }
+.dash-title h1 { font-size: 24px; font-weight: 680; line-height: 1.2; overflow-wrap: anywhere; }
+.dash-meta { margin-top: 4px; color: var(--ink-2); font-size: 13.5px; font-variant-numeric: tabular-nums; }
+.dash-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.save-group { display: flex; gap: 8px; align-items: center; }
+.save-group input {
+  width: 170px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); color: var(--ink);
+}
+
+.compare-banner {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 14px; margin-bottom: 16px; font-size: 13px;
+}
+.compare-banner .verdict { flex: 1 1 100%; color: var(--ink-2); }
+.compare-banner .deltas { flex: 1 1 100%; color: var(--ink-muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.compare-banner .spacer { flex: 1; }
+.key { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; min-width: 0; }
+.key .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+.swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex: none; }
+.line-key { width: 14px; height: 0; border-top: 3px solid; border-radius: 2px; display: inline-block; flex: none; }
+.arrow { color: var(--ink-muted); }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+.tile-label { font-size: 12px; color: var(--ink-2); margin-bottom: 4px; }
+.tile-value { font-size: 22px; font-weight: 600; }
+.tile-delta { font-size: 12px; color: var(--ink-2); margin-top: 4px; font-variant-numeric: tabular-nums; }
+.tile-delta .d { color: var(--ink-muted); }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px 14px; margin-bottom: 18px; }
+.card h2 { font-size: 15px; font-weight: 650; margin-bottom: 2px; }
+.card-sub { font-size: 12.5px; color: var(--ink-2); margin-bottom: 12px; }
+.legend { display: flex; gap: 16px; flex-wrap: wrap; margin: 8px 0 6px; font-size: 12.5px; color: var(--ink-2); }
+.legend .key { font-weight: 500; }
+.chart svg { display: block; width: 100%; height: auto; }
+svg text.axis {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 11px; font-variant-numeric: tabular-nums; fill: var(--ink-muted);
+}
+.empty-state { padding: 44px 24px; text-align: center; }
+.empty-state p { color: var(--ink-2); font-size: 15px; }
+
+.shots-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.shots-table th {
+  text-align: left; font-size: 11.5px; font-weight: 650; color: var(--ink-2);
+  padding: 6px 10px; border-bottom: 1px solid var(--grid);
+}
+.shots-table td { padding: 7px 10px; border-bottom: 1px solid var(--grid); overflow-wrap: anywhere; }
+.shots-table tr:last-child td { border-bottom: none; }
+.shots-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ---------- tooltip / toast / modal / veil ------------------------------ */
+.tooltip {
+  position: fixed; z-index: 60; pointer-events: none; max-width: 300px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: var(--shadow); padding: 8px 11px; font-size: 12.5px;
+}
+.tt-head { color: var(--ink-muted); font-size: 11.5px; margin-bottom: 4px; font-variant-numeric: tabular-nums; }
+.tt-row { display: flex; align-items: center; gap: 7px; margin-top: 2px; min-width: 0; }
+.tt-row .v { font-weight: 650; font-variant-numeric: tabular-nums; }
+.tt-row .n { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.toasts { position: fixed; top: 16px; right: 16px; z-index: 80; display: flex; flex-direction: column; gap: 8px; width: min(360px, calc(100vw - 32px)); }
+.toast {
+  display: flex; align-items: flex-start; gap: 10px;
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--ink-muted);
+  border-radius: 10px; padding: 10px 12px; box-shadow: var(--shadow); font-size: 13px;
+}
+.toast.error { border-left-color: var(--critical); }
+.toast.success { border-left-color: var(--series-2); }
+.toast .msg { flex: 1; overflow-wrap: anywhere; }
+.toast .close { flex: none; border: 0; background: none; color: var(--ink-muted); cursor: pointer; font-size: 15px; line-height: 1; padding: 1px 4px; border-radius: 5px; }
+.toast .close:hover { color: var(--ink); background: var(--surface-2); }
+
+.modal { position: fixed; inset: 0; z-index: 70; display: flex; align-items: center; justify-content: center; background: var(--veil); padding: 20px; }
+.modal-card { width: min(400px, 100%); background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow); padding: 20px 22px; }
+.modal-card h2 { font-size: 16px; font-weight: 680; }
+.modal-sub { margin: 4px 0 14px; font-size: 13px; color: var(--ink-2); overflow-wrap: anywhere; }
+.fps-presets { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.fps-chip {
+  border: 1px solid var(--border); background: var(--page); color: var(--ink);
+  border-radius: 8px; padding: 7px 12px; cursor: pointer; font-weight: 600; font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.fps-chip[aria-pressed="true"] { border-color: var(--series-1); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--series-1); }
+.fps-custom { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-2); margin-bottom: 16px; }
+.fps-custom input { width: 90px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--ink); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+#drop-veil {
+  position: fixed; inset: 0; z-index: 65; background: var(--veil);
+  display: flex; align-items: center; justify-content: center; pointer-events: none;
+}
+.veil-card {
+  border: 2px dashed var(--series-1); border-radius: 16px; padding: 40px 60px;
+  background: var(--surface); font-size: 17px; font-weight: 650; color: var(--ink);
+}
+[hidden] { display: none !important; }
+
+@media (max-width: 760px) {
+  .app { flex-direction: column; }
+  .sidebar { width: 100%; max-height: 45vh; border-right: 0; border-bottom: 1px solid var(--border); }
+  #dashboard { padding: 20px 16px 44px; }
+}
+</style>
+</head>
+<body>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-name">
+        <svg class="brand-mark" viewBox="0 0 20 20" aria-hidden="true">
+          <rect x="1" y="3" width="18" height="14" rx="2.5" fill="none" stroke="var(--series-1)" stroke-width="2"/>
+          <path d="M5 13 l3.4 -4 l2.8 2.6 l3.6 -5" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>Fable Studio</span>
+      </div>
+      <p class="brand-sub">Pacing &amp; rhythm for your cut</p>
+    </div>
+
+    <section class="side-section" id="versions-section" aria-label="Version history">
+      <h2>Versions</h2>
+      <p class="side-hint" id="versions-empty">No saved versions yet. Analyze a cut, then save it to start tracking how your tempo evolves.</p>
+      <ul class="version-list" id="version-list"></ul>
+      <p class="compare-note" id="compare-note" hidden>Check two versions to compare them.</p>
+      <div id="trend-block" hidden>
+        <h3>Tempo trend</h3>
+        <p class="side-sub">Average shot length across versions</p>
+        <div id="trend-chart" class="chart"></div>
+      </div>
+    </section>
+
+    <section class="side-section" id="resolve-panel" aria-label="DaVinci Resolve">
+      <h2>DaVinci Resolve</h2>
+      <div id="resolve-body"><p class="side-hint">Checking for Resolve&hellip;</p></div>
+    </section>
+  </aside>
+
+  <main class="main" id="main">
+    <div class="welcome" id="welcome">
+      <div class="dropzone" id="dropzone" role="button" tabindex="0"
+           aria-label="Drop a timeline export here, EDL or FCPXML, or press Enter to browse">
+        <svg class="dz-icon" viewBox="0 0 44 44" aria-hidden="true">
+          <rect x="4" y="8" width="36" height="28" rx="4" fill="none" stroke="currentColor" stroke-width="2"/>
+          <line x1="4" y1="16" x2="40" y2="16" stroke="currentColor" stroke-width="2"/>
+          <line x1="12" y1="8" x2="12" y2="16" stroke="currentColor" stroke-width="2"/>
+          <line x1="22" y1="8" x2="22" y2="16" stroke="currentColor" stroke-width="2"/>
+          <line x1="32" y1="8" x2="32" y2="16" stroke="currentColor" stroke-width="2"/>
+          <path d="M15 27 l5.5 -6 l4.5 4.2 l5.5 -7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <p class="dz-title">Drop a timeline export here — EDL or FCPXML</p>
+        <p class="dz-sub">&hellip;or click to browse. Drop two cuts at once to compare them.</p>
+        <p class="dz-busy" id="dz-busy">Analyzing&hellip;</p>
+      </div>
+    </div>
+
+    <section id="dashboard" hidden>
+      <header class="dash-head">
+        <div class="dash-title">
+          <p class="eyebrow" id="dash-source"></p>
+          <h1 id="dash-name"></h1>
+          <p class="dash-meta" id="dash-meta"></p>
+        </div>
+        <div class="dash-actions">
+          <button class="btn ghost" id="open-btn" type="button">Open cut&hellip;</button>
+          <button class="btn ghost" id="compare-file-btn" type="button" title="Compare the current cut with another file">Compare file&hellip;<span class="spin" aria-hidden="true"></span></button>
+          <div class="save-group" id="save-group">
+            <label class="sr-only" for="save-label">Version label</label>
+            <input type="text" id="save-label" placeholder="Version label" maxlength="80">
+            <button class="btn" id="save-btn" type="button">Save as version<span class="spin" aria-hidden="true"></span></button>
+          </div>
+        </div>
+      </header>
+
+      <div class="compare-banner" id="compare-banner" hidden></div>
+
+      <div class="card empty-state" id="dash-empty" hidden>
+        <p>No shots to analyze — this timeline has no cuts to report on.</p>
+      </div>
+
+      <div id="dash-body">
+        <section class="tiles" id="tiles" aria-label="Pacing statistics"></section>
+
+        <section class="card">
+          <h2>Pacing curve</h2>
+          <p class="card-sub">Rolling average shot length across the timeline — dips are faster cutting</p>
+          <div class="legend" id="curve-legend" hidden></div>
+          <div class="chart" id="curve-chart"></div>
+        </section>
+
+        <section class="card">
+          <h2>Tempo sections</h2>
+          <p class="card-sub">Fast, medium and slow stretches relative to the cut&rsquo;s own average tempo</p>
+          <div class="chart" id="strip-chart"></div>
+          <div class="legend" aria-hidden="true">
+            <span class="key"><span class="swatch" style="background:var(--tempo-fast)"></span>Fast</span>
+            <span class="key"><span class="swatch" style="background:var(--tempo-medium)"></span>Medium</span>
+            <span class="key"><span class="swatch" style="background:var(--tempo-slow)"></span>Slow</span>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Shot-length histogram</h2>
+          <p class="card-sub">How many shots fall into each length bucket</p>
+          <div class="chart" id="hist-chart"></div>
+        </section>
+
+        <section class="card">
+          <h2>Longest shots</h2>
+          <div id="longest-table"></div>
+        </section>
+      </div>
+    </section>
+  </main>
+</div>
+
+<input type="file" id="file-input" accept=".edl,.fcpxml,.xml" multiple hidden>
+<input type="file" id="compare-input" accept=".edl,.fcpxml,.xml" hidden>
+
+<div id="drop-veil" hidden aria-hidden="true"><div class="veil-card">Drop to analyze</div></div>
+
+<div class="modal" id="fps-modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="fps-title">
+    <h2 id="fps-title">Frame rate</h2>
+    <p class="modal-sub" id="fps-file"></p>
+    <div class="fps-presets" id="fps-presets"></div>
+    <label class="fps-custom">Custom
+      <input type="number" id="fps-custom" min="1" max="240" step="0.001" inputmode="decimal">
+      <span>fps</span>
+    </label>
+    <div class="modal-actions">
+      <button class="btn ghost" id="fps-cancel" type="button">Cancel</button>
+      <button class="btn" id="fps-ok" type="button">Analyze</button>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<div class="tooltip" id="tooltip" hidden></div>
+
+<script>
+"use strict";
+(function () {
+
+/* ================= state ================= */
+
+var state = {
+  primary: null,   // {stats, label, source:{kind:'file'|'version'|'resolve', payload?, versionId?}}
+  baseline: null,  // {stats, label, verdict?} — comparison overlay (series 2)
+  versions: [],    // sidebar list entries from GET /api/versions
+  statsCache: {},  // version id -> stats
+  selected: []     // version ids checked for compare, in click order
+};
+
+var TIME_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200];
+var VALUE_STEPS = [0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120];
+var FPS_PRESETS = [23.976, 24, 25, 29.97, 30];
+var SVGNS = "http://www.w3.org/2000/svg";
+
+function $(id) { return document.getElementById(id); }
+
+/* ================= formatting ================= */
+
+function fmt1(x) { return (Math.round(x * 10) / 10).toFixed(1); }
+function fmtSecs(x) { return fmt1(x) + "s"; }
+function fmtClock(seconds) {
+  var total = Math.max(0, Math.round(seconds));
+  var h = Math.floor(total / 3600);
+  var m = Math.floor((total % 3600) / 60);
+  var s = total % 60;
+  function pad(n) { return (n < 10 ? "0" : "") + n; }
+  return h > 0 ? h + ":" + pad(m) + ":" + pad(s) : m + ":" + pad(s);
+}
+function fmtFps(fps) { return Number(Number(fps).toFixed(3)) + " fps"; }
+function signed(x, decimals) {
+  var v = decimals === 0 ? Math.round(x) : Math.round(x * 10) / 10;
+  var body = decimals === 0 ? String(Math.abs(v)) : Math.abs(v).toFixed(1);
+  if (v > 0) return "+" + body;
+  if (v < 0) return "−" + body;
+  return "±" + body;
+}
+
+/* ================= tiny DOM helpers (textContent only — no data via innerHTML) === */
+
+function el(tag, cls, text) {
+  var node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = text;
+  return node;
+}
+function svgEl(tag, attrs) {
+  var node = document.createElementNS(SVGNS, tag);
+  if (attrs) for (var k in attrs) node.setAttribute(k, attrs[k]);
+  return node;
+}
+function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+/* ================= toasts ================= */
+
+function toast(message, kind) {
+  var box = el("div", "toast " + (kind || ""));
+  box.setAttribute("role", kind === "error" ? "alert" : "status");
+  box.appendChild(el("span", "msg", message));
+  var close = el("button", "close", "×");
+  close.type = "button";
+  close.setAttribute("aria-label", "Dismiss notification");
+  close.addEventListener("click", function () { box.remove(); });
+  box.appendChild(close);
+  $("toasts").appendChild(box);
+  window.setTimeout(function () { box.remove(); }, kind === "error" ? 9000 : 5000);
+}
+
+/* ================= API ================= */
+
+function api(path, options) {
+  options = options || {};
+  var init = { method: options.method || "GET" };
+  if (options.body !== undefined) {
+    init.headers = { "Content-Type": "application/json" };
+    init.body = JSON.stringify(options.body);
+  }
+  return fetch(path, init).then(function (response) {
+    return response.json().catch(function () { return {}; }).then(function (data) {
+      if (!response.ok) {
+        var msg = data && data.error ? String(data.error) : (response.status + " " + response.statusText);
+        throw new Error(msg);
+      }
+      return data;
+    });
+  });
+}
+
+function busy(button, fn) {
+  if (button.classList.contains("busy")) return Promise.resolve();
+  button.classList.add("busy");
+  button.disabled = true;
+  return Promise.resolve().then(fn).catch(function (err) {
+    toast(err && err.message ? err.message : String(err), "error");
+  }).then(function () {
+    button.classList.remove("busy");
+    button.disabled = false;
+  });
+}
+
+/* ================= tooltip ================= */
+
+var tooltipEl = $("tooltip");
+function showTooltip(clientX, clientY, head, rows) {
+  clear(tooltipEl);
+  if (head) tooltipEl.appendChild(el("div", "tt-head", head));
+  (rows || []).forEach(function (row) {
+    var r = el("div", "tt-row");
+    if (row.color) {
+      var key = el("span", row.line ? "line-key" : "swatch");
+      if (row.line) { key.style.borderTopColor = row.color; } else { key.style.background = row.color; }
+      r.appendChild(key);
+    }
+    r.appendChild(el("span", "v", row.value));
+    if (row.name) r.appendChild(el("span", "n", row.name));
+    tooltipEl.appendChild(r);
+  });
+  tooltipEl.hidden = false;
+  var pad = 14;
+  var rect = tooltipEl.getBoundingClientRect();
+  var x = clientX + pad, y = clientY + pad;
+  if (x + rect.width > window.innerWidth - 8) x = clientX - rect.width - pad;
+  if (y + rect.height > window.innerHeight - 8) y = clientY - rect.height - pad;
+  tooltipEl.style.left = Math.max(8, x) + "px";
+  tooltipEl.style.top = Math.max(8, y) + "px";
+}
+function hideTooltip() { tooltipEl.hidden = true; }
+document.addEventListener("keydown", function (e) { if (e.key === "Escape") hideTooltip(); });
+
+/* attach hover+focus tooltip to an SVG mark */
+function markTooltip(node, head, rows) {
+  function onEnter(e) { showTooltip(e.clientX, e.clientY, head, rows); }
+  node.addEventListener("pointermove", onEnter);
+  node.addEventListener("pointerleave", hideTooltip);
+  node.addEventListener("focus", function () {
+    var r = node.getBoundingClientRect();
+    showTooltip(r.left + r.width / 2, r.top + r.height / 2, head, rows);
+  });
+  node.addEventListener("blur", hideTooltip);
+}
+
+/* ================= chart primitives ================= */
+
+function tickValues(span, candidates, maxTicks) {
+  if (span <= 0) return [];
+  var step = candidates[candidates.length - 1];
+  for (var i = 0; i < candidates.length; i++) {
+    if (span / candidates[i] <= maxTicks) { step = candidates[i]; break; }
+  }
+  var ticks = [];
+  for (var v = step; v <= span + step * 1e-6; v += step) ticks.push(v);
+  return ticks;
+}
+
+function seriesColor(n) { return n === 1 ? "var(--series-1)" : "var(--series-2)"; }
+
+/* ---------- pacing curve ---------- */
+
+function renderCurve(container, primary, baseline) {
+  clear(container);
+  var W = 760, H = 300, ML = 48, MR = 16, MT = 16, MB = 36;
+  var plotW = W - ML - MR, plotH = H - MT - MB;
+  var stats = primary.stats;
+  if (!stats.pacing_curve || !stats.pacing_curve.length) {
+    container.appendChild(el("p", "side-hint", "No pacing-curve data available."));
+    return;
+  }
+  var series = [{ color: seriesColor(1), name: primary.label, curve: stats.pacing_curve, area: true }];
+  if (baseline && baseline.stats.pacing_curve && baseline.stats.pacing_curve.length) {
+    series.push({ color: seriesColor(2), name: baseline.label, curve: baseline.stats.pacing_curve, area: false });
+  }
+  var xmax = stats.duration_seconds;
+  var ymaxRaw = stats.avg_shot_seconds;
+  series.forEach(function (s) {
+    s.curve.forEach(function (p) {
+      if (p[0] > xmax) xmax = p[0];
+      if (p[1] > ymaxRaw) ymaxRaw = p[1];
+    });
+  });
+  if (baseline) xmax = Math.max(xmax, baseline.stats.duration_seconds);
+  xmax = xmax > 0 ? xmax : 1;
+  var ymax = ymaxRaw > 0 ? ymaxRaw * 1.15 : 1;
+
+  function sx(sec) { return ML + sec / xmax * plotW; }
+  function sy(val) { return MT + plotH - Math.min(val, ymax) / ymax * plotH; }
+  var baseY = MT + plotH;
+
+  var svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img" });
+  svg.setAttribute("aria-label", "Pacing curve for " + primary.label +
+    (baseline ? " compared with " + baseline.label : "") +
+    ". Average shot length " + fmtSecs(stats.avg_shot_seconds) + ".");
+
+  // grid + y ticks (solid hairlines)
+  tickValues(ymax, VALUE_STEPS, 5).forEach(function (t) {
+    var y = sy(t);
+    svg.appendChild(svgEl("line", { x1: ML, y1: y, x2: ML + plotW, y2: y, stroke: "var(--grid)", "stroke-width": 1 }));
+    var lbl = svgEl("text", { x: ML - 8, y: y + 3.5, "text-anchor": "end", "class": "axis" });
+    lbl.textContent = Number(t.toFixed(2)) + "s";
+    svg.appendChild(lbl);
+  });
+  // x axis (position in minutes)
+  svg.appendChild(svgEl("line", { x1: ML, y1: baseY, x2: ML + plotW, y2: baseY, stroke: "var(--axis)", "stroke-width": 1 }));
+  tickValues(xmax, TIME_STEPS, 7).forEach(function (t) {
+    var x = sx(t);
+    svg.appendChild(svgEl("line", { x1: x, y1: baseY, x2: x, y2: baseY + 4, stroke: "var(--axis)", "stroke-width": 1 }));
+    var lbl = svgEl("text", { x: x, y: baseY + 18, "text-anchor": "middle", "class": "axis" });
+    lbl.textContent = fmtClock(t);
+    svg.appendChild(lbl);
+  });
+
+  // primary area wash
+  var first = series[0].curve[0], last = series[0].curve[series[0].curve.length - 1];
+  var d = "M" + sx(first[0]) + " " + baseY;
+  series[0].curve.forEach(function (p) { d += " L" + sx(p[0]) + " " + sy(p[1]); });
+  d += " L" + sx(last[0]) + " " + baseY + " Z";
+  svg.appendChild(svgEl("path", { d: d, fill: seriesColor(1), opacity: 0.1 }));
+
+  // dashed reference at the global average (a threshold, not a gridline)
+  if (stats.avg_shot_seconds > 0) {
+    var refY = sy(stats.avg_shot_seconds);
+    svg.appendChild(svgEl("line", {
+      x1: ML, y1: refY, x2: ML + plotW, y2: refY,
+      stroke: "var(--ink-muted)", "stroke-width": 1, "stroke-dasharray": "4 3"
+    }));
+    var refLbl = svgEl("text", { x: ML + plotW, y: refY - 5, "text-anchor": "end", "class": "axis" });
+    refLbl.textContent = "avg " + fmtSecs(stats.avg_shot_seconds);
+    svg.appendChild(refLbl);
+  }
+
+  // lines + end dots (2px stroke, surface-ring markers)
+  series.forEach(function (s) {
+    var pts = s.curve.map(function (p) { return sx(p[0]) + "," + sy(p[1]); }).join(" ");
+    svg.appendChild(svgEl("polyline", {
+      points: pts, fill: "none", stroke: s.color, "stroke-width": 2,
+      "stroke-linejoin": "round", "stroke-linecap": "round"
+    }));
+    var end = s.curve[s.curve.length - 1];
+    svg.appendChild(svgEl("circle", {
+      cx: sx(end[0]), cy: sy(end[1]), r: 4, fill: s.color, stroke: "var(--surface)", "stroke-width": 2
+    }));
+  });
+
+  // hover layer: crosshair + snap dots + tooltip
+  var cross = svgEl("line", { y1: MT, y2: baseY, stroke: "var(--axis)", "stroke-width": 1, visibility: "hidden" });
+  svg.appendChild(cross);
+  var dots = series.map(function (s) {
+    var dot = svgEl("circle", { r: 4.5, fill: s.color, stroke: "var(--surface)", "stroke-width": 2, visibility: "hidden" });
+    svg.appendChild(dot);
+    return dot;
+  });
+  var overlay = svgEl("rect", { x: ML, y: MT, width: plotW, height: plotH, fill: "transparent" });
+  overlay.style.cursor = "crosshair";
+  svg.appendChild(overlay);
+
+  function nearest(curve, sec) {
+    var best = 0, bestDist = Infinity;
+    for (var i = 0; i < curve.length; i++) {
+      var dist = Math.abs(curve[i][0] - sec);
+      if (dist < bestDist) { bestDist = dist; best = i; }
+    }
+    return curve[best];
+  }
+  overlay.addEventListener("pointermove", function (e) {
+    var rect = svg.getBoundingClientRect();
+    if (!rect.width) return;
+    var vx = (e.clientX - rect.left) * (W / rect.width);
+    var sec = Math.max(0, Math.min(xmax, (vx - ML) / plotW * xmax));
+    var rows = [];
+    var anchor = null;
+    series.forEach(function (s, i) {
+      var p = nearest(s.curve, sec);
+      if (anchor === null) anchor = p[0];
+      dots[i].setAttribute("cx", sx(p[0]));
+      dots[i].setAttribute("cy", sy(p[1]));
+      dots[i].setAttribute("visibility", "visible");
+      rows.push({ color: s.color, line: true, value: fmtSecs(p[1]), name: s.name });
+    });
+    var cx = sx(anchor);
+    cross.setAttribute("x1", cx);
+    cross.setAttribute("x2", cx);
+    cross.setAttribute("visibility", "visible");
+    showTooltip(e.clientX, e.clientY, "at " + fmtClock(anchor), rows);
+  });
+  overlay.addEventListener("pointerleave", function () {
+    cross.setAttribute("visibility", "hidden");
+    dots.forEach(function (dot) { dot.setAttribute("visibility", "hidden"); });
+    hideTooltip();
+  });
+
+  container.appendChild(svg);
+}
+
+/* ---------- tempo sections strip ---------- */
+
+function renderStrip(container, stats) {
+  clear(container);
+  if (!stats.sections || !stats.sections.length) {
+    container.appendChild(el("p", "side-hint", "No section data available."));
+    return;
+  }
+  var W = 760, H = 32;
+  var total = stats.duration_seconds;
+  stats.sections.forEach(function (s) { if (s.end > total) total = s.end; });
+  total = total > 0 ? total : 1;
+  var svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img" });
+  svg.setAttribute("aria-label", "Tempo sections across the timeline");
+  var lastIdx = stats.sections.length - 1;
+  stats.sections.forEach(function (section, i) {
+    var x0 = section.start / total * W;
+    var x1 = section.end / total * W;
+    var width = Math.max(x1 - x0 - (i === lastIdx ? 0 : 2), 1); // 2px surface gap
+    var label = (section.label === "fast" || section.label === "slow") ? section.label : "medium";
+    var rect = svgEl("rect", {
+      x: x0, y: 4, width: width, height: 24, rx: 2,
+      fill: "var(--tempo-" + label + ")", tabindex: 0
+    });
+    var pretty = label.charAt(0).toUpperCase() + label.slice(1);
+    var head = pretty + " · " + fmtClock(section.start) + "–" + fmtClock(section.end);
+    rect.setAttribute("role", "img");
+    rect.setAttribute("aria-label", head + ", average shot " + fmtSecs(section.avg_shot_length));
+    markTooltip(rect, head, [{ value: fmtSecs(section.avg_shot_length), name: "avg shot" }]);
+    svg.appendChild(rect);
+  });
+  container.appendChild(svg);
+}
+
+/* ---------- histogram ---------- */
+
+function renderHistogram(container, stats) {
+  clear(container);
+  var histogram = stats.histogram || [];
+  if (!histogram.length) {
+    container.appendChild(el("p", "side-hint", "No histogram data available."));
+    return;
+  }
+  var W = 760, H = 240, ML = 36, MR = 12, MT = 20, MB = 30;
+  var plotW = W - ML - MR, plotH = H - MT - MB, baseY = MT + plotH;
+  var maxCount = 0;
+  histogram.forEach(function (b) { if (b[1] > maxCount) maxCount = b[1]; });
+  var ymax = maxCount > 0 ? maxCount : 1;
+  var slotW = plotW / histogram.length;
+  var barW = Math.min(24, slotW * 0.6);
+
+  var svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img" });
+  svg.setAttribute("aria-label", "Shot-length histogram for " + stats.timeline_name);
+
+  tickValues(ymax, VALUE_STEPS, 4).forEach(function (t) {
+    if (t !== Math.round(t)) return;
+    var y = baseY - t / ymax * plotH;
+    svg.appendChild(svgEl("line", { x1: ML, y1: y, x2: ML + plotW, y2: y, stroke: "var(--grid)", "stroke-width": 1 }));
+    var lbl = svgEl("text", { x: ML - 8, y: y + 3.5, "text-anchor": "end", "class": "axis" });
+    lbl.textContent = String(Math.round(t));
+    svg.appendChild(lbl);
+  });
+  svg.appendChild(svgEl("line", { x1: ML, y1: baseY, x2: ML + plotW, y2: baseY, stroke: "var(--axis)", "stroke-width": 1 }));
+
+  histogram.forEach(function (bucket, i) {
+    var label = String(bucket[0]), count = bucket[1];
+    var cx = ML + slotW * (i + 0.5);
+    var lbl = svgEl("text", { x: cx, y: baseY + 18, "text-anchor": "middle", "class": "axis" });
+    lbl.textContent = label;
+    svg.appendChild(lbl);
+    var head = label + " · " + count + (count === 1 ? " shot" : " shots");
+    if (count > 0) {
+      var yTop = baseY - count / ymax * plotH;
+      var x0 = cx - barW / 2, r = 4;
+      var height = baseY - yTop;
+      var bar;
+      if (height < r + 1 || barW < r * 2 + 2) {
+        bar = svgEl("rect", { x: x0, y: yTop, width: barW, height: Math.max(height, 0), fill: "var(--series-1)" });
+      } else { // 4px rounded data-end, square at the baseline
+        bar = svgEl("path", {
+          d: "M" + x0 + " " + baseY + " V" + (yTop + r) +
+             " Q" + x0 + " " + yTop + " " + (x0 + r) + " " + yTop +
+             " H" + (x0 + barW - r) +
+             " Q" + (x0 + barW) + " " + yTop + " " + (x0 + barW) + " " + (yTop + r) +
+             " V" + baseY + " Z",
+          fill: "var(--series-1)"
+        });
+      }
+      bar.setAttribute("tabindex", 0);
+      bar.setAttribute("role", "img");
+      bar.setAttribute("aria-label", head);
+      var cap = svgEl("text", { x: cx, y: yTop - 6, "text-anchor": "middle", "class": "axis" });
+      cap.textContent = String(count);
+      // hit target bigger than the mark
+      var hit = svgEl("rect", { x: ML + slotW * i, y: MT, width: slotW, height: plotH, fill: "transparent" });
+      markTooltip(hit, null, [{ color: "var(--series-1)", value: String(count), name: label + (count === 1 ? " shot" : " shots") }]);
+      markTooltip(bar, null, [{ color: "var(--series-1)", value: String(count), name: label + (count === 1 ? " shot" : " shots") }]);
+      svg.appendChild(hit);
+      svg.appendChild(bar);
+      svg.appendChild(cap);
+    } else {
+      var zero = svgEl("text", { x: cx, y: baseY - 6, "text-anchor": "middle", "class": "axis" });
+      zero.textContent = "0";
+      svg.appendChild(zero);
+    }
+  });
+  container.appendChild(svg);
+}
+
+/* ---------- sidebar trend sparkline ---------- */
+
+function renderTrend() {
+  var block = $("trend-block");
+  var container = $("trend-chart");
+  clear(container);
+  var versions = state.versions;
+  if (versions.length < 2) { block.hidden = true; return; }
+  block.hidden = false;
+
+  var W = 232, H = 56, ML = 6, MR = 44, MT = 10, MB = 10;
+  var plotW = W - ML - MR, plotH = H - MT - MB;
+  var values = versions.map(function (v) { return v.avg_shot_seconds; });
+  var lo = Math.min.apply(null, values), hi = Math.max.apply(null, values);
+  if (hi - lo < 1e-9) { lo -= 0.5; hi += 0.5; }
+  function sx(i) { return ML + i / (versions.length - 1) * plotW; }
+  function sy(v) { return MT + plotH - (v - lo) / (hi - lo) * plotH; }
+
+  var svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img" });
+  svg.setAttribute("aria-label", "Average shot length across " + versions.length +
+    " versions, from " + fmtSecs(values[0]) + " to " + fmtSecs(values[values.length - 1]) + ".");
+  var pts = values.map(function (v, i) { return sx(i) + "," + sy(v); }).join(" ");
+  svg.appendChild(svgEl("polyline", {
+    points: pts, fill: "none", stroke: "var(--axis)", "stroke-width": 2,
+    "stroke-linejoin": "round", "stroke-linecap": "round"
+  }));
+  var activeId = state.primary && state.primary.source.kind === "version" ? state.primary.source.versionId : null;
+  versions.forEach(function (v, i) {
+    var isLast = i === versions.length - 1;
+    var isActive = v.id === activeId;
+    if (isLast || isActive) {
+      svg.appendChild(svgEl("circle", {
+        cx: sx(i), cy: sy(values[i]), r: 4,
+        fill: isActive ? "var(--series-1)" : "var(--ink-muted)",
+        stroke: "var(--surface)", "stroke-width": 2
+      }));
+    }
+    var hit = svgEl("circle", { cx: sx(i), cy: sy(values[i]), r: 12, fill: "transparent", tabindex: 0 });
+    hit.setAttribute("role", "img");
+    hit.setAttribute("aria-label", v.label + ": average shot " + fmtSecs(values[i]));
+    markTooltip(hit, v.saved_at || null, [{ color: "var(--series-1)", value: fmtSecs(values[i]), name: v.label }]);
+    svg.appendChild(hit);
+  });
+  var endLbl = svgEl("text", { x: W - 2, y: sy(values[values.length - 1]) + 4, "text-anchor": "end", "class": "axis" });
+  endLbl.textContent = fmtSecs(values[values.length - 1]);
+  svg.appendChild(endLbl);
+  container.appendChild(svg);
+}
+
+/* ================= dashboard ================= */
+
+var SOURCE_NAMES = { file: "Analyzed file", version: "Saved version", resolve: "DaVinci Resolve timeline" };
+
+function renderDashboard() {
+  var p = state.primary;
+  if (!p) return;
+  $("welcome").hidden = true;
+  var dash = $("dashboard");
+  dash.hidden = false;
+
+  var stats = p.stats;
+  $("dash-source").textContent = SOURCE_NAMES[p.source.kind] || "Cut";
+  $("dash-name").textContent = p.label || stats.timeline_name || "Untitled cut";
+  $("dash-meta").textContent =
+    fmtClock(stats.duration_seconds) + " · " + fmtFps(stats.fps) +
+    " · " + stats.shot_count + (stats.shot_count === 1 ? " shot" : " shots") +
+    " · " + stats.cut_count + (stats.cut_count === 1 ? " cut" : " cuts");
+
+  var fromFile = p.source.kind === "file";
+  $("save-group").hidden = !fromFile;
+  $("compare-file-btn").hidden = !fromFile;
+  if (fromFile) $("save-label").value = p.source.payload.filename || "";
+
+  renderCompareBanner();
+
+  var empty = stats.shot_count <= 0;
+  $("dash-empty").hidden = !empty;
+  $("dash-body").hidden = empty;
+  if (empty) { renderVersions(); return; }
+
+  renderTiles();
+  var legend = $("curve-legend");
+  clear(legend);
+  if (state.baseline) {
+    legend.hidden = false;
+    [[seriesColor(1), p.label], [seriesColor(2), state.baseline.label]].forEach(function (pair) {
+      var key = el("span", "key");
+      var line = el("span", "line-key");
+      line.style.borderTopColor = pair[0];
+      key.appendChild(line);
+      key.appendChild(el("span", "name", pair[1]));
+      legend.appendChild(key);
+    });
+  } else {
+    legend.hidden = true;
+  }
+  renderCurve($("curve-chart"), p, state.baseline);
+  renderStrip($("strip-chart"), stats);
+  renderHistogram($("hist-chart"), stats);
+  renderLongest(stats);
+  renderVersions(); // refresh active highlight + trend accent
+}
+
+function renderTiles() {
+  var tiles = $("tiles");
+  clear(tiles);
+  var s = state.primary.stats;
+  var b = state.baseline ? state.baseline.stats : null;
+  [
+    ["Average shot (ASL)", "avg_shot_seconds"],
+    ["Median shot", "median_shot_seconds"],
+    ["Shortest shot", "min_shot_seconds"],
+    ["Longest shot", "max_shot_seconds"],
+    ["Std deviation", "std_shot_seconds"]
+  ].forEach(function (spec) {
+    var tile = el("div", "tile");
+    tile.appendChild(el("div", "tile-label", spec[0]));
+    tile.appendChild(el("div", "tile-value", fmtSecs(s[spec[1]])));
+    if (b) {
+      var delta = el("div", "tile-delta");
+      delta.appendChild(el("span", null, fmtSecs(b[spec[1]]) + " → " + fmtSecs(s[spec[1]]) + " "));
+      delta.appendChild(el("span", "d", "(" + signed(s[spec[1]] - b[spec[1]], 1) + "s)"));
+      tile.appendChild(delta);
+    }
+    tiles.appendChild(tile);
+  });
+}
+
+function renderCompareBanner() {
+  var banner = $("compare-banner");
+  clear(banner);
+  var b = state.baseline;
+  if (!b) { banner.hidden = true; return; }
+  banner.hidden = false;
+
+  banner.appendChild(el("span", null, "Comparing"));
+  var keyB = el("span", "key");
+  var swB = el("span", "swatch"); swB.style.background = seriesColor(2);
+  keyB.appendChild(swB);
+  keyB.appendChild(el("span", "name", b.label));
+  banner.appendChild(keyB);
+  banner.appendChild(el("span", "arrow", "→"));
+  var keyA = el("span", "key");
+  var swA = el("span", "swatch"); swA.style.background = seriesColor(1);
+  keyA.appendChild(swA);
+  keyA.appendChild(el("span", "name", state.primary.label));
+  banner.appendChild(keyA);
+
+  banner.appendChild(el("span", "spacer"));
+  var clearBtn = el("button", "btn ghost small", "Clear comparison");
+  clearBtn.type = "button";
+  clearBtn.addEventListener("click", clearCompare);
+  banner.appendChild(clearBtn);
+
+  if (b.verdict) banner.appendChild(el("p", "verdict", b.verdict));
+
+  var s = state.primary.stats, base = b.stats;
+  var deltas = [
+    "Runtime " + fmtClock(base.duration_seconds) + " → " + fmtClock(s.duration_seconds) +
+      " (" + signed(s.duration_seconds - base.duration_seconds, 1) + "s)",
+    "Shots " + base.shot_count + " → " + s.shot_count + " (" + signed(s.shot_count - base.shot_count, 0) + ")",
+    "Cuts " + base.cut_count + " → " + s.cut_count + " (" + signed(s.cut_count - base.cut_count, 0) + ")"
+  ];
+  banner.appendChild(el("p", "deltas", deltas.join("  ·  ")));
+}
+
+function renderLongest(stats) {
+  var container = $("longest-table");
+  clear(container);
+  if (!stats.longest_shots || !stats.longest_shots.length) {
+    container.appendChild(el("p", "side-hint", "No shot data available."));
+    return;
+  }
+  var table = el("table", "shots-table");
+  var thead = el("thead");
+  var hrow = el("tr");
+  hrow.appendChild(el("th", null, "Shot"));
+  var thPos = el("th", "num", "Position"); hrow.appendChild(thPos);
+  var thLen = el("th", "num", "Length"); hrow.appendChild(thLen);
+  thead.appendChild(hrow);
+  table.appendChild(thead);
+  var tbody = el("tbody");
+  stats.longest_shots.forEach(function (shot) {
+    var row = el("tr");
+    row.appendChild(el("td", null, shot.name || "(unnamed)"));
+    row.appendChild(el("td", "num", fmtClock(shot.start)));
+    row.appendChild(el("td", "num", fmtSecs(shot.length)));
+    tbody.appendChild(row);
+  });
+  table.appendChild(tbody);
+  container.appendChild(table);
+}
+
+/* ================= versions (sidebar) ================= */
+
+function refreshVersions() {
+  return api("/api/versions").then(function (data) {
+    state.versions = data.versions || [];
+    state.selected = state.selected.filter(function (id) {
+      return state.versions.some(function (v) { return v.id === id; });
+    });
+    renderVersions();
+    renderTrend();
+  }).catch(function (err) {
+    toast("Could not load versions: " + err.message, "error");
+  });
+}
+
+function renderVersions() {
+  var list = $("version-list");
+  clear(list);
+  $("versions-empty").hidden = state.versions.length > 0;
+  $("compare-note").hidden = state.versions.length < 2;
+  var activeId = state.primary && state.primary.source.kind === "version" ? state.primary.source.versionId : null;
+
+  state.versions.forEach(function (v) {
+    var li = el("li", "version-row" + (v.id === activeId ? " active" : ""));
+
+    var check = document.createElement("input");
+    check.type = "checkbox";
+    check.className = "v-check";
+    check.checked = state.selected.indexOf(v.id) !== -1;
+    check.setAttribute("aria-label", "Select " + v.label + " for comparison");
+    check.addEventListener("change", function () { onCompareToggle(v.id, check); });
+    li.appendChild(check);
+
+    var open = el("button", "v-open");
+    open.type = "button";
+    open.appendChild(el("span", "v-label", v.label));
+    open.appendChild(el("span", "v-meta",
+      (v.saved_at ? v.saved_at + " · " : "") + fmtClock(v.duration_seconds) + " · " + fmtSecs(v.avg_shot_seconds) + " avg"));
+    open.setAttribute("aria-label", "Open version " + v.label);
+    open.addEventListener("click", function () { openVersion(v.id); });
+    li.appendChild(open);
+
+    var del = el("button", "v-del", "×");
+    del.type = "button";
+    del.setAttribute("aria-label", "Delete version " + v.label);
+    del.addEventListener("click", function () { confirmDelete(li, v); });
+    li.appendChild(del);
+
+    list.appendChild(li);
+  });
+  renderTrend();
+}
+
+function confirmDelete(li, v) {
+  clear(li);
+  var box = el("div", "v-confirm");
+  box.appendChild(el("span", null, "Delete “" + v.label + "”?"));
+  var yes = el("button", "btn danger small", "Delete");
+  yes.type = "button";
+  yes.addEventListener("click", function () {
+    busy(yes, function () {
+      return api("/api/versions/" + v.id, { method: "DELETE" }).then(function () {
+        state.selected = state.selected.filter(function (id) { return id !== v.id; });
+        delete state.statsCache[v.id];
+        if (state.selected.length < 2 && state.baseline && !state.baseline.verdict) clearCompareState();
+        toast("Deleted “" + v.label + "”.", "success");
+        return refreshVersions().then(function () { if (state.primary) renderDashboard(); });
+      });
+    });
+  });
+  var no = el("button", "btn ghost small", "Keep");
+  no.type = "button";
+  no.addEventListener("click", function () { renderVersions(); });
+  box.appendChild(yes);
+  box.appendChild(no);
+  li.appendChild(box);
+  yes.focus();
+}
+
+function versionStats(id) {
+  if (state.statsCache[id]) return Promise.resolve(state.statsCache[id]);
+  return api("/api/versions/" + id).then(function (data) {
+    state.statsCache[id] = data.stats;
+    return data.stats;
+  });
+}
+
+function versionLabel(id) {
+  for (var i = 0; i < state.versions.length; i++) {
+    if (state.versions[i].id === id) return state.versions[i].label;
+  }
+  return "Version " + id;
+}
+
+function openVersion(id) {
+  versionStats(id).then(function (stats) {
+    state.primary = { stats: stats, label: versionLabel(id), source: { kind: "version", versionId: id } };
+    clearCompareState();
+    renderDashboard();
+  }).catch(function (err) { toast(err.message, "error"); });
+}
+
+function onCompareToggle(id, checkbox) {
+  if (checkbox.checked) {
+    if (state.selected.length >= 2) {
+      checkbox.checked = false;
+      toast("Pick just two versions to compare — untick one first.");
+      return;
+    }
+    state.selected.push(id);
+  } else {
+    state.selected = state.selected.filter(function (x) { return x !== id; });
+  }
+  if (state.selected.length === 2) {
+    enterVersionCompare(state.selected[0], state.selected[1]);
+  } else if (state.baseline && !state.baseline.verdict) {
+    clearCompareState();
+    if (state.primary) renderDashboard();
+  }
+}
+
+function enterVersionCompare(aId, bId) {
+  Promise.all([versionStats(aId), versionStats(bId)]).then(function (pair) {
+    // first ticked = A (baseline), second ticked = B (primary in focus); deltas = B − A
+    state.primary = { stats: pair[1], label: versionLabel(bId), source: { kind: "version", versionId: bId } };
+    state.baseline = { stats: pair[0], label: versionLabel(aId), verdict: null };
+    renderDashboard();
+  }).catch(function (err) { toast(err.message, "error"); });
+}
+
+function clearCompareState() {
+  state.baseline = null;
+  if (state.selected.length === 2) state.selected = [];
+}
+
+function clearCompare() {
+  state.selected = [];
+  clearCompareState();
+  renderDashboard();
+}
+
+/* ================= saving ================= */
+
+$("save-btn").addEventListener("click", function () {
+  var p = state.primary;
+  if (!p || p.source.kind !== "file") return;
+  var label = $("save-label").value.trim() || p.source.payload.filename;
+  busy($("save-btn"), function () {
+    var body = Object.assign({}, p.source.payload, { label: label });
+    return api("/api/versions", { method: "POST", body: body }).then(function (data) {
+      toast("Saved “" + data.version.label + "” to version history.", "success");
+      return refreshVersions();
+    });
+  });
+});
+
+/* ================= files & analysis ================= */
+
+function extOf(name) {
+  var m = /\.([^.]+)$/.exec(name || "");
+  return m ? m[1].toLowerCase() : "";
+}
+function isTimelineFile(name) {
+  var ext = extOf(name);
+  return ext === "edl" || ext === "fcpxml" || ext === "xml";
+}
+function readFileText(file) {
+  return new Promise(function (resolve, reject) {
+    var reader = new FileReader();
+    reader.onload = function () { resolve(String(reader.result)); };
+    reader.onerror = function () { reject(new Error("Could not read " + file.name)); };
+    reader.readAsText(file);
+  });
+}
+
+/* fps prompt (EDL only) */
+var fpsResolve = null;
+function storedFps() {
+  try {
+    var v = parseFloat(window.localStorage.getItem("fable:fps"));
+    return isFinite(v) && v > 0 ? v : 25;
+  } catch (e) { return 25; }
+}
+function rememberFps(v) {
+  try { window.localStorage.setItem("fable:fps", String(v)); } catch (e) { /* private mode */ }
+}
+function askFps(filenames) {
+  return new Promise(function (resolve) {
+    fpsResolve = resolve;
+    $("fps-file").textContent = "EDL files don’t carry a frame rate. Pick the timeline fps for " + filenames.join(" and ") + ".";
+    var chosen = storedFps();
+    var presets = $("fps-presets");
+    clear(presets);
+    FPS_PRESETS.forEach(function (fps) {
+      var chip = el("button", "fps-chip", String(fps));
+      chip.type = "button";
+      chip.setAttribute("aria-pressed", String(fps === chosen));
+      chip.addEventListener("click", function () {
+        $("fps-custom").value = "";
+        Array.prototype.forEach.call(presets.children, function (c) { c.setAttribute("aria-pressed", "false"); });
+        chip.setAttribute("aria-pressed", "true");
+      });
+      presets.appendChild(chip);
+    });
+    if (FPS_PRESETS.indexOf(chosen) === -1) $("fps-custom").value = String(chosen);
+    else $("fps-custom").value = "";
+    $("fps-modal").hidden = false;
+    var pressed = presets.querySelector('[aria-pressed="true"]');
+    (pressed || presets.firstChild).focus();
+  });
+}
+function closeFps(value) {
+  $("fps-modal").hidden = true;
+  var resolve = fpsResolve;
+  fpsResolve = null;
+  if (resolve) resolve(value);
+}
+$("fps-cancel").addEventListener("click", function () { closeFps(null); });
+$("fps-ok").addEventListener("click", function () {
+  var custom = parseFloat($("fps-custom").value);
+  var value;
+  if (isFinite(custom) && custom > 0) {
+    value = custom;
+  } else {
+    var pressed = $("fps-presets").querySelector('[aria-pressed="true"]');
+    value = pressed ? parseFloat(pressed.textContent) : 25;
+  }
+  rememberFps(value);
+  closeFps(value);
+});
+$("fps-modal").addEventListener("keydown", function (e) {
+  if (e.key === "Escape") closeFps(null);
+  if (e.key === "Enter" && e.target !== $("fps-cancel")) { e.preventDefault(); $("fps-ok").click(); }
+});
+
+/* build {filename, content, fps?} payloads, prompting once for fps if any EDL */
+function buildPayloads(files) {
+  return Promise.all(files.map(function (f) {
+    return readFileText(f).then(function (text) { return { filename: f.name, content: text }; });
+  })).then(function (payloads) {
+    var edls = payloads.filter(function (p) { return extOf(p.filename) === "edl"; });
+    if (!edls.length) return payloads;
+    return askFps(edls.map(function (p) { return p.filename; })).then(function (fps) {
+      if (fps === null) return null; // cancelled
+      edls.forEach(function (p) { p.fps = fps; });
+      return payloads;
+    });
+  });
+}
+
+var analyzing = false;
+function loadFiles(fileList, viaButton) {
+  if (analyzing) return;
+  var files = Array.prototype.slice.call(fileList || []).filter(function (f) { return isTimelineFile(f.name); });
+  if (!files.length) {
+    toast("That doesn’t look like a timeline export — Fable reads .edl, .fcpxml and .xml files.", "error");
+    return;
+  }
+  files = files.slice(0, 2);
+  var dz = $("dropzone");
+  analyzing = true;
+  dz.setAttribute("aria-busy", "true");
+  if (viaButton) { viaButton.classList.add("busy"); viaButton.disabled = true; }
+
+  buildPayloads(files).then(function (payloads) {
+    if (!payloads) return; // fps prompt cancelled
+    if (payloads.length === 2) {
+      // two cuts at once → server-side compare (A = first, B = second)
+      return api("/api/compare", { method: "POST", body: { a: payloads[0], b: payloads[1] } }).then(function (data) {
+        state.primary = { stats: data.b, label: payloads[1].filename, source: { kind: "file", payload: payloads[1] } };
+        state.baseline = { stats: data.a, label: payloads[0].filename, verdict: data.compare.verdict };
+        state.selected = [];
+        renderDashboard();
+      });
+    }
+    return api("/api/analyze", { method: "POST", body: payloads[0] }).then(function (data) {
+      state.primary = { stats: data.stats, label: payloads[0].filename, source: { kind: "file", payload: payloads[0] } };
+      state.selected = [];
+      state.baseline = null;
+      renderDashboard();
+    });
+  }).catch(function (err) {
+    toast(err && err.message ? err.message : String(err), "error");
+  }).then(function () {
+    analyzing = false;
+    dz.setAttribute("aria-busy", "false");
+    if (viaButton) { viaButton.classList.remove("busy"); viaButton.disabled = false; }
+  });
+}
+
+/* compare current file cut with another file */
+function compareWithFile(fileList) {
+  var p = state.primary;
+  if (!p || p.source.kind !== "file") return;
+  var files = Array.prototype.slice.call(fileList || []).filter(function (f) { return isTimelineFile(f.name); });
+  if (!files.length) {
+    toast("That doesn’t look like a timeline export — Fable reads .edl, .fcpxml and .xml files.", "error");
+    return;
+  }
+  var button = $("compare-file-btn");
+  busy(button, function () {
+    return buildPayloads([files[0]]).then(function (payloads) {
+      if (!payloads) return;
+      var body = { a: p.source.payload, b: payloads[0] };
+      return api("/api/compare", { method: "POST", body: body }).then(function (data) {
+        state.baseline = { stats: data.a, label: p.label, verdict: data.compare.verdict };
+        state.primary = { stats: data.b, label: payloads[0].filename, source: { kind: "file", payload: payloads[0] } };
+        state.selected = [];
+        renderDashboard();
+      });
+    });
+  });
+}
+
+/* ================= drop zone & pickers ================= */
+
+var dropzone = $("dropzone");
+dropzone.addEventListener("click", function () { $("file-input").click(); });
+dropzone.addEventListener("keydown", function (e) {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("file-input").click(); }
+});
+dropzone.addEventListener("dragover", function (e) { e.preventDefault(); dropzone.classList.add("over"); });
+dropzone.addEventListener("dragleave", function () { dropzone.classList.remove("over"); });
+dropzone.addEventListener("drop", function (e) {
+  e.preventDefault();
+  dropzone.classList.remove("over");
+  loadFiles(e.dataTransfer.files);
+});
+
+$("file-input").addEventListener("change", function () {
+  loadFiles($("file-input").files);
+  $("file-input").value = "";
+});
+$("compare-input").addEventListener("change", function () {
+  compareWithFile($("compare-input").files);
+  $("compare-input").value = "";
+});
+$("open-btn").addEventListener("click", function () { $("file-input").click(); });
+$("compare-file-btn").addEventListener("click", function () { $("compare-input").click(); });
+
+/* whole-window drop once the dashboard is up */
+var dragDepth = 0;
+document.addEventListener("dragenter", function (e) {
+  if (!e.dataTransfer || $("dashboard").hidden) return;
+  dragDepth += 1;
+  $("drop-veil").hidden = false;
+});
+document.addEventListener("dragleave", function () {
+  if ($("dashboard").hidden) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) $("drop-veil").hidden = true;
+});
+document.addEventListener("dragover", function (e) { e.preventDefault(); });
+document.addEventListener("drop", function (e) {
+  e.preventDefault();
+  dragDepth = 0;
+  $("drop-veil").hidden = true;
+  if (!$("dashboard").hidden && e.dataTransfer && e.dataTransfer.files.length) {
+    loadFiles(e.dataTransfer.files);
+  }
+});
+
+/* ================= Resolve panel ================= */
+
+function loadResolve() {
+  var body = $("resolve-body");
+  api("/api/resolve/status").then(function (status) {
+    clear(body);
+    if (status.connected) {
+      var proj = el("p", "resolve-project");
+      var dot = el("span", "resolve-dot on");
+      dot.setAttribute("aria-hidden", "true");
+      proj.appendChild(dot);
+      proj.appendChild(document.createTextNode(status.project || "Untitled project"));
+      body.appendChild(proj);
+
+      var field = el("label", "resolve-field", "Timeline");
+      var select = document.createElement("select");
+      select.id = "resolve-timeline";
+      (status.timelines || []).forEach(function (name) {
+        var option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        if (name === status.current) option.selected = true;
+        select.appendChild(option);
+      });
+      field.appendChild(select);
+      body.appendChild(field);
+
+      var analyzeBtn = el("button", "btn small", "Analyze timeline");
+      analyzeBtn.type = "button";
+      var spin = el("span", "spin");
+      spin.setAttribute("aria-hidden", "true");
+      analyzeBtn.appendChild(spin);
+      analyzeBtn.addEventListener("click", function () {
+        busy(analyzeBtn, function () {
+          var payload = { timeline: select.value || null, save: false };
+          return api("/api/resolve/analyze", { method: "POST", body: payload }).then(function (data) {
+            state.primary = {
+              stats: data.stats,
+              label: data.stats.timeline_name || select.value || "Resolve timeline",
+              source: { kind: "resolve" }
+            };
+            state.selected = [];
+            state.baseline = null;
+            renderDashboard();
+            toast("Analyzed “" + state.primary.label + "” from Resolve.", "success");
+          });
+        });
+      });
+      body.appendChild(analyzeBtn);
+    } else {
+      var hint = el("p", "side-hint");
+      var dotOff = el("span", "resolve-dot off");
+      dotOff.setAttribute("aria-hidden", "true");
+      hint.appendChild(dotOff);
+      hint.appendChild(document.createTextNode("DaVinci Resolve not detected."));
+      body.appendChild(hint);
+      var details = document.createElement("details");
+      var summary = document.createElement("summary");
+      summary.textContent = "Why?";
+      details.appendChild(summary);
+      details.appendChild(el("p", null, status.error || "No details available."));
+      body.appendChild(details);
+    }
+  }).catch(function () {
+    clear(body);
+    body.appendChild(el("p", "side-hint", "Couldn’t reach the Resolve bridge."));
+  });
+}
+
+/* ================= boot ================= */
+
+refreshVersions();
+loadResolve();
+
+})();
+</script>
+</body>
+</html>

@@ -109,6 +109,7 @@ class FableHandler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
         routes = {
             ("GET", "/"): self._app,
+            ("GET", "/favicon.ico"): self._favicon,
             ("GET", "/api/versions"): self._versions_list,
             ("POST", "/api/versions"): self._versions_add,
             ("POST", "/api/analyze"): self._analyze,
@@ -147,6 +148,18 @@ class FableHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _favicon(self) -> None:
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+            '<rect width="16" height="16" rx="3" fill="#2a78d6"/>'
+            '<path d="M3 11 6.5 6l2.5 3 2-2.5L13 11z" fill="#fff"/></svg>'
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "image/svg+xml")
+        self.send_header("Content-Length", str(len(svg)))
+        self.end_headers()
+        self.wfile.write(svg)
+
     def _analyze(self) -> None:
         stats = _analyze_payload(self._read_json())
         self._send_json({"stats": asdict(stats)})
@@ -184,7 +197,7 @@ class FableHandler(BaseHTTPRequestHandler):
         try:
             stats = self.project.get_stats(version_id)
         except KeyError as exc:
-            raise ApiError(404, str(exc))
+            raise ApiError(404, exc.args[0])
         self._send_json({"stats": asdict(stats)})
 
     def _versions_delete(self, version_id: int) -> None:
