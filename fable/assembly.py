@@ -342,7 +342,10 @@ def _build_segments(chosen: list[LineMatch]) -> list[Segment]:
 
 
 def plan_assembly(
-    screenplay: Screenplay, takes: list[TakeSource], max_takes_per_scene: int = 1
+    screenplay: Screenplay,
+    takes: list[TakeSource],
+    max_takes_per_scene: int = 1,
+    forced: dict[int, str] | None = None,
 ) -> AssemblyPlan:
     """Choose material for every scene and return the full assembly plan.
 
@@ -352,6 +355,10 @@ def plan_assembly(
     matched lines; with max_takes_per_scene > 1, lines it missed are filled
     from the next-best takes. Adjacent lines from one take merge into a
     single segment when the gap between them is under 1.5 seconds.
+
+    ``forced`` maps a scene index to a take name the editor picked manually;
+    that take supplies its lines first regardless of score (gap filling from
+    other takes still applies when max_takes_per_scene allows it).
     """
     plan = AssemblyPlan()
     for scene_index, scene in enumerate(screenplay.scenes):
@@ -377,9 +384,20 @@ def plan_assembly(
         for m in matches:
             by_take.setdefault(m.take, {})[m.element_index] = m
 
+        order = assembly.take_scores
+        forced_take = (forced or {}).get(scene_index)
+        if forced_take is not None:
+            if any(s.take == forced_take for s in order):
+                order = sorted(order, key=lambda s: (s.take != forced_take, -s.total))
+                assembly.notes.append(f"take {forced_take} pinned by editor")
+            else:
+                assembly.notes.append(
+                    f"pinned take {forced_take} not available for this scene"
+                )
+
         chosen: dict[int, LineMatch] = {}
         takes_used = 0
-        for score in assembly.take_scores:
+        for score in order:
             if takes_used >= max_takes_per_scene:
                 break
             contributed = 0

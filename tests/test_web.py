@@ -112,3 +112,43 @@ class TestApi:
         with urllib.request.urlopen(f"{server}/") as response:
             body = response.read().decode()
         assert "Fable Studio" in body
+
+
+class TestAssemblyApi:
+    def _payload(self):
+        demo = Path(__file__).parent.parent / "examples" / "demo"
+        return {
+            "script": {
+                "filename": "script.fountain",
+                "content": (demo / "script.fountain").read_text(),
+            },
+            "takes": [
+                {"filename": p.name, "content": p.read_text()}
+                for p in sorted((demo / "takes").glob("*.srt"))
+            ],
+        }
+
+    def test_plan(self, server):
+        data = _post(f"{server}/api/assembly/plan", self._payload())
+        assert data["coverage"] == 1.0
+        assert len(data["plan"]["scenes"]) == 2
+        assert data["screenplay"]["scenes"][0]["dialogue"]
+        winner = data["plan"]["scenes"][0]["segments"][0]["take"]
+        assert winner == "S1_T01"
+
+    def test_plan_with_forced_take(self, server):
+        payload = self._payload() | {"forced": {"0": "S1_T02"}}
+        data = _post(f"{server}/api/assembly/plan", payload)
+        assert data["plan"]["scenes"][0]["segments"][0]["take"] == "S1_T02"
+
+    def test_export_edl(self, server):
+        payload = self._payload() | {"format": "edl", "fps": 25}
+        data = _post(f"{server}/api/assembly/export", payload)
+        assert data["filename"].endswith(".edl")
+        assert "TITLE: Fable Assembly" in data["content"]
+
+    def test_plan_without_takes_is_400(self, server):
+        payload = self._payload() | {"takes": []}
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/assembly/plan", payload)
+        assert exc_info.value.code == 400

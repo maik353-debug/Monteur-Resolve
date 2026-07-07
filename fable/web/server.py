@@ -116,6 +116,8 @@ class FableHandler(BaseHTTPRequestHandler):
             ("POST", "/api/compare"): self._compare,
             ("GET", "/api/resolve/status"): self._resolve_status,
             ("POST", "/api/resolve/analyze"): self._resolve_analyze,
+            ("POST", "/api/assembly/plan"): self._assembly_plan,
+            ("POST", "/api/assembly/export"): self._assembly_export,
         }
         if (method, path) in routes:
             return routes[(method, path)]
@@ -203,6 +205,99 @@ class FableHandler(BaseHTTPRequestHandler):
     def _versions_delete(self, version_id: int) -> None:
         self.project.delete_version(version_id)
         self._send_json({"ok": True})
+
+    def _assembly_inputs(self, payload: dict):
+        from fable.io import read_srt, read_whisper_json
+        from fable.assembly import TakeSource
+        from fable.screenplay import parse_fountain
+        from fable.transcribe import scene_take_from_name
+
+        script = payload.get("script") or {}
+        if not script.get("content"):
+            raise ApiError(400, "missing script content")
+        screenplay = parse_fountain(script["content"])
+        takes = []
+        for item in payload.get("takes") or []:
+            filename = item.get("filename", "")
+            content = item.get("content", "")
+            if not content:
+                continue
+            stem = Path(filename).stem
+            if filename.lower().endswith(".json"):
+                transcript = read_whisper_json(content, source_name=stem)
+            else:
+                transcript = read_srt(content, source_name=stem)
+            scene_hint, take_hint = scene_take_from_name(filename)
+            takes.append(
+                TakeSource(
+                    name=stem, transcript=transcript,
+                    scene_hint=scene_hint, take_hint=take_hint,
+                )
+            )
+        if not takes:
+            raise ApiError(400, "no readable take transcripts (.srt/.json) provided")
+        forced = {
+            int(k): v for k, v in (payload.get("forced") or {}).items() if str(v)
+        }
+        return screenplay, takes, forced
+
+    def _assembly_plan(self) -> None:
+        from fable.assembly import plan_assembly
+        from fable.screenplay import DIALOGUE
+
+        payload = self._read_json()
+        screenplay, takes, forced = self._assembly_inputs(payload)
+        plan = plan_assembly(
+            screenplay, takes,
+            max_takes_per_scene=int(payload.get("max_takes") or 1),
+            forced=forced,
+        )
+        scenes = [
+            {
+                "heading": s.heading,
+                "number": s.number,
+                "dialogue": [
+                    {"index": i, "character": e.character, "text": e.text}
+                    for i, e in enumerate(s.elements)
+                    if e.kind == DIALOGUE
+                ],
+            }
+            for s in screenplay.scenes
+        ]
+        self._send_json(
+            {
+                "screenplay": {"title": screenplay.title, "scenes": scenes},
+                "plan": asdict(plan),
+                "coverage": plan.coverage(),
+                "takes": [t.name for t in takes],
+            }
+        )
+
+    def _assembly_export(self) -> None:
+        from fable.assembly import assembly_to_timeline, plan_assembly
+        from fable.io import write_edl, write_fcpxml
+
+        payload = self._read_json()
+        screenplay, takes, forced = self._assembly_inputs(payload)
+        fps = float(payload.get("fps") or 25)
+        plan = plan_assembly(
+            screenplay, takes,
+            max_takes_per_scene=int(payload.get("max_takes") or 1),
+            forced=forced,
+        )
+        timeline = assembly_to_timeline(
+            plan, takes, fps=fps, handles=float(payload.get("handles") or 0.5)
+        )
+        if not timeline.clips:
+            raise ApiError(422, "nothing matched — no segments to export")
+        fmt = (payload.get("format") or "fcpxml").lower()
+        if fmt == "edl":
+            content, filename = write_edl(timeline), "fable_assembly.edl"
+        elif fmt == "fcpxml":
+            content, filename = write_fcpxml(timeline), "fable_assembly.fcpxml"
+        else:
+            raise ApiError(400, f"unknown format {fmt!r} (use 'edl' or 'fcpxml')")
+        self._send_json({"filename": filename, "content": content})
 
     def _resolve_status(self) -> None:
         from fable.resolve import FableResolveError, connect

@@ -323,3 +323,54 @@ def test_coverage_arithmetic():
     )
     assert plan.coverage() == 0.75
     assert AssemblyPlan().coverage() == 0.0
+
+
+class TestForcedTakes:
+    def test_pinned_take_wins_over_score(self):
+        from fable.assembly import TakeSource, plan_assembly
+        from fable.model import Transcript, TranscriptSegment
+        from fable.screenplay import DIALOGUE, Element, Scene, Screenplay
+
+        scene = Scene(
+            heading="INT. TEST",
+            number="1",
+            elements=[
+                Element(kind=DIALOGUE, text="The quick brown fox jumps over the dog.", character="A"),
+                Element(kind=DIALOGUE, text="And the cat watches from the window sill.", character="B"),
+            ],
+        )
+        good = TakeSource(
+            name="T1",
+            transcript=Transcript(segments=[
+                TranscriptSegment(1, 0.0, 3.0, "The quick brown fox jumps over the dog."),
+                TranscriptSegment(2, 3.5, 6.5, "And the cat watches from the window sill."),
+            ]),
+        )
+        worse = TakeSource(
+            name="T2",
+            transcript=Transcript(segments=[
+                TranscriptSegment(1, 0.0, 3.0, "The quick brown fox jumps over a dog."),
+            ]),
+        )
+        plan = plan_assembly(Screenplay(scenes=[scene]), [good, worse], forced={0: "T2"})
+        assert all(seg.take == "T2" for seg in plan.scenes[0].segments)
+        assert any("pinned by editor" in n for n in plan.scenes[0].notes)
+
+    def test_pinned_take_missing_noted(self):
+        from fable.assembly import TakeSource, plan_assembly
+        from fable.model import Transcript, TranscriptSegment
+        from fable.screenplay import DIALOGUE, Element, Scene, Screenplay
+
+        scene = Scene(
+            heading="INT. TEST",
+            elements=[Element(kind=DIALOGUE, text="Hello there old friend of mine.", character="A")],
+        )
+        take = TakeSource(
+            name="T1",
+            transcript=Transcript(segments=[
+                TranscriptSegment(1, 0.0, 2.0, "Hello there old friend of mine."),
+            ]),
+        )
+        plan = plan_assembly(Screenplay(scenes=[scene]), [take], forced={0: "NOPE"})
+        assert any("not available" in n for n in plan.scenes[0].notes)
+        assert plan.scenes[0].segments[0].take == "T1"
