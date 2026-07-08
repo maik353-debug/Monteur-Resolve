@@ -132,7 +132,15 @@ class ClipSegment:
 
 @dataclass
 class Moment:
-    """A candidate moment for the cut."""
+    """A candidate moment for the cut.
+
+    The technical fields (score/motion/highlight) come from the sift itself.
+    The semantic fields (label/tags/role/hero/group) default to "not
+    analyzed" and are filled IN PLACE by :func:`monteur.vision.analyze_reports`,
+    which shows each moment's keyframe to Claude — so the montage planner can
+    cast shots by meaning (hero shots on the drop, establishing shots in the
+    opening) instead of by technical score alone.
+    """
 
     start: float
     end: float
@@ -140,6 +148,11 @@ class Moment:
     entry_motion: tuple[float, float] = (0.0, 0.0)  # (dx, dy) at the window start
     exit_motion: tuple[float, float] = (0.0, 0.0)  # (dx, dy) at the window end
     highlight: float = 0.0  # 0..1 audio-highlight strength inside the window
+    label: str = ""        # one-line description from vision ("overtake in a left-hand curve")
+    tags: list[str] = field(default_factory=list)  # 2-5 lowercase keywords ("curve", "mountains")
+    role: str = ""         # "opener" | "build" | "climax" | "closer" | "" = unknown/not analyzed
+    hero: float = 0.0      # 0..1 hero-shot strength (0 = ordinary or not analyzed)
+    group: str = ""        # short scene-similarity key; same group = visually the same scene
 
 
 @dataclass
