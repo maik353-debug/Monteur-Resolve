@@ -208,9 +208,13 @@ def _phase_shift(prev, cur) -> tuple[float, float]:
 
 # Keyframe fast path (see frame_metrics): clips at/above this duration are
 # sampled by decoding ONLY keyframes, which skips the (very expensive) full
-# decode of long 4K/H.265 material. Short clips keep the uniform full-decode
-# path — they are fast anyway and their tests rely on uniform spacing.
-_KEYFRAME_MIN_DURATION = 45.0  # seconds
+# decode of long 4K/H.265 material. Even a ~10s 4K clip takes a minute to
+# full-decode, so the threshold is low; correctness is still guaranteed by
+# the sparse-keyframe fallback below (fewer than max(6, duration/6) keyframes
+# rejects the fast path — e.g. a 10s clip with a 1s GOP has ~10 keyframes and
+# qualifies, while a 10s clip with a 10s GOP has 1 and falls back). Only
+# genuinely short clips keep the uniform full-decode path.
+_KEYFRAME_MIN_DURATION = 8.0  # seconds
 # All-intra codecs mark every frame a keyframe; above this multiple of the
 # requested sample rate the decoded keyframes are thinned back down so the
 # metric list stays bounded (the decode cost is already paid at that point).
@@ -350,7 +354,7 @@ def frame_metrics(
 ) -> list[FrameMetric]:
     """Decode downscaled grayscale frames and compute quality metrics.
 
-    Clips shorter than _KEYFRAME_MIN_DURATION (45 s) are sampled uniformly at
+    Clips shorter than _KEYFRAME_MIN_DURATION (8 s) are sampled uniformly at
     ``samples_per_second`` by decoding every frame (the original path). Longer
     clips use a keyframe-only fast path: only keyframes are decoded (orders of
     magnitude cheaper on long-GOP 4K/H.265 material), so sample spacing

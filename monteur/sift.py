@@ -84,6 +84,10 @@ DARK = "dark"
 BLURRY = "blurry"
 SHAKY = "shaky"
 
+
+class SiftCancelled(RuntimeError):
+    """Raised by :func:`sift_directory` when its ``cancel`` event is set."""
+
 # Tunable heuristic constants (see module docstring).
 # Exposure: "dark" splits into near-black (unusable) vs. dim/flat (a Log look,
 # usable). A sample is DARK only if near-black OR far below the clip's median.
@@ -589,7 +593,9 @@ def _call_progress(progress, index, total, name, stage, report):
         pass
 
 
-def sift_directory(directory: str, progress=None) -> list[ClipReport]:
+def sift_directory(
+    directory: str, progress=None, cancel: threading.Event | None = None
+) -> list[ClipReport]:
     """Reports for every video file in a directory (analysed concurrently).
 
     Clips are analysed on a small thread pool (up to 4 workers) —
@@ -623,6 +629,13 @@ def sift_directory(directory: str, progress=None) -> list[ClipReport]:
     the callback raises is swallowed so a broken callback cannot abort the
     sift. ``progress=None`` (the default) disables all feedback and keeps the
     function fully backwards compatible.
+
+    ``cancel`` is an optional :class:`threading.Event`. It is checked before
+    each clip is submitted for analysis (and again when a queued clip is about
+    to start): clips already being analysed run to completion, pending clips
+    are skipped. Once every in-flight clip has drained, a cancelled run raises
+    :class:`SiftCancelled` instead of returning reports. ``cancel=None`` (the
+    default) disables cancellation entirely.
     """
     media = list_media(directory)
     total = len(media)
@@ -630,11 +643,16 @@ def sift_directory(directory: str, progress=None) -> list[ClipReport]:
         return []
     progress_lock = threading.Lock()
 
+    def _cancelled() -> bool:
+        return cancel is not None and cancel.is_set()
+
     def _locked_progress(index, name, stage, report):
         with progress_lock:
             _call_progress(progress, index, total, name, stage, report)
 
-    def _analyze_one(index: int, media_path) -> ClipReport:
+    def _analyze_one(index: int, media_path) -> ClipReport | None:
+        if _cancelled():
+            return None  # a queued clip whose run was cancelled: skip silently
         name = Path(media_path).name
         _locked_progress(index, name, "start", None)
         try:
@@ -649,11 +667,22 @@ def sift_directory(directory: str, progress=None) -> list[ClipReport]:
 
     workers = min(4, os.cpu_count() or 1, total)
     if workers <= 1:
-        return [_analyze_one(i, p) for i, p in enumerate(media, start=1)]
+        results = []
+        for i, p in enumerate(media, start=1):
+            if _cancelled():
+                raise SiftCancelled("sift cancelled")
+            results.append(_analyze_one(i, p))
+        return results
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [
-            pool.submit(_analyze_one, i, p) for i, p in enumerate(media, start=1)
-        ]
+        futures = []
+        for i, p in enumerate(media, start=1):
+            if _cancelled():
+                break  # pending clips are never submitted
+            futures.append(pool.submit(_analyze_one, i, p))
         # futures[] is in sorted file order, so gathering by index keeps the
         # returned report order identical to the sequential implementation.
-        return [f.result() for f in futures]
+        # On cancellation this drains: already-running clips finish here.
+        results = [f.result() for f in futures]
+    if _cancelled():
+        raise SiftCancelled("sift cancelled")
+    return results

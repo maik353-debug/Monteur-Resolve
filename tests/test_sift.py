@@ -16,6 +16,7 @@ from monteur.sift import (
     USABLE,
     ClipReport,
     Moment,
+    SiftCancelled,
     analyze_clip,
     apply_audio,
     audio_flags,
@@ -412,6 +413,61 @@ def test_progress_none_is_backwards_compatible(monkeypatch):
     assert len(reports) == 2
     reports2 = sift_directory("footage", progress=None)
     assert len(reports2) == 2
+
+
+# -------------------------------------------------------------- cancellation
+
+
+def test_cancel_before_start_skips_everything(monkeypatch):
+    import threading
+
+    _fake_sift(monkeypatch, ["a.mp4", "b.mp4", "c.mp4"])
+    calls = []
+    monkeypatch.setattr(
+        sift_module,
+        "analyze_clip",
+        lambda path: calls.append(path) or ClipReport(path=str(path), duration=6.0),
+    )
+    cancel = threading.Event()
+    cancel.set()  # cancelled before the sift even begins
+
+    events = []
+    with pytest.raises(SiftCancelled):
+        sift_directory(
+            "footage",
+            progress=lambda *args: events.append(args),
+            cancel=cancel,
+        )
+    assert calls == []  # no clip was ever analysed
+    assert events == []  # skipped clips fire no progress
+
+
+def test_cancel_mid_run_skips_pending_clips(monkeypatch):
+    import threading
+
+    # Force the sequential path so "cancel after the first clip" is
+    # deterministic: exactly one clip analysed, the rest skipped.
+    monkeypatch.setattr(sift_module.os, "cpu_count", lambda: 1)
+    names = ["a.mp4", "b.mp4", "c.mp4", "d.mp4"]
+    _fake_sift(monkeypatch, names)
+    cancel = threading.Event()
+    analysed = []
+
+    def analyze_then_cancel(path):
+        analysed.append(str(path))
+        cancel.set()  # the user hits cancel while clip 1 is being analysed
+        return ClipReport(path=str(path), duration=6.0)
+
+    monkeypatch.setattr(sift_module, "analyze_clip", analyze_then_cancel)
+
+    with pytest.raises(SiftCancelled):
+        sift_directory("footage", cancel=cancel)
+    assert analysed == ["a.mp4"]  # the running clip finished; the rest skipped
+
+
+def test_cancel_none_keeps_old_behaviour(monkeypatch):
+    _fake_sift(monkeypatch, ["a.mp4", "b.mp4"])
+    assert len(sift_directory("footage", cancel=None)) == 2
 
 
 # --------------------------------------------------------- parallel sifting

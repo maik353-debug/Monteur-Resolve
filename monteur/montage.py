@@ -94,6 +94,41 @@ metadata (``"fade_in_frames"`` / ``"fade_out_frames"``) so the EDL/FCPXML
 writers can carry the dissolves into Resolve. Audio fades cannot ride
 along in either export format; a plan note reminds the editor to apply
 the music fade in Resolve.
+
+Repetition guard
+----------------
+Stretching little footage over a long song repeats material painfully
+(36 clips over a 2:30 song "extrem viel wiederholt"). ``plan_montage``
+merges each clip's overlapping moments, sums the deduplicated material,
+and caps the montage length at ``unique_material x _REPEAT_TOLERANCE``
+(1.5) when the requested length exceeds it — the end_on_phrase snap then
+refines the capped length, and the strongest-window logic works from it.
+A note explains the cap; ``allow_repeats=True`` (CLI ``--allow-repeats``)
+disables it. The cap never lengthens a montage and never applies when
+the request is already below it.
+
+Cut-ahead lead
+--------------
+Editors place cuts 1-2 frames BEFORE the beat so the incoming shot is
+already on screen when the beat lands — a cut exactly ON the beat reads
+late. ``cut_lead`` (default ``_DEFAULT_CUT_LEAD`` = 0.04 s, ~1 frame at
+25 fps; 0 disables) shifts every interior cut point earlier by that
+amount after the grid is built, clamped so ordering is preserved, no
+slot drops below ``_LEAD_MIN_SLOT`` (0.25 s, or its own original length
+if shorter), the first cut stays at 0 and the final boundary stays at
+the montage length.
+
+No-music plans and audio modes
+------------------------------
+``plan_montage(reports, music=None, max_duration=...)`` plans a cut with
+no song at all (ride-POV videos where the clips' own engine sound IS the
+soundtrack): the grid falls back to fixed intervals per style phase
+(``beats_per_cut x _PSEUDO_BEAT`` = 0.75 s — slow phases every ~3 s,
+fast every ~0.75 s), with no drops/phrases/sections; ``music_path`` is
+"" and ``song_duration``/``music_start`` are 0. :func:`montage_to_timeline`
+takes ``audio=``: "music" (song on A1, today's behavior), "mix" (song on
+A1 plus each entry's own audio on A2) or "original" (no song clip; each
+entry's own audio on A1). A no-music plan only renders with "original".
 """
 
 from __future__ import annotations
@@ -119,6 +154,20 @@ FALLBACK_INTERVAL = 2.0
 
 # A phase cutting every >= this many beats is "slow": its cuts go on downbeats.
 _SLOW_PHASE_STEP = 4
+# Repetition guard: a montage longer than (unique material x this factor)
+# repeats footage too visibly and is capped (unless allow_repeats=True).
+_REPEAT_TOLERANCE = 1.5
+# No-music plans have no beat grid; each phase cuts on a fixed interval of
+# (beats_per_cut x this nominal pseudo-beat) seconds — slow phases every ~3s,
+# fast phases every ~0.75s.
+_PSEUDO_BEAT = 0.75
+# Cut-ahead lead (seconds, ~1 frame at 25 fps): interior cuts are shifted this
+# far BEFORE the beat so the incoming shot is on screen when the beat lands.
+_DEFAULT_CUT_LEAD = 0.04
+# Lead shifting never squeezes a slot below this (seconds).
+_LEAD_MIN_SLOT = 0.25
+# Audio modes for montage_to_timeline.
+_AUDIO_MODES = ("music", "mix", "original")
 # Drop alignment only when the drop falls inside this share of the montage.
 _DROP_ALIGN_MARGIN = 0.05
 # Candidate window (K): unconsumed pool items considered per slot.
@@ -532,6 +581,96 @@ def _build_style_grid(
     return cuts, phases, notes
 
 
+def _build_pseudo_grid(
+    length: float, style: MontageStyle
+) -> tuple[list[float], list[tuple[float, float, str]], list[str]]:
+    """Cut grid and phase spans for a NO-MUSIC plan (fixed intervals).
+
+    With no song there is no beat grid to walk, so each arc phase cuts on a
+    fixed interval of ``beats_per_cut x _PSEUDO_BEAT`` (0.75 s) seconds —
+    slow phases (4 beats per cut) every ~3 s, fast phases every ~0.75 s.
+    Phase boundaries are the raw arc shares mapped onto ``length`` (nothing
+    musical to snap to). "auto" has no arc; it cuts on a flat "mid" interval
+    (2 x _PSEUDO_BEAT = 1.5 s).
+    """
+    notes = [f"no music: fixed intervals from a {_PSEUDO_BEAT:g}s pseudo-beat"]
+    cuts = [0.0]
+    phases: list[tuple[float, float, str]] = []
+    if style.arc:
+        labels = [lab for _, lab in style.arc]
+        total_share = sum(share for share, _ in style.arc) or 1.0
+        bounds = [0.0]
+        acc = 0.0
+        for share, _ in style.arc:
+            acc += share
+            bounds.append(length * acc / total_share)
+        bounds[-1] = length
+        phases = [(bounds[i], bounds[i + 1], labels[i]) for i in range(len(labels))]
+        for (p_start, p_end, _label), step in zip(phases, _phase_steps(style)):
+            interval = max(step * _PSEUDO_BEAT, MIN_CUT_INTERVAL)
+            t = cuts[-1] + interval
+            while t < p_end - _EPS:
+                cuts.append(t)
+                t += interval
+            if p_end < length - _EPS and p_end > cuts[-1] + _EPS:
+                cuts.append(p_end)  # the phase boundary itself is a cut
+    else:
+        interval = BEATS_PER_CUT["mid"] * _PSEUDO_BEAT
+        t = interval
+        while t < length - _EPS:
+            cuts.append(t)
+            t += interval
+    cuts.append(length)
+    return cuts, phases, notes
+
+
+def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Merge overlapping/touching [start, end] intervals (sorted result).
+
+    Used by the repetition guard so moments that overlap WITHIN one clip are
+    not double-counted as unique material.
+    """
+    merged: list[tuple[float, float]] = []
+    for start, end in sorted((s, e) for s, e in intervals if e - s > _EPS):
+        if merged and start <= merged[-1][1] + _EPS:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _unique_material(reports: list[ClipReport]) -> float:
+    """Total seconds of deduplicated moment material across all reports.
+
+    Each clip's moment intervals are merged first (moments can overlap within
+    a clip), then the merged spans are summed.
+    """
+    total = 0.0
+    for report in reports:
+        for start, end in _merge_intervals([(m.start, m.end) for m in report.moments]):
+            total += end - start
+    return total
+
+
+def _apply_cut_lead(cuts: list[float], lead: float) -> list[float]:
+    """Shift every INTERIOR cut point ``lead`` seconds earlier.
+
+    Editors place cuts 1-2 frames before the beat so the incoming shot is
+    already on screen when the beat lands. The first cut stays at 0 and the
+    final boundary stays at the montage length; each shifted cut is clamped
+    so ordering is preserved and no slot is squeezed below
+    ``min(_LEAD_MIN_SLOT, its original length)``.
+    """
+    if lead <= _EPS or len(cuts) <= 2:
+        return list(cuts)
+    shifted = [cuts[0]]
+    for i in range(1, len(cuts) - 1):
+        floor = shifted[-1] + min(_LEAD_MIN_SLOT, cuts[i] - cuts[i - 1])
+        shifted.append(min(max(cuts[i] - lead, floor), cuts[i]))
+    shifted.append(cuts[-1])
+    return shifted
+
+
 # --- slot filling -------------------------------------------------------------
 
 
@@ -735,11 +874,13 @@ def _fill(
 
 def plan_montage(
     reports: list[ClipReport],
-    music: MusicAnalysis,
+    music: MusicAnalysis | None = None,
     order: str = CHRONOLOGICAL,
     max_duration: float | None = None,
     style: str = "auto",
     end_on_phrase: bool = True,
+    allow_repeats: bool = False,
+    cut_lead: float = _DEFAULT_CUT_LEAD,
 ) -> MontagePlan:
     """Distribute the best moments across the song, in a cutting style.
 
@@ -748,9 +889,27 @@ def plan_montage(
     (see the module docstring for the grid, drop, highlight and motion
     rules). Unknown styles raise ValueError listing the valid ones.
 
+    ``music=None`` plans a cut with no song at all (ride-POV videos whose
+    own sound is the point): ``max_duration`` is then required, the grid
+    uses fixed per-phase intervals (``beats_per_cut x _PSEUDO_BEAT``; see
+    :func:`_build_pseudo_grid`) and the plan carries ``music_path`` "" —
+    render it with ``montage_to_timeline(..., audio="original")``.
+
+    ``allow_repeats`` (default False) controls the repetition guard: a
+    montage longer than the deduplicated moment material x
+    ``_REPEAT_TOLERANCE`` (1.5) is capped to that product, with a note (see
+    the module docstring). The cap runs before the phrase snap and the
+    strongest-window choice, never lengthens the montage, and never applies
+    when the request is already below it.
+
+    ``cut_lead`` (default 0.04 s, ~1 frame at 25 fps; 0 disables) shifts
+    every interior cut earlier so the incoming shot lands ON the beat
+    instead of starting there — cuts exactly on the beat read late (see
+    :func:`_apply_cut_lead` for the clamping rules).
+
     ``end_on_phrase`` (default True) gives a truncated montage a musical
-    ending: when ``max_duration`` makes it shorter than the song, the length
-    is snapped to the nearest phrase start (fallback: downbeats, then beats)
+    ending: when the montage is shorter than the song, the length is
+    snapped to the nearest phrase start (fallback: downbeats, then beats)
     within ±12% of the request — ties prefer the shorter cut, larger changes
     are never made, and a full-song montage is left alone. The plan also
     carries the intended fades (``fade_in`` / ``fade_out``) and per-entry
@@ -761,10 +920,37 @@ def plan_montage(
         valid = ", ".join(sorted(STYLES))
         raise ValueError(f"unknown style {style!r}; valid styles: {valid}")
     chosen = STYLES[style]
+    if music is None and max_duration is None:
+        raise ValueError("without music, pass max_duration")
 
-    length = music.duration if max_duration is None else min(music.duration, max_duration)
+    if music is None:
+        requested = max_duration
+    else:
+        requested = (
+            music.duration if max_duration is None else min(music.duration, max_duration)
+        )
+
+    # Repetition guard: don't stretch little footage over a long montage.
+    # Runs BEFORE the phrase snap and best_energy_window so both refine the
+    # capped length.
+    length = requested
+    repeat_note: str | None = None
+    unique_material = _unique_material(reports)
+    supported = unique_material * _REPEAT_TOLERANCE
+    if not allow_repeats and unique_material > _EPS and requested > supported + _EPS:
+        length = supported
+        repeat_note = (
+            f"footage supports about {supported:.0f}s — capped the cut to "
+            f"{length:.0f}s (was {requested:.0f}s); pass allow_repeats=True / "
+            f"--allow-repeats to use the full length"
+        )
+
     end_note: str | None = None
-    if end_on_phrase and max_duration is not None and length < music.duration - _EPS and length > _EPS:
+    if (
+        music is not None
+        and end_on_phrase
+        and _EPS < length < music.duration - _EPS
+    ):
         snapped_length, boundary_kind = _snap_ending_length(music, length)
         if snapped_length is not None:
             end_note = f"length snapped to {boundary_kind} at {snapped_length:.1f}s"
@@ -773,17 +959,24 @@ def plan_montage(
     # A montage cut shorter than the song uses the song's strongest passage,
     # not its intro: shift the whole grid onto [music_start, music_start+length].
     music_start = 0.0
-    if max_duration is not None and _EPS < length < music.duration - _EPS:
+    if music is not None and _EPS < length < music.duration - _EPS:
         music_start = best_energy_window(music, length)
-    grid_music = _window_music(music, music_start, length) if music_start > _EPS else music
+    if music is None:
+        grid_music = MusicAnalysis(path="", duration=max(length, 0.0), tempo=0.0)
+    elif music_start > _EPS:
+        grid_music = _window_music(music, music_start, length)
+    else:
+        grid_music = music
 
     plan = MontagePlan(
-        music_path=music.path,
+        music_path=music.path if music is not None else "",
         duration=max(length, 0.0),
         music_start=music_start,
-        song_duration=music.duration,
+        song_duration=music.duration if music is not None else 0.0,
     )
     plan.notes.append(f'style "{chosen.key}": {chosen.name}')
+    if repeat_note:
+        plan.notes.append(repeat_note)
     if end_note:
         plan.notes.append(end_note)
     if music_start > _EPS:
@@ -797,7 +990,11 @@ def plan_montage(
     phases: list[tuple[float, float, str]] = []
     highlight_phase: str | None = None
     drop_starts: list[float] = []
-    if chosen.arc:
+    if music is None:
+        cuts, phases, grid_notes = _build_pseudo_grid(length, chosen)
+        if chosen.arc:
+            highlight_phase = chosen.prefer_highlights_in
+    elif chosen.arc:
         cuts, phases, grid_notes = _build_style_grid(grid_music, length, chosen)
         highlight_phase = chosen.prefer_highlights_in
     else:
@@ -810,11 +1007,15 @@ def plan_montage(
             drop_starts.append(d)
             grid_notes.append(f"cut forced at drop {d:.1f}s; strongest moment assigned")
     plan.notes.extend(grid_notes)
+    # Cut-ahead lead: interior cuts move slightly BEFORE their beat so the
+    # incoming shot is on screen when the beat lands. Drop-slot matching
+    # below tolerates the shift (slots start cut_lead before their drop).
+    cuts = _apply_cut_lead(cuts, cut_lead)
     slots = list(zip(cuts, cuts[1:]))
     drop_slots = {
         i
         for i, (s, _) in enumerate(slots)
-        if any(abs(s - d) <= _EPS for d in drop_starts)
+        if any(abs(s - d) <= cut_lead + _EPS for d in drop_starts)
     }
     pool = [
         _PoolItem(r.path, r.duration, m, media_start=r.media_start)
@@ -892,8 +1093,25 @@ def _plan_finishing(
         plan.notes.append(f"music fade-out: {plan.fade_out:.1f}s (apply in Resolve)")
 
 
-def montage_to_timeline(plan: MontagePlan, fps: float, name: str = "Monteur Montage") -> Timeline:
-    """Render a MontagePlan as a Timeline (footage on V1, music on A1).
+def montage_to_timeline(
+    plan: MontagePlan,
+    fps: float,
+    name: str = "Monteur Montage",
+    audio: str = "music",
+) -> Timeline:
+    """Render a MontagePlan as a Timeline (footage on V1, sound per ``audio``).
+
+    ``audio`` picks what plays under the pictures:
+
+    * ``"music"`` (default) — the song on A1, exactly as before.
+    * ``"mix"`` — the song on A1 PLUS one A2 audio clip per video entry
+      carrying the clip's own sound (same source range and source_name as
+      the video entry), e.g. engine sound recorded straight into the clips.
+    * ``"original"`` — NO song clip; each entry's own audio on A1 (the
+      ride-POV mode, and the only valid mode for a no-music plan).
+
+    Any other value raises ValueError listing the three; ``"music"``/
+    ``"mix"`` raise ValueError when the plan has no ``music_path``.
 
     Entries with a dissolve (``transition`` > 0) carry it in the video
     clip's metadata (``"transition"`` = ``"dissolve"``,
@@ -901,7 +1119,16 @@ def montage_to_timeline(plan: MontagePlan, fps: float, name: str = "Monteur Mont
     writers can emit it; the plan's fades land in ``timeline.metadata``
     as ``"fade_in_frames"`` / ``"fade_out_frames"``.
     """
+    if audio not in _AUDIO_MODES:
+        valid = ", ".join(_AUDIO_MODES)
+        raise ValueError(f"unknown audio mode {audio!r}; valid modes: {valid}")
+    if audio in ("music", "mix") and not plan.music_path:
+        raise ValueError(
+            f'plan has no music; audio mode {audio!r} needs a song — '
+            'use audio="original"'
+        )
     timeline = Timeline(name=name, fps=fps)
+    own_audio_track = {"mix": "A2", "original": "A1"}.get(audio)
     for entry in plan.entries:
         stem = PurePath(entry.clip_path).stem
         rec_in = seconds_to_frames(entry.record_start, fps)
@@ -937,38 +1164,62 @@ def montage_to_timeline(plan: MontagePlan, fps: float, name: str = "Monteur Mont
             clip.metadata["transition"] = "dissolve"
             clip.metadata["transition_frames"] = transition_frames
         timeline.clips.append(clip)
+        if own_audio_track:
+            # The entry's own sound (DJI Mic engine audio etc.): same source
+            # range and source_name as the video entry, on A2 ("mix") or A1
+            # ("original").
+            timeline.clips.append(
+                Clip(
+                    name=stem,
+                    track=own_audio_track,
+                    kind=AUDIO,
+                    source_in=src_in,
+                    source_out=src_out,
+                    record_in=rec_in,
+                    record_out=rec_out,
+                    source_name=stem,
+                    source_file=entry.clip_path,
+                    metadata={
+                        "media_start_seconds": entry.media_start,
+                        "media_duration_seconds": entry.clip_duration,
+                    },
+                )
+            )
     if plan.fade_in > _EPS:
         timeline.metadata["fade_in_frames"] = seconds_to_frames(plan.fade_in, fps)
     if plan.fade_out > _EPS:
         timeline.metadata["fade_out_frames"] = seconds_to_frames(plan.fade_out, fps)
-    music_stem = PurePath(plan.music_path).stem
-    duration_frames = seconds_to_frames(plan.duration, fps)
-    # The music clip starts at the song offset the cut was built against, so a
-    # short montage plays the song's strongest passage rather than its intro.
-    music_in = seconds_to_frames(plan.music_start, fps)
-    # Keep the source range inside the song: if independent rounding of the
-    # offset and the length would read one frame past the end, shift the start
-    # back so the clip length stays exact and never over-reads the media.
-    if plan.song_duration > 0:
-        song_end = seconds_to_frames(plan.song_duration, fps)
-        if music_in + duration_frames > song_end:
-            music_in = max(0, song_end - duration_frames)
-    timeline.clips.append(
-        Clip(
-            name=music_stem,
-            track="A1",
-            kind=AUDIO,
-            source_in=music_in,
-            source_out=music_in + duration_frames,
-            record_in=0,
-            record_out=duration_frames,
-            source_name=music_stem,
-            source_file=plan.music_path,
-            # Music has no embedded start timecode we can probe here, so no
-            # media_start_seconds; the real song length still lets the FCPXML
-            # writer claim an honest asset duration.
-            metadata={"media_duration_seconds": plan.song_duration},
+    if audio != "original":
+        music_stem = PurePath(plan.music_path).stem
+        duration_frames = seconds_to_frames(plan.duration, fps)
+        # The music clip starts at the song offset the cut was built against,
+        # so a short montage plays the song's strongest passage rather than
+        # its intro.
+        music_in = seconds_to_frames(plan.music_start, fps)
+        # Keep the source range inside the song: if independent rounding of the
+        # offset and the length would read one frame past the end, shift the
+        # start back so the clip length stays exact and never over-reads the
+        # media.
+        if plan.song_duration > 0:
+            song_end = seconds_to_frames(plan.song_duration, fps)
+            if music_in + duration_frames > song_end:
+                music_in = max(0, song_end - duration_frames)
+        timeline.clips.append(
+            Clip(
+                name=music_stem,
+                track="A1",
+                kind=AUDIO,
+                source_in=music_in,
+                source_out=music_in + duration_frames,
+                record_in=0,
+                record_out=duration_frames,
+                source_name=music_stem,
+                source_file=plan.music_path,
+                # Music has no embedded start timecode we can probe here, so
+                # no media_start_seconds; the real song length still lets the
+                # FCPXML writer claim an honest asset duration.
+                metadata={"media_duration_seconds": plan.song_duration},
+            )
         )
-    )
-    timeline.markers.append(Marker(frame=0, name=f"Cut to {music_stem}"))
+        timeline.markers.append(Marker(frame=0, name=f"Cut to {music_stem}"))
     return timeline

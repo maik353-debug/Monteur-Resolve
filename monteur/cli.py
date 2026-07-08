@@ -291,6 +291,16 @@ def cmd_create(args: argparse.Namespace) -> None:
             f"  -> style {args.style}, order {args.order}, "
             f"max duration {args.max_duration if args.max_duration else 'full song'}"
         )
+    # No-music mode (ride-POV: the clips' own sound IS the soundtrack).
+    # Validated after the brief so a brief-set max duration counts.
+    if not args.music:
+        if args.audio != "original":
+            _fail(
+                "no music given — pass a song file, or add --audio original "
+                "to cut to the clips' own sound"
+            )
+        if not args.max_duration:
+            _fail("no music given — pass --max-duration to set the cut length")
     try:
         from monteur.sift import list_media
 
@@ -303,23 +313,32 @@ def cmd_create(args: argparse.Namespace) -> None:
         reports = sift_directory(args.folder, progress=_sift_progress)
         print(f"  {len(reports)} clips, "
               f"{sum(len(r.moments) for r in reports)} good moments found")
-        print("Analyzing music ...")
-        music = analyze_music(args.music)
-        print(f"  {music.tempo:.0f} BPM, {len(music.beats)} beats, "
-              f"{music.duration:.0f}s")
+        music = None
+        if args.music:
+            print("Analyzing music ...")
+            music = analyze_music(args.music)
+            print(f"  {music.tempo:.0f} BPM, {len(music.beats)} beats, "
+                  f"{music.duration:.0f}s")
     except MonteurMediaError as exc:
         _fail(str(exc))
     try:
         plan = plan_montage(
             reports, music, order=args.order, max_duration=args.max_duration,
-            style=args.style,
+            style=args.style, allow_repeats=args.allow_repeats,
+            cut_lead=args.cut_lead,
         )
     except ValueError as exc:
         _fail(str(exc))
     if not plan.entries:
         _fail("no usable material found — run 'monteur sift' to see why")
+    audio_wording = {
+        "music": "song only",
+        "mix": "song + the clips' own sound",
+        "original": "the clips' own sound, no song",
+    }
+    print(f"Audio: {args.audio} ({audio_wording[args.audio]})")
     if args.output:
-        timeline = montage_to_timeline(plan, fps=args.fps)
+        timeline = montage_to_timeline(plan, fps=args.fps, audio=args.audio)
         io.save_timeline(timeline, args.output)
         print(f"\n{len(plan.entries)} cuts -> {args.output} "
               f"({plan.duration:.1f}s at {args.fps:g} fps)")
@@ -499,7 +518,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("create", help="automatic first cut: footage folder + song")
     p.add_argument("folder", help="directory with your video clips")
-    p.add_argument("music", help="song file (mp3/wav/m4a/...)")
+    p.add_argument(
+        "music", nargs="?", default=None,
+        help="song file (mp3/wav/m4a/...); omit for a no-music cut "
+             "(needs --audio original and --max-duration)",
+    )
     p.add_argument("-o", "--output", help="output .fcpxml/.edl")
     p.add_argument(
         "--into-resolve",
@@ -512,6 +535,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--style", default="auto",
         help="montage style: auto, travel, wedding, music_video, trailer",
+    )
+    p.add_argument(
+        "--audio", choices=["music", "mix", "original"], default="music",
+        help="what plays under the pictures: the song (music), song + the "
+             "clips' own sound (mix), or only the clips' own sound (original)",
+    )
+    p.add_argument(
+        "--allow-repeats", action="store_true",
+        help="let footage repeat instead of capping the cut length at "
+             "1.5x the unique material",
+    )
+    p.add_argument(
+        "--cut-lead", type=float, default=0.04,
+        help="place each cut this many seconds BEFORE the beat so the "
+             "incoming shot lands on it (default 0.04, 0 disables)",
     )
     p.add_argument(
         "--brief", default="",

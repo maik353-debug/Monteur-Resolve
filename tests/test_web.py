@@ -1,6 +1,8 @@
 import json
+import os
 import socket
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -161,6 +163,17 @@ class TestAssemblyApi:
         assert exc_info.value.code == 400
 
 
+def _wait_for_job(server, job_id, timeout=60.0, states=("done", "error", "cancelled")):
+    """Poll GET /api/jobs/<id> until the job reaches a terminal state."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        job = _get(f"{server}/api/jobs/{job_id}")
+        if job["state"] in states:
+            return job
+        time.sleep(0.05)
+    pytest.fail(f"job {job_id} still {job['state']!r} after {timeout}s")
+
+
 class TestCreateApi:
     DEMO = "/tmp/claude-0/-home-user-Fable-tool/90401078-872b-52b4-9d55-214193ea4ea5/scratchpad/demo-footage"
 
@@ -169,34 +182,124 @@ class TestCreateApi:
         if not Path(self.DEMO).is_dir():
             pytest.skip("demo footage not generated in this environment")
 
-    def test_scan(self, server):
+    def _scan(self, server):
         data = _post(f"{server}/api/create/scan", {"folder": self.DEMO})
-        assert len(data["clips"]) == 4
-        by_name = {Path(c["path"]).name: c for c in data["clips"]}
+        assert isinstance(data["job"], str) and data["job"]
+        return data["job"]
+
+    def test_scan_job(self, server):
+        job_id = self._scan(server)
+        job = _wait_for_job(server, job_id)
+        assert job["state"] == "done"
+        assert job["kind"] == "scan"
+
+        clips = job["result"]["clips"]
+        assert len(clips) == 4
+        by_name = {Path(c["path"]).name: c for c in clips}
         assert by_name["clip_B.mp4"]["usable_ratio"] < 1.0
 
-    def test_build_with_style(self, server):
+        # Live per-clip progress: every clip fires a start and a done entry,
+        # and done entries carry the clip's usable_ratio.
+        stages = [p["stage"] for p in job["progress"]]
+        assert stages.count("start") == 4
+        assert stages.count("done") == 4
+        done_entries = [p for p in job["progress"] if p["stage"] == "done"]
+        assert all(0.0 <= p["usable_ratio"] <= 1.0 for p in done_entries)
+        assert all(p["total"] == 4 for p in job["progress"])
+
+    def test_build_reuses_scan_cache(self, server):
+        scan_job = _wait_for_job(server, self._scan(server))
+        assert scan_job["state"] == "done"
+
         data = _post(
             f"{server}/api/create/build",
             {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
              "style": "travel", "fps": 25, "format": "edl"},
         )
-        assert data["plan"]["cuts"] > 0
-        assert data["content"].startswith("TITLE:")
-        assert any("travel" in n for n in data["plan"]["notes"])
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert job["kind"] == "build"
 
-    def test_build_unknown_style_is_400(self, server):
-        with pytest.raises(urllib.error.HTTPError) as exc_info:
-            _post(
-                f"{server}/api/create/build",
-                {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
-                 "style": "vaporwave"},
-            )
-        assert exc_info.value.code == 400
+        # The build must NOT sift again: the scan's reports are reused.
+        assert {"stage": "cache", "name": "using previous scan"} in job["progress"]
+        assert not any(p["stage"] in ("start", "done") for p in job["progress"])
+        assert any(p["stage"] == "music" for p in job["progress"])
+
+        result = job["result"]
+        assert result["plan"]["cuts"] > 0
+        assert result["plan"]["tempo"] > 0
+        assert result["filename"].endswith(".edl")
+        assert result["content"].startswith("TITLE:")
+        assert any("travel" in n for n in result["plan"]["notes"])
+
+    def test_build_unknown_style_is_error_job(self, server):
+        data = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "style": "vaporwave"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "valid styles" in job["message"]
+        assert job["result"] is None
+
+    def test_cancel_scan(self, server):
+        job_id = self._scan(server)
+        assert _post(f"{server}/api/jobs/{job_id}/cancel", {"why": "user"})["ok"] is True
+        # A tiny demo dir may finish before the cancel lands — both terminal
+        # states are acceptable; the endpoint contract must hold either way.
+        job = _wait_for_job(server, job_id)
+        assert job["state"] in ("cancelled", "done")
+        if job["state"] == "done":
+            assert len(job["result"]["clips"]) == 4
+        else:
+            assert job["result"] is None
+        # Cancelling an already-finished job stays a no-op {"ok": true}.
+        assert _post(f"{server}/api/jobs/{job_id}/cancel", {})["ok"] is True
+        assert _get(f"{server}/api/jobs/{job_id}")["state"] == job["state"]
 
     def test_scan_missing_folder_is_400(self, server):
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             _post(f"{server}/api/create/scan", {})
+        assert exc_info.value.code == 400
+
+    def test_build_missing_folder_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/build", {"music": "song.wav"})
+        assert exc_info.value.code == 400
+
+
+class TestJobsApi:
+    def test_unknown_job_is_404(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _get(f"{server}/api/jobs/deadbeef")
+        assert exc_info.value.code == 404
+
+    def test_cancel_unknown_job_is_404(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/jobs/deadbeef/cancel", {})
+        assert exc_info.value.code == 404
+
+    def test_scan_of_missing_folder_is_error_job(self, server):
+        data = _post(f"{server}/api/create/scan", {"folder": "/no/such/folder"})
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "not a directory" in job["message"]
+
+
+class TestPickApi:
+    @pytest.mark.skipif(
+        bool(os.environ.get("DISPLAY")),
+        reason="a display is available — a real dialog would open and block",
+    )
+    def test_pick_headless_soft_fallback(self, server):
+        data = _post(f"{server}/api/pick", {"kind": "folder"})
+        assert "path" not in data
+        assert "paste the path" in data["error"]
+
+    def test_pick_bad_kind_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/pick", {"kind": "clipboard"})
         assert exc_info.value.code == 400
 
 

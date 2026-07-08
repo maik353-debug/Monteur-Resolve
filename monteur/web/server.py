@@ -15,14 +15,27 @@ API (all JSON):
 * ``DELETE /api/versions/<id>``                                 -> {"ok": true}
 * ``GET  /api/resolve/status``                                  -> {"connected", ...}
 * ``POST /api/resolve/analyze`` {"timeline"?, "save"?}          -> {"stats", "version"?}
+* ``POST /api/create/scan``   {"folder"}                        -> {"job": id}
+* ``POST /api/create/build``  {"folder", "music"?, ...}         -> {"job": id}
+* ``GET  /api/jobs/<id>``                                       -> the job dict
+* ``POST /api/jobs/<id>/cancel``                                -> {"ok": true}
+* ``POST /api/pick``          {"kind": "folder"|"music"|"file"} -> {"path"} | {"error"}
 
 Timeline content is passed as text (EDL/FCPXML are text formats); ``fps`` is
 required for EDL files.
+
+Scans and builds are cancellable BACKGROUND JOBS: the POST returns a job id
+immediately, a daemon thread does the slow sifting/planning, and the browser
+polls ``GET /api/jobs/<id>`` for live per-clip progress. A successful scan is
+cached (folder + per-file mtimes), so a build straight after a scan reuses the
+reports instead of sifting the same footage twice.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import secrets
 import sys
 import threading
 import time
@@ -160,34 +173,276 @@ def _analyze_payload(payload: dict):
     return analyze_timeline(timeline)
 
 
-def _scan_progress():
-    """Per-clip sift progress printed to the server terminal.
+# --- background jobs (scan/build) ---------------------------------------------
+#
+# Scans and builds run in daemon threads; the browser polls GET /api/jobs/<id>.
+# The registry is module-level (one Studio process serves one user) and capped
+# at the last _MAX_JOBS jobs — oldest FINISHED jobs are evicted first, running
+# jobs are never dropped.
 
-    The browser gets no streaming feedback during a scan, so the terminal that
-    launched ``monteur ui`` is where a long scan shows life. Reuses the CLI's
-    ``_sift_progress`` line format ("[i/N] name ..." then "[i/N] name — X%
-    usable"); imported lazily (monteur.cli only imports monteur.web inside its
-    ``ui`` command, so there is no import cycle), with a minimal local copy as
-    a fallback if the import ever fails.
-    """
-    try:
-        from monteur.cli import _sift_progress
+_MAX_JOBS = 20
+_JOBS: dict[str, dict] = {}
+_JOBS_LOCK = threading.Lock()
 
-        return _sift_progress
-    except ImportError:
-        pass
+# Result of the last successful sift: {"folder", "mtimes": {path: mtime},
+# "reports": [ClipReport]}. A build reuses it when the folder matches and no
+# file changed on disk, so scan-then-build never sifts the same footage twice.
+_SCAN_CACHE: dict = {}
+_SCAN_CACHE_LOCK = threading.Lock()
 
-    def fallback(index, total, name, stage, report):
-        if stage == "start":
-            print(f"[{index}/{total}] {name} ...", flush=True)
-        elif stage == "done":
-            print(
-                f"[{index}/{total}] {name} — "
-                f"{report.usable_ratio * 100:.0f}% usable",
-                flush=True,
+# One native file dialog at a time; Tk lives entirely inside a dedicated thread.
+_PICK_LOCK = threading.Lock()
+
+
+def _new_job(kind: str) -> dict:
+    job = {
+        "id": secrets.token_hex(4),
+        "kind": kind,  # "scan" | "build"
+        "state": "running",  # -> "done" | "error" | "cancelled"
+        "progress": [],  # dicts: {"index","total","name","stage"[,"usable_ratio"]}
+        "message": "",  # human-readable reason when state == "error"
+        "result": None,  # dict when state == "done"
+        "created": time.time(),
+        "cancel": threading.Event(),
+    }
+    with _JOBS_LOCK:
+        _JOBS[job["id"]] = job
+        if len(_JOBS) > _MAX_JOBS:
+            finished = sorted(
+                (j for j in _JOBS.values() if j["state"] != "running"),
+                key=lambda j: j["created"],
             )
+            for old in finished:
+                if len(_JOBS) <= _MAX_JOBS:
+                    break
+                del _JOBS[old["id"]]
+    return job
 
-    return fallback
+
+def _job_view(job: dict) -> dict:
+    """A JSON-safe snapshot of a job (everything but the cancel Event)."""
+    with _JOBS_LOCK:
+        view = {k: job[k] for k in ("id", "kind", "state", "message", "result", "created")}
+        view["progress"] = list(job["progress"])
+    return view
+
+
+def _job_progress(job: dict):
+    """A sift progress callback that appends per-clip entries to the job."""
+
+    def callback(index, total, name, stage, report):
+        entry = {"index": index, "total": total, "name": name, "stage": stage}
+        if stage == "done" and report is not None:
+            entry["usable_ratio"] = report.usable_ratio
+        with _JOBS_LOCK:
+            job["progress"].append(entry)
+
+    return callback
+
+
+def _remember_scan(folder: str, reports: list) -> None:
+    """Cache a successful sift keyed by folder + per-file mtimes."""
+    mtimes: dict[str, float] = {}
+    try:
+        for report in reports:
+            mtimes[os.path.abspath(report.path)] = os.path.getmtime(report.path)
+    except OSError:
+        return  # a file vanished mid-scan — don't cache a stale picture
+    with _SCAN_CACHE_LOCK:
+        _SCAN_CACHE.clear()
+        _SCAN_CACHE.update(
+            folder=os.path.abspath(folder), mtimes=mtimes, reports=list(reports)
+        )
+
+
+def _cached_reports(folder: str):
+    """The cached sift reports, or None unless the folder matches AND every
+    file's mtime is unchanged (no additions, removals or edits)."""
+    from monteur.media import MonteurMediaError, list_media
+
+    with _SCAN_CACHE_LOCK:
+        cache = dict(_SCAN_CACHE)
+    if not cache or cache["folder"] != os.path.abspath(folder):
+        return None
+    try:
+        current = {os.path.abspath(str(p)) for p in list_media(folder)}
+    except MonteurMediaError:
+        return None
+    if current != set(cache["mtimes"]):
+        return None  # files were added or removed since the scan
+    try:
+        for path, mtime in cache["mtimes"].items():
+            if os.path.getmtime(path) != mtime:
+                return None
+    except OSError:
+        return None
+    return cache["reports"]
+
+
+def _run_scan_job(job: dict, folder: str) -> None:
+    """Daemon-thread body for POST /api/create/scan."""
+    from monteur.media import MonteurMediaError
+    from monteur.sift import SiftCancelled, sift_directory
+
+    try:
+        reports = sift_directory(
+            folder, progress=_job_progress(job), cancel=job["cancel"]
+        )
+        if not reports:
+            raise MonteurMediaError(f"no video files found in {folder}")
+        _remember_scan(folder, reports)
+        job["result"] = {"clips": [asdict(r) for r in reports]}
+        job["state"] = "done"
+    except SiftCancelled:
+        job["state"] = "cancelled"
+    except (MonteurMediaError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
+def _run_build_job(job: dict, payload: dict) -> None:
+    """Daemon-thread body for POST /api/create/build."""
+    from monteur.media import MonteurMediaError
+    from monteur.montage import CHRONOLOGICAL, montage_to_timeline, plan_montage
+    from monteur.sift import SiftCancelled, sift_directory
+    from monteur.io import write_edl, write_fcpxml
+
+    folder = payload.get("folder", "")
+    music_path = payload.get("music") or ""
+    try:
+        reports = _cached_reports(folder)
+        if reports is not None:
+            with _JOBS_LOCK:
+                job["progress"].append(
+                    {"stage": "cache", "name": "using previous scan"}
+                )
+        else:
+            reports = sift_directory(
+                folder, progress=_job_progress(job), cancel=job["cancel"]
+            )
+            if not reports:
+                raise MonteurMediaError(f"no video files found in {folder}")
+            _remember_scan(folder, reports)
+        if job["cancel"].is_set():
+            raise SiftCancelled("build cancelled")
+
+        music = None
+        if music_path:
+            from monteur.music import analyze_music
+
+            with _JOBS_LOCK:
+                job["progress"].append(
+                    {"stage": "music", "name": Path(music_path).name}
+                )
+            music = analyze_music(music_path)
+        if job["cancel"].is_set():
+            raise SiftCancelled("build cancelled")
+
+        # allow_repeats / cut_lead / audio are forwarded ONLY when the client
+        # sent them: a montage engine without those parameters then raises a
+        # loud TypeError (surfaced as a job error) instead of silently
+        # dropping the user's choice.
+        plan_kwargs: dict = {
+            "order": payload.get("order") or CHRONOLOGICAL,
+            "style": payload.get("style") or "auto",
+        }
+        max_duration = payload.get("max_duration")
+        plan_kwargs["max_duration"] = float(max_duration) if max_duration else None
+        if "allow_repeats" in payload:
+            plan_kwargs["allow_repeats"] = bool(payload["allow_repeats"])
+        if "cut_lead" in payload:
+            plan_kwargs["cut_lead"] = float(payload["cut_lead"])
+        plan = plan_montage(reports, music, **plan_kwargs)
+        if not plan.entries:
+            raise ValueError("no usable material found — check the scan results")
+
+        fps = float(payload.get("fps") or 25)
+        timeline_kwargs: dict = {}
+        if payload.get("audio"):
+            timeline_kwargs["audio"] = payload["audio"]
+        timeline = montage_to_timeline(plan, fps=fps, **timeline_kwargs)
+        fmt = (payload.get("format") or "fcpxml").lower()
+        if fmt == "edl":
+            content, filename = write_edl(timeline), "monteur_montage.edl"
+        else:
+            content, filename = write_fcpxml(timeline), "monteur_montage.fcpxml"
+        job["result"] = {
+            "filename": filename,
+            "content": content,
+            "plan": {
+                "duration": plan.duration,
+                "cuts": len(plan.entries),
+                "tempo": music.tempo if music is not None else 0,
+                "notes": plan.notes,
+            },
+        }
+        job["state"] = "done"
+    except SiftCancelled:
+        job["state"] = "cancelled"
+    except (MonteurMediaError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
+_AUDIO_FILETYPES = [
+    ("Audio files", "*.wav *.mp3 *.m4a *.aac *.flac *.ogg *.aiff *.aif *.wma"),
+    ("All files", "*.*"),
+]
+
+_NO_DIALOG_ERROR = (
+    "no native file dialog available on this system — paste the path instead"
+)
+
+
+def _native_pick(kind: str) -> dict:
+    """Open a native file/folder dialog on THIS machine (Studio is local).
+
+    Tk is created, used and destroyed entirely inside one dedicated thread —
+    Tk objects are not thread-portable — and _PICK_LOCK serialises dialogs so
+    two concurrent picks can't fight over the screen. A headless machine
+    (tkinter missing, no display) degrades to a soft ``{"error": ...}`` that
+    the UI turns into a "paste the path" hint; it is NOT an HTTP error.
+    """
+    outcome: dict = {}
+
+    def run_dialog() -> None:
+        try:
+            import tkinter
+            from tkinter import filedialog
+
+            root = tkinter.Tk()
+            root.withdraw()
+            try:
+                root.attributes("-topmost", True)  # dialog must not hide behind the browser
+            except Exception:  # noqa: BLE001 — purely cosmetic
+                pass
+            try:
+                if kind == "folder":
+                    picked = filedialog.askdirectory(parent=root, title="Choose your footage folder")
+                elif kind == "music":
+                    picked = filedialog.askopenfilename(
+                        parent=root, title="Choose a song", filetypes=_AUDIO_FILETYPES
+                    )
+                else:
+                    picked = filedialog.askopenfilename(parent=root, title="Choose a file")
+            finally:
+                root.destroy()
+            # Cancelled dialogs return "" (or an empty tuple on some platforms).
+            outcome["path"] = str(picked) if picked else ""
+        except Exception:  # noqa: BLE001 — headless/no-display: soft fallback
+            outcome["error"] = _NO_DIALOG_ERROR
+
+    with _PICK_LOCK:
+        thread = threading.Thread(target=run_dialog, name="monteur-pick", daemon=True)
+        thread.start()
+        thread.join()
+    return outcome or {"error": _NO_DIALOG_ERROR}
 
 
 class MonteurHandler(BaseHTTPRequestHandler):
@@ -255,6 +510,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/assembly/export"): self._assembly_export,
             ("POST", "/api/create/scan"): self._create_scan,
             ("POST", "/api/create/build"): self._create_build,
+            ("POST", "/api/pick"): self._pick,
         }
         if (method, path) in routes:
             return routes[(method, path)]
@@ -266,6 +522,12 @@ class MonteurHandler(BaseHTTPRequestHandler):
                     return lambda: self._versions_get(vid)
                 if method == "DELETE":
                     return lambda: self._versions_delete(vid)
+        if path.startswith("/api/jobs/"):
+            parts = path[len("/api/jobs/"):].split("/")
+            if len(parts) == 1 and parts[0] and method == "GET":
+                return lambda: self._jobs_get(parts[0])
+            if len(parts) == 2 and parts[1] == "cancel" and method == "POST":
+                return lambda: self._jobs_cancel(parts[0])
         raise ApiError(404, f"no route for {method} {path}")
 
     def do_GET(self) -> None:  # noqa: N802
@@ -445,67 +707,55 @@ class MonteurHandler(BaseHTTPRequestHandler):
         self._send_json({"filename": filename, "content": content})
 
     def _create_scan(self) -> None:
-        from monteur.media import MonteurMediaError
-        from monteur.sift import sift_directory
-
         payload = self._read_json()
         folder = payload.get("folder", "")
         if not folder:
             raise ApiError(400, "missing 'folder' (path to your footage)")
-        try:
-            reports = sift_directory(folder, progress=_scan_progress())
-        except MonteurMediaError as exc:
-            raise ApiError(422, str(exc))
-        if not reports:
-            raise ApiError(422, f"no video files found in {folder}")
-        self._send_json({"clips": [asdict(r) for r in reports]})
+        job = _new_job("scan")
+        threading.Thread(
+            target=_run_scan_job,
+            args=(job, folder),
+            name=f"monteur-scan-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
 
     def _create_build(self) -> None:
-        from monteur.media import MonteurMediaError
-        from monteur.montage import CHRONOLOGICAL, montage_to_timeline, plan_montage
-        from monteur.music import analyze_music
-        from monteur.sift import sift_directory
-        from monteur.io import write_edl, write_fcpxml
-
         payload = self._read_json()
-        folder = payload.get("folder", "")
-        music_path = payload.get("music", "")
-        if not folder or not music_path:
-            raise ApiError(400, "need 'folder' (footage) and 'music' (song file)")
-        try:
-            reports = sift_directory(folder, progress=_scan_progress())
-            music = analyze_music(music_path)
-        except MonteurMediaError as exc:
-            raise ApiError(422, str(exc))
-        max_duration = payload.get("max_duration")
-        plan = plan_montage(
-            reports,
-            music,
-            order=payload.get("order") or CHRONOLOGICAL,
-            max_duration=float(max_duration) if max_duration else None,
-            style=payload.get("style") or "auto",
-        )
-        if not plan.entries:
-            raise ApiError(422, "no usable material found — check the scan results")
-        fps = float(payload.get("fps") or 25)
-        timeline = montage_to_timeline(plan, fps=fps)
-        fmt = (payload.get("format") or "fcpxml").lower()
-        if fmt == "edl":
-            content, filename = write_edl(timeline), "monteur_montage.edl"
-        else:
-            content, filename = write_fcpxml(timeline), "monteur_montage.fcpxml"
-        self._send_json(
-            {
-                "filename": filename,
-                "content": content,
-                "plan": {
-                    "duration": plan.duration,
-                    "cuts": len(plan.entries),
-                    "tempo": music.tempo,
-                    "notes": plan.notes,
-                },
-            }
-        )
+        if not payload.get("folder"):
+            raise ApiError(400, "missing 'folder' (path to your footage)")
+        job = _new_job("build")
+        threading.Thread(
+            target=_run_build_job,
+            args=(job, payload),
+            name=f"monteur-build-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _find_job(self, job_id: str) -> dict:
+        with _JOBS_LOCK:
+            job = _JOBS.get(job_id)
+        if job is None:
+            raise ApiError(404, f"unknown job {job_id!r}")
+        return job
+
+    def _jobs_get(self, job_id: str) -> None:
+        self._send_json(_job_view(self._find_job(job_id)))
+
+    def _jobs_cancel(self, job_id: str) -> None:
+        # Setting the event on a finished job is a harmless no-op — the
+        # response is {"ok": true} either way, so the UI never has to race
+        # its cancel button against job completion.
+        self._find_job(job_id)["cancel"].set()
+        self._send_json({"ok": True})
+
+    def _pick(self) -> None:
+        payload = self._read_json()
+        kind = payload.get("kind", "")
+        if kind not in ("folder", "music", "file"):
+            raise ApiError(400, "'kind' must be 'folder', 'music' or 'file'")
+        self._send_json(_native_pick(kind))
 
     def _resolve_status(self) -> None:
         # Isolated in a child process: Resolve's native module can hard-crash

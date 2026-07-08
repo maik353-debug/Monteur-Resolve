@@ -57,7 +57,7 @@ def slot_length(entry) -> float:
 
 
 def test_grid_density_follows_section_energy():
-    plan = plan_montage(make_reports(), make_music())
+    plan = plan_montage(make_reports(), make_music(), cut_lead=0.0)
     assert plan.duration == 12.0
     for e in plan.entries:
         if e.record_start < 4.0:  # low: every 4 beats
@@ -80,7 +80,7 @@ def test_grid_is_contiguous_and_ends_on_duration():
 
 def test_no_beats_falls_back_to_fixed_grid():
     music = MusicAnalysis(path="/music/song.wav", duration=12.0, tempo=0.0, beats=[])
-    plan = plan_montage(make_reports(), music)
+    plan = plan_montage(make_reports(), music, cut_lead=0.0)
     assert all(slot_length(e) == pytest.approx(2.0) for e in plan.entries)
     assert len(plan.entries) == 6
     assert any("no beats" in note for note in plan.notes)
@@ -108,7 +108,7 @@ def test_anti_strobe_doubles_dense_grid():
         beats=[i * 0.2 for i in range(60)],
         sections=[MusicSection(0.0, 12.0, 0.9, "high")],
     )
-    plan = plan_montage(make_reports(), music)
+    plan = plan_montage(make_reports(), music, cut_lead=0.0)
     assert plan.entries
     for e in plan.entries:
         assert slot_length(e) >= 0.4 - 1e-9
@@ -157,7 +157,7 @@ def test_every_moment_used_once_before_reuse_and_repeat_noted():
         duration=2.0,
         moments=[Moment(0.0, 0.5, 0.9), Moment(1.0, 1.5, 0.8)],
     )
-    plan = plan_montage([report], music, order=CHRONOLOGICAL)
+    plan = plan_montage([report], music, order=CHRONOLOGICAL, allow_repeats=True, cut_lead=0.0)
     assert len(plan.entries) == 24  # 0.5s slots over 12s
     # both moments used once before anything repeats
     assert {plan.entries[0].source_start, plan.entries[1].source_start} == {0.0, 1.0}
@@ -242,7 +242,7 @@ def test_default_auto_style_matches_previous_behavior():
 
 
 def test_travel_phase_beat_densities():
-    plan = plan_montage(make_long_reports(), make_arc_music(), style="travel")
+    plan = plan_montage(make_long_reports(), make_arc_music(), style="travel", cut_lead=0.0)
     assert plan.duration == 40.0
     # phases after phrase snapping: opening 0-8, build 8-16, climax 16-32, outro 32-40
     for e in plan.entries:
@@ -264,7 +264,7 @@ def test_travel_phase_beat_densities():
 
 
 def test_phase_boundaries_snap_to_phrase_starts():
-    plan = plan_montage(make_long_reports(), make_arc_music(), style="travel")
+    plan = plan_montage(make_long_reports(), make_arc_music(), style="travel", cut_lead=0.0)
     by_start = {round(e.record_start, 6): e for e in plan.entries}
     # raw boundaries 6.0 / 20.0 / 34.0 snap to the phrase grid (multiples of 8)
     assert {8.0, 16.0, 32.0} <= set(by_start)
@@ -278,7 +278,9 @@ def test_phase_boundaries_snap_to_phrase_starts():
 
 
 def test_drop_aligns_travel_climax():
-    plan = plan_montage(make_long_reports(), make_arc_music(drops=[20.0]), style="travel")
+    plan = plan_montage(
+        make_long_reports(), make_arc_music(drops=[20.0]), style="travel", cut_lead=0.0
+    )
     assert any("climax aligned to drop at 20.0s" in note for note in plan.notes)
     # a cut lands exactly on the drop and the climax density starts there
     drop_entries = [e for e in plan.entries if e.record_start == pytest.approx(20.0)]
@@ -308,7 +310,7 @@ def test_drop_in_auto_forces_cut_and_takes_highest_highlight():
             Moment(30.0, 32.0, 0.4, highlight=0.95),  # the audible peak
         ],
     )
-    plan = plan_montage([report], music, style="auto")
+    plan = plan_montage([report], music, style="auto", allow_repeats=True, cut_lead=0.0)
     # 20.0 is not on the 0.6s grid; the drop forces a cut there
     drop_entries = [e for e in plan.entries if e.record_start == pytest.approx(20.0)]
     assert len(drop_entries) == 1
@@ -326,7 +328,9 @@ def test_highlight_preference_in_climax_phase():
         duration=60.0,
         moments=fillers + [quiet_good, loud_cheer],
     )
-    plan = plan_montage([report], make_arc_music(), style="travel", order=CHRONOLOGICAL)
+    plan = plan_montage(
+        [report], make_arc_music(), style="travel", order=CHRONOLOGICAL, cut_lead=0.0
+    )
     # the 12 fillers cover opening+build; at the first climax slot (16.0s)
     # the (highlight, score) sort puts the cheer ahead of the higher-scored moment
     climax_first = [e for e in plan.entries if e.record_start == pytest.approx(16.0)]
@@ -476,7 +480,7 @@ def test_end_on_phrase_prefers_shorter_on_tie():
 
 def test_end_snap_falls_back_to_downbeats():
     music = make_ending_music(phrases=[])
-    plan = plan_montage(make_long_reports(), music, max_duration=60.9)
+    plan = plan_montage(make_long_reports(), music, max_duration=60.9, allow_repeats=True)
     assert plan.duration == pytest.approx(60.0)
     assert any("length snapped to downbeat at 60.0s" in n for n in plan.notes)
 
@@ -490,7 +494,9 @@ def test_end_on_phrase_disabled():
 
 def test_full_song_montage_length_not_snapped():
     music = make_ending_music(phrases=[0.0, 96.0])  # 96s is within 12% of 100s
-    plan = plan_montage(make_long_reports(), music)  # no max_duration: full song
+    plan = plan_montage(
+        make_long_reports(), music, allow_repeats=True
+    )  # no max_duration: full song (40s of moments would otherwise cap it)
     assert plan.duration == pytest.approx(100.0)
     assert not any("length snapped" in n for n in plan.notes)
 
@@ -555,7 +561,7 @@ def test_timeline_carries_transitions_and_fades():
 
 
 def test_montage_to_timeline_exact_frames_at_25fps():
-    plan = plan_montage(make_reports(), make_music(), order=CHRONOLOGICAL)
+    plan = plan_montage(make_reports(), make_music(), order=CHRONOLOGICAL, cut_lead=0.0)
     timeline = montage_to_timeline(plan, fps=25.0)
 
     video = timeline.video_clips()
@@ -629,3 +635,126 @@ def test_montage_to_timeline_publishes_media_metadata():
         plan.song_duration
     )
     assert "media_start_seconds" not in music_clip.metadata  # no TC concept here
+
+
+# --- repetition guard -------------------------------------------------------------
+
+
+def make_repeat_music(duration: float = 60.0, **overrides) -> MusicAnalysis:
+    """A plain beat grid (0.5s) with no phrases/downbeats/sections."""
+    kwargs = dict(
+        path="/music/long.wav",
+        duration=duration,
+        tempo=120.0,
+        beats=[i * 0.5 for i in range(int(duration * 2))],
+    )
+    kwargs.update(overrides)
+    return MusicAnalysis(**kwargs)
+
+
+def ten_second_reports() -> list[ClipReport]:
+    """Exactly 10s of unique, non-overlapping moment material."""
+    return [
+        ClipReport(
+            path="/footage/a.mp4",
+            duration=60.0,
+            moments=[Moment(i * 4.0, i * 4.0 + 2.0, 0.8) for i in range(5)],
+        )
+    ]
+
+
+def test_repetition_guard_caps_length_with_note():
+    # 10s of unique moments over a 60s song: capped at 10 x 1.5 = 15s.
+    plan = plan_montage(ten_second_reports(), make_repeat_music())
+    assert plan.duration <= 15.0 + 1e-6
+    assert plan.duration == pytest.approx(15.0)
+    assert plan.entries[-1].record_end == pytest.approx(plan.duration)
+    note = next(n for n in plan.notes if "capped the cut" in n)
+    assert "footage supports about 15s" in note
+    assert "was 60s" in note
+    assert "allow_repeats=True" in note and "--allow-repeats" in note
+
+
+def test_repetition_guard_disabled_by_allow_repeats():
+    plan = plan_montage(ten_second_reports(), make_repeat_music(), allow_repeats=True)
+    assert plan.duration == pytest.approx(60.0)
+    assert not any("capped the cut" in n for n in plan.notes)
+
+
+def test_repetition_guard_never_raises_a_short_request():
+    # 8s requested is already below the 15s cap: left untouched, no note.
+    plan = plan_montage(ten_second_reports(), make_repeat_music(), max_duration=8.0)
+    assert plan.duration == pytest.approx(8.0)
+    assert not any("capped the cut" in n for n in plan.notes)
+
+
+def test_repetition_guard_merges_overlapping_moments_per_clip():
+    # Two overlapping moments (0-6 and 4-10) are 10s of unique material, not
+    # 12s: the cap must use the merged span (15s, not 18s).
+    reports = [
+        ClipReport(
+            path="/footage/a.mp4",
+            duration=60.0,
+            moments=[Moment(0.0, 6.0, 0.9), Moment(4.0, 10.0, 0.8)],
+        )
+    ]
+    plan = plan_montage(reports, make_repeat_music())
+    assert plan.duration == pytest.approx(15.0)
+
+
+def test_repetition_guard_runs_before_strongest_window():
+    # The capped (15s) length — not the requested full 60s — is what the
+    # strongest-window logic places against the song's high-energy tail.
+    music = make_repeat_music(
+        sections=[
+            MusicSection(0.0, 40.0, 0.2, "low"),
+            MusicSection(40.0, 60.0, 0.9, "high"),
+        ]
+    )
+    plan = plan_montage(ten_second_reports(), music)
+    assert plan.duration == pytest.approx(15.0)
+    assert plan.music_start == pytest.approx(40.0)  # 15s window inside "high"
+
+
+# --- cut-ahead lead ----------------------------------------------------------------
+
+
+def test_cut_lead_shifts_interior_cuts_earlier():
+    base = plan_montage(make_reports(), make_music(), cut_lead=0.0)
+    lead = plan_montage(make_reports(), make_music())  # default 0.04s
+    assert len(base.entries) == len(lead.entries)
+    # first cut stays at 0, final boundary stays at the montage length
+    assert lead.entries[0].record_start == 0.0
+    assert lead.entries[-1].record_end == pytest.approx(12.0)
+    # every interior cut moved exactly 0.04s earlier (slots here are >= 0.5s)
+    for b, l in zip(base.entries[1:], lead.entries[1:]):
+        assert l.record_start == pytest.approx(b.record_start - 0.04)
+    # no slot squeezed below the 0.25s floor
+    assert all(slot_length(e) >= 0.25 - 1e-9 for e in lead.entries)
+
+
+def test_cut_lead_zero_matches_default_grid_of_before():
+    # cut_lead=0 reproduces the exact historical grid (2s/1s/0.5s slots).
+    plan = plan_montage(make_reports(), make_music(), cut_lead=0.0)
+    starts = [e.record_start for e in plan.entries]
+    assert starts[:4] == pytest.approx([0.0, 2.0, 4.0, 5.0])
+    assert plan.entries[-1].record_end == pytest.approx(12.0)
+
+
+def test_cut_lead_clamps_to_preserve_order_and_min_slot():
+    # 0.4s beat slots with an oversized 0.2s lead: cuts may not cross and no
+    # slot may fall below 0.25s.
+    music = MusicAnalysis(
+        path="/music/fast.wav",
+        duration=4.0,
+        tempo=150.0,
+        beats=[i * 0.4 for i in range(10)],
+        sections=[MusicSection(0.0, 4.0, 0.9, "high")],
+    )
+    plan = plan_montage(make_reports(), music, cut_lead=0.2)
+    assert plan.entries[0].record_start == 0.0
+    assert plan.entries[-1].record_end == pytest.approx(4.0)
+    for prev, nxt in zip(plan.entries, plan.entries[1:]):
+        assert nxt.record_start == pytest.approx(prev.record_end)
+        assert nxt.record_start > prev.record_start
+    assert all(slot_length(e) >= 0.25 - 1e-9 for e in plan.entries)

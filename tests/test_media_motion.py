@@ -139,6 +139,29 @@ def test_frame_metrics_short_clip_keeps_uniform_full_decode(tmp_path):
         assert m.t == pytest.approx(i / 2.0)
 
 
+@needs_ffmpeg
+def test_frame_metrics_10s_clip_now_uses_keyframe_path(tmp_path):
+    """A 10s clip with a 1s GOP clears the lowered 8s threshold and its ~10
+    keyframes beat the max(6, 10/6) sparse-GOP floor: keyframe path, samples
+    at (near-)integer pts instead of 20 uniform half-second samples."""
+    clip = make_h264_clip(tmp_path, seconds=10, gop=30, name="ten.mp4")
+    metrics = frame_metrics(str(clip))
+    assert 8 <= len(metrics) <= 12  # one keyframe per second, give or take
+    for m in metrics:
+        assert abs(m.t - round(m.t)) <= 0.1  # exact pts, on the GOP grid
+
+
+@needs_ffmpeg
+def test_frame_metrics_5s_clip_still_full_decodes(tmp_path):
+    """A 5s clip sits below the 8s threshold: uniform 2/s full-decode samples,
+    even when its GOP would offer enough keyframes."""
+    clip = make_h264_clip(tmp_path, seconds=5, gop=30, name="five.mp4")
+    metrics = frame_metrics(str(clip))
+    assert abs(len(metrics) - 10) <= 1
+    for i, m in enumerate(metrics):
+        assert m.t == pytest.approx(i / 2.0)
+
+
 _PROBE_STDERR = (
     b"  Duration: 00:00:50.00, start: 0.000000, bitrate: 900 kb/s\n"
     b"  Stream #0:0: Video: h264 (High), yuv420p, 320x180, 30 fps, 30 tbr\n"
