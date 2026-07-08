@@ -76,6 +76,7 @@ from monteur.media import (
     frame_metrics,
     list_media,
     probe,
+    start_timecode_seconds,
 )
 
 USABLE = "usable"
@@ -145,6 +146,7 @@ class ClipReport:
     moments: list[Moment] = field(default_factory=list)  # best first
     usable_ratio: float = 0.0  # share of the clip classified usable
     notes: list[str] = field(default_factory=list)
+    media_start: float = 0.0  # seconds: the file's embedded start timecode (0 if none)
 
 
 def _percentile(values: list[float], q: float) -> float:
@@ -510,7 +512,11 @@ def analyze_clip(path: str) -> ClipReport:
         _reraise_if_ffmpeg_missing(exc)
         return ClipReport(path=path, duration=0.0, notes=[f"could not analyze: {exc}"])
 
-    report = ClipReport(path=path, duration=info.duration)
+    report = ClipReport(
+        path=path,
+        duration=info.duration,
+        media_start=start_timecode_seconds(info),
+    )
     if info.duration < 1.0:
         report.notes.append("clip shorter than 1s — skipped")
         return report

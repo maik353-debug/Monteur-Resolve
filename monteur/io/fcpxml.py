@@ -13,7 +13,11 @@ Reading (:func:`read_fcpxml`):
   ``<asset-clip>``, ``<clip>``, ``<video>``, ``<audio>`` and ``<gap>``.
 * Rational time attributes (``offset``, ``duration``, ``start``) are
   parsed exactly with :mod:`fractions` and converted to frames at the
-  sequence frame rate.
+  sequence frame rate. An element's ``start`` is expressed in its asset's
+  native timescale, which begins at the asset's own ``start`` (the file's
+  embedded start timecode): the asset ``start`` is subtracted so
+  ``source_in``/``source_out`` are always file-relative (0-based); a
+  non-zero asset start is kept in ``clip.metadata["media_start_seconds"]``.
 * An asset-clip whose asset has both video and audio yields a video clip
   on V1 plus an audio clip on A1 covering the same ranges.
 * Connected clips (children carrying a ``lane`` attribute, inside spine
@@ -26,6 +30,15 @@ Writing (:func:`write_fcpxml`):
   ``<asset>`` per distinct ``source_name`` (falling back to the clip
   name), and a library/event/project/sequence/spine of ``<asset-clip>``
   elements with ``<gap>`` filler between non-adjacent clips.
+* Each asset claims its REAL source range so Resolve can verify it
+  against the media file and link the clips: asset ``start`` is the
+  file's embedded start timecode (``clip.metadata["media_start_seconds"]``,
+  0s when absent) and asset ``duration`` is the file's real length
+  (``metadata["media_duration_seconds"]``, else the furthest source
+  frame used — never the timeline's duration). Every asset-clip's
+  ``start`` (source position) is shifted into the asset's timescale:
+  ``media_start_seconds + source_in``. Clip ``source_in``/``source_out``
+  stay file-relative in the model; the shift happens only here.
 * A video clip and an audio clip sharing the same source and record
   range are merged into a single asset-clip whose asset advertises audio
   channels.
@@ -140,6 +153,10 @@ class _Reader:
                 or (media_rep.get("src", "") if media_rep is not None else ""),
                 "has_video": asset.get("hasVideo") == "1",
                 "has_audio": asset.get("hasAudio") == "1",
+                # The file's embedded start timecode: element `start` values
+                # are expressed in this timescale and must be shifted back to
+                # file-relative positions when reading.
+                "start": _time_attr(asset, "start"),
             }
 
     def read(self) -> Timeline:
@@ -217,11 +234,18 @@ class _Reader:
         source_name = asset.get("name", "") or name
         rec_in = _to_frames(record_start, frame_dur)
         rec_out = _to_frames(record_start + duration, frame_dur)
-        src_in = _to_frames(start, frame_dur)
+        # `start` is in the asset's timescale, which begins at the asset's
+        # `start` (the file's embedded start timecode). Subtracting it keeps
+        # source_in/source_out file-relative (0-based), so write -> read
+        # roundtrips preserve source ranges exactly.
+        asset_start = asset.get("start", Fraction(0))
+        src_in = _to_frames(start - asset_start, frame_dur)
         src_out = src_in + (rec_out - rec_in)
         metadata: dict = {}
         if asset.get("src"):
             metadata["src"] = asset["src"]
+        if asset_start > 0:
+            metadata["media_start_seconds"] = float(asset_start)
 
         kinds: list[str]
         if elem.tag == "audio":
@@ -300,6 +324,15 @@ def _transition_frames(clip: Clip) -> int:
     return max(frames, 0)
 
 
+def _media_seconds(clip: Clip, key: str) -> float:
+    """A positive ``media_*_seconds`` value from clip metadata, else 0.0."""
+    try:
+        value = float(clip.metadata.get(key) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return value if value > 0 else 0.0
+
+
 def write_fcpxml(timeline: Timeline, name: str = "") -> str:
     """Serialize ``timeline`` as a minimal FCPXML 1.9 document string.
 
@@ -341,9 +374,15 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
                 used.add(id(aclip))
                 break
 
+    def seconds_frames(seconds: float) -> int:
+        return round(seconds / frame_dur)
+
     asset_ids: dict[str, str] = {}
     asset_audio: dict[str, bool] = {}
     asset_src: dict[str, str] = {}
+    asset_start: dict[str, int] = {}  # frames: the file's embedded start TC
+    asset_dur: dict[str, int] = {}  # frames: the file's real duration, when known
+    asset_max_out: dict[str, int] = {}  # frames: furthest source frame used (fallback)
     for clip in video:
         key = source_key(clip)
         asset_ids.setdefault(key, f"r{len(asset_ids) + 2}")
@@ -354,6 +393,17 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
         path = clip.source_file or clip.metadata.get("src", "")
         if path and key not in asset_src:
             asset_src[key] = _file_uri(path)
+        # Real source metadata: the asset's claimed [start, start+duration]
+        # must match the actual file's timecode range, or Resolve reports
+        # "Mismatch between specified target timecodes and located file
+        # timecodes" / "No overlap" and drops the clips.
+        start_s = _media_seconds(clip, "media_start_seconds")
+        if start_s > 0 and key not in asset_start:
+            asset_start[key] = seconds_frames(start_s)
+        dur_s = _media_seconds(clip, "media_duration_seconds")
+        if dur_s > 0 and key not in asset_dur:
+            asset_dur[key] = seconds_frames(dur_s)
+        asset_max_out[key] = max(asset_max_out.get(key, 0), clip.source_out)
 
     # Audio clips not folded into a video asset-clip (e.g. a montage's music
     # bed) become connected audio clips with their own asset, so the montage
@@ -378,11 +428,17 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
     )
     total = _fmt_time(timeline.duration, frame_dur)
     for key, rid in asset_ids.items():
+        # start = the file's embedded start timecode (0s when unknown);
+        # duration = the file's real length, else the furthest source frame
+        # used as a safe lower bound — NEVER the timeline's duration, which
+        # would claim source ranges the media does not have.
         attrs = {
             "id": rid,
             "name": key,
-            "start": "0s",
-            "duration": total,
+            "start": _fmt_time(asset_start.get(key, 0), frame_dur),
+            "duration": _fmt_time(
+                asset_dur.get(key, asset_max_out.get(key, 0)), frame_dur
+            ),
             "hasVideo": "1",
             "format": "r1",
         }
@@ -398,12 +454,17 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
                 asset_el, "media-rep", kind="original-media", src=src
             )
 
+    audio_start: dict[int, int] = {}  # id(aclip) -> asset start frames
     for aclip, aid in connected_audio:
+        a_start = seconds_frames(_media_seconds(aclip, "media_start_seconds"))
+        audio_start[id(aclip)] = a_start
+        a_dur_s = _media_seconds(aclip, "media_duration_seconds")
+        a_dur = seconds_frames(a_dur_s) if a_dur_s > 0 else aclip.source_out
         a_attrs = {
             "id": aid,
             "name": aclip.source_name or aclip.name or "Audio",
-            "start": "0s",
-            "duration": total,
+            "start": _fmt_time(a_start, frame_dur),
+            "duration": _fmt_time(a_dur, frame_dur),
             "hasAudio": "1",
             "audioSources": "1",
             "audioChannels": "2",
@@ -459,6 +520,9 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
                 offset=_fmt_time(clip.record_in, frame_dur),
                 duration=_fmt_time(dissolve, frame_dur),
             )
+        # The source position is expressed in the asset's timescale, which
+        # begins at the file's embedded start timecode: file TC + source_in.
+        source_start = asset_start.get(source_key(clip), 0) + clip.source_in
         clip_el = ET.SubElement(
             spine,
             "asset-clip",
@@ -466,13 +530,13 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
             name=clip.name or source_key(clip),
             offset=_fmt_time(clip.record_in, frame_dur),
             duration=_fmt_time(clip.duration, frame_dur),
-            start=_fmt_time(clip.source_in, frame_dur),
+            start=_fmt_time(source_start, frame_dur),
             format="r1",
             tcFormat="NDF",
         )
         if first_clip_el is None:
             first_clip_el = clip_el
-            first_clip_start = clip.source_in
+            first_clip_start = source_start
         playhead = clip.record_out
 
     # Attach unpaired audio (music bed) as a connected clip on the first video
@@ -485,7 +549,9 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
             "lane": "-1",
             "name": aclip.source_name or aclip.name or "Music",
             "duration": _fmt_time(aclip.duration, frame_dur),
-            "start": _fmt_time(aclip.source_in, frame_dur),
+            "start": _fmt_time(
+                audio_start.get(id(aclip), 0) + aclip.source_in, frame_dur
+            ),
             "audioRole": "music",
         }
         if first_clip_el is not None:

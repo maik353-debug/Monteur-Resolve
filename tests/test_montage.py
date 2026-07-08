@@ -589,3 +589,43 @@ def test_montage_to_timeline_exact_frames_at_25fps():
     assert len(timeline.markers) == 1
     assert timeline.markers[0].frame == 0
     assert timeline.markers[0].name == "Cut to song"
+
+
+# --- embedded start timecode / real source metadata ------------------------------
+
+
+def test_entries_carry_media_start_and_clip_duration():
+    reports = make_reports()
+    reports[0].media_start = 6472.32  # 01:47:52:08 at 25 fps
+    reports[1].media_start = 7800.0  # 02:10:00:00
+    plan = plan_montage(reports, make_music(), order=CHRONOLOGICAL)
+    assert plan.entries
+    for entry in plan.entries:
+        if entry.clip_path == "/footage/a.mp4":
+            assert entry.media_start == pytest.approx(6472.32)
+            assert entry.clip_duration == pytest.approx(30.0)
+        else:
+            assert entry.media_start == pytest.approx(7800.0)
+            assert entry.clip_duration == pytest.approx(25.0)
+
+
+def test_montage_to_timeline_publishes_media_metadata():
+    reports = make_reports()
+    reports[0].media_start = 6472.32
+    reports[1].media_start = 7800.0
+    plan = plan_montage(reports, make_music(), order=CHRONOLOGICAL)
+    timeline = montage_to_timeline(plan, fps=25.0)
+
+    by_path = {"/footage/a.mp4": (6472.32, 30.0), "/footage/b.mp4": (7800.0, 25.0)}
+    for clip, entry in zip(timeline.video_clips(), plan.entries):
+        start, duration = by_path[entry.clip_path]
+        assert clip.metadata["media_start_seconds"] == pytest.approx(start)
+        assert clip.metadata["media_duration_seconds"] == pytest.approx(duration)
+        # source ranges stay FILE-RELATIVE; the offset is applied at write time
+        assert clip.source_in == round(entry.source_start * 25)
+
+    music_clip = timeline.audio_clips()[0]
+    assert music_clip.metadata["media_duration_seconds"] == pytest.approx(
+        plan.song_duration
+    )
+    assert "media_start_seconds" not in music_clip.metadata  # no TC concept here

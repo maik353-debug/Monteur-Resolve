@@ -230,12 +230,14 @@ class MontagePlan:
 @dataclass
 class MontageEntry:
     clip_path: str
-    source_start: float  # seconds in the clip
+    source_start: float  # seconds in the clip (file-relative, 0-based)
     source_end: float
     record_start: float  # seconds in the montage
     record_end: float
     score: float
     transition: float = 0.0  # seconds of dissolve INTO this entry (0 = cut)
+    media_start: float = 0.0  # seconds: the file's embedded start timecode (0 if none)
+    clip_duration: float = 0.0  # seconds: the source file's real duration (0 if unknown)
 
 
 # --- grid -------------------------------------------------------------------
@@ -538,6 +540,7 @@ class _PoolItem:
     clip_path: str
     clip_duration: float
     moment: Moment
+    media_start: float = 0.0  # seconds: the file's embedded start timecode
     consumed: float = 0.0  # seconds of the moment already placed
     uses: int = 0
 
@@ -715,6 +718,8 @@ def _fill(
                 record_start=rec_start,
                 record_end=rec_end,
                 score=moment.score,
+                media_start=item.media_start,
+                clip_duration=item.clip_duration,
             )
         )
     if len(slot_order) > n:
@@ -811,7 +816,11 @@ def plan_montage(
         for i, (s, _) in enumerate(slots)
         if any(abs(s - d) <= _EPS for d in drop_starts)
     }
-    pool = [_PoolItem(r.path, r.duration, m) for r in reports for m in r.moments]
+    pool = [
+        _PoolItem(r.path, r.duration, m, media_start=r.media_start)
+        for r in reports
+        for m in r.moments
+    ]
     if not slots or not pool:
         plan.notes.append("no slots or no moments; nothing planned")
         return plan
@@ -916,6 +925,13 @@ def montage_to_timeline(plan: MontagePlan, fps: float, name: str = "Monteur Mont
             source_name=stem,
             source_file=entry.clip_path,
         )
+        # Real source metadata for the exporters: the file's embedded start
+        # timecode and true duration. Resolve refuses to link media whose
+        # claimed source ranges don't match the actual file, so the FCPXML/EDL
+        # writers shift source positions by media_start at write time
+        # (source_in/source_out stay file-relative here).
+        clip.metadata["media_start_seconds"] = entry.media_start
+        clip.metadata["media_duration_seconds"] = entry.clip_duration
         transition_frames = round(entry.transition * fps)
         if transition_frames > 0:
             clip.metadata["transition"] = "dissolve"
@@ -948,6 +964,10 @@ def montage_to_timeline(plan: MontagePlan, fps: float, name: str = "Monteur Mont
             record_out=duration_frames,
             source_name=music_stem,
             source_file=plan.music_path,
+            # Music has no embedded start timecode we can probe here, so no
+            # media_start_seconds; the real song length still lets the FCPXML
+            # writer claim an honest asset duration.
+            metadata={"media_duration_seconds": plan.song_duration},
         )
     )
     timeline.markers.append(Marker(frame=0, name=f"Cut to {music_stem}"))

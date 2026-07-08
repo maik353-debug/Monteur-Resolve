@@ -92,6 +92,184 @@ def test_frame_metrics_dx_consistent_on_scrolling_clip(tmp_path):
     assert sum(dxs) / len(dxs) == pytest.approx(-15.0, abs=3.0)
 
 
+# -------------------------------------------------------- keyframe fast path
+
+
+def make_h264_clip(tmp_path, seconds, gop=None, name="clip.mp4"):
+    """Encode a testsrc2 H.264 clip; ``gop`` forces a fixed keyframe interval."""
+    exe = imageio_ffmpeg.get_ffmpeg_exe()
+    out = tmp_path / name
+    cmd = [
+        exe, "-y", "-f", "lavfi",
+        "-i", f"testsrc2=duration={seconds}:size=320x180:rate=30",
+    ]
+    if gop is not None:
+        cmd += ["-g", str(gop), "-keyint_min", str(gop)]
+    cmd += ["-pix_fmt", "yuv420p", str(out)]
+    subprocess.run(cmd, check=True, capture_output=True)
+    return out
+
+
+@needs_ffmpeg
+def test_frame_metrics_long_clip_uses_keyframe_sampling(tmp_path):
+    """50s clip with a 1s GOP: ~50 keyframe samples at (near-)integer pts,
+    NOT the ~100 uniform 2/s samples of the full-decode path."""
+    clip = make_h264_clip(tmp_path, seconds=50, gop=30)
+    metrics = frame_metrics(str(clip))
+
+    assert 45 <= len(metrics) <= 55  # one keyframe per second, give or take
+    for m in metrics:
+        assert abs(m.t - round(m.t)) <= 0.1  # exact pts, on the GOP grid
+        assert 0.0 <= m.brightness <= 255.0
+    # Metrics still classify downstream.
+    from monteur.sift import classify_metrics
+
+    segments = classify_metrics(metrics, 50.0)
+    assert segments
+    assert segments[-1].end == pytest.approx(50.0)
+
+
+@needs_ffmpeg
+def test_frame_metrics_short_clip_keeps_uniform_full_decode(tmp_path):
+    """A 6s clip stays on the full-decode path: 2/s samples, uniform spacing."""
+    clip = make_h264_clip(tmp_path, seconds=6)
+    metrics = frame_metrics(str(clip))
+    assert abs(len(metrics) - 12) <= 1  # duration * samples_per_second
+    for i, m in enumerate(metrics):
+        assert m.t == pytest.approx(i / 2.0)
+
+
+_PROBE_STDERR = (
+    b"  Duration: 00:00:50.00, start: 0.000000, bitrate: 900 kb/s\n"
+    b"  Stream #0:0: Video: h264 (High), yuv420p, 320x180, 30 fps, 30 tbr\n"
+)
+
+
+def _fake_runner(keyframe_stdout, keyframe_stderr, full_stdout, calls):
+    """A frame_metrics ``runner`` that answers probe/keyframe/full-decode
+    commands from canned data and records which kind of command ran."""
+
+    def runner(cmd, capture_output=True):
+        if "-skip_frame" in cmd:
+            calls.append("keyframe")
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=keyframe_stdout, stderr=keyframe_stderr
+            )
+        if any("fps=" in str(arg) for arg in cmd):
+            calls.append("full")
+            return subprocess.CompletedProcess(cmd, 0, stdout=full_stdout, stderr=b"")
+        calls.append("probe")
+        return subprocess.CompletedProcess(cmd, 0, stdout=b"", stderr=_PROBE_STDERR)
+
+    return runner
+
+
+def test_frame_metrics_sparse_keyframes_fall_back_to_full_decode(tmp_path, monkeypatch):
+    """Only 2 keyframes in a 50s clip (sparse GOP): the fast path must be
+    rejected and the full-decode command must run."""
+    import monteur.media as media
+
+    monkeypatch.setattr(media, "find_ffmpeg", lambda: "ffmpeg")
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"fake")
+    width, height = 4, 3
+    frame_bytes = width * height
+    calls: list[str] = []
+    runner = _fake_runner(
+        keyframe_stdout=bytes(frame_bytes * 2),
+        keyframe_stderr=b"[Parsed_showinfo_0] n: 0 pts_time:0 x\n"
+        b"[Parsed_showinfo_0] n: 1 pts_time:25 x\n",
+        full_stdout=bytes(frame_bytes * 100),
+        calls=calls,
+    )
+    metrics = frame_metrics(str(clip), size=(width, height), runner=runner)
+
+    assert calls == ["probe", "keyframe", "full"]  # tried fast path, fell back
+    assert len(metrics) == 100  # 50s x 2/s from the full decode
+    assert [m.t for m in metrics[:4]] == [0.0, 0.5, 1.0, 1.5]
+
+
+def test_frame_metrics_frame_pts_mismatch_falls_back(tmp_path, monkeypatch):
+    """3 rawvideo frames but only 2 pts_time lines: mistrust and fall back."""
+    import monteur.media as media
+
+    monkeypatch.setattr(media, "find_ffmpeg", lambda: "ffmpeg")
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"fake")
+    width, height = 4, 3
+    frame_bytes = width * height
+    calls: list[str] = []
+    runner = _fake_runner(
+        keyframe_stdout=bytes(frame_bytes * 3),
+        keyframe_stderr=b"pts_time:0\npts_time:1\n",
+        full_stdout=bytes(frame_bytes * 100),
+        calls=calls,
+    )
+    metrics = frame_metrics(str(clip), size=(width, height), runner=runner)
+    assert calls == ["probe", "keyframe", "full"]
+    assert len(metrics) == 100
+
+
+def test_frame_metrics_keyframe_path_uses_exact_pts_and_crlf(tmp_path, monkeypatch):
+    """A healthy keyframe stream (with Windows \\r\\n stderr) is used as-is:
+    timestamps are the parsed pts, and the full decode never runs."""
+    import monteur.media as media
+
+    monkeypatch.setattr(media, "find_ffmpeg", lambda: "ffmpeg")
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"fake")
+    width, height = 4, 3
+    frame_bytes = width * height
+    pts = [round(i + 0.25, 2) for i in range(50)]  # ~1/s over the 50s probe
+    stderr = b"\r\n".join(
+        f"[Parsed_showinfo_0] n: {i} pts_time:{t} pos: 1".encode()
+        for i, t in enumerate(pts)
+    ) + b"\r\n"
+    calls: list[str] = []
+    runner = _fake_runner(
+        keyframe_stdout=bytes(frame_bytes * 50),
+        keyframe_stderr=stderr,
+        full_stdout=b"",
+        calls=calls,
+    )
+    metrics = frame_metrics(str(clip), size=(width, height), runner=runner)
+    assert calls == ["probe", "keyframe"]  # no fallback
+    assert [m.t for m in metrics] == pytest.approx(pts)
+
+
+def test_frame_metrics_all_intra_keyframes_are_thinned(tmp_path, monkeypatch):
+    """300 keyframes over 50s (all-intra, 6/s) get thinned to ~2/s."""
+    import monteur.media as media
+
+    monkeypatch.setattr(media, "find_ffmpeg", lambda: "ffmpeg")
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"fake")
+    width, height = 4, 3
+    frame_bytes = width * height
+    pts = [i / 6.0 for i in range(300)]
+    stderr = "".join(f"pts_time:{t:.6f}\n" for t in pts).encode()
+    calls: list[str] = []
+    runner = _fake_runner(
+        keyframe_stdout=bytes(frame_bytes * 300),
+        keyframe_stderr=stderr,
+        full_stdout=b"",
+        calls=calls,
+    )
+    metrics = frame_metrics(str(clip), size=(width, height), runner=runner)
+    assert calls == ["probe", "keyframe"]
+    assert len(metrics) == 100  # every 3rd of 300 -> ~2 samples/second
+    assert [m.t for m in metrics] == pytest.approx(pts[::3])
+
+
+def test_parse_keyframe_pts_tolerates_crlf_lines():
+    text = (
+        "[Parsed_showinfo_0 @ 0x55] n: 0 pts: 0 pts_time:0 duration: 512\r\n"
+        "[Parsed_showinfo_0 @ 0x55] n: 1 pts: 512 pts_time:1.001 duration: 512\r\n"
+        "[Parsed_showinfo_0 @ 0x55] n: 2 pts: 1024 pts_time:2.5\r\n"
+    )
+    assert _parse_keyframe_pts(text) == [0.0, 1.001, 2.5]
+
+
 # ------------------------------------------------------------- audio metrics
 
 

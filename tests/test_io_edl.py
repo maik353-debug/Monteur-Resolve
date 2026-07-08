@@ -220,3 +220,73 @@ def test_save_timeline_edl(tmp_path: Path) -> None:
     back = load_timeline(out, fps=25.0)
     assert len(back.clips) == 1
     assert back.clips[0].record_out == 50
+
+
+# --- embedded start timecode (source TC offset) -----------------------------------
+
+
+def test_write_edl_shifts_source_tc_by_media_start() -> None:
+    """EDL conform in Resolve matches by ABSOLUTE source timecode, so a clip
+    carrying media_start_seconds (the file's embedded start TC) must have its
+    source in/out shifted by that offset; record TCs stay untouched."""
+    timeline = Timeline(name="TC", fps=25.0)
+    timeline.clips = [
+        Clip(
+            "A",
+            "V1",
+            VIDEO,
+            50,
+            100,
+            0,
+            50,
+            source_name="TAPE1",
+            metadata={"media_start_seconds": 6472.32},  # 01:47:52:08 @ 25fps
+        ),
+    ]
+    text = write_edl(timeline)
+    # source 50..100 frames + 6472.32s = 01:47:54:08..01:47:56:08; record unchanged
+    assert "01:47:54:08 01:47:56:08 00:00:00:00 00:00:02:00" in text
+
+
+def test_write_edl_without_media_start_unchanged() -> None:
+    timeline = Timeline(name="Plain", fps=25.0)
+    timeline.clips = [Clip("A", "V1", VIDEO, 50, 100, 0, 50, source_name="TAPE1")]
+    text = write_edl(timeline)
+    assert "00:00:02:00 00:00:04:00 00:00:00:00 00:00:02:00" in text
+
+
+def test_write_edl_dissolve_pair_shifts_both_sides() -> None:
+    timeline = Timeline(name="Dissolve", fps=25.0)
+    timeline.clips = [
+        Clip(
+            "Out",
+            "V1",
+            VIDEO,
+            0,
+            100,
+            0,
+            100,
+            source_name="TAPE1",
+            metadata={"media_start_seconds": 3600.0},  # 01:00:00:00
+        ),
+        Clip(
+            "In",
+            "V1",
+            VIDEO,
+            250,
+            350,
+            100,
+            200,
+            source_name="TAPE2",
+            metadata={
+                "transition": "dissolve",
+                "transition_frames": 12,
+                "media_start_seconds": 7200.0,  # 02:00:00:00
+            },
+        ),
+    ]
+    text = write_edl(timeline)
+    # outgoing zero-duration tail: TAPE1's source_out (100f) + 01:00:00:00
+    assert "01:00:04:00 01:00:04:00 00:00:04:00 00:00:04:00" in text
+    # incoming clip: TAPE2's source 250..350 frames + 02:00:00:00
+    assert "02:00:10:00 02:00:14:00 00:00:04:00 00:00:08:00" in text

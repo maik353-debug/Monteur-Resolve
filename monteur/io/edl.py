@@ -219,6 +219,23 @@ def _transition_frames(clip: Clip) -> int:
     return max(frames, 0)
 
 
+def _media_start_frames(clip: Clip, fps: float) -> int:
+    """The file's embedded start TC (``metadata["media_start_seconds"]``) in frames.
+
+    Resolve conforms an EDL by matching absolute source timecodes against the
+    media's embedded timecode, so clips whose model-level source ranges are
+    file-relative must be shifted by this offset on write. 0 when absent or
+    invalid.
+    """
+    try:
+        seconds = float(clip.metadata.get("media_start_seconds") or 0.0)
+    except (TypeError, ValueError):
+        return 0
+    if seconds <= 0:
+        return 0
+    return round(seconds * fps)
+
+
 def write_edl(timeline: Timeline, title: str = "") -> str:
     """Serialize ``timeline`` as a CMX3600 EDL string.
 
@@ -226,6 +243,11 @@ def write_edl(timeline: Timeline, title: str = "") -> str:
     (outgoing zero-duration tail with ``C``, incoming clip with ``D`` and
     the length in frames, plus ``FROM``/``TO CLIP NAME`` comments — see
     the module docstring); everything else is a plain cut.
+
+    A clip with ``metadata["media_start_seconds"]`` (the file's embedded
+    start timecode) has that offset added to its SOURCE in/out timecodes,
+    since EDL conform matches by absolute source TC; record timecodes are
+    never shifted.
     """
     drop = is_drop_frame_rate(timeline.fps)
     lines = [
@@ -241,9 +263,15 @@ def write_edl(timeline: Timeline, title: str = "") -> str:
         return format_timecode(frames, timeline.fps, drop_frame=drop)
 
     for num, clip in enumerate(ordered, start=1):
+        src_offset = _media_start_frames(clip, timeline.fps)
         tcs = " ".join(
             tc(f)
-            for f in (clip.source_in, clip.source_out, clip.record_in, clip.record_out)
+            for f in (
+                clip.source_in + src_offset,
+                clip.source_out + src_offset,
+                clip.record_in,
+                clip.record_out,
+            )
         )
         dissolve = _transition_frames(clip)
         outgoing = None
@@ -263,11 +291,12 @@ def write_edl(timeline: Timeline, title: str = "") -> str:
         if outgoing is not None:
             # CMX dissolve pair: zero-duration outgoing tail, then the
             # incoming clip with the dissolve duration in frames.
+            out_offset = _media_start_frames(outgoing, timeline.fps)
             tail = " ".join(
                 tc(f)
                 for f in (
-                    outgoing.source_out,
-                    outgoing.source_out,
+                    outgoing.source_out + out_offset,
+                    outgoing.source_out + out_offset,
                     clip.record_in,
                     clip.record_in,
                 )

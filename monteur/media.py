@@ -73,12 +73,16 @@ class MediaInfo:
     width: int
     height: int
     has_audio: bool
+    start_timecode: str = ""  # embedded start TC (e.g. "01:47:52:08"), "" if none
 
 
 _DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
 _VIDEO_RE = re.compile(r"Video:.*?(\d{2,5})x(\d{2,5})")
 _FPS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*fps")
 _AUDIO_RE = re.compile(r"Stream #\d+:\d+.*Audio:")
+# Embedded start timecode, printed by ffmpeg as a metadata line such as
+# "    timecode        : 01:47:52:08" (drop-frame uses ';' before frames).
+_TIMECODE_RE = re.compile(r"timecode\s*:\s*(\d{1,2}:\d{2}:\d{2}[:;]\d{1,3})")
 
 
 def probe(path: str | Path, runner=None) -> MediaInfo:
@@ -94,6 +98,7 @@ def probe(path: str | Path, runner=None) -> MediaInfo:
     duration = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
     video = _VIDEO_RE.search(text)
     fps_match = _FPS_RE.search(text)
+    tc_match = _TIMECODE_RE.search(text)
     return MediaInfo(
         path=str(path),
         duration=duration,
@@ -101,7 +106,27 @@ def probe(path: str | Path, runner=None) -> MediaInfo:
         width=int(video.group(1)) if video else 0,
         height=int(video.group(2)) if video else 0,
         has_audio=bool(_AUDIO_RE.search(text)),
+        start_timecode=tc_match.group(1) if tc_match else "",
     )
+
+
+def start_timecode_seconds(info: MediaInfo) -> float:
+    """The file's embedded start timecode as seconds, 0.0 when unknown.
+
+    Real camera files (DJI action cams, most pro cameras) carry a
+    time-of-day start timecode; NLEs like DaVinci Resolve link media by
+    matching source ranges against it. Returns 0.0 when the file has no
+    embedded TC, its frame rate is unknown, or the TC cannot be parsed.
+    """
+    if not info.start_timecode or info.fps <= 0:
+        return 0.0
+    from monteur.model import parse_timecode
+
+    try:
+        frames = parse_timecode(info.start_timecode, info.fps)
+    except ValueError:
+        return 0.0
+    return frames / info.fps
 
 
 def read_audio(path: str | Path, rate: int = 22050, runner=None):

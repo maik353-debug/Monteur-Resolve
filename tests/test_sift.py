@@ -348,7 +348,11 @@ def _fake_sift(monkeypatch, names):
     monkeypatch.setattr(sift_module, "analyze_clip", fake_analyze)
 
 
-def test_progress_called_with_start_and_done_sequence(monkeypatch):
+def test_progress_called_with_start_and_done_pairs(monkeypatch):
+    # Clips are analysed concurrently, so events for DIFFERENT clips may
+    # interleave — but each clip fires exactly one start then one done, with
+    # its 1-based index in the sorted file order, and the returned reports
+    # keep that order.
     names = ["clip_A.mp4", "clip_B.mp4", "clip_C.mp4"]
     _fake_sift(monkeypatch, names)
     events = []
@@ -359,16 +363,20 @@ def test_progress_called_with_start_and_done_sequence(monkeypatch):
     reports = sift_directory("footage", progress=progress)
 
     assert len(reports) == 3
-    assert events == [
-        (1, 3, "clip_A.mp4", "start", False),
-        (1, 3, "clip_A.mp4", "done", True),
-        (2, 3, "clip_B.mp4", "start", False),
-        (2, 3, "clip_B.mp4", "done", True),
-        (3, 3, "clip_C.mp4", "start", False),
-        (3, 3, "clip_C.mp4", "done", True),
-    ]
+    assert [Path(r.path).name for r in reports] == names  # order preserved
+    assert len(events) == 6
     # index is 1-based and total is correct across the run.
     assert all(1 <= idx <= total == 3 for idx, total, *_ in events)
+    for position, name in enumerate(names, start=1):
+        clip_events = [
+            (idx, stage, has_report)
+            for idx, _, n, stage, has_report in events
+            if n == name
+        ]
+        assert clip_events == [
+            (position, "start", False),
+            (position, "done", True),
+        ]
 
 
 def test_progress_done_receives_finished_report(monkeypatch):
@@ -404,6 +412,76 @@ def test_progress_none_is_backwards_compatible(monkeypatch):
     assert len(reports) == 2
     reports2 = sift_directory("footage", progress=None)
     assert len(reports2) == 2
+
+
+# --------------------------------------------------------- parallel sifting
+
+
+def test_sift_directory_analyzes_clips_concurrently(monkeypatch):
+    import os
+    import time
+
+    if min(4, os.cpu_count() or 1) < 2:
+        pytest.skip("single-CPU box: sift_directory runs sequentially")
+
+    names = ["a.mp4", "b.mp4", "c.mp4"]
+    monkeypatch.setattr(
+        sift_module, "list_media", lambda directory: [Path(n) for n in names]
+    )
+    spans = {}
+
+    def slow_analyze(path):
+        begin = time.monotonic()
+        time.sleep(0.3)
+        spans[str(path)] = (begin, time.monotonic())
+        return ClipReport(path=str(path), duration=6.0)
+
+    monkeypatch.setattr(sift_module, "analyze_clip", slow_analyze)
+
+    wall_start = time.monotonic()
+    reports = sift_directory("footage")
+    wall = time.monotonic() - wall_start
+
+    assert [Path(r.path).name for r in reports] == names  # order preserved
+    # Sequential would take >= 0.9s (3 x 0.3s); overlap must beat that.
+    assert wall < 0.75, f"no overlap: 3 x 0.3s clips took {wall:.2f}s"
+    intervals = sorted(spans.values())
+    assert any(
+        later_begin < earlier_end
+        for (_, earlier_end), (later_begin, _) in zip(intervals, intervals[1:])
+    ), "no two clip analyses overlapped in time"
+
+
+def test_sift_directory_clip_failure_does_not_cancel_others(monkeypatch):
+    from monteur.media import MonteurMediaError
+
+    names = ["a.mp4", "bad.mp4", "c.mp4"]
+    monkeypatch.setattr(
+        sift_module, "list_media", lambda directory: [Path(n) for n in names]
+    )
+
+    def flaky_analyze(path):
+        if "bad" in str(path):
+            raise MonteurMediaError("decode exploded")
+        return ClipReport(
+            path=str(path), duration=6.0, moments=[Moment(0.0, 1.0, 0.5)]
+        )
+
+    monkeypatch.setattr(sift_module, "analyze_clip", flaky_analyze)
+    events = []
+
+    def progress(index, total, name, stage, report):
+        events.append((index, name, stage))
+
+    reports = sift_directory("footage", progress=progress)
+
+    assert [Path(r.path).name for r in reports] == names  # order preserved
+    assert reports[1].notes == ["skipped: decode exploded"]
+    assert reports[1].moments == []
+    assert reports[0].moments and reports[2].moments  # others unaffected
+    # The failing clip still fires its start/done pair.
+    assert (2, "bad.mp4", "start") in events
+    assert (2, "bad.mp4", "done") in events
 
 
 # ---------------------------------------------- analyze_clip (patched media)
@@ -571,3 +649,32 @@ def test_analyze_clip_flags_silent_audio(tmp_path):
     assert "audio: mostly silent" in report.notes
     assert report.moments
     assert all(m.highlight == 0.0 for m in report.moments)  # silence: no bursts
+
+
+# ------------------------------------------------- embedded start timecode
+
+
+def test_analyze_clip_fills_media_start_from_probe(monkeypatch):
+    # The probe's embedded start TC (time-of-day camera timecode) must land on
+    # the report as seconds, so exporters can claim real source ranges.
+    metrics = make_metrics([120] * 24, [60] * 24, [2] * 24)
+    monkeypatch.setattr(
+        sift_module,
+        "probe",
+        lambda p: MediaInfo(
+            path=str(p), duration=12.0, fps=25.0, width=160, height=90,
+            has_audio=False, start_timecode="01:47:52:08",
+        ),
+    )
+    monkeypatch.setattr(sift_module, "frame_metrics", lambda p: metrics)
+    monkeypatch.setattr(sift_module, "audio_metrics", lambda p: [])
+
+    report = analyze_clip("dji_0001.mp4")
+    assert report.media_start == pytest.approx(1 * 3600 + 47 * 60 + 52 + 8 / 25)
+
+
+def test_analyze_clip_media_start_zero_without_timecode(monkeypatch):
+    metrics = make_metrics([120] * 24, [60] * 24, [2] * 24)
+    _patch_media(monkeypatch, metrics, 12.0)  # MediaInfo without start_timecode
+    report = analyze_clip("plain.mp4")
+    assert report.media_start == 0.0

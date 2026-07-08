@@ -27,16 +27,22 @@ def test_read_sample_counts(sample: Timeline) -> None:
 
 
 def test_read_sample_exact_frames(sample: Timeline) -> None:
+    # The asset-clip start (3600s) is expressed in the asset's timescale,
+    # which begins at the asset's start (3600s = the file's embedded start
+    # timecode): source ranges come back FILE-RELATIVE, with the embedded TC
+    # preserved in metadata.
     anna = next(c for c in sample.clips if c.name == "Interview Anna" and c.kind == VIDEO)
     assert anna.track == "V1"
     assert (anna.record_in, anna.record_out) == (0, 100)
-    assert (anna.source_in, anna.source_out) == (90000, 90100)
+    assert (anna.source_in, anna.source_out) == (0, 100)
+    assert anna.metadata["media_start_seconds"] == 3600.0
     assert anna.source_name == "Interview Anna"
     assert anna.metadata["src"] == "file:///media/interview_anna.mov"
 
     broll = next(c for c in sample.clips if c.name == "B-Roll Street")
     assert (broll.record_in, broll.record_out) == (100, 175)
-    assert (broll.source_in, broll.source_out) == (180000, 180075)
+    assert (broll.source_in, broll.source_out) == (0, 75)
+    assert broll.metadata["media_start_seconds"] == 7200.0
 
 
 def test_read_sample_audio_from_asset(sample: Timeline) -> None:
@@ -52,7 +58,9 @@ def test_read_sample_connected_clip_in_gap(sample: Timeline) -> None:
     assert drone.kind == VIDEO
     assert drone.track == "V2"
     assert (drone.record_in, drone.record_out) == (200, 225)
-    assert (drone.source_in, drone.source_out) == (1500, 1525)
+    # asset start 60s subtracted: file-relative source range, TC in metadata
+    assert (drone.source_in, drone.source_out) == (0, 25)
+    assert drone.metadata["media_start_seconds"] == 60.0
 
 
 def test_read_sample_clip_element(sample: Timeline) -> None:
@@ -273,3 +281,87 @@ def test_write_fcpxml_without_paths_still_valid():
     xml = write_fcpxml(tl)
     assert "<media-rep" not in xml
     assert len(read_fcpxml(xml).video_clips()) == 1
+
+
+# --- real source ranges (embedded start timecode) --------------------------------
+
+
+def _tc_timeline() -> Timeline:
+    """Two clips from one TC-stamped source + a music bed + one plain source."""
+    meta = {"media_start_seconds": 6472.32, "media_duration_seconds": 14.0}
+    tl = Timeline(name="TC", fps=25.0)
+    tl.clips = [
+        Clip("A", "V1", VIDEO, 50, 100, 0, 50, source_name="A",
+             source_file="/footage/a.mp4", metadata=dict(meta)),
+        Clip("A", "V1", VIDEO, 150, 200, 50, 100, source_name="A",
+             source_file="/footage/a.mp4", metadata=dict(meta)),
+        Clip("B", "V1", VIDEO, 25, 75, 100, 150, source_name="B",
+             source_file="/footage/b.mp4"),  # no media metadata
+        Clip("song", "A1", AUDIO, 0, 150, 0, 150, source_name="song",
+             source_file="/music/song.wav"),
+    ]
+    return tl
+
+
+def test_write_asset_claims_real_source_range():
+    """Regression for the Resolve import bug: each asset must claim the FILE's
+    timecode range (start = embedded TC, duration = file length), never the
+    timeline's duration — Resolve verifies these against the media and drops
+    clips on mismatch ("No overlap")."""
+    import xml.etree.ElementTree as ET
+
+    xml = write_fcpxml(_tc_timeline())
+    root = ET.fromstring(xml)
+
+    asset_a = next(a for a in root.iter("asset") if a.get("name") == "A")
+    assert asset_a.get("start") == "161808/25s"  # 6472.32s = 01:47:52:08 @ 25fps
+    assert asset_a.get("duration") == "14s"  # the FILE's length...
+    assert asset_a.get("duration") != root.find(".//sequence").get("duration")
+
+    # an asset WITHOUT the metadata: start 0s, duration = furthest source frame
+    asset_b = next(a for a in root.iter("asset") if a.get("name") == "B")
+    assert asset_b.get("start") == "0s"
+    assert asset_b.get("duration") == "3s"  # max(source_out) = 75 frames
+
+    # every asset-clip's source position = file TC + source_in
+    starts = [c.get("start") for c in root.findall(".//spine/asset-clip")]
+    assert starts == [
+        "161858/25s",  # 6472.32 + 50/25
+        "161958/25s",  # 6472.32 + 150/25
+        "1s",  # B: no TC, source_in 25 frames
+    ]
+
+    # the music bed's asset: no TC concept, duration = its own source extent
+    asset_song = next(a for a in root.iter("asset") if a.get("name") == "song")
+    assert asset_song.get("start") == "0s"
+    assert asset_song.get("duration") == "6s"  # source_out 150 frames
+
+
+def test_write_asset_music_duration_metadata_wins():
+    import xml.etree.ElementTree as ET
+
+    tl = _tc_timeline()
+    tl.clips[-1].metadata["media_duration_seconds"] = 187.4  # the real song length
+    root = ET.fromstring(write_fcpxml(tl))
+    asset_song = next(a for a in root.iter("asset") if a.get("name") == "song")
+    assert asset_song.get("duration") == "937/5s"  # 187.4s (4685 frames @ 25fps)
+
+
+def test_roundtrip_preserves_file_relative_source_ranges():
+    """write -> read must keep source_in/source_out file-relative (0-based):
+    the writer shifts by the embedded TC, the reader subtracts it back."""
+    tl = _tc_timeline()
+    back = read_fcpxml(write_fcpxml(tl))
+    original = {
+        (c.name, c.kind, c.source_in, c.source_out, c.record_in, c.record_out)
+        for c in tl.clips
+    }
+    reread = {
+        (c.name, c.kind, c.source_in, c.source_out, c.record_in, c.record_out)
+        for c in back.clips
+    }
+    assert reread == original
+    a = next(c for c in back.clips if c.name == "A")
+    assert a.metadata["media_start_seconds"] == pytest.approx(6472.32)
+    b = next(c for c in back.clips if c.name == "B")
+    assert "media_start_seconds" not in b.metadata
