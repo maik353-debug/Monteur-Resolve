@@ -8,6 +8,8 @@ Workflow overview::
     # ... tick the takes you want in cut.md ...
     monteur papercut render cut.md -o rough_cut.fcpxml
     monteur convert cut.edl cut.fcpxml --fps 25
+    monteur create clips song.mp3 -o cut.fcpxml --save-plan plan.json
+    monteur revise plan.json clips -o cut_v2.fcpxml --brief "zweite Hälfte ruhiger"
     monteur resolve status
     monteur ai selects cut.md --brief "90s teaser, keep it fast"
 """
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -468,6 +471,8 @@ def cmd_create(args: argparse.Namespace) -> None:
             _fail(str(exc))
         print(f"\n{len(plan.entries)} cuts -> Resolve timeline {name!r} "
               f"({plan.duration:.1f}s at {args.fps:g} fps)")
+    if args.save_plan:
+        _save_plan(plan, args.save_plan)
     if args.kit:
         from monteur.publish import publish_kit
 
@@ -488,6 +493,114 @@ def cmd_create(args: argparse.Namespace) -> None:
                 f"{cue.kind:<{kind_width}}  {cue.query:<{query_width}}  "
                 f"({cue.note})"
             )
+
+
+def _save_plan(plan, path: str) -> None:
+    """Write a plan as JSON — the input for the next 'monteur revise'."""
+    from monteur.montage import plan_to_dict
+
+    Path(path).write_text(
+        json.dumps(plan_to_dict(plan), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"Plan saved to {path} — iterate on it with 'monteur revise'.")
+
+
+_PIN_MMSS_RE = re.compile(r"(\d+):([0-5]\d)")
+
+
+def _parse_pin(raw: str) -> float:
+    """A --pin value in seconds: accepts M:SS ("0:04") or plain seconds."""
+    match = _PIN_MMSS_RE.fullmatch(raw.strip())
+    if match:
+        return int(match.group(1)) * 60 + int(match.group(2))
+    try:
+        value = float(raw)
+    except ValueError:
+        _fail(f"--pin {raw!r} is neither M:SS nor seconds")
+    if value < 0:
+        _fail(f"--pin {raw!r} is negative — pins are record times in the cut")
+    return value
+
+
+def cmd_revise(args: argparse.Namespace) -> None:
+    from monteur import io
+    from monteur.media import MonteurMediaError
+    from monteur.montage import montage_to_timeline, plan_from_dict
+    from monteur.music import analyze_music
+    from monteur.revise import parse_revision, revise_plan, style_from_plan
+    from monteur.sift import list_media, sift_directory
+
+    try:
+        data = json.loads(Path(args.plan).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        _fail(f"plan file not found: {args.plan}")
+    except json.JSONDecodeError as exc:
+        _fail(f"{args.plan} is not valid JSON: {exc}")
+    try:
+        plan = plan_from_dict(data)
+    except ValueError as exc:
+        _fail(str(exc))
+    if not plan.entries:
+        _fail("the plan has no entries — nothing to revise")
+
+    pins = [_parse_pin(raw) for raw in args.pin]
+    audio = args.audio or ("music" if plan.music_path else "original")
+    if not plan.music_path and audio != "original":
+        _fail(f"the plan has no music; audio mode {audio!r} needs a song")
+
+    revision = parse_revision(args.brief)
+    print(f"Revision: {revision.rationale}")
+
+    # The material has to be re-sifted: the plan file stores the cut, not
+    # the footage analysis.
+    try:
+        count = len(list_media(args.folder))
+        print(
+            f"Scanning {count} clips in {args.folder} — this decodes each clip, "
+            f"so it can take a few seconds per clip.",
+            flush=True,
+        )
+        reports = sift_directory(args.folder, progress=_sift_progress)
+        music = None
+        if plan.music_path:
+            print("Analyzing music ...")
+            music = analyze_music(plan.music_path)
+            print(f"  {music.tempo:.0f} BPM, {len(music.beats)} beats, "
+                  f"{music.duration:.0f}s")
+    except MonteurMediaError as exc:
+        _fail(str(exc))
+    if not reports:
+        _fail(f"no video files found in {args.folder}")
+
+    # The plan file stores no run flags, so the re-plan recovers what it
+    # can: the style from the plan's own notes, the length from the plan
+    # itself (authoritative — allow_repeats keeps the guard from re-capping
+    # it), the SFX layer from whether cues were planned. Order and the
+    # other knobs use the create defaults.
+    try:
+        revised = revise_plan(
+            plan, reports, music, revision, pinned=pins,
+            style=style_from_plan(plan),
+            max_duration=plan.duration,
+            allow_repeats=True,
+            sfx=bool(plan.sfx),
+        )
+    except ValueError as exc:
+        _fail(str(exc))
+    if not revised.entries:
+        _fail("the revision left no entries — run 'monteur sift' to see why")
+
+    timeline = montage_to_timeline(
+        revised, fps=args.fps, audio=audio, canvas=args.canvas
+    )
+    io.save_timeline(timeline, args.output)
+    print(f"\n{len(revised.entries)} cuts -> {args.output} "
+          f"({revised.duration:.1f}s at {args.fps:g} fps)")
+    if args.save_plan:
+        _save_plan(revised, args.save_plan)
+    for note in revised.notes:
+        print(f"  {note}")
 
 
 def cmd_transcribe(args: argparse.Namespace) -> None:
@@ -721,6 +834,11 @@ def build_parser() -> argparse.ArgumentParser:
              "sets style/order/max-duration; explicit flags win over the brief",
     )
     p.add_argument(
+        "--save-plan", default="", metavar="PATH.json",
+        help="also save the plan as JSON — the input for 'monteur revise' "
+             "(iterate on the cut without starting over)",
+    )
+    p.add_argument(
         "--kit", default="",
         help="also write a publish kit into this folder: thumbnail "
              "candidates from your hero shots, YouTube chapters, title/"
@@ -738,6 +856,41 @@ def build_parser() -> argparse.ArgumentParser:
              "(default 48; only with --see)",
     )
     p.set_defaults(func=cmd_create)
+
+    p = sub.add_parser(
+        "revise",
+        help='iterate on a saved cut: "zweite Hälfte ruhiger" without losing the rest',
+    )
+    p.add_argument("plan", help="plan JSON from 'monteur create --save-plan' (or a previous revise)")
+    p.add_argument("folder", help="the same footage folder the plan was cut from")
+    p.add_argument("-o", "--output", required=True, help="output .fcpxml/.edl")
+    p.add_argument(
+        "--brief", default="",
+        help='what to change, e.g. "zweite Hälfte ruhiger" or "second half '
+             'calmer, harte Schnitte" (offline German/English keywords)',
+    )
+    p.add_argument(
+        "--pin", action="append", default=[], metavar="TIME",
+        help="keep the shot at this record time exactly as it is (M:SS or "
+             "seconds); repeatable",
+    )
+    p.add_argument("--fps", type=float, default=25.0)
+    p.add_argument(
+        "--audio", choices=["music", "mix", "original"], default=None,
+        help="what plays under the pictures (default: music when the plan "
+             "has a song, original otherwise)",
+    )
+    p.add_argument(
+        "--canvas",
+        choices=["hd", "uhd", "vertical", "vertical-uhd", "cine", "cine-uhd"],
+        default="uhd",
+        help="timeline shape and resolution (same presets as 'create')",
+    )
+    p.add_argument(
+        "--save-plan", default="", metavar="PATH.json",
+        help="save the revised plan as JSON for the next iteration",
+    )
+    p.set_defaults(func=cmd_revise)
 
     p = sub.add_parser(
         "pick-music",

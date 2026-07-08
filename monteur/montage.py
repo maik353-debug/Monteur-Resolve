@@ -194,13 +194,23 @@ notes. :func:`montage_to_timeline` exports each cue as a Green timeline
 marker ("SFX: <kind>" / "<query> — <note>"), which the EDL/FCPXML writers
 and the Resolve bridge already carry. ``sfx=False`` (the default) plans
 exactly as before.
+
+Plan persistence & revision
+---------------------------
+:func:`plan_to_dict` / :func:`plan_from_dict` round-trip a full plan
+through JSON (every field, entries, dips, SFX cues, notes) under a
+``"monteur_plan"`` schema version — the save format behind ``monteur
+create --save-plan`` and the input to the revision loop
+(:mod:`monteur.revise`). :func:`pin_entry` is the revision's pinning
+hook: it forces one entry verbatim into a plan, trimming or dropping
+whatever the re-plan put in its way.
 """
 
 from __future__ import annotations
 
 import bisect
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import PurePath
 
 from monteur.model import AUDIO, VIDEO, Clip, Marker, Timeline, seconds_to_frames
@@ -1942,3 +1952,107 @@ def montage_to_timeline(
             )
         )
     return timeline
+
+
+# --- plan persistence & the revision hook ---------------------------------------
+
+# Schema version written by plan_to_dict and required by plan_from_dict.
+# Bump when the saved shape changes incompatibly.
+PLAN_FORMAT_VERSION = 1
+
+
+def plan_to_dict(plan: MontagePlan) -> dict:
+    """A JSON-ready dict of the full plan — the revision loop's save format.
+
+    Everything round-trips through :func:`plan_from_dict`: every scalar
+    field, the entries, the smash-to-black dips, the SFX cues and the notes.
+    The ``"monteur_plan"`` key carries :data:`PLAN_FORMAT_VERSION` so a
+    future Monteur can refuse (or migrate) old files instead of misreading
+    them.
+    """
+    return {
+        "monteur_plan": PLAN_FORMAT_VERSION,
+        "music_path": plan.music_path,
+        "duration": plan.duration,
+        "music_start": plan.music_start,
+        "song_duration": plan.song_duration,
+        "fade_in": plan.fade_in,
+        "fade_out": plan.fade_out,
+        "entries": [asdict(entry) for entry in plan.entries],
+        "notes": list(plan.notes),
+        "dips": [[start, length] for start, length in plan.dips],
+        "sfx": [asdict(cue) for cue in plan.sfx],
+    }
+
+
+def plan_from_dict(data: dict) -> MontagePlan:
+    """Rebuild a MontagePlan from :func:`plan_to_dict` output.
+
+    Raises ValueError with a clear message when the dict is not a Monteur
+    plan at all (no ``"monteur_plan"`` key), was written by an unsupported
+    schema version, or is structurally malformed.
+    """
+    version = data.get("monteur_plan")
+    if version is None:
+        raise ValueError(
+            "not a Monteur plan: the 'monteur_plan' version key is missing "
+            "(plans are written by 'monteur create --save-plan')"
+        )
+    if version != PLAN_FORMAT_VERSION:
+        raise ValueError(
+            f"unsupported plan version {version!r}; this Monteur reads "
+            f"version {PLAN_FORMAT_VERSION}"
+        )
+    try:
+        return MontagePlan(
+            music_path=data["music_path"],
+            duration=float(data["duration"]),
+            music_start=float(data.get("music_start", 0.0)),
+            song_duration=float(data.get("song_duration", 0.0)),
+            fade_in=float(data.get("fade_in", 0.0)),
+            fade_out=float(data.get("fade_out", 0.0)),
+            entries=[MontageEntry(**entry) for entry in data.get("entries", [])],
+            notes=list(data.get("notes", [])),
+            dips=[(float(start), float(length)) for start, length in data.get("dips", [])],
+            sfx=[SfxCue(**cue) for cue in data.get("sfx", [])],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"malformed plan JSON: {exc}") from exc
+
+
+def pin_entry(plan: MontagePlan, entry: MontageEntry) -> None:
+    """Force ``entry`` into the plan verbatim — the revision pinning hook.
+
+    Used by :mod:`monteur.revise` for shots the editor wants untouched: a
+    COPY of ``entry`` (exact source material AND record window) is inserted
+    and everything in its way yields. Entries overlapping the pinned record
+    window are trimmed to make room (an entry spanning the whole window is
+    split in two; source positions move 1:1 with the record trim, clamped to
+    the entry's own material), entries fully inside it are dropped, and dips
+    overlapping it are dropped — the pinned shot covers that time. The
+    right-hand remainder of a split entry loses its dissolve (``transition``
+    = 0): the cut out of the pinned shot is a hard cut. Entries stay sorted
+    by record time; SFX cues and notes are left alone.
+    """
+    lo, hi = entry.record_start, entry.record_end
+    kept: list[MontageEntry] = []
+    for e in plan.entries:
+        if e.record_end <= lo + _EPS or e.record_start >= hi - _EPS:
+            kept.append(e)
+            continue
+        if e.record_start < lo - _EPS:  # the part before the pinned window
+            head_end = min(e.source_end, e.source_start + (lo - e.record_start))
+            kept.append(replace(e, record_end=lo, source_end=head_end))
+        if e.record_end > hi + _EPS:  # the part after the pinned window
+            tail_start = min(e.source_end, e.source_start + (hi - e.record_start))
+            kept.append(
+                replace(e, record_start=hi, source_start=tail_start, transition=0.0)
+            )
+    kept.append(replace(entry))
+    kept.sort(key=lambda e: e.record_start)
+    plan.entries = kept
+    plan.dips = [
+        (start, length)
+        for start, length in plan.dips
+        if start + length <= lo + _EPS or start >= hi - _EPS
+    ]

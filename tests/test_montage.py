@@ -1341,3 +1341,100 @@ def test_sfx_works_without_music():
     impacts = [c for c in plan.sfx if c.kind == "impact"]
     # pseudo-grid phases use the raw arc shares: climax starts at 50% of 20s
     assert [c.time for c in impacts] == pytest.approx([10.0])
+
+
+# --- plan persistence (the revision loop's save format) ---------------------------
+
+
+def make_full_plan():
+    """A plan exercising every serialized field: dips, sfx, labels, fades."""
+    reports = make_reports()
+    for r in reports:
+        r.media_start = 100.0
+        for i, m in enumerate(r.moments):
+            setattr(m, "label", f"shot {i}")
+    return plan_montage(
+        reports, make_music(), style="trailer", cut_lead=0.0,
+        allow_repeats=True, sfx=True,
+    )
+
+
+def test_plan_round_trips_through_json():
+    import json
+    from dataclasses import asdict
+
+    from monteur.montage import plan_from_dict, plan_to_dict
+
+    plan = make_full_plan()
+    assert plan.entries and plan.dips and plan.sfx and plan.notes
+    data = plan_to_dict(plan)
+    assert data["monteur_plan"] == 1
+    # through real JSON, like the CLI writes and reads it
+    restored = plan_from_dict(json.loads(json.dumps(data)))
+    assert asdict(restored) == asdict(plan)
+    # dips come back as tuples (JSON has no tuples), same values
+    assert restored.dips == plan.dips
+    assert all(isinstance(d, tuple) for d in restored.dips)
+
+
+def test_plan_from_dict_requires_version_key():
+    from monteur.montage import plan_from_dict, plan_to_dict
+
+    data = plan_to_dict(make_full_plan())
+    del data["monteur_plan"]
+    with pytest.raises(ValueError, match="monteur_plan"):
+        plan_from_dict(data)
+
+
+def test_plan_from_dict_rejects_wrong_version():
+    from monteur.montage import plan_from_dict, plan_to_dict
+
+    data = plan_to_dict(make_full_plan())
+    data["monteur_plan"] = 2
+    with pytest.raises(ValueError, match="unsupported plan version 2"):
+        plan_from_dict(data)
+
+
+def test_plan_from_dict_rejects_malformed_entries():
+    from monteur.montage import plan_from_dict, plan_to_dict
+
+    data = plan_to_dict(make_full_plan())
+    data["entries"][0]["no_such_field"] = 1.0
+    with pytest.raises(ValueError, match="malformed plan JSON"):
+        plan_from_dict(data)
+
+
+# --- pin_entry (the revision pinning hook) ----------------------------------------
+
+
+def test_pin_entry_splits_overlap_and_drops_covered_dip():
+    from dataclasses import replace
+
+    from monteur.montage import MontageEntry, MontagePlan, pin_entry
+
+    def entry(rs, re_, src=0.0):
+        return MontageEntry(
+            clip_path="/f/a.mp4", source_start=src, source_end=src + (re_ - rs),
+            record_start=rs, record_end=re_, score=0.5, transition=0.3,
+        )
+
+    plan = MontagePlan(music_path="", duration=6.0)
+    plan.entries = [entry(0.0, 2.0, src=10.0), entry(2.0, 4.0, src=20.0), entry(4.0, 6.0, src=30.0)]
+    plan.dips = [(2.8, 0.4)]
+    pinned = MontageEntry(
+        clip_path="/f/b.mp4", source_start=5.0, source_end=6.0,
+        record_start=2.5, record_end=3.5, score=0.9,
+    )
+    pin_entry(plan, pinned)
+    windows = [(e.record_start, e.record_end) for e in plan.entries]
+    assert windows == [(0.0, 2.0), (2.0, 2.5), (2.5, 3.5), (3.5, 4.0), (4.0, 6.0)]
+    # the pinned copy is verbatim (and a COPY, not the caller's object)
+    inserted = plan.entries[2]
+    assert inserted == replace(pinned) and inserted is not pinned
+    # the split entry's source moved 1:1 with the record trim
+    left, right = plan.entries[1], plan.entries[3]
+    assert (left.source_start, left.source_end) == (20.0, 20.5)
+    assert (right.source_start, right.source_end) == (21.5, 22.0)
+    assert right.transition == 0.0  # the cut out of the pinned shot is hard
+    # the dip under the pinned window is gone (the shot covers that time)
+    assert plan.dips == []
