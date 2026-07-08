@@ -54,6 +54,10 @@ Craft templates:
 - [ ] Watch mode: new footage auto-sifted overnight, report ready in the
       morning
 - [ ] Change list between versions for sound/VFX handoffs
+- [ ] Artlist (and Musicbed) integration: suggest licensed tracks matching
+      the cut's target tempo/mood/length, preview against the timeline,
+      and search sound effects for marker positions (depends on available
+      APIs; fall back to deep-linked searches)
 
 ## v1.0 — Product
 

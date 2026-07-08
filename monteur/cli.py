@@ -222,9 +222,13 @@ def cmd_create(args: argparse.Namespace) -> None:
               f"{music.duration:.0f}s")
     except MonteurMediaError as exc:
         _fail(str(exc))
-    plan = plan_montage(
-        reports, music, order=args.order, max_duration=args.max_duration
-    )
+    try:
+        plan = plan_montage(
+            reports, music, order=args.order, max_duration=args.max_duration,
+            style=args.style,
+        )
+    except ValueError as exc:
+        _fail(str(exc))
     if not plan.entries:
         _fail("no usable material found — run 'monteur sift' to see why")
     if args.output:
@@ -415,6 +419,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fps", type=float, default=25.0)
     p.add_argument("--order", choices=["chronological", "best_first"], default="chronological")
     p.add_argument("--max-duration", type=float, default=None, help="cap the cut length (seconds)")
+    p.add_argument(
+        "--style", default="auto",
+        help="montage style: auto, travel, wedding, music_video, trailer",
+    )
     p.set_defaults(func=cmd_create)
 
     p = sub.add_parser("sift", help="scan footage: what's usable, what's not")

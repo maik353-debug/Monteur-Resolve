@@ -342,6 +342,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             music,
             order=payload.get("order") or CHRONOLOGICAL,
             max_duration=float(max_duration) if max_duration else None,
+            style=payload.get("style") or "auto",
         )
         if not plan.entries:
             raise ApiError(422, "no usable material found — check the scan results")
