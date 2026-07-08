@@ -58,6 +58,71 @@ class FakeMediaPoolItem:
         return self._name
 
 
+class FakeTextTool:
+    """A Fusion tool; reg_id 'TextPlus' makes it the Text+ tool."""
+
+    def __init__(self, reg_id: str = "TextPlus") -> None:
+        self._reg_id = reg_id
+        self.inputs: dict = {}
+
+    def GetAttrs(self) -> dict:
+        return {"TOOLS_RegID": self._reg_id}
+
+    def SetInput(self, name: str, value) -> None:
+        self.inputs[name] = value
+
+
+class FakeComp:
+    """A Fusion composition honoring GetToolList's optional type filter."""
+
+    def __init__(self, tools: list) -> None:
+        self._tools = tools
+
+    def GetToolList(self, selected: bool = False, reg_id: str | None = None):
+        tools = [
+            t
+            for t in self._tools
+            if reg_id is None or t.GetAttrs().get("TOOLS_RegID") == reg_id
+        ]
+        return {i + 1: t for i, t in enumerate(tools)}
+
+
+_DEFAULT_COMP = object()  # sentinel: build a comp with one Text+ tool
+
+
+class FakeTitleItem:
+    """A timeline item created by InsertFusionTitleIntoTimeline."""
+
+    def __init__(self, comp: object = _DEFAULT_COMP) -> None:
+        if comp is _DEFAULT_COMP:
+            comp = FakeComp([FakeTextTool()])
+        self._comp = comp
+        self.start: int | None = None
+        self.end: int | None = None
+
+    def GetFusionCompByIndex(self, index: int):
+        assert index == 1
+        return self._comp
+
+    def SetStart(self, frame: int) -> bool:
+        self.start = frame
+        return True
+
+    def SetEnd(self, frame: int) -> bool:
+        self.end = frame
+        return True
+
+
+class FakeTitleItemNoSetters:
+    """An old-Resolve title item: no SetStart/SetEnd scripting support."""
+
+    def __init__(self, comp) -> None:
+        self._comp = comp
+
+    def GetFusionCompByIndex(self, index: int):
+        return self._comp
+
+
 class FakeTimeline:
     def __init__(
         self,
@@ -78,6 +143,41 @@ class FakeTimeline:
         self._markers = markers or {}
         self.added_markers: list[tuple] = []
         self.fail_marker_frames: set[int] = set()
+        # --- Fusion title behavior knobs (add_titles tests) ---
+        self.inserted_fusion_titles: list[str] = []
+        self.created_title_items: list = []
+        self.title_items_queue: list = []  # preset items for the next inserts
+        self.insert_title_returns_item = True  # False = legacy True return
+        self.insert_title_result_override = "auto"  # e.g. None to fail inserts
+        self.insert_places_item = True  # False: Resolve put it "somewhere else"
+        self.raise_on_insert_title: Exception | None = None
+        self.added_tracks: list[str] = []
+        self.fail_add_track = False
+
+    def AddTrack(self, kind: str) -> bool:
+        if self.fail_add_track:
+            return False
+        self._tracks[kind].append([])
+        self.added_tracks.append(kind)
+        return True
+
+    def InsertFusionTitleIntoTimeline(self, name: str):
+        if self.raise_on_insert_title is not None:
+            raise self.raise_on_insert_title
+        if self.insert_title_result_override != "auto":
+            return self.insert_title_result_override
+        self.inserted_fusion_titles.append(name)
+        item = (
+            self.title_items_queue.pop(0)
+            if self.title_items_queue
+            else FakeTitleItem()
+        )
+        if self.insert_places_item:
+            if not self._tracks["video"]:
+                self._tracks["video"].append([])
+            self._tracks["video"][-1].append(item)
+        self.created_title_items.append(item)
+        return item if self.insert_title_returns_item else True
 
     def AddMarker(
         self,
@@ -568,6 +668,280 @@ def test_build_timeline_append_failure_raises() -> None:
     with pytest.raises(MonteurResolveError) as excinfo:
         bridge.build_timeline_from_plan(make_plan(), fps=24.0)
     assert "append" in str(excinfo.value)
+
+
+# --- add_titles -------------------------------------------------------------------
+
+
+def title_specs() -> list[dict]:
+    return [
+        {"start": 10.0, "duration": 2.5, "text": "ACT ONE"},
+        {"start": 20.0, "duration": 2.0, "text": "ACT TWO"},
+    ]
+
+
+def test_add_titles_happy_path_sets_position_and_text() -> None:
+    timeline = standard_timeline()  # two video tracks, starts at frame 86400
+    bridge, _ = make_bridge([timeline])
+    warnings: list[str] = []
+    added = bridge.add_titles(title_specs(), fps=24.0, warnings=warnings)
+    assert added == 2
+    assert warnings == []
+    assert timeline.inserted_fusion_titles == ["Text+", "Text+"]
+    assert timeline.added_tracks == []  # a track above the footage existed
+    first, second = timeline.created_title_items
+    # Placement is in absolute timeline frames: timeline start + t * fps.
+    assert (first.start, first.end) == (86400 + 240, 86400 + 240 + 60)
+    assert (second.start, second.end) == (86400 + 480, 86400 + 480 + 48)
+    assert first._comp._tools[0].inputs["StyledText"] == "ACT ONE"
+    assert second._comp._tools[0].inputs["StyledText"] == "ACT TWO"
+
+
+def test_add_titles_adds_a_track_above_single_track_footage() -> None:
+    timeline = FakeTimeline(
+        name="Montage", start_frame=0, video_tracks=[[FakeItem("Scene", 0, 100)]]
+    )
+    bridge, _ = make_bridge([timeline])
+    warnings: list[str] = []
+    added = bridge.add_titles(
+        [{"start": 1.0, "duration": 2.0, "text": "T"}], fps=25.0, warnings=warnings
+    )
+    assert added == 1
+    assert warnings == []
+    assert timeline.added_tracks == ["video"]
+    assert timeline.GetTrackCount("video") == 2
+    item = timeline.created_title_items[0]
+    assert timeline.GetItemListInTrack("video", 2) == [item]
+    assert (item.start, item.end) == (25, 75)
+
+
+def test_add_titles_add_track_failure_is_only_a_warning() -> None:
+    timeline = FakeTimeline(
+        name="Montage", start_frame=0, video_tracks=[[FakeItem("Scene", 0, 100)]]
+    )
+    timeline.fail_add_track = True
+    bridge, _ = make_bridge([timeline])
+    warnings: list[str] = []
+    added = bridge.add_titles(
+        [{"start": 0.0, "duration": 2.0, "text": "T"}], fps=25.0, warnings=warnings
+    )
+    assert added == 1
+    assert any("AddTrack" in w for w in warnings)
+
+
+def test_add_titles_legacy_bool_return_finds_item_via_track_scan() -> None:
+    timeline = standard_timeline()
+    timeline.insert_title_returns_item = False  # old Resolve returns True
+    bridge, _ = make_bridge([timeline])
+    warnings: list[str] = []
+    added = bridge.add_titles(
+        [{"start": 5.0, "duration": 3.0, "text": "SOON"}], fps=24.0, warnings=warnings
+    )
+    assert added == 1
+    assert warnings == []
+    item = timeline.created_title_items[0]
+    assert (item.start, item.end) == (86400 + 120, 86400 + 120 + 72)
+    assert item._comp._tools[0].inputs["StyledText"] == "SOON"
+
+
+def test_add_titles_insert_returning_none_warns_and_continues() -> None:
+    timeline = standard_timeline()
+    timeline.insert_title_result_override = None
+    bridge, _ = make_bridge([timeline])
+    warnings: list[str] = []
+    added = bridge.add_titles(title_specs(), fps=24.0, warnings=warnings)
+    assert added == 0
+    assert len(warnings) == 2
+    assert "InsertFusionTitleIntoTimeline" in warnings[0]
+    assert "'ACT ONE'" in warnings[0] and "'ACT TWO'" in warnings[1]
+
+
+def test_add_titles_item_not_found_counts_but_warns() -> None:
+    timeline = standard_timeline()
+    timeline.insert_title_returns_item = False
+    timeline.insert_places_item = False  # Resolve put it somewhere invisible
+    bridge, _ = make_bridge([timeline])
+    warnings: list[str] = []
+    added = bridge.add_titles(
+        [{"start": 2.0, "duration": 2.0, "text": "X"}], fps=24.0, warnings=warnings
+    )
+    assert added == 1  # the title exists, even if we could not reach it
+    assert len(warnings) == 1
+    assert "playhead" in warnings[0]
+
+
+def test_add_titles_missing_text_tool_warns_and_continues() -> None:
+    timeline = standard_timeline()
+    timeline.title_items_queue = [
+        FakeTitleItem(comp=FakeComp([FakeTextTool(reg_id="Merge")])),
+        FakeTitleItem(),
+    ]
+    bridge, _ = make_bridge([timeline])
+    warnings: list[str] = []
+    added = bridge.add_titles(title_specs(), fps=24.0, warnings=warnings)
+    assert added == 2
+    assert len(warnings) == 1
+    assert "Text+" in warnings[0] and "'ACT ONE'" in warnings[0]
+    # The non-title tool was never written to; the second title got its text.
+    merge_tool = timeline.created_title_items[0]._comp._tools[0]
+    assert merge_tool.inputs == {}
+    second = timeline.created_title_items[1]
+    assert second._comp._tools[0].inputs["StyledText"] == "ACT TWO"
+
+
+def test_add_titles_missing_comp_warns() -> None:
+    timeline = standard_timeline()
+    timeline.title_items_queue = [FakeTitleItem(comp=None)]
+    bridge, _ = make_bridge([timeline])
+    warnings: list[str] = []
+    added = bridge.add_titles(
+        [{"start": 1.0, "duration": 2.0, "text": "T"}], fps=24.0, warnings=warnings
+    )
+    assert added == 1
+    assert any("Fusion composition" in w for w in warnings)
+
+
+def test_add_titles_without_setters_still_sets_text() -> None:
+    timeline = standard_timeline()
+    comp = FakeComp([FakeTextTool()])
+    timeline.title_items_queue = [FakeTitleItemNoSetters(comp)]
+    bridge, _ = make_bridge([timeline])
+    warnings: list[str] = []
+    added = bridge.add_titles(
+        [{"start": 9.6, "duration": 2.0, "text": "FINALE"}], fps=24.0,
+        warnings=warnings,
+    )
+    assert added == 1
+    assert comp._tools[0].inputs["StyledText"] == "FINALE"
+    assert any("drag" in w for w in warnings)
+
+
+def test_add_titles_native_exception_becomes_monteur_error() -> None:
+    timeline = standard_timeline()
+    timeline.raise_on_insert_title = RuntimeError("fusion exploded")
+    bridge, _ = make_bridge([timeline])
+    with pytest.raises(MonteurResolveError) as excinfo:
+        bridge.add_titles(title_specs(), fps=24.0)
+    assert "fusion exploded" in str(excinfo.value)
+    assert "0 of 2" in str(excinfo.value)
+
+
+def test_add_titles_invalid_specs_are_skipped_with_warnings() -> None:
+    timeline = standard_timeline()
+    bridge, _ = make_bridge([timeline])
+    warnings: list[str] = []
+    added = bridge.add_titles(
+        ["not-a-dict", {"start": "soon", "duration": 2.0, "text": "T"}],
+        fps=24.0,
+        warnings=warnings,
+    )
+    assert added == 0
+    assert len(warnings) == 2
+    assert timeline.inserted_fusion_titles == []
+
+
+def test_add_titles_empty_list_is_a_noop() -> None:
+    timeline = standard_timeline()
+    bridge, _ = make_bridge([timeline])
+    assert bridge.add_titles([], fps=24.0) == 0
+    assert timeline.inserted_fusion_titles == []
+
+
+def test_add_titles_without_current_timeline_raises() -> None:
+    bridge, _ = make_bridge([], current=None)
+    with pytest.raises(MonteurResolveError):
+        bridge.add_titles(title_specs(), fps=24.0)
+
+
+def test_add_titles_default_text_is_title() -> None:
+    timeline = standard_timeline()
+    bridge, _ = make_bridge([timeline])
+    added = bridge.add_titles([{"start": 0.0, "duration": 2.0}], fps=24.0)
+    assert added == 1
+    item = timeline.created_title_items[0]
+    assert item._comp._tools[0].inputs["StyledText"] == "Title"
+
+
+# --- titles_from_plan --------------------------------------------------------------
+
+
+def trailer_plan() -> MontagePlan:
+    return MontagePlan(
+        music_path="/music/epic.wav",
+        duration=8.0,
+        entries=[
+            MontageEntry(
+                clip_path="/media/a.mov", source_start=0.0, source_end=2.6,
+                record_start=0.0, record_end=2.6, score=1.0,
+            ),
+            MontageEntry(
+                clip_path="/media/b.mov", source_start=1.0, source_end=3.0,
+                record_start=3.0, record_end=5.0, score=0.9,
+                label="the mountain pass",
+            ),
+            MontageEntry(
+                clip_path="/media/c.mov", source_start=0.0, source_end=2.4,
+                record_start=5.6, record_end=8.0, score=0.8,
+            ),
+        ],
+        dips=[(2.6, 0.4), (5.0, 0.6)],
+    )
+
+
+def test_titles_from_plan_uses_dips_and_following_labels() -> None:
+    titles = resolve.titles_from_plan(trailer_plan())
+    assert titles == [
+        {"start": 2.6, "duration": 2.0, "text": "the mountain pass"},
+        {"start": 5.0, "duration": 2.0, "text": "Title"},
+    ]
+
+
+def test_titles_from_plan_explicit_texts_win() -> None:
+    titles = resolve.titles_from_plan(trailer_plan(), texts=["ACT ONE", "ACT TWO"])
+    assert [t["text"] for t in titles] == ["ACT ONE", "ACT TWO"]
+
+
+def test_titles_from_plan_partial_texts_fall_back() -> None:
+    titles = resolve.titles_from_plan(trailer_plan(), texts=["ACT ONE"])
+    assert [t["text"] for t in titles] == ["ACT ONE", "Title"]
+    titles = resolve.titles_from_plan(trailer_plan(), texts=["", "ACT TWO"])
+    assert [t["text"] for t in titles] == ["the mountain pass", "ACT TWO"]
+
+
+def test_titles_from_plan_no_dips_is_empty() -> None:
+    assert resolve.titles_from_plan(make_plan()) == []
+
+
+def test_titles_from_plan_minimum_duration() -> None:
+    plan = trailer_plan()
+    plan.dips = [(2.6, 0.4), (5.0, 3.5)]
+    durations = [t["duration"] for t in resolve.titles_from_plan(plan)]
+    assert durations == [2.0, 3.5]  # short dips stretched, long dips kept
+
+
+def test_build_timeline_from_plan_inserts_titles_with_dip_shift() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    plan = trailer_plan()
+    titles = resolve.titles_from_plan(plan, texts=["ONE", "TWO"])
+    bridge.build_timeline_from_plan(plan, fps=25.0, titles=titles)
+    created = project._timelines[-1]  # the montage timeline (now current)
+    assert created.inserted_fusion_titles == ["Text+", "Text+"]
+    # A title track was added above the montage footage.
+    assert created.added_tracks == ["video"]
+    first, second = created.created_title_items
+    # Entries are appended back-to-back, so the dips do not exist in Resolve:
+    # title 1 stays at its own dip's start (2.6s -> frame 65); title 2 shifts
+    # left by dip 1's 0.4s (5.0 - 0.4 = 4.6s -> frame 115).
+    assert (first.start, first.end) == (65, 65 + 50)
+    assert (second.start, second.end) == (115, 115 + 50)
+    assert first._comp._tools[0].inputs["StyledText"] == "ONE"
+    assert second._comp._tools[0].inputs["StyledText"] == "TWO"
+
+
+def test_build_timeline_from_plan_without_titles_adds_none() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+    assert project._timelines[-1].inserted_fusion_titles == []
 
 
 # --- install_scripts ------------------------------------------------------------

@@ -25,6 +25,7 @@ EXPECTED_TOOLS = {
     "compare_cuts",
     "check_genre",
     "mark_slow_sections",
+    "add_resolve_titles",
     "sift_footage",
     "analyze_song",
     "create_montage",
@@ -105,6 +106,21 @@ def test_mark_slow_sections_without_resolve_returns_error_dict():
     result = mcp_server.mark_slow_sections()
     assert "error" in result
     assert "hint" in result
+
+
+def test_add_resolve_titles_without_resolve_returns_error_dict():
+    result = mcp_server.add_resolve_titles(
+        titles=[{"start": 2.6, "duration": 2.0, "text": "ACT ONE"}]
+    )
+    assert "error" in result
+    assert "hint" in result
+    assert "Resolve" in result["hint"]
+
+
+def test_add_resolve_titles_requires_titles():
+    result = mcp_server.add_resolve_titles(titles=[])
+    assert "error" in result
+    assert "titles" in result["error"]
 
 
 def test_sift_footage_empty_dir_is_graceful(tmp_path):

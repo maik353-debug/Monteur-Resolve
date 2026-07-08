@@ -682,8 +682,147 @@ class ResolveBridge:
                 added += 1
         return added
 
+    def add_titles(
+        self, titles: list[dict], fps: float, warnings: list[str] | None = None
+    ) -> int:
+        """Insert Fusion Text+ titles into the current timeline; return the count.
+
+        ``titles``: ``[{"start": seconds, "duration": seconds, "text": str},
+        ...]`` with times relative to the timeline start. Typical use: after
+        :meth:`build_timeline_from_plan` for a trailer plan, with specs from
+        :func:`titles_from_plan`.
+
+        Exact API sequence (every call may be missing or return None on some
+        Resolve versions, so each step is checked):
+
+        1. once: ``timeline.GetTrackCount("video")`` and, when only the
+           footage track exists, ``timeline.AddTrack("video")`` so titles get
+           a track above the picture;
+        2. per title: snapshot every video track via ``GetItemListInTrack``,
+           then ``timeline.InsertFusionTitleIntoTimeline("Text+")`` — Resolve
+           inserts at the playhead; recent versions return the created
+           TimelineItem, older ones only True, in which case the new item is
+           found by re-scanning the video tracks (topmost first);
+        3. ``item.SetStart(frame)`` / ``item.SetEnd(frame)`` to move it onto
+           the requested spot — not scriptable on all versions; when
+           unavailable the title stays at the playhead and a warning tells
+           the user to drag it onto the black gap;
+        4. ``item.GetFusionCompByIndex(1)``, the Text+ tool from
+           ``comp.GetToolList``, then ``tool.SetInput("StyledText", text)``.
+
+        A step failing softly (None/False) appends a human-readable message
+        to ``warnings`` (pass a list to collect them) and the loop continues:
+        a partial failure NEVER raises, and a title with the right text at
+        the wrong spot still counts as inserted — that beats no title. Only
+        an exception thrown by Resolve's native API raises, converted to
+        :class:`MonteurResolveError`.
+        """
+        if warnings is None:
+            warnings = []
+        if not titles:
+            return 0
+        inserted = 0
+        try:
+            timeline = self._current_timeline()
+            _ensure_title_track(timeline, warnings)
+            record_start = _record_start(timeline)
+            for index, spec in enumerate(titles):
+                if not isinstance(spec, dict):
+                    warnings.append(
+                        f"title {index + 1}: expected a dict like "
+                        f"{{'start': s, 'duration': s, 'text': ...}}, got "
+                        f"{spec!r} — skipped."
+                    )
+                    continue
+                text = str(spec.get("text") or "").strip() or "Title"
+                label = f"title {index + 1} ({text!r})"
+                try:
+                    start = float(spec.get("start", 0.0))
+                    duration = float(spec.get("duration", 0.0))
+                except (TypeError, ValueError):
+                    warnings.append(
+                        f"{label}: invalid start/duration in {spec!r} — skipped."
+                    )
+                    continue
+                before = _video_track_snapshot(timeline)
+                result = timeline.InsertFusionTitleIntoTimeline("Text+")
+                if not result:
+                    warnings.append(
+                        f"{label}: Resolve did not insert a Fusion Text+ title "
+                        "(InsertFusionTitleIntoTimeline returned nothing) — "
+                        "this Resolve version/page may not support scripted "
+                        f"Fusion titles; add it by hand at {start:.1f}s."
+                    )
+                    continue
+                inserted += 1
+                # Recent Resolve versions return the created TimelineItem;
+                # older ones return True and leave it at the playhead.
+                item = result if hasattr(result, "GetFusionCompByIndex") else None
+                if item is None:
+                    item = _find_new_video_item(timeline, before)
+                if item is None:
+                    warnings.append(
+                        f"{label}: inserted, but Monteur could not locate the "
+                        "new timeline item — Resolve placed the title at the "
+                        "playhead; set its text and drag it onto the black "
+                        f"gap at {start:.1f}s."
+                    )
+                    continue
+                start_frame = int(record_start) + int(round(start * fps))
+                end_frame = start_frame + max(1, int(round(duration * fps)))
+                set_start = getattr(item, "SetStart", None)
+                set_end = getattr(item, "SetEnd", None)
+                if callable(set_start) and callable(set_end):
+                    ok_start = set_start(start_frame)
+                    ok_end = set_end(end_frame)
+                    if not (ok_start and ok_end):
+                        warnings.append(
+                            f"{label}: Resolve placed the title at the "
+                            "playhead — drag it onto the black gap at "
+                            f"{start:.1f}s."
+                        )
+                else:
+                    warnings.append(
+                        f"{label}: this Resolve version cannot reposition "
+                        "timeline items via scripting — the title sits at the "
+                        f"playhead; drag it onto the black gap at {start:.1f}s."
+                    )
+                get_comp = getattr(item, "GetFusionCompByIndex", None)
+                comp = get_comp(1) if callable(get_comp) else None
+                if comp is None:
+                    warnings.append(
+                        f"{label}: could not open the title's Fusion "
+                        "composition — double-click the title in Resolve and "
+                        "set the text by hand."
+                    )
+                    continue
+                tool = _find_text_plus_tool(comp)
+                if tool is None:
+                    warnings.append(
+                        f"{label}: no Text+ tool found in the title's Fusion "
+                        "composition — set the text by hand."
+                    )
+                    continue
+                # Fusion's SetInput returns None even on success — only an
+                # exception (handled below) means it failed.
+                tool.SetInput("StyledText", text)
+        except MonteurResolveError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - native API misbehaving
+            raise MonteurResolveError(
+                "Resolve's scripting API failed while inserting Fusion titles "
+                f"({inserted} of {len(titles)} made it in before the failure): "
+                f"{type(exc).__name__}: {exc}. The timeline itself is intact — "
+                "add the remaining titles by hand at the 'Title slot' markers."
+            ) from exc
+        return inserted
+
     def build_timeline_from_plan(
-        self, plan, fps: float, name: str = "Monteur Montage"
+        self,
+        plan,
+        fps: float,
+        name: str = "Monteur Montage",
+        titles: list[dict] | None = None,
     ) -> str:
         """Build a montage timeline in Resolve from a MontagePlan.
 
@@ -694,9 +833,20 @@ class ResolveBridge:
         ranges), then append the music as one audio clip. Returns the created
         timeline's name.
 
+        ``titles`` (optional, ``[{"start": s, "duration": s, "text": ...}]``
+        in plan-time seconds — e.g. from :func:`titles_from_plan`; the caller
+        decides the texts, nothing is derived from the plan) are inserted via
+        :meth:`add_titles` after the montage is built. Because the entries
+        are appended back-to-back, any smash-to-black dips in the plan do not
+        exist on the Resolve timeline; title starts are shifted earlier by
+        the summed lengths of the dips before them so each title still lands
+        exactly on its act change. Title placement problems are non-fatal
+        (see add_titles); call add_titles yourself to collect its warnings.
+
         Limitation: plans with ``dips`` (the trailer's smash-to-black title
-        slots) are appended back-to-back too — the black gaps currently only
-        exist in the FCPXML/EDL exports, so import the file for trailers.
+        slots) are appended back-to-back too — the black gaps themselves only
+        exist in the FCPXML/EDL exports, so import the file when you want
+        real black between the acts.
 
         Imported media-pool items are mapped back to file paths by, in order:
         ``GetClipProperty("File Path")``; positional order when Resolve
@@ -765,7 +915,189 @@ class ResolveBridge:
                 f"Resolve failed to append the music {plan.music_path!r} to "
                 f"timeline {timeline_name!r}."
             )
+        if titles:
+            shifted = _shift_titles_for_gapless_append(
+                titles, list(getattr(plan, "dips", []) or [])
+            )
+            self.add_titles(shifted, fps)
         return timeline_name
+
+
+# --- Fusion Text+ titles --------------------------------------------------------
+
+# A trailer's smash-to-black dip is ~0.4s — far too short to read a title, so
+# titles_from_plan stretches every title to at least this long. The overlap
+# with the incoming clip is deliberate: titles usually sit over picture.
+MIN_TITLE_SECONDS = 2.0
+
+
+def titles_from_plan(plan, texts: list[str] | None = None) -> list[dict]:
+    """Title specs for :meth:`ResolveBridge.add_titles` from a plan's dips.
+
+    Pure and Resolve-free (testable anywhere). One title per ``plan.dips``
+    entry (the trailer's smash-to-black title slots): ``start`` is the dip's
+    start and ``duration`` is ``max(dip length, MIN_TITLE_SECONDS)`` — the
+    dip itself is too short for a readable title, so the title deliberately
+    overlaps the incoming clip (titles usually sit over picture). The text is
+    ``texts[i]`` when given (and non-empty); otherwise the vision ``label``
+    of the entry that starts right after the dip; otherwise ``"Title"``.
+    Plans without dips yield ``[]``.
+    """
+    dips = list(getattr(plan, "dips", []) or [])
+    if not dips:
+        return []
+    entries = sorted(plan.entries, key=lambda e: e.record_start)
+    titles: list[dict] = []
+    for index, (start, length) in enumerate(dips):
+        text = ""
+        if texts is not None and index < len(texts):
+            text = str(texts[index] or "").strip()
+        if not text:
+            incoming = next(
+                (e for e in entries if e.record_start >= start + length - 1e-6),
+                None,
+            )
+            text = str(getattr(incoming, "label", "") or "").strip()
+        titles.append(
+            {
+                "start": float(start),
+                "duration": max(float(length), MIN_TITLE_SECONDS),
+                "text": text or "Title",
+            }
+        )
+    return titles
+
+
+def _shift_titles_for_gapless_append(
+    titles: list[dict], dips: list[tuple[float, float]]
+) -> list[dict]:
+    """Map plan-time title starts onto the gapless appended Resolve timeline.
+
+    ``build_timeline_from_plan`` appends entries back-to-back, so the plan's
+    smash-to-black dips are squeezed out of the Resolve timeline — everything
+    after a dip sits earlier by that dip's length. A title at plan time ``t``
+    therefore belongs at ``t`` minus the total length of the dips that END at
+    or before ``t`` (a title at its own dip's start is not shifted by that
+    dip). Returns copies; with no dips the input is returned unchanged.
+    """
+    if not dips:
+        return titles
+    shifted: list[dict] = []
+    for title in titles:
+        copy = dict(title) if isinstance(title, dict) else title
+        try:
+            start = float(copy.get("start", 0.0))
+        except (TypeError, ValueError, AttributeError):
+            shifted.append(copy)
+            continue
+        shift = sum(
+            length for dip_start, length in dips if dip_start + length <= start + 1e-6
+        )
+        copy["start"] = max(0.0, start - shift)
+        shifted.append(copy)
+    return shifted
+
+
+def _ensure_title_track(timeline: Any, warnings: list[str]) -> None:
+    """Make sure a video track exists above the footage for the titles.
+
+    With fewer than two video tracks, tries ``timeline.AddTrack("video")`` so
+    inserted Text+ items can sit over the picture instead of colliding with
+    it. A missing or refusing AddTrack is only a warning — Resolve versions
+    differ, and the insert itself still goes ahead.
+    """
+    try:
+        count = int(timeline.GetTrackCount("video") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    if count >= 2:
+        return
+    add = getattr(timeline, "AddTrack", None)
+    if callable(add) and add("video"):
+        return
+    warnings.append(
+        "could not add a video track for the titles (Timeline.AddTrack "
+        "unavailable or refused) — the titles will land wherever Resolve "
+        "puts them; check the track above the footage."
+    )
+
+
+def _video_track_snapshot(timeline: Any) -> list[list[Any]]:
+    """Items per video track (index 0 = track 1); tolerant of None returns."""
+    try:
+        count = int(timeline.GetTrackCount("video") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    return [
+        list(timeline.GetItemListInTrack("video", index) or [])
+        for index in range(1, count + 1)
+    ]
+
+
+def _find_new_video_item(timeline: Any, before: list[list[Any]]) -> Any | None:
+    """The timeline item added since ``before`` (a _video_track_snapshot).
+
+    Scans the topmost track first (titles land above the footage). In a
+    track that gained items, the newest not-seen-before item wins; identity
+    (``is``) comparison is used because Resolve's item wrappers do not
+    support equality reliably. Returns None when nothing new is found —
+    Resolve inserted somewhere unexpected (e.g. a brand-new track it created
+    itself plus a re-read glitch), which callers report as a warning.
+    """
+    after = _video_track_snapshot(timeline)
+    for track_index in range(len(after), 0, -1):
+        old = before[track_index - 1] if track_index <= len(before) else []
+        new = after[track_index - 1]
+        if len(new) <= len(old):
+            continue
+        fresh = [item for item in new if all(item is not seen for seen in old)]
+        return fresh[-1] if fresh else new[-1]
+    return None
+
+
+def _find_text_plus_tool(comp: Any) -> Any | None:
+    """The Text+ ("TextPlus") tool of a Fusion composition, or None.
+
+    Tries the type-filtered ``comp.GetToolList(False, "TextPlus")`` first
+    (False = all tools, not just selected); older hosts without the filter
+    argument raise TypeError, and the full ``GetToolList()`` is scanned
+    instead. GetToolList returns a dict keyed by index in Fusion — lists are
+    tolerated too. A candidate must have a callable ``SetInput``; when its
+    ``GetAttrs()["TOOLS_RegID"]`` is readable it must be "TextPlus", and a
+    filtered result without a readable registry id is trusted as a fallback.
+    """
+    getter = getattr(comp, "GetToolList", None)
+    if not callable(getter):
+        return None
+    filtered = True
+    try:
+        candidates = getter(False, "TextPlus")
+    except TypeError:  # host without the type-filter argument
+        candidates = None
+        filtered = False
+    if not candidates:
+        candidates = getter()
+        filtered = False
+    values = (
+        list(candidates.values()) if isinstance(candidates, dict)
+        else list(candidates or [])
+    )
+    fallback = None
+    for tool in values:
+        if tool is None or not callable(getattr(tool, "SetInput", None)):
+            continue
+        reg_id = ""
+        get_attrs = getattr(tool, "GetAttrs", None)
+        if callable(get_attrs):
+            try:
+                reg_id = (get_attrs() or {}).get("TOOLS_RegID", "")
+            except Exception:  # identification only — never fatal
+                reg_id = ""
+        if reg_id == "TextPlus":
+            return tool
+        if filtered and not reg_id and fallback is None:
+            fallback = tool  # the type filter already vouched for it
+    return fallback
 
 
 # Resolve's fixed marker color palette.

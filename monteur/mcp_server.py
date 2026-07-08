@@ -328,6 +328,37 @@ def mark_slow_sections(timeline: str = "", threshold: float = 1.5) -> dict:
         return _resolve_error(exc)
 
 
+@mcp_instance.tool()
+def add_resolve_titles(titles: list[dict], fps: float = 25) -> dict:
+    """Insert real Fusion Text+ titles into the current DaVinci Resolve timeline.
+
+    Each entry in ``titles`` is ``{"start": <seconds>, "duration":
+    <seconds>, "text": "<title text>"}`` — times relative to the timeline
+    start; ``fps`` must match the timeline's frame rate. Typical use: right
+    after ``create_montage(into_resolve=true)`` with the trailer style,
+    whose smash-to-black act changes are marked "Title slot" — put one
+    title on each slot (2-3 s durations read well; a title overlapping the
+    incoming picture is normal). Requires Resolve running with scripting
+    enabled. Returns ``{"inserted": n, "warnings": [...]}``: the warnings
+    list what older Resolve versions could not do via scripting (e.g. the
+    title was left at the playhead — relay them so the user can drag it
+    onto the gap or set the text by hand). On a connection failure returns
+    ``{"error": ..., "hint": ...}``.
+    """
+    if not titles:
+        return {
+            "error": "no titles given — pass titles=[{'start': seconds, "
+            "'duration': seconds, 'text': '...'}, ...]"
+        }
+    try:
+        bridge = connect()
+        warnings: list[str] = []
+        inserted = bridge.add_titles(titles, fps=fps, warnings=warnings)
+        return {"inserted": inserted, "warnings": warnings}
+    except MonteurResolveError as exc:
+        return _resolve_error(exc)
+
+
 # --- Footage & music ------------------------------------------------------------
 
 
