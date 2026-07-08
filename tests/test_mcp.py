@@ -28,6 +28,7 @@ EXPECTED_TOOLS = {
     "sift_footage",
     "analyze_song",
     "create_montage",
+    "pick_music",
     "see_footage",
     "build_assembly",
     "save_version",

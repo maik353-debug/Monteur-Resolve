@@ -90,6 +90,18 @@ No song at all — a ride-POV cut that keeps the engine sound?
 monteur create footage/ --audio original --max-duration 90 -o ride.fcpxml
 ```
 
+Not sure which song? Drop your candidates (e.g. Artlist downloads) in a
+folder and let Monteur rank them against the footage — beat clarity,
+length vs your unique material, tempo vs your motion, drop, dynamics:
+
+```bash
+monteur pick-music footage/ ~/Music/candidates/
+# 1. skyline.mp3 — 87/100 (124 BPM, 95s)
+#    - clear steady pulse (124 BPM)
+#    - 95s fits your 78s of material — nothing has to repeat
+#    - drop at 42s — a natural climax anchor
+```
+
 Every export opens and closes on black, a trailer smashes to black
 between acts (each gap carries a "Title slot" marker), and cuts land a
 frame before the beat so the incoming shot hits ON it.

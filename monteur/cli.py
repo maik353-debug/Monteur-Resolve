@@ -242,6 +242,45 @@ def _sift_progress(index: int, total: int, name: str, stage: str, report) -> Non
         )
 
 
+def cmd_pick_music(args: argparse.Namespace) -> None:
+    from monteur.media import MonteurMediaError
+    from monteur.pick import list_songs, rank_songs
+    from monteur.sift import list_media, sift_directory
+
+    songs = list_songs(args.music_dir)
+    if not songs:
+        _fail(f"no audio files found in {args.music_dir}")
+    try:
+        count = len(list_media(args.folder))
+        print(
+            f"Scanning {count} clips in {args.folder} — this decodes each clip, "
+            f"so it can take a few seconds per clip.",
+            flush=True,
+        )
+        reports = sift_directory(args.folder, progress=_sift_progress)
+    except MonteurMediaError as exc:
+        _fail(str(exc))
+    if not reports:
+        _fail(f"no video files found in {args.folder}")
+
+    def _song_progress(index: int, total: int, name: str) -> None:
+        print(f"  [{index}/{total}] listening to {name} ...", flush=True)
+
+    ratings = rank_songs(
+        reports, args.music_dir, target_duration=args.max_duration,
+        progress=_song_progress,
+    )
+    print(f"\nBest match first ({len(ratings)} songs):")
+    for rank, rating in enumerate(ratings, start=1):
+        name = Path(rating.path).name
+        header = f"{rank}. {name}  —  {rating.score * 100:.0f}/100"
+        if rating.tempo:
+            header += f"  ({rating.tempo:.0f} BPM, {rating.duration:.0f}s)"
+        print(header)
+        for reason in rating.reasons:
+            print(f"     - {reason}")
+
+
 def cmd_sift(args: argparse.Namespace) -> None:
     from monteur.media import MonteurMediaError
     from monteur.sift import list_media, sift_directory
@@ -679,6 +718,19 @@ def build_parser() -> argparse.ArgumentParser:
              "(default 48; only with --see)",
     )
     p.set_defaults(func=cmd_create)
+
+    p = sub.add_parser(
+        "pick-music",
+        help="rank candidate songs (e.g. Artlist downloads) against your footage",
+    )
+    p.add_argument("folder", help="footage folder")
+    p.add_argument("music_dir", help="folder with candidate audio files")
+    p.add_argument(
+        "--max-duration", type=float, default=None,
+        help="planned cut length in seconds — length fit is scored against "
+             "this instead of the footage's unique material",
+    )
+    p.set_defaults(func=cmd_pick_music)
 
     p = sub.add_parser("sift", help="scan footage: what's usable, what's not")
     p.add_argument("folder", help="directory with your video clips")

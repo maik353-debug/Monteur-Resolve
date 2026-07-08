@@ -577,6 +577,50 @@ def create_montage(
 
 
 @mcp_instance.tool()
+def pick_music(folder: str, music_dir: str, target_duration: float = 0) -> dict:
+    """Rank candidate songs against the footage — which one should score it?
+
+    Sifts the clips in ``folder`` (absolute path) and analyzes every audio
+    file in ``music_dir`` (absolute path; e.g. a folder of Artlist
+    downloads), then scores each song on beat clarity, length fit against
+    the footage's unique material, tempo vs the footage's motion, drop
+    presence and dynamic arc. Returns the ranking best-first with
+    per-signal scores and human-readable reasons — present the reasons, not
+    just the numbers. ``target_duration`` (seconds, optional) scores length
+    fit against a planned cut length instead of the material measure. Songs
+    that fail to decode appear with score 0 and the error as their reason.
+    """
+    try:
+        from monteur.media import MonteurMediaError
+        from monteur.pick import list_songs, rank_songs
+        from monteur.sift import sift_directory
+    except ImportError as exc:
+        return {"error": f"analysis features unavailable: {exc}"}
+    if not list_songs(music_dir):
+        return {"error": f"no audio files found in {music_dir}"}
+    try:
+        reports = sift_directory(folder)
+    except MonteurMediaError as exc:
+        return {"error": str(exc)}
+    if not reports:
+        return {"error": f"no video files found in {folder}"}
+    ratings = rank_songs(reports, music_dir, target_duration=target_duration or None)
+    return {
+        "ranking": [
+            {
+                "path": r.path,
+                "score": _round(r.score),
+                "tempo_bpm": _round(r.tempo, 1),
+                "duration_seconds": _round(r.duration),
+                "signals": {k: _round(v) for k, v in r.parts.items()},
+                "reasons": r.reasons,
+            }
+            for r in ratings
+        ]
+    }
+
+
+@mcp_instance.tool()
 def see_footage(folder: str, max_moments: int = 48) -> dict:
     """Ask Claude vision what the footage shows, moment by moment.
 
