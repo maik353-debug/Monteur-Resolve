@@ -134,22 +134,28 @@ def resolve_status() -> dict:
     Takes no arguments. If it returns an error, Resolve is not running or
     scripting is disabled — relay the hint to the user.
     """
-    try:
-        bridge = connect()
-        project = bridge.project_name()
-        timelines = bridge.list_timelines()
-        try:
-            current = bridge.current_timeline_name()
-        except MonteurResolveError:
-            current = ""
+    # Isolated in a child process: Resolve's native module can hard-crash
+    # under an incompatible Python, which would kill the MCP server. This
+    # never raises.
+    from monteur.resolve import resolve_status_isolated
+
+    status = resolve_status_isolated()
+    if status.get("connected"):
         return {
             "connected": True,
-            "project": project,
-            "timelines": timelines,
-            "current_timeline": current,
+            "project": status.get("project"),
+            "timelines": status.get("timelines", []),
+            "current_timeline": status.get("current") or "",
         }
-    except MonteurResolveError as exc:
-        return _resolve_error(exc)
+    result = {"connected": False, "error": status.get("error", "Resolve unavailable")}
+    if status.get("reason"):
+        result["reason"] = status["reason"]
+    result["hint"] = (
+        "Is DaVinci Resolve running with scripting enabled "
+        "(Preferences > System > General)? If Monteur runs on Python 3.12+, "
+        "set MONTEUR_RESOLVE_PYTHON to a Resolve-compatible interpreter (3.6-3.11)."
+    )
+    return result
 
 
 # --- Pacing analysis ----------------------------------------------------------

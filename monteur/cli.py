@@ -153,7 +153,13 @@ def cmd_convert(args: argparse.Namespace) -> None:
 
 
 def cmd_resolve(args: argparse.Namespace) -> None:
-    from monteur.resolve import MonteurResolveError, connect, install_scripts
+    from monteur.resolve import (
+        MonteurResolveError,
+        connect,
+        install_scripts,
+        read_timeline_isolated,
+        resolve_status_isolated,
+    )
 
     if args.action == "install-scripts":
         for path in install_scripts():
@@ -163,23 +169,37 @@ def cmd_resolve(args: argparse.Namespace) -> None:
             "Workspace > Scripts > Utility."
         )
         return
+
+    # Read-only inspection runs in a child process so an incompatible-Python
+    # native crash in Resolve's module can't take the CLI down.
+    if args.action == "status":
+        status = resolve_status_isolated()
+        if not status.get("connected"):
+            _fail(status.get("error", "DaVinci Resolve not available"))
+        print(f"Connected to project: {status['project']}")
+        for name in status.get("timelines", []):
+            marker = "*" if name == status.get("current") else " "
+            print(f" {marker} {name}")
+        return
+    if args.action == "analyze":
+        from monteur.analysis import analyze_timeline
+
+        try:
+            timeline = read_timeline_isolated()
+        except MonteurResolveError as exc:
+            _fail(str(exc))
+        _print_stats(analyze_timeline(timeline))
+        return
+
+    # Mutating ops still use the in-process bridge (they need a compatible
+    # Python to work at all; a crash here prints via faulthandler).
     try:
         bridge = connect()
-        if args.action == "status":
-            print(f"Connected to project: {bridge.project_name()}")
-            for name in bridge.list_timelines():
-                marker = "*" if name == bridge.current_timeline_name() else " "
-                print(f" {marker} {name}")
-        elif args.action == "import":
+        if args.action == "import":
             if not args.file:
                 _fail("resolve import needs a file argument")
             bridge.import_timeline_file(args.file)
             print(f"Imported {args.file} into {bridge.project_name()}")
-        elif args.action == "analyze":
-            from monteur.analysis import analyze_timeline
-
-            timeline = bridge.read_timeline()
-            _print_stats(analyze_timeline(timeline))
     except MonteurResolveError as exc:
         _fail(str(exc))
 

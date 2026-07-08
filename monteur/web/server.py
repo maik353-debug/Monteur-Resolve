@@ -478,28 +478,19 @@ class MonteurHandler(BaseHTTPRequestHandler):
         )
 
     def _resolve_status(self) -> None:
-        from monteur.resolve import MonteurResolveError, connect
+        # Isolated in a child process: Resolve's native module can hard-crash
+        # (access violation) under an incompatible Python, and that would take
+        # the whole server down. resolve_status_isolated never raises.
+        from monteur.resolve import resolve_status_isolated
 
-        try:
-            bridge = connect()
-            self._send_json(
-                {
-                    "connected": True,
-                    "project": bridge.project_name(),
-                    "timelines": bridge.list_timelines(),
-                    "current": bridge.current_timeline_name(),
-                }
-            )
-        except MonteurResolveError as exc:
-            self._send_json({"connected": False, "error": str(exc)})
+        self._send_json(resolve_status_isolated())
 
     def _resolve_analyze(self) -> None:
-        from monteur.resolve import MonteurResolveError, connect
+        from monteur.resolve import MonteurResolveError, read_timeline_isolated
 
         payload = self._read_json()
         try:
-            bridge = connect()
-            timeline = bridge.read_timeline(payload.get("timeline"))
+            timeline = read_timeline_isolated(payload.get("timeline"))
         except MonteurResolveError as exc:
             raise ApiError(502, str(exc))
         stats = analyze_timeline(timeline)

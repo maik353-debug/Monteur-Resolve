@@ -32,6 +32,17 @@ Works with the free DaVinci Resolve via timeline files; live control
 (markers, building timelines in place, MCP) uses the scripting API and
 needs Resolve Studio.
 
+> **Python version note for live Resolve features.** DaVinci Resolve's
+> scripting module is a native library built for **Python 3.6–3.11**;
+> loading it under a newer Python (3.12+) crashes it. Monteur isolates
+> every Resolve call in a child process, so this never takes Monteur down
+> — but the live features won't *work* until the child runs a compatible
+> Python. If your main Python is 3.12+, install 3.11 alongside it and set
+> `MONTEUR_RESOLVE_PYTHON` to its path (e.g.
+> `set MONTEUR_RESOLVE_PYTHON=C:\Python311\python.exe` on Windows). All
+> file-based features (create, sift, analyze → EDL/FCPXML) work on any
+> Python 3.10+.
+
 Pure Python 3.10+, zero required dependencies (AI features optionally use
 the `anthropic` package).
 

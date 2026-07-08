@@ -1859,7 +1859,10 @@ function loadResolve() {
       var dotOff = el("span", "resolve-dot off");
       dotOff.setAttribute("aria-hidden", "true");
       hint.appendChild(dotOff);
-      hint.appendChild(document.createTextNode("DaVinci Resolve not detected."));
+      var headline = status.reason === "crash"
+        ? "DaVinci Resolve needs a compatible Python."
+        : "DaVinci Resolve not detected.";
+      hint.appendChild(document.createTextNode(headline));
       body.appendChild(hint);
       var details = document.createElement("details");
       var summary = document.createElement("summary");
