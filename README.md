@@ -50,7 +50,7 @@ the `anthropic` package).
 
 ```bash
 pip install -e .          # core
-pip install -e '.[ai]'    # with AI features (needs ANTHROPIC_API_KEY)
+pip install -e '.[ai]'    # with AI features (needs ANTHROPIC_API_KEY or Claude Code)
 
 cd ~/my-film-project
 monteur ui                  # launches Monteur Studio in your browser
@@ -189,6 +189,13 @@ monteur ai selects cut.md --brief "90-second teaser, lead with the conflict"
 monteur ai notes my_cut.edl --fps 25    # editorial notes on your pacing
 monteur ai log interview.srt           # footage log: topics, quotes, timestamps
 ```
+
+No API key? If [Claude Code](https://claude.com/claude-code) is installed
+(the `claude` command), Monteur's writing features — selects, notes, logs,
+briefs, publish copy, movie blueprints — use it automatically with its
+subscription, at no extra cost. Set `MONTEUR_AI_BACKEND=api` or
+`MONTEUR_AI_BACKEND=claude-cli` to force one backend. Only footage vision
+(`monteur see`, below) sends images and therefore always needs the API key.
 
 **Claude watches your footage.** `monteur see` sends one frame per good
 moment to Claude, which labels what it shows ("overtake in a left-hand

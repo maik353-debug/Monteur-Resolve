@@ -1250,7 +1250,7 @@ svg text.axis {
           </div>
           <div class="kit-block" id="cre-kit">
             <p class="seg-heading">Publish kit — the upload package for this cut</p>
-            <p class="help-small">Uploading a video means writing a title, a description, chapters and tags, and hunting for a thumbnail — the kit drafts all of that from the cut above so publishing takes minutes, not an evening. It writes one <code>publish.md</code> with title suggestions and a short description (drafted by Claude when your Anthropic API key is set — otherwise from an honest offline template that says so), YouTube chapter timestamps taken from the cut&rsquo;s own scene changes, a ready-to-paste tag list, and real thumbnail stills of your strongest moments in a <code>thumbs/</code> folder. A planned SFX layer adds its sound-design shopping list with Artlist search links.</p>
+            <p class="help-small">Uploading a video means writing a title, a description, chapters and tags, and hunting for a thumbnail — the kit drafts all of that from the cut above so publishing takes minutes, not an evening. It writes one <code>publish.md</code> with title suggestions and a short description (drafted by Claude when your Anthropic API key is set or Claude Code — the <code>claude</code> command — is installed; otherwise from an honest offline template that says so), YouTube chapter timestamps taken from the cut&rsquo;s own scene changes, a ready-to-paste tag list, and real thumbnail stills of your strongest moments in a <code>thumbs/</code> folder. A planned SFX layer adds its sound-design shopping list with Artlist search links.</p>
             <label class="sr-only" for="cre-kit-dir">Folder to write the publish kit into</label>
             <div class="path-row">
               <input type="text" id="cre-kit-dir" placeholder="/Users/you/Movies/my-trip/publish" spellcheck="false" autocomplete="off">
@@ -1353,7 +1353,7 @@ svg text.axis {
               <input type="text" id="mov-genre" placeholder="Genre (optional) — thriller, doku, komödie&hellip;" spellcheck="false" autocomplete="off">
               <button class="btn primary" id="mov-new-btn" type="button">Create the blueprint<span class="spin" aria-hidden="true"></span></button>
             </div>
-            <p class="help-small">Drafting a screenplay needs the anthropic package and your Anthropic API key (ANTHROPIC_API_KEY) on the machine running <code>monteur ui</code> — unlike scans, there is no offline fallback for writing.</p>
+            <p class="help-small">Drafting a screenplay needs Claude on the machine running <code>monteur ui</code>: either your Anthropic API key (ANTHROPIC_API_KEY, with the anthropic package) or an installed Claude Code (the <code>claude</code> command — it uses its subscription, no API key needed). Unlike scans, there is no offline fallback for writing.</p>
             <div id="mov-new-panel"></div>
             <p class="scan-note" id="mov-new-msg" role="status" hidden></p>
           </section>

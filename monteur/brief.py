@@ -7,9 +7,9 @@ duration).
 
 Two interpreters are provided:
 
-* :func:`interpret_brief` — asks Claude (structured output, guaranteed JSON)
-  to translate the brief. Needs the ``anthropic`` package and credentials,
-  like everything in :mod:`monteur.ai`.
+* :func:`interpret_brief` — asks Claude to translate the brief. Works with
+  an Anthropic API key or an installed Claude Code CLI, like everything in
+  :mod:`monteur.ai`.
 * :func:`interpret_brief_offline` — a dependency-free keyword fallback for
   German and English. Deliberately rough: it recognizes obvious duration,
   style, and order cues and ignores everything else.
@@ -24,7 +24,7 @@ import json
 import re
 from dataclasses import dataclass
 
-from monteur.ai import DEFAULT_MODEL, MonteurAIError, _client
+from monteur.ai import DEFAULT_MODEL, MonteurAIError, complete
 
 #: Montage style keys — mirrors monteur.montage.STYLES (kept as a literal so
 #: this module stays importable without the media stack).
@@ -106,28 +106,20 @@ def _validated(data: dict) -> BriefSettings:
 def interpret_brief(text: str, model: str = DEFAULT_MODEL) -> BriefSettings:
     """Translate an editorial brief into montage settings via Claude.
 
-    Uses structured output (a JSON schema on ``output_config.format``), so
-    the response is guaranteed to be valid JSON matching the schema. Raises
-    :class:`monteur.ai.MonteurAIError` when the ``anthropic`` package is
-    missing or the API call fails.
+    Goes through :func:`monteur.ai.complete` with a JSON schema: on the
+    API backend the response is guaranteed valid JSON
+    (``output_config.format``), on the Claude Code CLI backend the schema
+    is instructed and the parse below stays the judge. Raises
+    :class:`monteur.ai.MonteurAIError` when no backend is available or
+    the request fails.
     """
-    client = _client()
-    try:
-        response = client.messages.create(
-            model=model,
-            max_tokens=1024,
-            system=_BRIEF_SYSTEM,
-            thinking={"type": "adaptive"},
-            output_config={"format": {"type": "json_schema", "schema": _BRIEF_SCHEMA}},
-            messages=[{"role": "user", "content": f"EDITOR'S BRIEF:\n{text}"}],
-        )
-    except MonteurAIError:
-        raise
-    except Exception as exc:  # pragma: no cover - network/auth failures
-        raise MonteurAIError(f"Claude API request failed: {exc}") from exc
-    if getattr(response, "stop_reason", None) == "refusal":
-        raise MonteurAIError("The request was declined by the model's safety system.")
-    raw = "".join(b.text for b in response.content if b.type == "text")
+    raw = complete(
+        f"EDITOR'S BRIEF:\n{text}",
+        system=_BRIEF_SYSTEM,
+        model=model,
+        max_tokens=1024,
+        json_schema=_BRIEF_SCHEMA,
+    )
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, TypeError) as exc:
@@ -222,7 +214,7 @@ def resolve_brief(text: str, use_ai: bool = True) -> BriefSettings:
     """Interpret a brief with Claude when possible, offline otherwise.
 
     Tries :func:`interpret_brief` when ``use_ai`` is true; any
-    :class:`MonteurAIError` (missing package, missing credentials, request
+    :class:`MonteurAIError` (no API key and no Claude Code CLI, request
     failure) falls back to :func:`interpret_brief_offline` with the rationale
     prefixed ``"(offline interpretation) "``.
     """

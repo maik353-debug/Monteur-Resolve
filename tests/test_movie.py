@@ -6,7 +6,6 @@ import json
 
 import pytest
 
-import monteur.movie as movie
 from monteur.ai import MonteurAIError
 from monteur.movie import (
     DialogueLine,
@@ -77,9 +76,15 @@ class _FakeClient:
         self.messages = _Messages()
 
 
+def _use_api_client(monkeypatch, fake):
+    """Route monteur.ai.complete to the API backend with a fake SDK client."""
+    monkeypatch.setenv("MONTEUR_AI_BACKEND", "api")
+    monkeypatch.setattr("monteur.ai._client", lambda: fake)
+    return fake
+
+
 def test_generate_movie_builds_validated_project(monkeypatch):
-    fake = _FakeClient(_blueprint_json())
-    monkeypatch.setattr(movie, "_client", lambda: fake)
+    fake = _use_api_client(monkeypatch, _FakeClient(_blueprint_json()))
     project = generate_movie("5 Minuten, Wald und Auto", genre="thriller")
     assert project.title == "Nachtfahrt"
     assert project.genre == "thriller"
@@ -94,21 +99,21 @@ def test_generate_movie_builds_validated_project(monkeypatch):
 
 def test_generate_movie_too_few_scenes_is_actionable(monkeypatch):
     payload = _blueprint_json(1)
-    monkeypatch.setattr(movie, "_client", lambda: _FakeClient(payload))
+    _use_api_client(monkeypatch, _FakeClient(payload))
     with pytest.raises(MonteurAIError, match="at least 3"):
         generate_movie("zu dünn")
 
 
 def test_generate_movie_clamps_scene_count(monkeypatch):
     payload = _blueprint_json(30)
-    monkeypatch.setattr(movie, "_client", lambda: _FakeClient(payload))
+    _use_api_client(monkeypatch, _FakeClient(payload))
     project = generate_movie("episch")
     assert len(project.scenes) == 24
     assert any("clamped" in n for n in project.notes)
 
 
 def test_render_fountain_is_assembly_compatible(monkeypatch):
-    monkeypatch.setattr(movie, "_client", lambda: _FakeClient(_blueprint_json()))
+    _use_api_client(monkeypatch, _FakeClient(_blueprint_json()))
     project = generate_movie("test")
     text = render_fountain(project)
     assert text.startswith("Title: Nachtfahrt")
@@ -173,7 +178,7 @@ def test_load_project_missing_file(tmp_path):
 
 
 def test_cli_movie_new(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(movie, "_client", lambda: _FakeClient(_blueprint_json()))
+    _use_api_client(monkeypatch, _FakeClient(_blueprint_json()))
     from monteur.cli import build_parser
 
     args = build_parser().parse_args(

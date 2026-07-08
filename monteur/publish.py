@@ -40,11 +40,12 @@ for the sound pass, clickable straight from the kit.
 
 Text
 ----
-With the ``anthropic`` package and ``ANTHROPIC_API_KEY``, one Claude call
-drafts title ideas, a description and tags from the labels, tags and the
-brief (in the brief's language). Without them the kit falls back to an
-honest offline template built from the same data and says so in a note —
-the kit never fails the export.
+With Claude available — an ``ANTHROPIC_API_KEY`` (plus the ``anthropic``
+package) or an installed Claude Code CLI, see :mod:`monteur.ai` — one
+Claude call drafts title ideas, a description and tags from the labels,
+tags and the brief (in the brief's language). Without either the kit
+falls back to an honest offline template built from the same data and
+says so in a note — the kit never fails the export.
 """
 
 from __future__ import annotations
@@ -266,8 +267,9 @@ def publish_kit(
         copy = _template_copy(chapters, tags, brief, plan.duration)
         copy_source = "offline template"
         notes.append(
-            f"copy drafted from the offline template ({exc}); with "
-            "ANTHROPIC_API_KEY set, Claude drafts titles and description"
+            f"copy drafted from the offline template ({exc}); with an "
+            "Anthropic API key set or Claude Code installed, Claude drafts "
+            "titles and description"
         )
 
     doc = ["# Publish kit", ""]

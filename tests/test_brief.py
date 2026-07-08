@@ -121,6 +121,15 @@ def _fake_client(payload: dict):
     return client
 
 
+def _api_backend(client):
+    """Force the API backend and serve ``client`` from monteur.ai._client."""
+    return mock.patch.multiple(
+        "monteur.ai",
+        _client=mock.Mock(return_value=client),
+        _resolve_backend=mock.Mock(return_value="api"),
+    )
+
+
 def test_interpret_brief_parses_structured_response():
     client = _fake_client(
         {
@@ -130,7 +139,7 @@ def test_interpret_brief_parses_structured_response():
             "rationale": "Energiegeladen und 90 Sekunden -> Musikvideo-Schnitt.",
         }
     )
-    with mock.patch("monteur.brief._client", return_value=client):
+    with _api_backend(client):
         settings = interpret_brief("90 Sekunden, energiegeladen, beste zuerst")
     assert settings.style == "music_video"
     assert settings.order == "best_first"
@@ -152,7 +161,7 @@ def test_interpret_brief_invalid_style_falls_back_with_note():
         {"style": "vlog", "order": "best_first", "max_duration": None,
          "rationale": "vlog style"}
     )
-    with mock.patch("monteur.brief._client", return_value=client):
+    with _api_backend(client):
         settings = interpret_brief("mach ein vlog")
     assert settings.style == "auto"
     assert settings.order == "best_first"
@@ -160,15 +169,16 @@ def test_interpret_brief_invalid_style_falls_back_with_note():
 
 
 def test_interpret_brief_missing_anthropic_raises():
-    with mock.patch.dict(sys.modules, {"anthropic": None}):
-        with pytest.raises(MonteurAIError, match=r"monteur\[ai\]"):
-            interpret_brief("90 sekunden")
+    with mock.patch("monteur.ai._resolve_backend", return_value="api"):
+        with mock.patch.dict(sys.modules, {"anthropic": None}):
+            with pytest.raises(MonteurAIError, match=r"monteur\[ai\]"):
+                interpret_brief("90 sekunden")
 
 
 def test_interpret_brief_unparseable_text_raises():
     client = _fake_client({})
     client.messages.create.return_value.content[0].text = "not json"
-    with mock.patch("monteur.brief._client", return_value=client):
+    with _api_backend(client):
         with pytest.raises(MonteurAIError, match="unparseable"):
             interpret_brief("90 sekunden")
 

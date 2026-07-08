@@ -85,6 +85,11 @@ Craft templates:
 - [ ] Watch mode: new footage auto-sifted overnight, report ready in the
       morning
 - [ ] Change list between versions for sound/VFX handoffs
+- [x] Claude Code as an AI backend: with no ANTHROPIC_API_KEY but an
+      installed `claude` CLI, every writing feature (movie blueprint,
+      brief, publish kit, selects/notes) runs on the user's Claude
+      subscription at no extra cost; footage vision stays API-only
+      (the CLI takes no images)
 - [x] Song matcher (`monteur pick-music`, Artlist integration stage 1):
       rank a folder of candidate songs against the footage — beat clarity,
       length vs unique material, tempo vs motion, drop, dynamic arc —

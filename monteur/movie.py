@@ -97,7 +97,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from monteur.ai import DEFAULT_MODEL, MonteurAIError, _client
+from monteur.ai import DEFAULT_MODEL, MonteurAIError, complete
 
 if TYPE_CHECKING:  # only for type hints — stages 2/3 import lazily at runtime
     from monteur.model import Timeline
@@ -255,31 +255,23 @@ def generate_movie(
 ) -> MovieProject:
     """Draft a movie blueprint with Claude (structured output).
 
-    Raises :class:`monteur.ai.MonteurAIError` when the ``anthropic``
-    package or credentials are missing, or the response is unusable.
+    Goes through :func:`monteur.ai.complete`, so it works with either an
+    Anthropic API key or an installed Claude Code CLI. Raises
+    :class:`monteur.ai.MonteurAIError` when neither backend is available
+    or the response is unusable.
     """
-    client = _client()
     prompt = (
         f"GENRE: {genre or 'filmmaker’s choice — pick what serves the idea'}\n"
         f"BRIEF (idea + real-world constraints):\n{brief}\n\n"
         "Draft the complete blueprint for this short film."
     )
-    try:
-        response = client.messages.create(
-            model=model,
-            max_tokens=16000,
-            system=_MOVIE_SYSTEM,
-            thinking={"type": "adaptive"},
-            output_config={"format": {"type": "json_schema", "schema": _MOVIE_SCHEMA}},
-            messages=[{"role": "user", "content": prompt}],
-        )
-    except MonteurAIError:
-        raise
-    except Exception as exc:  # pragma: no cover - network/auth failures
-        raise MonteurAIError(f"Claude API request failed: {exc}") from exc
-    if getattr(response, "stop_reason", None) == "refusal":
-        raise MonteurAIError("The request was declined by the model's safety system.")
-    raw = "".join(b.text for b in response.content if b.type == "text")
+    raw = complete(
+        prompt,
+        system=_MOVIE_SYSTEM,
+        model=model,
+        max_tokens=16000,
+        json_schema=_MOVIE_SCHEMA,
+    )
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, TypeError) as exc:

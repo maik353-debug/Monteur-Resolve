@@ -130,8 +130,9 @@ def _client():
         return anthropic.Anthropic()
     except Exception as exc:  # pragma: no cover - constructor-time auth failures
         raise MonteurVisionError(
-            "could not create the Claude client — set ANTHROPIC_API_KEY and "
-            f"install the AI extra (pip install 'monteur[ai]'): {exc}"
+            "could not create the Claude client — footage vision needs an "
+            "Anthropic API key (ANTHROPIC_API_KEY) specifically; unlike the "
+            f"writing features it cannot use the Claude Code CLI: {exc}"
         ) from exc
 
 
@@ -336,8 +337,10 @@ def _describe_batch(client, model: str, batch: list[tuple]) -> dict[int, dict]:
         raise
     except Exception as exc:  # broad: missing ANTHROPIC_API_KEY surfaces here
         raise MonteurVisionError(
-            f"Claude vision request failed: {exc} — vision analysis needs the "
-            "'anthropic' package (pip install 'monteur[ai]') and ANTHROPIC_API_KEY."
+            f"Claude vision request failed: {exc} — footage vision sends "
+            "images, so unlike Monteur's writing features it cannot use the "
+            "Claude Code CLI: it needs the 'anthropic' package (pip install "
+            "'monteur[ai]') and an Anthropic API key (ANTHROPIC_API_KEY)."
         ) from exc
     if getattr(response, "stop_reason", None) == "refusal":
         raise MonteurVisionError(
