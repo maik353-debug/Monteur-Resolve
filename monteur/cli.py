@@ -429,6 +429,11 @@ def cmd_create(args: argparse.Namespace) -> None:
             _fail(str(exc))
         print(f"\n{len(plan.entries)} cuts -> Resolve timeline {name!r} "
               f"({plan.duration:.1f}s at {args.fps:g} fps)")
+    if args.kit:
+        from monteur.publish import publish_kit
+
+        for note in publish_kit(plan, reports, args.kit, brief=args.brief):
+            print(f"  {note}")
     for note in plan.notes:
         print(f"  {note}")
 
@@ -655,6 +660,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--brief", default="",
         help='natural-language brief, e.g. "90 Sekunden, energiegeladen" — '
              "sets style/order/max-duration; explicit flags win over the brief",
+    )
+    p.add_argument(
+        "--kit", default="",
+        help="also write a publish kit into this folder: thumbnail "
+             "candidates from your hero shots, YouTube chapters, title/"
+             "description/tag drafts (best with --see)",
     )
     p.add_argument(
         "--see", action="store_true",

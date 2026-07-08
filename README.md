@@ -165,6 +165,20 @@ monteur create footage/ track.mp3 --see --style trailer -o cut.fcpxml
 Results are cached next to your footage (`.monteur-vision.json`), so a
 re-run only pays for new material — a scan costs on the order of a cent.
 
+**Publish kit.** The upload needs more than a timeline — `--kit` writes
+it in one go, straight from the cut:
+
+```bash
+monteur create footage/ track.mp3 --see -o cut.fcpxml --kit publish/
+# publish/publish.md    — title ideas, description draft, tags,
+#                         YouTube chapters (from the cut's scene changes)
+# publish/thumbs/*.jpg  — thumbnail candidates, hero shots first,
+#                         no two from the same scene
+```
+
+Title/description/tags are drafted by Claude when a key is set, from an
+honest offline template otherwise — the kit never blocks the export.
+
 ## Claude integration (MCP)
 
 Monteur ships an MCP server, so you can talk to DaVinci Resolve through
