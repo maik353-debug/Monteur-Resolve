@@ -531,6 +531,28 @@ svg text.axis {
 .ft-check input { width: 15px; height: 15px; accent-color: var(--series-1); margin: 0; }
 .help-small { font-size: 11.5px; color: var(--ink-muted); margin-top: 6px; line-height: 1.45; max-width: 420px; }
 
+/* rank-a-folder (song matcher) */
+.rank-details { margin: 4px 0 14px; }
+.rank-body { padding: 12px 14px; }
+.rank-cards { display: grid; gap: 10px; margin-top: 12px; }
+.rank-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 11px 13px; }
+.rank-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.rank-score { font-size: 19px; font-weight: 680; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rank-name { flex: 1; min-width: 0; font-weight: 650; font-size: 13.5px; overflow-wrap: anywhere; }
+.rank-meta { font-size: 12px; color: var(--ink-muted); margin-top: 1px; font-variant-numeric: tabular-nums; }
+.rank-reasons { margin: 6px 0 10px; padding-left: 18px; font-size: 12px; color: var(--ink-2); }
+.rank-reasons li { margin-top: 2px; }
+
+/* publish kit */
+.kit-block { border-top: 1px solid var(--grid); margin-top: 16px; padding-top: 14px; }
+.thumb-strip { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 6px; }
+.thumb-strip img { display: block; max-height: 90px; max-width: 100%; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-2); }
+.kit-md {
+  margin: 0; padding: 12px 14px; font-size: 12px; line-height: 1.5;
+  white-space: pre-wrap; overflow-wrap: anywhere; overflow-y: auto; max-height: 320px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--ink-2);
+}
+
 /* job progress panel */
 .job-panel {
   border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2);
@@ -829,6 +851,21 @@ svg text.axis {
               <button class="btn ghost" id="cre-browse-music" type="button">Browse&hellip;</button>
             </div>
             <p class="hint-small">Any common audio file works — .mp3, .wav or .m4a.</p>
+            <details class="fine-tune rank-details" id="cre-rank">
+              <summary>Not sure which song? Rank a folder</summary>
+              <div class="rank-body">
+                <label class="sr-only" for="cre-music-dir">Music folder path</label>
+                <div class="path-row">
+                  <input type="text" id="cre-music-dir" placeholder="/Users/you/Music/candidates" spellcheck="false" autocomplete="off">
+                  <button class="btn ghost" id="cre-browse-musicdir" type="button">Browse&hellip;</button>
+                  <button class="btn" id="cre-rank-btn" type="button">Rank songs<span class="spin" aria-hidden="true"></span></button>
+                </div>
+                <p class="help-small">Monteur listens to every song in the folder and scores how well it fits your scanned footage — beat clarity, length, tempo, drop and dynamics. When a Target length is set, songs are scored against it automatically.</p>
+                <div id="cre-rank-panel"></div>
+                <p class="scan-note" id="cre-rank-msg" role="status" hidden></p>
+                <div class="rank-cards" id="cre-rank-results"></div>
+              </div>
+            </details>
             <h3 class="fgroup-title">Sound in the finished cut</h3>
             <div class="radio-cards stack" role="radiogroup" aria-label="Sound in the finished cut">
               <button class="radio-card" id="audio-music" type="button" role="radio" aria-checked="true">
@@ -965,6 +1002,26 @@ svg text.axis {
             <li>When Resolve asks where the media lives, point it at your footage folder.</li>
             <li>Press play — then fine-tune from there. FCPXML relinks most easily.</li>
           </ol>
+          <div class="kit-block" id="cre-kit">
+            <p class="seg-heading">Publish kit</p>
+            <p class="help-small">Everything the upload needs, drafted from this cut: title ideas, a description with YouTube chapters, tags, and thumbnail stills — written as publish.md plus a thumbs/ folder.</p>
+            <label class="sr-only" for="cre-kit-dir">Publish kit folder path</label>
+            <div class="path-row">
+              <input type="text" id="cre-kit-dir" placeholder="/Users/you/Movies/my-trip/publish" spellcheck="false" autocomplete="off">
+              <button class="btn ghost" id="cre-browse-kit" type="button">Browse&hellip;</button>
+              <button class="btn" id="cre-kit-btn" type="button">Write publish kit<span class="spin" aria-hidden="true"></span></button>
+            </div>
+            <div id="cre-kit-panel"></div>
+            <p class="scan-note" id="cre-kit-msg" role="status" hidden></p>
+            <div id="cre-kit-result" hidden>
+              <ul class="plan-notes" id="cre-kit-notes"></ul>
+              <div class="thumb-strip" id="cre-kit-thumbs"></div>
+              <details class="fine-tune" id="cre-kit-md">
+                <summary>Preview publish.md</summary>
+                <pre class="kit-md" id="cre-kit-md-pre"></pre>
+              </details>
+            </div>
+          </div>
         </div>
       </section>
     </section>
@@ -2545,9 +2602,10 @@ function makeJobPanel(hostId, texts) {
     var total = 0, done = 0, cached = 0;
     var lines = [];
     progress.forEach(function (p) {
-      // vision entries count MOMENTS, not clips — keep them out of the
-      // "x / y clips" total so the bar keeps meaning clips.
-      if (p.stage !== "vision" && p.total > total) total = p.total;
+      // vision entries count MOMENTS and song entries count SONGS, not
+      // clips — keep both out of the "x / y clips" total so the bar keeps
+      // meaning clips.
+      if (p.stage !== "vision" && p.stage !== "song" && p.total > total) total = p.total;
       if (p.stage === "done" || p.stage === "cache") {
         done += 1;
         if (p.stage === "cache") cached += 1;
@@ -2564,12 +2622,22 @@ function makeJobPanel(hostId, texts) {
         }
         vtext += " — " + String(p.name || "clip");
         lines.push(vtext);
+      } else if (p.stage === "song") {
+        var stext = "♪ listening to " + String(p.name || "song");
+        if (typeof p.index === "number" && typeof p.total === "number" && p.total > 0) {
+          stext += " (" + p.index + "/" + p.total + ")";
+        }
+        lines.push(stext);
+      } else if (p.stage === "kit") {
+        lines.push(String(p.name || "writing publish kit") + "…");
       }
     });
     var last = progress.length ? progress[progress.length - 1] : null;
     if (last && last.stage === "start") status.textContent = "Watching " + String(last.name || "clip") + "…";
     else if (last && last.stage === "music") status.textContent = "Listening to the song…";
     else if (last && last.stage === "vision") status.textContent = "Claude is watching your clips…";
+    else if (last && last.stage === "song") status.textContent = "Listening to your songs…";
+    else if (last && last.stage === "kit") status.textContent = "Writing the publish kit…";
     else if (cached > 0 && (total === 0 || done >= total)) status.textContent = "Using your previous scan — nothing to re-watch.";
     else status.textContent = texts.working;
     if (total > 0) {
@@ -2638,6 +2706,8 @@ function makeJobPanel(hostId, texts) {
 
 var scanPanel = makeJobPanel("cre-scan-panel", { starting: "Starting the scan…", working: "Scanning your clips…" });
 var buildPanel = makeJobPanel("cre-build-panel", { starting: "Starting the build…", working: "Building your cut…" });
+var rankPanel = makeJobPanel("cre-rank-panel", { starting: "Starting the ranking…", working: "Ranking your songs…" });
+var kitPanel = makeJobPanel("cre-kit-panel", { starting: "Starting the publish kit…", working: "Writing the publish kit…" });
 
 function setScanBusy(on) {
   var btn = $("cre-scan-btn");
@@ -2652,11 +2722,27 @@ function setBuildBusy(on) {
   btn.disabled = on;
   $("cre-back-3").disabled = on;
 }
+function setRankBusy(on) {
+  var btn = $("cre-rank-btn");
+  btn.classList.toggle("busy", on);
+  btn.disabled = on;
+  $("cre-music-dir").disabled = on;
+  $("cre-browse-musicdir").disabled = on;
+}
+function setKitBusy(on) {
+  var btn = $("cre-kit-btn");
+  btn.classList.toggle("busy", on);
+  btn.disabled = on;
+  $("cre-kit-dir").disabled = on;
+  $("cre-browse-kit").disabled = on;
+}
 
 /* called when the user leaves the Create view — poll loops must not outlive it */
 function creStopJobs() {
   if (scanPanel.running()) { scanPanel.stop(); setScanBusy(false); }
   if (buildPanel.running()) { buildPanel.stop(); setBuildBusy(false); }
+  if (rankPanel.running()) { rankPanel.stop(); setRankBusy(false); }
+  if (kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
 }
 
 function creNote(id, message, isError) {
@@ -2668,7 +2754,9 @@ function creNote(id, message, isError) {
 
 function creShowStep(n, focusHeading) {
   if (n !== 1 && scanPanel.running()) { scanPanel.stop(); setScanBusy(false); }
+  if (n !== 2 && rankPanel.running()) { rankPanel.stop(); setRankBusy(false); }
   if (n !== 3 && buildPanel.running()) { buildPanel.stop(); setBuildBusy(false); }
+  if (n !== 3 && kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
   cre.step = n;
   var names = { 1: "Your footage", 2: "Music & options", 3: "Your cut" };
   $("wiz-progress").textContent = "Step " + n + " of 3 — " + names[n];
@@ -2686,6 +2774,8 @@ function hideBrowseButtons() {
   pickAvailable = false;
   $("cre-browse-folder").hidden = true;
   $("cre-browse-music").hidden = true;
+  $("cre-browse-musicdir").hidden = true;
+  $("cre-browse-kit").hidden = true;
 }
 function browsePath(kind, inputId, btnId) {
   if (!pickAvailable) return;
@@ -2702,6 +2792,8 @@ function browsePath(kind, inputId, btnId) {
 }
 $("cre-browse-folder").addEventListener("click", function () { browsePath("folder", "cre-folder", "cre-browse-folder"); });
 $("cre-browse-music").addEventListener("click", function () { browsePath("music", "cre-music", "cre-browse-music"); });
+$("cre-browse-musicdir").addEventListener("click", function () { browsePath("folder", "cre-music-dir", "cre-browse-musicdir"); });
+$("cre-browse-kit").addEventListener("click", function () { browsePath("folder", "cre-kit-dir", "cre-browse-kit"); });
 
 /* ---- step 1: scan the footage folder ---- */
 
@@ -3079,6 +3171,87 @@ Object.keys(TRANSITION_IDS).forEach(function (key) {
   $(TRANSITION_IDS[key]).addEventListener("click", function () { setTransitions(key); });
 });
 
+/* ---- step 2: rank a folder of candidate songs (monteur.pick) ---- */
+
+function renderRanking(ranking) {
+  var host = $("cre-rank-results");
+  clear(host);
+  if (!ranking.length) {
+    creNote("cre-rank-msg", "No songs could be ranked — check the folder.");
+    return;
+  }
+  ranking.forEach(function (song) {
+    var card = el("div", "rank-card");
+    var top = el("div", "rank-top");
+    top.appendChild(el("span", "rank-score",
+      Math.round(Math.max(0, Math.min(1, song.score || 0)) * 100) + "/100"));
+    top.appendChild(el("span", "rank-name", String(song.name || baseName(song.path))));
+    card.appendChild(top);
+    var meta = [];
+    if (song.tempo) meta.push(Math.round(song.tempo) + " BPM");
+    if (song.duration) meta.push(fmtClock(song.duration) + " long");
+    if (meta.length) card.appendChild(el("p", "rank-meta", meta.join(" · ")));
+    var reasons = el("ul", "rank-reasons");
+    (song.reasons || []).forEach(function (reason) {
+      reasons.appendChild(el("li", null, String(reason)));
+    });
+    card.appendChild(reasons);
+    var use = el("button", "btn small", "Use this song");
+    use.type = "button";
+    use.addEventListener("click", function () {
+      $("cre-music").value = String(song.path || "");
+      $("cre-rank").open = false;
+      toast("Song set: " + String(song.name || baseName(song.path)) + ".", "success");
+      $("cre-music").focus();
+    });
+    card.appendChild(use);
+    host.appendChild(card);
+  });
+}
+
+function rankSongs() {
+  if (rankPanel.running()) return;
+  var folder = $("cre-folder").value.trim();
+  if (!folder) {
+    creNote("cre-rank-msg", "Add your footage folder in step 1 first — the ranking scores songs against your scanned clips.", true);
+    return;
+  }
+  var musicDir = $("cre-music-dir").value.trim();
+  if (!musicDir) {
+    creNote("cre-rank-msg", "Add the folder with your candidate songs first — Browse… or paste its path.", true);
+    $("cre-music-dir").focus();
+    return;
+  }
+  $("cre-rank-msg").hidden = true;
+  clear($("cre-rank-results"));
+  setRankBusy(true);
+  var body = { folder: folder, music_dir: musicDir };
+  if (cre.lenMode === "target" && targetLen()) body.max_duration = targetLen();
+  api("/api/create/pick", { method: "POST", body: body }).then(function (data) {
+    rankPanel.start(data.job, {
+      onDone: function (result) {
+        setRankBusy(false);
+        renderRanking((result && result.ranking) || []);
+      },
+      onCancelled: function () {
+        setRankBusy(false);
+        creNote("cre-rank-msg", "Ranking cancelled — rank again whenever you're ready.");
+      },
+      onError: function (message) {
+        setRankBusy(false);
+        creNote("cre-rank-msg", message, true);
+      }
+    });
+  }).catch(function (err) {
+    setRankBusy(false);
+    creNote("cre-rank-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+$("cre-rank-btn").addEventListener("click", rankSongs);
+$("cre-music-dir").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); rankSongs(); }
+});
+
 function creValidateStep2() {
   if (cre.audio !== "original" && !$("cre-music").value.trim()) {
     toast("Add the path to your song — or choose “Original sound only” to cut without music.");
@@ -3160,12 +3333,16 @@ function startBuild(andThen) {
   rememberFps(body.fps);
   $("cre-build-msg").hidden = true;
   $("cre-result").hidden = true;
+  // a new build makes any previous publish kit stale — stop and clear it
+  if (kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
+  $("cre-kit-msg").hidden = true;
+  $("cre-kit-result").hidden = true;
   setBuildBusy(true);
   api("/api/create/build", { method: "POST", body: body }).then(function (data) {
     buildPanel.start(data.job, {
       onDone: function (result) {
         setBuildBusy(false);
-        cre.result = { data: result, format: body.format };
+        cre.result = { data: result, format: body.format, body: body };
         renderCreResult(result);
         $("cre-result-title").focus();
         if (andThen) andThen(result);
@@ -3210,6 +3387,76 @@ $("cre-download").addEventListener("click", function () {
     downloadText(result.filename || ("monteur_montage." + cre.format), result.content || "");
     toast("Downloaded " + (result.filename || "timeline") + ".", "success");
   });
+});
+
+/* ---- step 3: publish kit (monteur.publish) ---- */
+
+function renderKitResult(result) {
+  var notes = $("cre-kit-notes");
+  clear(notes);
+  (result.notes || []).forEach(function (note) {
+    notes.appendChild(el("li", null, String(note)));
+  });
+  var strip = $("cre-kit-thumbs");
+  clear(strip);
+  (result.thumbs || []).forEach(function (thumb) {
+    if (!thumb || !thumb.data_b64) return;
+    var img = document.createElement("img");
+    // data: URL from server-supplied base64 — rendered as an image only,
+    // never parsed as markup; a bad payload simply fails to display.
+    img.src = "data:image/jpeg;base64," + String(thumb.data_b64);
+    img.alt = "Thumbnail candidate " + String(thumb.name || "");
+    img.title = String(thumb.name || "");
+    strip.appendChild(img);
+  });
+  $("cre-kit-md-pre").textContent = String(result.publish_md || "");
+  $("cre-kit-md").open = false;
+  $("cre-kit-result").hidden = false;
+}
+
+function writeKit() {
+  if (kitPanel.running()) return;
+  if (!cre.result || !cre.result.body) {
+    creNote("cre-kit-msg", "Build your cut first — the kit is drafted from the finished plan.", true);
+    return;
+  }
+  var kitDir = $("cre-kit-dir").value.trim();
+  if (!kitDir) {
+    creNote("cre-kit-msg", "Pick a folder for the publish kit first — Browse… or paste its path.", true);
+    $("cre-kit-dir").focus();
+    return;
+  }
+  // the SAME body the build used, plus where to write the kit
+  var body = {};
+  Object.keys(cre.result.body).forEach(function (key) { body[key] = cre.result.body[key]; });
+  body.kit_dir = kitDir;
+  $("cre-kit-msg").hidden = true;
+  $("cre-kit-result").hidden = true;
+  setKitBusy(true);
+  api("/api/create/kit", { method: "POST", body: body }).then(function (data) {
+    kitPanel.start(data.job, {
+      onDone: function (result) {
+        setKitBusy(false);
+        renderKitResult(result || {});
+        toast("Publish kit written to " + String((result && result.kit_dir) || kitDir) + ".", "success");
+      },
+      onCancelled: function () {
+        setKitBusy(false);
+        creNote("cre-kit-msg", "Publish kit cancelled — write it again whenever you're ready.");
+      },
+      onError: function (message) {
+        setKitBusy(false);
+        creNote("cre-kit-msg", message, true);
+      }
+    });
+  }).catch(function (err) {
+    setKitBusy(false);
+    creNote("cre-kit-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+$("cre-kit-btn").addEventListener("click", writeKit);
+$("cre-kit-dir").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); writeKit(); }
 });
 
 populateFpsSelect($("cre-fps"));

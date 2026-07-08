@@ -17,6 +17,9 @@ API (all JSON):
 * ``POST /api/resolve/analyze`` {"timeline"?, "save"?}          -> {"stats", "version"?}
 * ``POST /api/create/scan``   {"folder", "see"?}                -> {"job": id}
 * ``POST /api/create/build``  {"folder", "music"?, "see"?, ...} -> {"job": id}
+* ``POST /api/create/pick``   {"folder", "music_dir",
+  "max_duration"?}                                              -> {"job": id}
+* ``POST /api/create/kit``    {build payload + "kit_dir"}       -> {"job": id}
 * ``GET  /api/jobs/<id>``                                       -> the job dict
 * ``POST /api/jobs/<id>/cancel``                                -> {"ok": true}
 * ``POST /api/pick``          {"kind": "folder"|"music"|"file"} -> {"path"} | {"error"}
@@ -24,11 +27,19 @@ API (all JSON):
 Timeline content is passed as text (EDL/FCPXML are text formats); ``fps`` is
 required for EDL files.
 
-Scans and builds are cancellable BACKGROUND JOBS: the POST returns a job id
-immediately, a daemon thread does the slow sifting/planning, and the browser
-polls ``GET /api/jobs/<id>`` for live per-clip progress. A successful scan is
-cached (folder + per-file mtimes), so a build straight after a scan reuses the
-reports instead of sifting the same footage twice.
+Scans, builds, picks and kits are cancellable BACKGROUND JOBS: the POST
+returns a job id immediately, a daemon thread does the slow sifting/planning,
+and the browser polls ``GET /api/jobs/<id>`` for live per-clip progress. A
+successful scan is cached (folder + per-file mtimes), so a build/pick/kit
+straight after a scan reuses the reports instead of sifting the same footage
+twice.
+
+``/api/create/pick`` ranks every song in ``music_dir`` against the sifted
+footage (:mod:`monteur.pick`); per-song progress arrives as ``"song"``
+entries. ``/api/create/kit`` builds the same montage plan a build would
+(identical payload) and then writes a publish kit (:mod:`monteur.publish`)
+into ``kit_dir`` — publish.md plus thumbnail JPEGs, returned inline as
+base64 so the browser can show them.
 
 ``"see": true`` on scan/build asks Claude vision (:mod:`monteur.vision`) to
 label the good moments after the sift. Vision is an upgrade, not a gate: a
@@ -202,7 +213,7 @@ _PICK_LOCK = threading.Lock()
 def _new_job(kind: str) -> dict:
     job = {
         "id": secrets.token_hex(4),
-        "kind": kind,  # "scan" | "build"
+        "kind": kind,  # "scan" | "build" | "pick" | "kit"
         "state": "running",  # -> "done" | "error" | "cancelled"
         "progress": [],  # dicts: {"index","total","name","stage"[,"usable_ratio"]}
         "message": "",  # human-readable reason when state == "error"
@@ -358,75 +369,105 @@ def _run_scan_job(job: dict, folder: str, see: bool = False) -> None:
         job["state"] = "error"
 
 
-def _run_build_job(job: dict, payload: dict) -> None:
-    """Daemon-thread body for POST /api/create/build."""
+def _sift_or_cached(job: dict, folder: str) -> tuple[list, bool]:
+    """Reports for ``folder``: the scan cache when fresh, else a full sift.
+
+    Returns ``(reports, cached)``. A cache hit appends the usual
+    ``{"stage": "cache"}`` progress entry; a miss sifts with per-clip
+    progress and refreshes the cache — the one sift-or-reuse path every
+    job kind (build, pick, kit) shares.
+    """
     from monteur.media import MonteurMediaError
-    from monteur.montage import CHRONOLOGICAL, montage_to_timeline, plan_montage
-    from monteur.sift import SiftCancelled, sift_directory
-    from monteur.io import write_edl, write_fcpxml
+    from monteur.sift import sift_directory
+
+    reports = _cached_reports(folder)
+    if reports is not None:
+        # A cache hit after a see-scan already carries the annotations
+        # (vision annotates the cached report objects in place) — no
+        # second vision pass, no double spend.
+        with _JOBS_LOCK:
+            job["progress"].append(
+                {"stage": "cache", "name": "using previous scan"}
+            )
+        return reports, True
+    reports = sift_directory(
+        folder, progress=_job_progress(job), cancel=job["cancel"]
+    )
+    if not reports:
+        raise MonteurMediaError(f"no video files found in {folder}")
+    _remember_scan(folder, reports)
+    return reports, False
+
+
+def _plan_from_payload(job: dict, payload: dict):
+    """Shared plan construction for build and kit jobs.
+
+    Runs the whole sift-or-cache -> vision -> music -> plan_montage pipeline
+    on a build-shaped payload and returns ``(plan, reports, music, vision)``
+    where ``vision`` is ``{"ran": bool, "notes": list, "error": str}``.
+    Build and kit MUST stay on this one path so a kit always plans exactly
+    the montage the build would have produced.
+    """
+    from monteur.montage import CHRONOLOGICAL, plan_montage
+    from monteur.sift import SiftCancelled
 
     folder = payload.get("folder", "")
     music_path = payload.get("music") or ""
     see = bool(payload.get("see"))
-    vision_notes: list = []
-    vision_error = ""
-    vision_ran = False
-    try:
-        reports = _cached_reports(folder)
-        if reports is not None:
-            # A cache hit after a see-scan already carries the annotations
-            # (vision annotates the cached report objects in place) — no
-            # second vision pass, no double spend.
-            with _JOBS_LOCK:
-                job["progress"].append(
-                    {"stage": "cache", "name": "using previous scan"}
-                )
-        else:
-            reports = sift_directory(
-                folder, progress=_job_progress(job), cancel=job["cancel"]
+    vision = {"ran": False, "notes": [], "error": ""}
+
+    reports, cached = _sift_or_cached(job, folder)
+    if not cached and see:  # fresh sift: annotate before planning (soft-fail)
+        vision["ran"] = True
+        vision["notes"], vision["error"] = _apply_vision(job, reports)
+    if job["cancel"].is_set():
+        raise SiftCancelled("cancelled")
+
+    music = None
+    if music_path:
+        from monteur.music import analyze_music
+
+        with _JOBS_LOCK:
+            job["progress"].append(
+                {"stage": "music", "name": Path(music_path).name}
             )
-            if not reports:
-                raise MonteurMediaError(f"no video files found in {folder}")
-            _remember_scan(folder, reports)
-            if see:  # fresh sift: annotate before planning (soft-fail)
-                vision_ran = True
-                vision_notes, vision_error = _apply_vision(job, reports)
-        if job["cancel"].is_set():
-            raise SiftCancelled("build cancelled")
+        music = analyze_music(music_path)
+    if job["cancel"].is_set():
+        raise SiftCancelled("cancelled")
 
-        music = None
-        if music_path:
-            from monteur.music import analyze_music
+    # allow_repeats / cut_lead / audio are forwarded ONLY when the client
+    # sent them: a montage engine without those parameters then raises a
+    # loud TypeError (surfaced as a job error) instead of silently
+    # dropping the user's choice.
+    plan_kwargs: dict = {
+        "order": payload.get("order") or CHRONOLOGICAL,
+        "style": payload.get("style") or "auto",
+    }
+    max_duration = payload.get("max_duration")
+    plan_kwargs["max_duration"] = float(max_duration) if max_duration else None
+    if "allow_repeats" in payload:
+        plan_kwargs["allow_repeats"] = bool(payload["allow_repeats"])
+    if "cut_lead" in payload:
+        plan_kwargs["cut_lead"] = float(payload["cut_lead"])
+    if payload.get("pace"):
+        plan_kwargs["pace"] = float(payload["pace"])
+    if payload.get("transitions"):
+        plan_kwargs["transitions"] = payload["transitions"]
+    plan = plan_montage(reports, music, **plan_kwargs)
+    if not plan.entries:
+        raise ValueError("no usable material found — check the scan results")
+    return plan, reports, music, vision
 
-            with _JOBS_LOCK:
-                job["progress"].append(
-                    {"stage": "music", "name": Path(music_path).name}
-                )
-            music = analyze_music(music_path)
-        if job["cancel"].is_set():
-            raise SiftCancelled("build cancelled")
 
-        # allow_repeats / cut_lead / audio are forwarded ONLY when the client
-        # sent them: a montage engine without those parameters then raises a
-        # loud TypeError (surfaced as a job error) instead of silently
-        # dropping the user's choice.
-        plan_kwargs: dict = {
-            "order": payload.get("order") or CHRONOLOGICAL,
-            "style": payload.get("style") or "auto",
-        }
-        max_duration = payload.get("max_duration")
-        plan_kwargs["max_duration"] = float(max_duration) if max_duration else None
-        if "allow_repeats" in payload:
-            plan_kwargs["allow_repeats"] = bool(payload["allow_repeats"])
-        if "cut_lead" in payload:
-            plan_kwargs["cut_lead"] = float(payload["cut_lead"])
-        if payload.get("pace"):
-            plan_kwargs["pace"] = float(payload["pace"])
-        if payload.get("transitions"):
-            plan_kwargs["transitions"] = payload["transitions"]
-        plan = plan_montage(reports, music, **plan_kwargs)
-        if not plan.entries:
-            raise ValueError("no usable material found — check the scan results")
+def _run_build_job(job: dict, payload: dict) -> None:
+    """Daemon-thread body for POST /api/create/build."""
+    from monteur.media import MonteurMediaError
+    from monteur.montage import montage_to_timeline
+    from monteur.sift import SiftCancelled
+    from monteur.io import write_edl, write_fcpxml
+
+    try:
+        plan, reports, music, vision = _plan_from_payload(job, payload)
 
         fps = float(payload.get("fps") or 25)
         timeline_kwargs: dict = {}
@@ -450,10 +491,136 @@ def _run_build_job(job: dict, payload: dict) -> None:
                 "notes": plan.notes,
             },
         }
-        if vision_error:
-            result["vision_error"] = vision_error
-        elif vision_ran:
-            result["vision_notes"] = vision_notes
+        if vision["error"]:
+            result["vision_error"] = vision["error"]
+        elif vision["ran"]:
+            result["vision_notes"] = vision["notes"]
+        job["result"] = result
+        job["state"] = "done"
+    except SiftCancelled:
+        job["state"] = "cancelled"
+    except (MonteurMediaError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
+def _run_pick_job(job: dict, payload: dict) -> None:
+    """Daemon-thread body for POST /api/create/pick (rank candidate songs)."""
+    from monteur.media import MonteurMediaError
+    from monteur.pick import list_songs, rank_songs
+    from monteur.sift import SiftCancelled
+
+    folder = payload.get("folder", "")
+    music_dir = payload.get("music_dir", "")
+    try:
+        # Check the songs before the (slow) sift so a wrong path fails fast.
+        if not Path(music_dir).is_dir():
+            raise MonteurMediaError(
+                f"{music_dir} is not a folder — point Monteur at the folder "
+                "holding your candidate songs"
+            )
+        if not list_songs(music_dir):
+            raise MonteurMediaError(
+                f"no audio files found in {music_dir} — looking for "
+                ".mp3, .wav, .m4a, .aac, .flac or .ogg"
+            )
+        reports, _ = _sift_or_cached(job, folder)
+        if job["cancel"].is_set():
+            raise SiftCancelled("pick cancelled")
+
+        max_duration = payload.get("max_duration")
+        target = float(max_duration) if max_duration else None
+
+        def progress(index, total, name):
+            entry = {"stage": "song", "index": index, "total": total, "name": name}
+            with _JOBS_LOCK:
+                job["progress"].append(entry)
+
+        ratings = rank_songs(
+            reports, music_dir, target_duration=target, progress=progress
+        )
+        job["result"] = {
+            "ranking": [
+                {
+                    "path": r.path,
+                    "name": Path(r.path).name,
+                    "score": r.score,
+                    "tempo": r.tempo,
+                    "duration": r.duration,
+                    "parts": dict(r.parts),
+                    "reasons": list(r.reasons),
+                }
+                for r in ratings
+            ]
+        }
+        job["state"] = "done"
+    except SiftCancelled:
+        job["state"] = "cancelled"
+    except (MonteurMediaError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
+# The kit endpoint returns thumbnails inline; cap how many JPEGs get
+# base64-encoded into one job result (publish_kit's own default is also 6).
+_KIT_MAX_THUMBS = 6
+
+
+def _run_kit_job(job: dict, payload: dict) -> None:
+    """Daemon-thread body for POST /api/create/kit (plan + publish kit)."""
+    from monteur.media import MonteurMediaError
+    from monteur.sift import SiftCancelled
+
+    kit_dir = payload.get("kit_dir", "")
+    try:
+        # The exact plan path a build takes — see _plan_from_payload.
+        plan, reports, _music, vision = _plan_from_payload(job, payload)
+
+        with _JOBS_LOCK:
+            job["progress"].append({"stage": "kit", "name": "writing publish kit"})
+        from monteur.publish import publish_kit
+
+        try:
+            notes = publish_kit(plan, reports, kit_dir, brief="")
+        except Exception as exc:  # noqa: BLE001 — surfaced as a clear job error
+            raise ValueError(f"could not write the publish kit: {exc}")
+
+        kit_path = Path(kit_dir)
+        publish_md = kit_path / "publish.md"
+        thumbs = []
+        thumb_dir = kit_path / "thumbs"
+        if thumb_dir.is_dir():
+            import base64
+
+            for thumb in sorted(thumb_dir.glob("*.jpg"))[:_KIT_MAX_THUMBS]:
+                try:
+                    data = thumb.read_bytes()
+                except OSError:
+                    continue  # a vanished thumbnail loses its preview, not the kit
+                thumbs.append(
+                    {
+                        "name": thumb.name,
+                        "data_b64": base64.b64encode(data).decode("ascii"),
+                    }
+                )
+        result = {
+            "kit_dir": str(kit_path.resolve()),
+            "notes": list(notes),
+            "publish_md": (
+                publish_md.read_text(encoding="utf-8") if publish_md.exists() else ""
+            ),
+            "thumbs": thumbs,
+        }
+        if vision["error"]:
+            result["vision_error"] = vision["error"]
+        elif vision["ran"]:
+            result["vision_notes"] = vision["notes"]
         job["result"] = result
         job["state"] = "done"
     except SiftCancelled:
@@ -586,6 +753,8 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/assembly/export"): self._assembly_export,
             ("POST", "/api/create/scan"): self._create_scan,
             ("POST", "/api/create/build"): self._create_build,
+            ("POST", "/api/create/pick"): self._create_pick,
+            ("POST", "/api/create/kit"): self._create_kit,
             ("POST", "/api/pick"): self._pick,
         }
         if (method, path) in routes:
@@ -805,6 +974,36 @@ class MonteurHandler(BaseHTTPRequestHandler):
             target=_run_build_job,
             args=(job, payload),
             name=f"monteur-build-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _create_pick(self) -> None:
+        payload = self._read_json()
+        if not payload.get("folder"):
+            raise ApiError(400, "missing 'folder' (path to your footage)")
+        if not payload.get("music_dir"):
+            raise ApiError(400, "missing 'music_dir' (folder with candidate songs)")
+        job = _new_job("pick")
+        threading.Thread(
+            target=_run_pick_job,
+            args=(job, payload),
+            name=f"monteur-pick-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _create_kit(self) -> None:
+        payload = self._read_json()
+        if not payload.get("folder"):
+            raise ApiError(400, "missing 'folder' (path to your footage)")
+        if not payload.get("kit_dir"):
+            raise ApiError(400, "missing 'kit_dir' (folder to write the publish kit into)")
+        job = _new_job("kit")
+        threading.Thread(
+            target=_run_kit_job,
+            args=(job, payload),
+            name=f"monteur-kit-{job['id']}",
             daemon=True,
         ).start()
         self._send_json({"job": job["id"]})

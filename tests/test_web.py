@@ -482,6 +482,190 @@ class TestVisionApi:
         assert result["content"].startswith("TITLE:")
 
 
+class TestPickJobApi:
+    """POST /api/create/pick — rank a folder of candidate songs."""
+
+    DEMO = TestCreateApi.DEMO
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+        _clear_scan_cache()  # each test decides for itself whether a scan is cached
+
+    @pytest.fixture()
+    def music_dir(self, tmp_path):
+        import shutil
+
+        songs = tmp_path / "songs"
+        songs.mkdir()
+        shutil.copy(Path(self.DEMO) / "song.wav", songs / "candidate.wav")
+        return songs
+
+    def _pick(self, server, music_dir, **extra):
+        data = _post(
+            f"{server}/api/create/pick",
+            {"folder": self.DEMO, "music_dir": str(music_dir), **extra},
+        )
+        assert isinstance(data["job"], str) and data["job"]
+        return _wait_for_job(server, data["job"])
+
+    def test_pick_job_end_to_end(self, server, music_dir):
+        job = self._pick(server, music_dir)
+        assert job["state"] == "done"
+        assert job["kind"] == "pick"
+
+        ranking = job["result"]["ranking"]
+        assert ranking
+        top = ranking[0]
+        assert top["name"] == "candidate.wav"
+        assert top["path"].endswith("candidate.wav")
+        assert 0.0 < top["score"] <= 1.0
+        assert top["duration"] > 0
+        assert top["parts"] and all(0.0 <= v <= 1.0 for v in top["parts"].values())
+        assert top["reasons"]
+
+        # Fresh sift: the usual per-clip entries, then one "song" entry per song.
+        stages = [p["stage"] for p in job["progress"]]
+        assert stages.count("start") == 4
+        assert stages.count("done") == 4
+        song_entries = [p for p in job["progress"] if p["stage"] == "song"]
+        assert [p["name"] for p in song_entries] == ["candidate.wav"]
+        assert song_entries[0]["index"] == 1 and song_entries[0]["total"] == 1
+
+    def test_second_pick_reuses_scan_cache(self, server, music_dir):
+        first = self._pick(server, music_dir)
+        assert first["state"] == "done"
+
+        job = self._pick(server, music_dir)
+        assert job["state"] == "done"
+        # The second pick must NOT sift again: cached reports are reused.
+        assert {"stage": "cache", "name": "using previous scan"} in job["progress"]
+        assert not any(p["stage"] in ("start", "done") for p in job["progress"])
+        assert any(p["stage"] == "song" for p in job["progress"])
+        assert job["result"]["ranking"]
+
+    def test_pick_forwards_max_duration(self, server, music_dir):
+        job = self._pick(server, music_dir, max_duration=1)
+        assert job["state"] == "done"
+        top = job["result"]["ranking"][0]
+        assert any("covers the 1s target" in r for r in top["reasons"])
+
+    def test_pick_missing_folder_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/pick", {"music_dir": "/somewhere"})
+        assert exc_info.value.code == 400
+
+    def test_pick_missing_music_dir_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/pick", {"folder": self.DEMO})
+        assert exc_info.value.code == 400
+        assert "music_dir" in json.loads(exc_info.value.read())["error"]
+
+    def test_pick_nonexistent_music_dir_is_error_job(self, server):
+        data = _post(
+            f"{server}/api/create/pick",
+            {"folder": self.DEMO, "music_dir": "/no/such/songs"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "is not a folder" in job["message"]
+        assert job["result"] is None
+
+    def test_pick_empty_music_dir_is_error_job(self, server, tmp_path):
+        (tmp_path / "notes.txt").write_text("not audio")
+        data = _post(
+            f"{server}/api/create/pick",
+            {"folder": self.DEMO, "music_dir": str(tmp_path)},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "no audio files" in job["message"]
+
+
+class TestKitApi:
+    """POST /api/create/kit — build's plan path + a publish kit on disk."""
+
+    DEMO = TestCreateApi.DEMO
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+        _clear_scan_cache()
+
+    def test_kit_job_end_to_end(self, server, tmp_path):
+        kit_dir = tmp_path / "publish"
+        data = _post(
+            f"{server}/api/create/kit",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "style": "travel", "fps": 25, "kit_dir": str(kit_dir)},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert job["kind"] == "kit"
+        assert {"stage": "kit", "name": "writing publish kit"} in job["progress"]
+
+        result = job["result"]
+        assert result["kit_dir"] == str(kit_dir.resolve())
+        assert result["notes"]
+        assert any("publish kit" in n for n in result["notes"])
+
+        # publish.md exists on disk AND is returned inline.
+        on_disk = (kit_dir / "publish.md").read_text(encoding="utf-8")
+        assert on_disk.startswith("# Publish kit")
+        assert result["publish_md"] == on_disk
+
+        # The demo clips are real media — thumbnails come back as base64 JPEGs.
+        import base64
+
+        assert result["thumbs"]
+        assert len(result["thumbs"]) <= 6
+        for thumb in result["thumbs"]:
+            assert thumb["name"].endswith(".jpg")
+            payload = base64.b64decode(thumb["data_b64"])
+            assert payload[:2] == b"\xff\xd8"  # JPEG SOI
+            assert (kit_dir / "thumbs" / thumb["name"]).is_file()
+
+    def test_kit_reuses_scan_cache(self, server, tmp_path):
+        scan = _post(f"{server}/api/create/scan", {"folder": self.DEMO})
+        assert _wait_for_job(server, scan["job"])["state"] == "done"
+
+        data = _post(
+            f"{server}/api/create/kit",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "kit_dir": str(tmp_path / "kit")},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert {"stage": "cache", "name": "using previous scan"} in job["progress"]
+        assert not any(p["stage"] in ("start", "done") for p in job["progress"])
+
+    def test_kit_missing_kit_dir_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/create/kit",
+                {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav"},
+            )
+        assert exc_info.value.code == 400
+        assert "kit_dir" in json.loads(exc_info.value.read())["error"]
+
+    def test_kit_missing_folder_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/kit", {"kit_dir": "/tmp/kit"})
+        assert exc_info.value.code == 400
+
+    def test_kit_unknown_style_is_error_job(self, server, tmp_path):
+        data = _post(
+            f"{server}/api/create/kit",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "style": "vaporwave", "kit_dir": str(tmp_path / "kit")},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "valid styles" in job["message"]
+
+
 class TestPickApi:
     @pytest.mark.skipif(
         bool(os.environ.get("DISPLAY")),
