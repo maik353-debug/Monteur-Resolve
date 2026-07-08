@@ -176,6 +176,55 @@ def cmd_resolve(args: argparse.Namespace) -> None:
         _fail(str(exc))
 
 
+def cmd_sift(args: argparse.Namespace) -> None:
+    from fable.media import FableMediaError
+    from fable.sift import sift_directory
+
+    try:
+        reports = sift_directory(args.folder)
+    except FableMediaError as exc:
+        _fail(str(exc))
+    if not reports:
+        _fail(f"no video files found in {args.folder}")
+    for report in reports:
+        name = Path(report.path).name
+        print(f"{name}: {report.usable_ratio * 100:.0f}% usable, "
+              f"{len(report.moments)} good moments")
+        for note in report.notes:
+            print(f"  {note}")
+
+
+def cmd_create(args: argparse.Namespace) -> None:
+    from fable import io
+    from fable.media import FableMediaError
+    from fable.montage import montage_to_timeline, plan_montage
+    from fable.music import analyze_music
+    from fable.sift import sift_directory
+
+    try:
+        print("Scanning footage ...")
+        reports = sift_directory(args.folder)
+        print(f"  {len(reports)} clips, "
+              f"{sum(len(r.moments) for r in reports)} good moments found")
+        print("Analyzing music ...")
+        music = analyze_music(args.music)
+        print(f"  {music.tempo:.0f} BPM, {len(music.beats)} beats, "
+              f"{music.duration:.0f}s")
+    except FableMediaError as exc:
+        _fail(str(exc))
+    plan = plan_montage(
+        reports, music, order=args.order, max_duration=args.max_duration
+    )
+    if not plan.entries:
+        _fail("no usable material found — run 'fable sift' to see why")
+    timeline = montage_to_timeline(plan, fps=args.fps)
+    io.save_timeline(timeline, args.output)
+    print(f"\n{len(plan.entries)} cuts -> {args.output} "
+          f"({plan.duration:.1f}s at {args.fps:g} fps)")
+    for note in plan.notes:
+        print(f"  {note}")
+
+
 def cmd_transcribe(args: argparse.Namespace) -> None:
     import json as json_module
     from dataclasses import asdict
@@ -322,6 +371,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action", choices=["status", "import", "analyze"])
     p.add_argument("file", nargs="?", help="file for 'import'")
     p.set_defaults(func=cmd_resolve)
+
+    p = sub.add_parser("create", help="automatic first cut: footage folder + song")
+    p.add_argument("folder", help="directory with your video clips")
+    p.add_argument("music", help="song file (mp3/wav/m4a/...)")
+    p.add_argument("-o", "--output", required=True, help="output .fcpxml/.edl")
+    p.add_argument("--fps", type=float, default=25.0)
+    p.add_argument("--order", choices=["chronological", "best_first"], default="chronological")
+    p.add_argument("--max-duration", type=float, default=None, help="cap the cut length (seconds)")
+    p.set_defaults(func=cmd_create)
+
+    p = sub.add_parser("sift", help="scan footage: what's usable, what's not")
+    p.add_argument("folder", help="directory with your video clips")
+    p.set_defaults(func=cmd_sift)
 
     p = sub.add_parser("transcribe", help="transcribe media files (whisper)")
     p.add_argument("path", help="media file or directory")

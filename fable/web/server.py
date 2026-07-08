@@ -118,6 +118,8 @@ class FableHandler(BaseHTTPRequestHandler):
             ("POST", "/api/resolve/analyze"): self._resolve_analyze,
             ("POST", "/api/assembly/plan"): self._assembly_plan,
             ("POST", "/api/assembly/export"): self._assembly_export,
+            ("POST", "/api/create/scan"): self._create_scan,
+            ("POST", "/api/create/build"): self._create_build,
         }
         if (method, path) in routes:
             return routes[(method, path)]
@@ -300,6 +302,68 @@ class FableHandler(BaseHTTPRequestHandler):
         else:
             raise ApiError(400, f"unknown format {fmt!r} (use 'edl' or 'fcpxml')")
         self._send_json({"filename": filename, "content": content})
+
+    def _create_scan(self) -> None:
+        from fable.media import FableMediaError
+        from fable.sift import sift_directory
+
+        payload = self._read_json()
+        folder = payload.get("folder", "")
+        if not folder:
+            raise ApiError(400, "missing 'folder' (path to your footage)")
+        try:
+            reports = sift_directory(folder)
+        except FableMediaError as exc:
+            raise ApiError(422, str(exc))
+        if not reports:
+            raise ApiError(422, f"no video files found in {folder}")
+        self._send_json({"clips": [asdict(r) for r in reports]})
+
+    def _create_build(self) -> None:
+        from fable.media import FableMediaError
+        from fable.montage import CHRONOLOGICAL, montage_to_timeline, plan_montage
+        from fable.music import analyze_music
+        from fable.sift import sift_directory
+        from fable.io import write_edl, write_fcpxml
+
+        payload = self._read_json()
+        folder = payload.get("folder", "")
+        music_path = payload.get("music", "")
+        if not folder or not music_path:
+            raise ApiError(400, "need 'folder' (footage) and 'music' (song file)")
+        try:
+            reports = sift_directory(folder)
+            music = analyze_music(music_path)
+        except FableMediaError as exc:
+            raise ApiError(422, str(exc))
+        max_duration = payload.get("max_duration")
+        plan = plan_montage(
+            reports,
+            music,
+            order=payload.get("order") or CHRONOLOGICAL,
+            max_duration=float(max_duration) if max_duration else None,
+        )
+        if not plan.entries:
+            raise ApiError(422, "no usable material found — check the scan results")
+        fps = float(payload.get("fps") or 25)
+        timeline = montage_to_timeline(plan, fps=fps)
+        fmt = (payload.get("format") or "fcpxml").lower()
+        if fmt == "edl":
+            content, filename = write_edl(timeline), "fable_montage.edl"
+        else:
+            content, filename = write_fcpxml(timeline), "fable_montage.fcpxml"
+        self._send_json(
+            {
+                "filename": filename,
+                "content": content,
+                "plan": {
+                    "duration": plan.duration,
+                    "cuts": len(plan.entries),
+                    "tempo": music.tempo,
+                    "notes": plan.notes,
+                },
+            }
+        )
 
     def _resolve_status(self) -> None:
         from fable.resolve import FableResolveError, connect
