@@ -1126,3 +1126,40 @@ def test_all_default_vision_fields_change_nothing():
         ]
         assert plain.notes == annotated.notes
         assert not any("semantic casting" in n for n in plain.notes)
+
+
+# --- energy-motion matching -----------------------------------------------------
+
+
+def _loud_music(duration=1.0):
+    """A single all-out section (energy 1.0): every slot is a peak slot."""
+    return MusicAnalysis(
+        path="/music/loud.wav",
+        duration=duration,
+        tempo=120.0,
+        beats=[i * 0.5 for i in range(int(duration * 2))],
+        sections=[MusicSection(0.0, duration, 1.0, "high")],
+    )
+
+
+def test_energy_matching_moving_shot_wins_the_peak_slot():
+    static = ClipReport(
+        path="/f/static.mp4", duration=5.0, moments=[Moment(0.0, 0.5, 0.9)]
+    )
+    moving = ClipReport(
+        path="/f/moving.mp4", duration=5.0,
+        moments=[Moment(0.0, 0.5, 0.8, entry_motion=(10.0, 0.0), exit_motion=(10.0, 0.0))],
+    )
+    plan = plan_montage([static, moving], _loud_music(), max_duration=1.0, cut_lead=0.0)
+    # pool order is (static, moving); the full-energy slot flips to the
+    # moving shot one position later
+    assert plan.entries[0].clip_path == "/f/moving.mp4"
+    assert plan.entries[1].clip_path == "/f/static.mp4"
+
+
+def test_energy_matching_neutral_when_all_static():
+    a = ClipReport(path="/f/a.mp4", duration=5.0, moments=[Moment(0.0, 0.5, 0.9)])
+    b = ClipReport(path="/f/b.mp4", duration=5.0, moments=[Moment(0.0, 0.5, 0.8)])
+    plan = plan_montage([a, b], _loud_music(), max_duration=1.0, cut_lead=0.0)
+    # no motion data anywhere: pool order is preserved exactly as before
+    assert [e.clip_path for e in plan.entries] == ["/f/a.mp4", "/f/b.mp4"]

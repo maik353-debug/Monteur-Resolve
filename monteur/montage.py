@@ -75,6 +75,15 @@ exit motion and the candidate's entry motion (neutral 0 unless both
 vectors exceed 0.5 px). With neutral motion the earliest candidate always
 wins, so behavior without motion data is unchanged.
 
+Energy-motion matching adds ``_ENERGY_MATCH_WEIGHT x (1 - |slot_energy -
+candidate_motion|)`` to the same blend: slot energy comes from the song's
+sections ("auto") or the arc phase's nominal energy (:data:`_PHASE_ENERGY`),
+candidate motion is the moment's mean entry/exit motion magnitude
+normalised to the pool's fastest moment. Loud passages meet moving
+footage, calm passages calm footage; the full weight only tips the scale
+at the energy extremes (a climax slot picks the moving shot over a static
+one a single order position earlier), everywhere else it just leans.
+
 Semantic casting
 ----------------
 :mod:`monteur.vision` can annotate moments with what is IN the picture: a
@@ -223,6 +232,12 @@ _MOTION_MIN_MAGNITUDE = 0.5
 # A candidate whose role fits the slot (its arc phase, or the montage's
 # first/last slot) gains this much: flips ONE order position, never two —
 # a mild preference, not a filter.
+# Energy-motion matching: a slot's music energy should meet footage with
+# matching motion — loud passages get moving shots, calm passages calm ones.
+# Sized like _ROLE_WEIGHT: enough to flip ONE order position, never two.
+_ENERGY_MATCH_WEIGHT = 0.2
+# Nominal music energy per arc phase (arc styles have no section data).
+_PHASE_ENERGY = {"opening": 0.35, "build": 0.65, "climax": 1.0, "outro": 0.3}
 _ROLE_WEIGHT = 0.2
 # Hero bonus: this x moment.hero on drop-reserved and climax-phase slots.
 # A full hero (1.0) outweighs the motion term plus one order step, so the
@@ -919,6 +934,7 @@ def _fill(
     highlight_phase: str | None = None,
     drop_slots: set[int] | frozenset[int] = frozenset(),
     semantic: bool = False,
+    slot_energies: list[float] | None = None,
 ) -> tuple[list[MontageEntry], list[str]]:
     """Assign pool moments to slots.
 
@@ -938,6 +954,14 @@ def _fill(
       :func:`_motion_continuity`). With neutral motion the earliest
       candidate always wins, so behavior without motion data is unchanged.
 
+    ``slot_energies`` (one value 0..1 per slot, from the song's sections or
+    the arc's nominal phase energy) adds an energy-motion matching term to
+    the blend: ``_ENERGY_MATCH_WEIGHT x (1 - |slot_energy - motion|)`` where
+    motion is the candidate's mean entry/exit motion magnitude normalised to
+    the pool's fastest moment. Loud passages meet moving footage, calm
+    passages calm footage. With an all-static pool the term is equal for
+    every candidate, so behavior without motion data is unchanged.
+
     Reuse (pool exhausted) is unchanged — cyclic scan for unconsumed tails,
     then rewind — except a drop slot still grabs the best remaining material.
 
@@ -953,6 +977,17 @@ def _fill(
     entries: list[MontageEntry] = []
     notes: list[str] = []
     n = len(pool)
+    # Energy-motion matching: candidate motion magnitudes normalised to the
+    # pool's fastest moment (empty = all static = term disabled).
+    motion_norm: list[float] = []
+    if slot_energies is not None:
+        mags = [
+            (math.hypot(*it.moment.entry_motion) + math.hypot(*it.moment.exit_motion)) / 2.0
+            for it in pool
+        ]
+        peak = max(mags, default=0.0)
+        if peak > _EPS:
+            motion_norm = [m / peak for m in mags]
     rewound = False
     unused = list(range(n))  # pool indices not yet placed, in pool order
     reserved: dict[int, int] = {}  # slot index -> pool index held for a drop
@@ -1019,12 +1054,17 @@ def _fill(
                         sem_penalty[idx] = _GROUP_PENALTY
 
             def _blend(pos: int, idx: int) -> float:
-                return (
+                score = (
                     _ORDER_WEIGHT * (1.0 - pos / _CANDIDATE_WINDOW)
                     + _MOTION_WEIGHT
                     * _motion_continuity(prev_exit, pool[idx].moment.entry_motion)
                     + sem_bonus.get(idx, 0.0)
                 )
+                if motion_norm and slot_energies is not None:
+                    score += _ENERGY_MATCH_WEIGHT * (
+                        1.0 - abs(slot_energies[slot_idx] - motion_norm[idx])
+                    )
+                return score
 
             best = max(
                 enumerate(window),
@@ -1331,8 +1371,19 @@ def plan_montage(
     # Semantic casting kicks in only when the vision pass annotated at least
     # one pool moment (labels alone still ride along, but change nothing).
     semantic = any(it.role or it.hero > _EPS or it.group for it in pool)
+    # Energy-motion matching: what the music does in each slot, 0..1. Arc
+    # styles use the phase's nominal energy; the arc-less "auto" style reads
+    # the song's sections (no-music auto plans have neither and skip it).
+    slot_energies: list[float] | None = None
+    if phases:
+        slot_energies = [
+            _PHASE_ENERGY.get(_phase_label_at(phases, s) or "", 0.5) for s, _ in slots
+        ]
+    elif music is not None and grid_music.sections:
+        slot_energies = [_energy_at(grid_music.sections, s) for s, _ in slots]
     entries, fill_notes = _fill(
-        slots, slot_order, pool, phases, highlight_phase, drop_slots, semantic=semantic
+        slots, slot_order, pool, phases, highlight_phase, drop_slots,
+        semantic=semantic, slot_energies=slot_energies,
     )
     entries.sort(key=lambda e: e.record_start)
     plan.entries = entries
