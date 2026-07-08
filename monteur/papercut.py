@@ -1,11 +1,11 @@
-"""Paper editing for Fable: cut your film in a text editor.
+"""Paper editing for Monteur: cut your film in a text editor.
 
 A *papercut* is the oldest editing trick in the book, reborn as markdown.
 You transcribe your footage, print the transcript as a checklist, and edit
 with a pen: tick the takes you like, cross out the rest, shuffle the pages
 into story order. This module does exactly that with plain text files:
 
-1. ``create_papercut`` turns a :class:`~fable.model.Transcript` into a
+1. ``create_papercut`` turns a :class:`~monteur.model.Transcript` into a
    markdown checklist. Every utterance becomes one line with its source
    timecode and text::
 
@@ -18,7 +18,7 @@ into story order. This module does exactly that with plain text files:
 
 3. ``parse_papercut`` reads the edited file back, and
    ``papercut_to_timeline`` turns the ticked lines -- in the order they
-   appear in the file -- into a real :class:`~fable.model.Timeline` with
+   appear in the file -- into a real :class:`~monteur.model.Timeline` with
    matching video and audio clips, ready for EDL/FCPXML export into your
    NLE.
 

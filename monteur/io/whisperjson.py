@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 
-from fable.model import Transcript, TranscriptSegment
+from monteur.model import Transcript, TranscriptSegment
 
 
 def read_whisper_json(text: str, source_name: str = "") -> Transcript:

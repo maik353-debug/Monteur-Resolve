@@ -20,7 +20,7 @@ from __future__ import annotations
 import statistics
 from dataclasses import dataclass, field, replace
 
-from fable.model import Timeline, frames_to_seconds
+from monteur.model import Timeline, frames_to_seconds
 
 _HISTOGRAM_BUCKETS: list[tuple[str, float, float]] = [
     ("0–1s", 0.0, 1.0),

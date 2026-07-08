@@ -1,8 +1,8 @@
 import pytest
 
-from fable.analysis import analyze_scenes, analyze_timeline
-from fable.model import Clip, Marker, Timeline
-from fable.references import PROFILES, compare_to_reference
+from monteur.analysis import analyze_scenes, analyze_timeline
+from monteur.model import Clip, Marker, Timeline
+from monteur.references import PROFILES, compare_to_reference
 
 
 def _timeline_with_markers():

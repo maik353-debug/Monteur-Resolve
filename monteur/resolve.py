@@ -1,13 +1,13 @@
-"""DaVinci Resolve integration for Fable.
+"""DaVinci Resolve integration for Monteur.
 
-Fable talks to Resolve through Blackmagic's scripting API. First enable
+Monteur talks to Resolve through Blackmagic's scripting API. First enable
 scripting in Resolve: Preferences > System > General > "External scripting
 using" and set it to "Local" (or "Network" for remote control). Then run
-Fable one of three ways:
+Monteur one of three ways:
 
-1. Resolve Console (Workspace > Console, select Py3): ``import fable.resolve``
+1. Resolve Console (Workspace > Console, select Py3): ``import monteur.resolve``
    works directly because Resolve preloads its scripting module; call
-   ``fable.resolve.connect()``.
+   ``monteur.resolve.connect()``.
 
 2. Workspace > Scripts: drop a script into the Resolve scripts folder
    (e.g. macOS ``~/Library/Application Support/Blackmagic Design/DaVinci
@@ -28,7 +28,7 @@ Fable one of three ways:
 
 Typical use::
 
-    from fable.resolve import connect
+    from monteur.resolve import connect
 
     bridge = connect()
     timeline = bridge.read_timeline()
@@ -42,7 +42,7 @@ import sys
 from types import ModuleType
 from typing import Any
 
-from fable.model import AUDIO, VIDEO, Clip, Marker, Timeline
+from monteur.model import AUDIO, VIDEO, Clip, Marker, Timeline
 
 _MODULE_NAME = "DaVinciResolveScript"
 
@@ -53,7 +53,7 @@ _ENABLE_HINT = (
 )
 
 
-class FableResolveError(RuntimeError):
+class MonteurResolveError(RuntimeError):
     """Raised when the Resolve scripting API is unavailable or misbehaves."""
 
 
@@ -95,7 +95,7 @@ def find_scripting_module() -> ModuleType:
 
     Tries PYTHONPATH / already-importable locations first, then
     RESOLVE_SCRIPT_API / RESOLVE_SCRIPT_LIB, then the standard per-platform
-    install paths. Raises FableResolveError with setup guidance if missing.
+    install paths. Raises MonteurResolveError with setup guidance if missing.
     """
     try:
         return importlib.import_module(_MODULE_NAME)
@@ -111,11 +111,11 @@ def find_scripting_module() -> ModuleType:
             return importlib.import_module(_MODULE_NAME)
         except ImportError:
             continue
-    raise FableResolveError(
+    raise MonteurResolveError(
         f"Could not locate the {_MODULE_NAME} module. Searched: "
         + ", ".join(searched)
         + ". Install DaVinci Resolve (free from blackmagicdesign.com), then "
-        "point Fable at its scripting API by setting RESOLVE_SCRIPT_API to "
+        "point Monteur at its scripting API by setting RESOLVE_SCRIPT_API to "
         "the Developer/Scripting folder (and RESOLVE_SCRIPT_LIB to "
         "fusionscript.so/.dll), or add the Scripting/Modules folder to "
         "PYTHONPATH. " + _ENABLE_HINT
@@ -132,7 +132,7 @@ def connect(app: Any | None = None) -> "ResolveBridge":
         module = find_scripting_module()
         app = module.scriptapp("Resolve")
     if app is None:
-        raise FableResolveError(
+        raise MonteurResolveError(
             "DaVinciResolveScript.scriptapp('Resolve') returned nothing — "
             "Resolve does not appear to be running. " + _ENABLE_HINT
         )
@@ -144,7 +144,7 @@ class ResolveBridge:
 
     def __init__(self, app: Any) -> None:
         if app is None:
-            raise FableResolveError(
+            raise MonteurResolveError(
                 "ResolveBridge requires a Resolve app object. " + _ENABLE_HINT
             )
         self.app = app
@@ -152,12 +152,12 @@ class ResolveBridge:
     def _project(self) -> Any:
         manager = self.app.GetProjectManager()
         if manager is None:
-            raise FableResolveError(
+            raise MonteurResolveError(
                 "Resolve returned no project manager. " + _ENABLE_HINT
             )
         project = manager.GetCurrentProject()
         if project is None:
-            raise FableResolveError(
+            raise MonteurResolveError(
                 "No project is open in Resolve — open or create a project "
                 "in the Project Manager first."
             )
@@ -166,7 +166,7 @@ class ResolveBridge:
     def _media_pool(self) -> Any:
         pool = self._project().GetMediaPool()
         if pool is None:
-            raise FableResolveError(
+            raise MonteurResolveError(
                 f"Project {self.project_name()!r} returned no media pool."
             )
         return pool
@@ -189,7 +189,7 @@ class ResolveBridge:
     def _current_timeline(self) -> Any:
         timeline = self._project().GetCurrentTimeline()
         if timeline is None:
-            raise FableResolveError(
+            raise MonteurResolveError(
                 f"Project {self.project_name()!r} has no current timeline — "
                 "open a timeline in the Edit page first."
             )
@@ -201,7 +201,7 @@ class ResolveBridge:
             timeline = project.GetTimelineByIndex(index)
             if timeline is not None and timeline.GetName() == name:
                 return timeline
-        raise FableResolveError(
+        raise MonteurResolveError(
             f"Timeline {name!r} not found in project {self.project_name()!r}. "
             f"Available timelines: {self.list_timelines()}"
         )
@@ -237,7 +237,7 @@ class ResolveBridge:
         pool = self._media_pool()
         timeline = pool.ImportTimelineFromFile(path)
         if timeline is None:
-            raise FableResolveError(
+            raise MonteurResolveError(
                 f"Resolve failed to import a timeline from {path!r} into "
                 f"project {self.project_name()!r} — check that the file is a "
                 "valid EDL/FCPXML/AAF and its media is available."
@@ -248,7 +248,7 @@ class ResolveBridge:
         pool = self._media_pool()
         items = pool.ImportMedia(paths)
         if items is None:
-            raise FableResolveError(
+            raise MonteurResolveError(
                 f"Resolve failed to import media into project "
                 f"{self.project_name()!r}: {paths}"
             )
@@ -260,7 +260,7 @@ def _parse_fps(raw_timeline: Any) -> float:
     try:
         return float(setting)
     except (TypeError, ValueError):
-        raise FableResolveError(
+        raise MonteurResolveError(
             f"Timeline {raw_timeline.GetName()!r} reported an unreadable "
             f"frame rate setting: {setting!r}"
         ) from None

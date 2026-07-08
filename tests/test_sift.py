@@ -1,4 +1,4 @@
-"""Tests for fable.sift — synthetic metrics for the heuristics, plus one
+"""Tests for monteur.sift — synthetic metrics for the heuristics, plus one
 ffmpeg-backed integration test."""
 
 from __future__ import annotations
@@ -7,8 +7,8 @@ import subprocess
 
 import pytest
 
-from fable.media import FrameMetric
-from fable.sift import (
+from monteur.media import FrameMetric
+from monteur.sift import (
     BLURRY,
     DARK,
     SHAKY,

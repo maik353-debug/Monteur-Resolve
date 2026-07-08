@@ -1,8 +1,8 @@
-"""Fable Studio — local web UI server.
+"""Monteur Studio — local web UI server.
 
 A zero-dependency local server (stdlib only): serves the single-page app in
-``app.html`` and a small JSON API on top of Fable's analysis engine. Started
-via ``fable ui``. Binds to 127.0.0.1 — this is a local tool, not a network
+``app.html`` and a small JSON API on top of Monteur's analysis engine. Started
+via ``monteur ui``. Binds to 127.0.0.1 — this is a local tool, not a network
 service.
 
 API (all JSON):
@@ -30,9 +30,9 @@ from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from fable import __version__
-from fable.analysis import analyze_timeline, compare
-from fable.project import Project
+from monteur import __version__
+from monteur.analysis import analyze_timeline, compare
+from monteur.project import Project
 
 _APP_HTML = Path(__file__).with_name("app.html")
 
@@ -45,7 +45,7 @@ class ApiError(Exception):
 
 
 def _analyze_payload(payload: dict):
-    from fable.io import edl, fcpxml
+    from monteur.io import edl, fcpxml
 
     filename = payload.get("filename", "")
     content = payload.get("content")
@@ -66,8 +66,8 @@ def _analyze_payload(payload: dict):
     return analyze_timeline(timeline)
 
 
-class FableHandler(BaseHTTPRequestHandler):
-    server_version = f"FableStudio/{__version__}"
+class MonteurHandler(BaseHTTPRequestHandler):
+    server_version = f"MonteurStudio/{__version__}"
     project: Project  # set by serve()
 
     # -- plumbing ---------------------------------------------------------
@@ -209,10 +209,10 @@ class FableHandler(BaseHTTPRequestHandler):
         self._send_json({"ok": True})
 
     def _assembly_inputs(self, payload: dict):
-        from fable.io import read_srt, read_whisper_json
-        from fable.assembly import TakeSource
-        from fable.screenplay import parse_fountain
-        from fable.transcribe import scene_take_from_name
+        from monteur.io import read_srt, read_whisper_json
+        from monteur.assembly import TakeSource
+        from monteur.screenplay import parse_fountain
+        from monteur.transcribe import scene_take_from_name
 
         script = payload.get("script") or {}
         if not script.get("content"):
@@ -244,8 +244,8 @@ class FableHandler(BaseHTTPRequestHandler):
         return screenplay, takes, forced
 
     def _assembly_plan(self) -> None:
-        from fable.assembly import plan_assembly
-        from fable.screenplay import DIALOGUE
+        from monteur.assembly import plan_assembly
+        from monteur.screenplay import DIALOGUE
 
         payload = self._read_json()
         screenplay, takes, forced = self._assembly_inputs(payload)
@@ -276,8 +276,8 @@ class FableHandler(BaseHTTPRequestHandler):
         )
 
     def _assembly_export(self) -> None:
-        from fable.assembly import assembly_to_timeline, plan_assembly
-        from fable.io import write_edl, write_fcpxml
+        from monteur.assembly import assembly_to_timeline, plan_assembly
+        from monteur.io import write_edl, write_fcpxml
 
         payload = self._read_json()
         screenplay, takes, forced = self._assembly_inputs(payload)
@@ -296,16 +296,16 @@ class FableHandler(BaseHTTPRequestHandler):
             raise ApiError(422, "nothing matched — no segments to export")
         fmt = (payload.get("format") or "fcpxml").lower()
         if fmt == "edl":
-            content, filename = write_edl(timeline), "fable_assembly.edl"
+            content, filename = write_edl(timeline), "monteur_assembly.edl"
         elif fmt == "fcpxml":
-            content, filename = write_fcpxml(timeline), "fable_assembly.fcpxml"
+            content, filename = write_fcpxml(timeline), "monteur_assembly.fcpxml"
         else:
             raise ApiError(400, f"unknown format {fmt!r} (use 'edl' or 'fcpxml')")
         self._send_json({"filename": filename, "content": content})
 
     def _create_scan(self) -> None:
-        from fable.media import FableMediaError
-        from fable.sift import sift_directory
+        from monteur.media import MonteurMediaError
+        from monteur.sift import sift_directory
 
         payload = self._read_json()
         folder = payload.get("folder", "")
@@ -313,18 +313,18 @@ class FableHandler(BaseHTTPRequestHandler):
             raise ApiError(400, "missing 'folder' (path to your footage)")
         try:
             reports = sift_directory(folder)
-        except FableMediaError as exc:
+        except MonteurMediaError as exc:
             raise ApiError(422, str(exc))
         if not reports:
             raise ApiError(422, f"no video files found in {folder}")
         self._send_json({"clips": [asdict(r) for r in reports]})
 
     def _create_build(self) -> None:
-        from fable.media import FableMediaError
-        from fable.montage import CHRONOLOGICAL, montage_to_timeline, plan_montage
-        from fable.music import analyze_music
-        from fable.sift import sift_directory
-        from fable.io import write_edl, write_fcpxml
+        from monteur.media import MonteurMediaError
+        from monteur.montage import CHRONOLOGICAL, montage_to_timeline, plan_montage
+        from monteur.music import analyze_music
+        from monteur.sift import sift_directory
+        from monteur.io import write_edl, write_fcpxml
 
         payload = self._read_json()
         folder = payload.get("folder", "")
@@ -334,7 +334,7 @@ class FableHandler(BaseHTTPRequestHandler):
         try:
             reports = sift_directory(folder)
             music = analyze_music(music_path)
-        except FableMediaError as exc:
+        except MonteurMediaError as exc:
             raise ApiError(422, str(exc))
         max_duration = payload.get("max_duration")
         plan = plan_montage(
@@ -349,9 +349,9 @@ class FableHandler(BaseHTTPRequestHandler):
         timeline = montage_to_timeline(plan, fps=fps)
         fmt = (payload.get("format") or "fcpxml").lower()
         if fmt == "edl":
-            content, filename = write_edl(timeline), "fable_montage.edl"
+            content, filename = write_edl(timeline), "monteur_montage.edl"
         else:
-            content, filename = write_fcpxml(timeline), "fable_montage.fcpxml"
+            content, filename = write_fcpxml(timeline), "monteur_montage.fcpxml"
         self._send_json(
             {
                 "filename": filename,
@@ -366,7 +366,7 @@ class FableHandler(BaseHTTPRequestHandler):
         )
 
     def _resolve_status(self) -> None:
-        from fable.resolve import FableResolveError, connect
+        from monteur.resolve import MonteurResolveError, connect
 
         try:
             bridge = connect()
@@ -378,17 +378,17 @@ class FableHandler(BaseHTTPRequestHandler):
                     "current": bridge.current_timeline_name(),
                 }
             )
-        except FableResolveError as exc:
+        except MonteurResolveError as exc:
             self._send_json({"connected": False, "error": str(exc)})
 
     def _resolve_analyze(self) -> None:
-        from fable.resolve import FableResolveError, connect
+        from monteur.resolve import MonteurResolveError, connect
 
         payload = self._read_json()
         try:
             bridge = connect()
             timeline = bridge.read_timeline(payload.get("timeline"))
-        except FableResolveError as exc:
+        except MonteurResolveError as exc:
             raise ApiError(502, str(exc))
         stats = analyze_timeline(timeline)
         response: dict = {"stats": asdict(stats)}
@@ -409,11 +409,11 @@ def serve(
     open_browser: bool = True,
     ready: threading.Event | None = None,
 ) -> None:
-    """Run Fable Studio until interrupted."""
-    handler = type("BoundHandler", (FableHandler,), {"project": Project(project_root)})
+    """Run Monteur Studio until interrupted."""
+    handler = type("BoundHandler", (MonteurHandler,), {"project": Project(project_root)})
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     url = f"http://127.0.0.1:{server.server_address[1]}/"
-    print(f"Fable Studio running at {url}  (Ctrl+C to stop)")
+    print(f"Monteur Studio running at {url}  (Ctrl+C to stop)")
     if ready is not None:
         ready.set()
     if open_browser:
@@ -421,6 +421,6 @@ def serve(
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nFable Studio stopped.")
+        print("\nMonteur Studio stopped.")
     finally:
         server.server_close()

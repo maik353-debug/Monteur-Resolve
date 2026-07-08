@@ -1,6 +1,6 @@
-"""Fable — AI-assisted editing room toolkit for DaVinci Resolve."""
+"""Monteur — AI-assisted editing room toolkit for DaVinci Resolve."""
 
-from fable.model import (
+from monteur.model import (
     Clip,
     Marker,
     Timeline,

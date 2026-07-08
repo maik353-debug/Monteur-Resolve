@@ -1,6 +1,6 @@
 import pytest
 
-from fable.model import (
+from monteur.model import (
     Clip,
     Timeline,
     format_timecode,

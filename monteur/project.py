@@ -1,6 +1,6 @@
 """Project version history.
 
-A Fable project is a directory containing a ``.fable/`` folder. Every time a
+A Monteur project is a directory containing a ``.monteur/`` folder. Every time a
 cut is analyzed and saved, a snapshot of its pacing statistics is appended to
 the project history — so an editor can watch the rhythm of a film evolve
 across versions ("v3 was faster but v5 breathes better in act two").
@@ -14,9 +14,9 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-from fable.analysis import PacingStats, Section, Shot
+from monteur.analysis import PacingStats, Section, Shot
 
-_DIRNAME = ".fable"
+_DIRNAME = ".monteur"
 _FILENAME = "versions.json"
 
 

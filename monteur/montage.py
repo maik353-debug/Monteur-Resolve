@@ -1,7 +1,7 @@
 """Montage builder: best moments + music beats -> a first cut.
 
-Takes the sifted footage (:mod:`fable.sift`) and an analyzed song
-(:mod:`fable.music`) and lays out a rough cut on the beat grid: calm
+Takes the sifted footage (:mod:`monteur.sift`) and an analyzed song
+(:mod:`monteur.music`) and lays out a rough cut on the beat grid: calm
 sections cut slower (every few beats), high-energy sections cut faster.
 The result is a Timeline — video from the footage on V1, the song on A1 —
 ready for EDL/FCPXML export into Resolve.
@@ -41,9 +41,9 @@ import bisect
 from dataclasses import dataclass, field
 from pathlib import PurePath
 
-from fable.model import AUDIO, VIDEO, Clip, Marker, Timeline, seconds_to_frames
-from fable.music import MusicAnalysis, MusicSection
-from fable.sift import ClipReport, Moment
+from monteur.model import AUDIO, VIDEO, Clip, Marker, Timeline, seconds_to_frames
+from monteur.music import MusicAnalysis, MusicSection
+from monteur.sift import ClipReport, Moment
 
 CHRONOLOGICAL = "chronological"  # keep footage order (travel/event films)
 BEST_FIRST = "best_first"  # strongest material on the strongest sections
@@ -260,7 +260,7 @@ def plan_montage(
     return plan
 
 
-def montage_to_timeline(plan: MontagePlan, fps: float, name: str = "Fable Montage") -> Timeline:
+def montage_to_timeline(plan: MontagePlan, fps: float, name: str = "Monteur Montage") -> Timeline:
     """Render a MontagePlan as a Timeline (footage on V1, music on A1)."""
     timeline = Timeline(name=name, fps=fps)
     for entry in plan.entries:

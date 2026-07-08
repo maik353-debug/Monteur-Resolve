@@ -1,6 +1,6 @@
 """Footage sifting: which parts of which clips are worth using?
 
-Fable scans every clip's frames (via :mod:`fable.media`) and classifies
+Monteur scans every clip's frames (via :mod:`monteur.media`) and classifies
 stretches as usable or problematic (too dark, blurry, shaky), then ranks the
 best moments — so the editor (or the montage builder) starts from the good
 material instead of watching everything.
@@ -29,8 +29,8 @@ import statistics
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 
-from fable.media import (
-    FableMediaError,
+from monteur.media import (
+    MonteurMediaError,
     FrameMetric,
     frame_metrics,
     list_media,
@@ -249,13 +249,13 @@ def find_moments(
     return kept
 
 
-def _reraise_if_ffmpeg_missing(exc: FableMediaError) -> None:
+def _reraise_if_ffmpeg_missing(exc: MonteurMediaError) -> None:
     if "ffmpeg not found" in str(exc):
         raise exc
 
 
 def analyze_clip(path: str) -> ClipReport:
-    """Full report for one clip (decodes frames via fable.media).
+    """Full report for one clip (decodes frames via monteur.media).
 
     Clips that are too short or fail to decode come back as a report with an
     explanatory note instead of raising; only a missing ffmpeg re-raises.
@@ -263,7 +263,7 @@ def analyze_clip(path: str) -> ClipReport:
     path = str(path)
     try:
         info = probe(path)
-    except FableMediaError as exc:
+    except MonteurMediaError as exc:
         _reraise_if_ffmpeg_missing(exc)
         return ClipReport(path=path, duration=0.0, notes=[f"could not analyze: {exc}"])
 
@@ -274,7 +274,7 @@ def analyze_clip(path: str) -> ClipReport:
 
     try:
         metrics = frame_metrics(path)
-    except FableMediaError as exc:
+    except MonteurMediaError as exc:
         _reraise_if_ffmpeg_missing(exc)
         report.notes.append(f"could not decode frames: {exc}")
         return report
@@ -313,7 +313,7 @@ def sift_directory(directory: str) -> list[ClipReport]:
     for media_path in list_media(directory):
         try:
             reports.append(analyze_clip(str(media_path)))
-        except FableMediaError as exc:
+        except MonteurMediaError as exc:
             _reraise_if_ffmpeg_missing(exc)
             reports.append(
                 ClipReport(

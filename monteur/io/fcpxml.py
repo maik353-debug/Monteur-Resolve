@@ -45,7 +45,7 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from fractions import Fraction
 
-from fable.model import AUDIO, VIDEO, Clip, Timeline
+from monteur.model import AUDIO, VIDEO, Clip, Timeline
 
 _NTSC_FRAME_DURATIONS = {
     24: Fraction(1001, 24000),

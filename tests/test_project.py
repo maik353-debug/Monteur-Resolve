@@ -1,8 +1,8 @@
 import pytest
 
-from fable.analysis import analyze_timeline
-from fable.model import Clip, Timeline
-from fable.project import Project
+from monteur.analysis import analyze_timeline
+from monteur.model import Clip, Timeline
+from monteur.project import Project
 
 
 def _stats(name="cut", lengths=(2.0, 4.0, 3.0)):

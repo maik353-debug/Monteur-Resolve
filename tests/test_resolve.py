@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-import fable.resolve as resolve
-from fable.model import AUDIO, VIDEO
-from fable.resolve import FableResolveError, ResolveBridge, connect
+import monteur.resolve as resolve
+from monteur.model import AUDIO, VIDEO
+from monteur.resolve import MonteurResolveError, ResolveBridge, connect
 
 
 class FakeItem:
@@ -110,7 +110,7 @@ class FakeMediaPool:
 class FakeProject:
     def __init__(
         self,
-        name: str = "Fable Feature",
+        name: str = "Monteur Feature",
         timelines: list[FakeTimeline] | None = None,
         current: FakeTimeline | None = None,
     ) -> None:
@@ -183,12 +183,12 @@ def standard_timeline() -> FakeTimeline:
 def test_import_is_safe_without_resolve() -> None:
     import importlib
 
-    module = importlib.import_module("fable.resolve")
+    module = importlib.import_module("monteur.resolve")
     assert module is resolve
 
 
 def test_connect_without_resolve_raises() -> None:
-    with pytest.raises(FableResolveError) as excinfo:
+    with pytest.raises(MonteurResolveError) as excinfo:
         connect()
     assert "DaVinciResolveScript" in str(excinfo.value)
 
@@ -196,11 +196,11 @@ def test_connect_without_resolve_raises() -> None:
 def test_connect_with_injected_app() -> None:
     bridge = connect(app=FakeResolve(FakeProject(timelines=[standard_timeline()])))
     assert isinstance(bridge, ResolveBridge)
-    assert bridge.project_name() == "Fable Feature"
+    assert bridge.project_name() == "Monteur Feature"
 
 
 def test_connect_rejects_none_app_object() -> None:
-    with pytest.raises(FableResolveError):
+    with pytest.raises(MonteurResolveError):
         ResolveBridge(None)
 
 
@@ -266,7 +266,7 @@ def test_read_timeline_fps_parsing_fractional() -> None:
 def test_read_timeline_bad_fps_raises() -> None:
     broken = FakeTimeline(name="Broken", fps="not-a-number")
     bridge, _ = make_bridge([broken])
-    with pytest.raises(FableResolveError):
+    with pytest.raises(MonteurResolveError):
         bridge.read_timeline()
 
 
@@ -281,7 +281,7 @@ def test_read_timeline_by_name() -> None:
 
 def test_read_timeline_unknown_name_raises() -> None:
     bridge, _ = make_bridge([standard_timeline()])
-    with pytest.raises(FableResolveError) as excinfo:
+    with pytest.raises(MonteurResolveError) as excinfo:
         bridge.read_timeline("Nope")
     assert "Nope" in str(excinfo.value)
     assert "Cut 1" in str(excinfo.value)
@@ -289,13 +289,13 @@ def test_read_timeline_unknown_name_raises() -> None:
 
 def test_read_timeline_without_current_raises() -> None:
     bridge, _ = make_bridge([], current=None)
-    with pytest.raises(FableResolveError):
+    with pytest.raises(MonteurResolveError):
         bridge.read_timeline()
 
 
 def test_no_current_project_raises() -> None:
     bridge = ResolveBridge(FakeResolve(None))
-    with pytest.raises(FableResolveError):
+    with pytest.raises(MonteurResolveError):
         bridge.project_name()
 
 
@@ -308,7 +308,7 @@ def test_import_timeline_file() -> None:
 def test_import_timeline_file_failure_raises() -> None:
     bridge, project = make_bridge([standard_timeline()])
     project.media_pool.fail_timeline_import = True
-    with pytest.raises(FableResolveError) as excinfo:
+    with pytest.raises(MonteurResolveError) as excinfo:
         bridge.import_timeline_file("/edits/broken.edl")
     assert "/edits/broken.edl" in str(excinfo.value)
 

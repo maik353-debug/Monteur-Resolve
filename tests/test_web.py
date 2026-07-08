@@ -7,15 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from fable.project import Project
-from fable.web.server import FableHandler, _APP_HTML
+from monteur.project import Project
+from monteur.web.server import MonteurHandler, _APP_HTML
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
 @pytest.fixture()
 def server(tmp_path):
-    handler = type("TestHandler", (FableHandler,), {"project": Project(tmp_path)})
+    handler = type("TestHandler", (MonteurHandler,), {"project": Project(tmp_path)})
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -111,7 +111,7 @@ class TestApi:
     def test_serves_app(self, server):
         with urllib.request.urlopen(f"{server}/") as response:
             body = response.read().decode()
-        assert "Fable Studio" in body
+        assert "Monteur Studio" in body
 
 
 class TestAssemblyApi:
@@ -145,7 +145,7 @@ class TestAssemblyApi:
         payload = self._payload() | {"format": "edl", "fps": 25}
         data = _post(f"{server}/api/assembly/export", payload)
         assert data["filename"].endswith(".edl")
-        assert "TITLE: Fable Assembly" in data["content"]
+        assert "TITLE: Monteur Assembly" in data["content"]
 
     def test_plan_without_takes_is_400(self, server):
         payload = self._payload() | {"takes": []}

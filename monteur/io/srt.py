@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 
-from fable.model import Transcript, TranscriptSegment
+from monteur.model import Transcript, TranscriptSegment
 
 _TIME_LINE_RE = re.compile(
     r"^(\d{1,2}):(\d{1,2}):(\d{1,2})[,.](\d{1,3})"

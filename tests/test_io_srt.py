@@ -1,4 +1,4 @@
-"""Tests for fable.io.srt and fable.io.whisperjson."""
+"""Tests for monteur.io.srt and monteur.io.whisperjson."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from fable.io import load_transcript, read_srt, read_whisper_json, write_srt
-from fable.model import Transcript, TranscriptSegment
+from monteur.io import load_transcript, read_srt, read_whisper_json, write_srt
+from monteur.model import Transcript, TranscriptSegment
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

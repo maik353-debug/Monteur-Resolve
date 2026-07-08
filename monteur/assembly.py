@@ -4,7 +4,7 @@ The engine aligns each take's transcript against the screenplay's dialogue,
 scores takes (coverage, accuracy, fluffs), picks the best material per
 dialogue passage, and lays it out as a Timeline that Resolve can import.
 
-The editor reviews the plan — Fable proposes, the editor decides.
+The editor reviews the plan — Monteur proposes, the editor decides.
 
 How the matching works (and where it stops working)
 ---------------------------------------------------
@@ -56,7 +56,7 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from statistics import fmean
 
-from fable.model import (
+from monteur.model import (
     AUDIO,
     VIDEO,
     Clip,
@@ -66,7 +66,7 @@ from fable.model import (
     TranscriptSegment,
     seconds_to_frames,
 )
-from fable.screenplay import DIALOGUE, Scene, Screenplay
+from monteur.screenplay import DIALOGUE, Scene, Screenplay
 
 MATCH_THRESHOLD = 0.55  # below this, a line counts as unmatched in a take
 FLUFF_THRESHOLD = 0.3  # 0.3..0.55 before a better match of the same line = restart
@@ -428,7 +428,7 @@ def assembly_to_timeline(
     takes: list[TakeSource],
     fps: float,
     handles: float = 0.5,
-    name: str = "Fable Assembly",
+    name: str = "Monteur Assembly",
 ) -> Timeline:
     """Render an AssemblyPlan as a Timeline (paired V1/A1 clips per segment).
 

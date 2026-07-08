@@ -1,4 +1,4 @@
-"""Tests for the montage builder (fable.montage).
+"""Tests for the montage builder (monteur.montage).
 
 MusicAnalysis / ClipReport objects are constructed directly — the analysis
 modules are implemented separately and are not exercised here.
@@ -8,14 +8,14 @@ from __future__ import annotations
 
 import pytest
 
-from fable.montage import (
+from monteur.montage import (
     BEST_FIRST,
     CHRONOLOGICAL,
     montage_to_timeline,
     plan_montage,
 )
-from fable.music import MusicAnalysis, MusicSection
-from fable.sift import ClipReport, Moment
+from monteur.music import MusicAnalysis, MusicSection
+from monteur.sift import ClipReport, Moment
 
 
 def make_music() -> MusicAnalysis:
@@ -218,7 +218,7 @@ def test_montage_to_timeline_exact_frames_at_25fps():
     assert (music_clip.record_in, music_clip.record_out) == (0, 300)
 
     assert timeline.duration == 300
-    assert timeline.name == "Fable Montage"
+    assert timeline.name == "Monteur Montage"
     assert len(timeline.markers) == 1
     assert timeline.markers[0].frame == 0
     assert timeline.markers[0].name == "Cut to song"

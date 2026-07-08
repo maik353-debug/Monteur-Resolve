@@ -1,15 +1,15 @@
-"""Fable command line interface.
+"""Monteur command line interface.
 
 Workflow overview::
 
-    fable analyze cut_v3.edl --fps 25 --report pacing.html
-    fable analyze cut_v3.edl --compare cut_v2.edl --fps 25
-    fable papercut create interview.srt -o cut.md --fps 25
+    monteur analyze cut_v3.edl --fps 25 --report pacing.html
+    monteur analyze cut_v3.edl --compare cut_v2.edl --fps 25
+    monteur papercut create interview.srt -o cut.md --fps 25
     # ... tick the takes you want in cut.md ...
-    fable papercut render cut.md -o rough_cut.fcpxml
-    fable convert cut.edl cut.fcpxml --fps 25
-    fable resolve status
-    fable ai selects cut.md --brief "90s teaser, keep it fast"
+    monteur papercut render cut.md -o rough_cut.fcpxml
+    monteur convert cut.edl cut.fcpxml --fps 25
+    monteur resolve status
+    monteur ai selects cut.md --brief "90s teaser, keep it fast"
 """
 
 from __future__ import annotations
@@ -20,16 +20,16 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from fable import __version__
+from monteur import __version__
 
 
 def _fail(message: str) -> "NoReturn":  # noqa: F821
-    print(f"fable: {message}", file=sys.stderr)
+    print(f"monteur: {message}", file=sys.stderr)
     raise SystemExit(1)
 
 
 def _load_timeline(path: str, fps: float | None):
-    from fable import io
+    from monteur import io
 
     try:
         return io.load_timeline(path, fps=fps)
@@ -65,7 +65,7 @@ def _print_stats(stats) -> None:
 
 
 def cmd_analyze(args: argparse.Namespace) -> None:
-    from fable.analysis import analyze_scenes, analyze_timeline, compare
+    from monteur.analysis import analyze_scenes, analyze_timeline, compare
 
     timeline = _load_timeline(args.timeline, args.fps)
     stats = analyze_timeline(timeline, track=args.track)
@@ -94,19 +94,19 @@ def cmd_analyze(args: argparse.Namespace) -> None:
                     f"  ASL {s.avg_shot_seconds:5.2f}s"
                 )
         if args.reference:
-            from fable.references import compare_to_reference
+            from monteur.references import compare_to_reference
 
             result = compare_to_reference(stats, args.reference)
             print(f"\n{result['profile']}: {result['verdict']}")
     if args.report:
-        from fable.report import save_report
+        from monteur.report import save_report
 
         save_report(stats, args.report, compare_to=other)
         print(f"\nReport written to {args.report}")
 
 
 def cmd_papercut_create(args: argparse.Namespace) -> None:
-    from fable import io, papercut
+    from monteur import io, papercut
 
     transcripts = []
     for path in args.transcripts:
@@ -127,7 +127,7 @@ def cmd_papercut_create(args: argparse.Namespace) -> None:
 
 
 def cmd_papercut_render(args: argparse.Namespace) -> None:
-    from fable import io, papercut
+    from monteur import io, papercut
 
     try:
         cut = papercut.parse_papercut(Path(args.papercut).read_text(encoding="utf-8"))
@@ -145,7 +145,7 @@ def cmd_papercut_render(args: argparse.Namespace) -> None:
 
 
 def cmd_convert(args: argparse.Namespace) -> None:
-    from fable import io
+    from monteur import io
 
     timeline = _load_timeline(args.input, args.fps)
     io.save_timeline(timeline, args.output)
@@ -153,7 +153,7 @@ def cmd_convert(args: argparse.Namespace) -> None:
 
 
 def cmd_resolve(args: argparse.Namespace) -> None:
-    from fable.resolve import FableResolveError, connect
+    from monteur.resolve import MonteurResolveError, connect
 
     try:
         bridge = connect()
@@ -168,21 +168,21 @@ def cmd_resolve(args: argparse.Namespace) -> None:
             bridge.import_timeline_file(args.file)
             print(f"Imported {args.file} into {bridge.project_name()}")
         elif args.action == "analyze":
-            from fable.analysis import analyze_timeline
+            from monteur.analysis import analyze_timeline
 
             timeline = bridge.read_timeline()
             _print_stats(analyze_timeline(timeline))
-    except FableResolveError as exc:
+    except MonteurResolveError as exc:
         _fail(str(exc))
 
 
 def cmd_sift(args: argparse.Namespace) -> None:
-    from fable.media import FableMediaError
-    from fable.sift import sift_directory
+    from monteur.media import MonteurMediaError
+    from monteur.sift import sift_directory
 
     try:
         reports = sift_directory(args.folder)
-    except FableMediaError as exc:
+    except MonteurMediaError as exc:
         _fail(str(exc))
     if not reports:
         _fail(f"no video files found in {args.folder}")
@@ -195,11 +195,11 @@ def cmd_sift(args: argparse.Namespace) -> None:
 
 
 def cmd_create(args: argparse.Namespace) -> None:
-    from fable import io
-    from fable.media import FableMediaError
-    from fable.montage import montage_to_timeline, plan_montage
-    from fable.music import analyze_music
-    from fable.sift import sift_directory
+    from monteur import io
+    from monteur.media import MonteurMediaError
+    from monteur.montage import montage_to_timeline, plan_montage
+    from monteur.music import analyze_music
+    from monteur.sift import sift_directory
 
     try:
         print("Scanning footage ...")
@@ -210,13 +210,13 @@ def cmd_create(args: argparse.Namespace) -> None:
         music = analyze_music(args.music)
         print(f"  {music.tempo:.0f} BPM, {len(music.beats)} beats, "
               f"{music.duration:.0f}s")
-    except FableMediaError as exc:
+    except MonteurMediaError as exc:
         _fail(str(exc))
     plan = plan_montage(
         reports, music, order=args.order, max_duration=args.max_duration
     )
     if not plan.entries:
-        _fail("no usable material found — run 'fable sift' to see why")
+        _fail("no usable material found — run 'monteur sift' to see why")
     timeline = montage_to_timeline(plan, fps=args.fps)
     io.save_timeline(timeline, args.output)
     print(f"\n{len(plan.entries)} cuts -> {args.output} "
@@ -229,7 +229,7 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
     import json as json_module
     from dataclasses import asdict
 
-    from fable.transcribe import FableTranscribeError, transcribe_directory, transcribe_file
+    from monteur.transcribe import MonteurTranscribeError, transcribe_directory, transcribe_file
 
     target = Path(args.path)
     try:
@@ -237,7 +237,7 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
             results = transcribe_directory(target, model=args.model, language=args.language)
         else:
             results = {str(target): transcribe_file(target, model=args.model, language=args.language)}
-    except (FableTranscribeError, FileNotFoundError, ValueError) as exc:
+    except (MonteurTranscribeError, FileNotFoundError, ValueError) as exc:
         _fail(str(exc))
     for media, transcript in results.items():
         out = Path(media).with_suffix(".json")
@@ -251,10 +251,10 @@ def cmd_transcribe(args: argparse.Namespace) -> None:
 
 
 def cmd_assembly(args: argparse.Namespace) -> None:
-    from fable import io
-    from fable.assembly import TakeSource, assembly_to_timeline, plan_assembly
-    from fable.screenplay import parse_fountain
-    from fable.transcribe import scene_take_from_name
+    from monteur import io
+    from monteur.assembly import TakeSource, assembly_to_timeline, plan_assembly
+    from monteur.screenplay import parse_fountain
+    from monteur.transcribe import scene_take_from_name
 
     try:
         screenplay = parse_fountain(Path(args.script).read_text(encoding="utf-8"))
@@ -268,14 +268,14 @@ def cmd_assembly(args: argparse.Namespace) -> None:
         try:
             transcript = io.load_transcript(path)
         except ValueError as exc:
-            print(f"fable: skipping {path.name}: {exc}", file=sys.stderr)
+            print(f"monteur: skipping {path.name}: {exc}", file=sys.stderr)
             continue
         scene_hint, take_hint = scene_take_from_name(path.name)
         takes.append(
             TakeSource(name=path.stem, transcript=transcript, scene_hint=scene_hint, take_hint=take_hint)
         )
     if not takes:
-        _fail(f"no .srt/.json transcripts found in {takes_dir} — run 'fable transcribe' first")
+        _fail(f"no .srt/.json transcripts found in {takes_dir} — run 'monteur transcribe' first")
 
     plan = plan_assembly(screenplay, takes, max_takes_per_scene=args.max_takes)
     print(f"Assembly plan — {plan.coverage() * 100:.0f}% of dialogue covered\n")
@@ -300,40 +300,40 @@ def cmd_assembly(args: argparse.Namespace) -> None:
 
 
 def cmd_ui(args: argparse.Namespace) -> None:
-    from fable.web import serve
+    from monteur.web import serve
 
     try:
         serve(port=args.port, project_root=args.project, open_browser=not args.no_browser)
     except OSError as exc:
-        _fail(f"could not start Fable Studio on port {args.port}: {exc}")
+        _fail(f"could not start Monteur Studio on port {args.port}: {exc}")
 
 
 def cmd_ai(args: argparse.Namespace) -> None:
-    from fable.ai import FableAIError, pacing_notes, suggest_selects, summarize_footage
+    from monteur.ai import MonteurAIError, pacing_notes, suggest_selects, summarize_footage
 
     try:
         if args.action == "selects":
             text = Path(args.file).read_text(encoding="utf-8")
             print(suggest_selects(text, brief=args.brief or ""))
         elif args.action == "notes":
-            from fable.analysis import analyze_timeline
+            from monteur.analysis import analyze_timeline
 
             stats = analyze_timeline(_load_timeline(args.file, args.fps))
             print(pacing_notes(stats))
         elif args.action == "log":
-            from fable import io
+            from monteur import io
 
             print(summarize_footage(io.load_transcript(args.file)))
-    except (FableAIError, ValueError, FileNotFoundError) as exc:
+    except (MonteurAIError, ValueError, FileNotFoundError) as exc:
         _fail(str(exc))
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="fable",
-        description="Fable — AI-assisted editing room toolkit for DaVinci Resolve.",
+        prog="monteur",
+        description="Monteur — AI-assisted editing room toolkit for DaVinci Resolve.",
     )
-    parser.add_argument("--version", action="version", version=f"fable {__version__}")
+    parser.add_argument("--version", action="version", version=f"monteur {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("analyze", help="pacing & rhythm analysis of a timeline")
@@ -400,7 +400,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-takes", type=int, default=1, help="takes per scene to draw from")
     p.set_defaults(func=cmd_assembly)
 
-    p = sub.add_parser("ui", help="launch Fable Studio (local web app)")
+    p = sub.add_parser("ui", help="launch Monteur Studio (local web app)")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--project", default=".", help="project directory for version history")
     p.add_argument("--no-browser", action="store_true", help="don't open a browser")

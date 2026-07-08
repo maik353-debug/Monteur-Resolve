@@ -1,4 +1,4 @@
-"""Tests for fable.music — beat/tempo detection and energy sections.
+"""Tests for monteur.music — beat/tempo detection and energy sections.
 
 All waveforms are synthesized directly with numpy; only the optional
 end-to-end test touches ffmpeg (skipped unless imageio_ffmpeg is available).
@@ -11,7 +11,7 @@ import importlib.util
 import numpy as np
 import pytest
 
-from fable.music import MusicSection, analyze_music, detect_beats, detect_sections
+from monteur.music import MusicSection, analyze_music, detect_beats, detect_sections
 
 RATE = 22050
 

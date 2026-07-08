@@ -1,6 +1,6 @@
 """Tests for the Fountain screenplay parser."""
 
-from fable.screenplay import ACTION, DIALOGUE, parse_fountain
+from monteur.screenplay import ACTION, DIALOGUE, parse_fountain
 
 FIXTURE = """\
 Title: The Long Night

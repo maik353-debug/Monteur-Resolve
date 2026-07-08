@@ -4,8 +4,8 @@ import statistics
 
 import pytest
 
-from fable.analysis import PacingStats, Section, Shot
-from fable.report import render_report, save_report
+from monteur.analysis import PacingStats, Section, Shot
+from monteur.report import render_report, save_report
 
 
 def build_stats(name: str = "Rough Cut v3 <final?>") -> PacingStats:
@@ -117,7 +117,7 @@ def test_report_contains_stat_values(stats: PacingStats) -> None:
 
 def test_report_renders_all_sections(stats: PacingStats) -> None:
     doc = render_report(stats)
-    assert "Fable pacing report" in doc
+    assert "Monteur pacing report" in doc
     assert "Pacing curve" in doc
     assert "Tempo sections" in doc
     assert "Shot-length histogram" in doc

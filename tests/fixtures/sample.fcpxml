@@ -7,9 +7,9 @@
     <asset id="r3" name="B-Roll Street" start="7200s" duration="30s" hasVideo="1" format="r1" src="file:///media/broll_street.mov"/>
     <asset id="r4" name="Sunset Drone" start="60s" duration="120s" hasVideo="1" format="r1" src="file:///media/sunset_drone.mov"/>
   </resources>
-  <library location="file:///Users/editor/Movies/Fable.fcpbundle/">
-    <event name="Fable Event">
-      <project name="Fable Sample Project">
+  <library location="file:///Users/editor/Movies/Monteur.fcpbundle/">
+    <event name="Monteur Event">
+      <project name="Monteur Sample Project">
         <sequence format="r1" duration="12s" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">
           <spine>
             <asset-clip ref="r2" name="Interview Anna" offset="0s" duration="4s" start="3600s" format="r1" tcFormat="NDF"/>

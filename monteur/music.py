@@ -1,6 +1,6 @@
 """Music analysis: tempo, beats and energy sections.
 
-Fable cuts montages to music, so it needs to know where the beats fall and
+Monteur cuts montages to music, so it needs to know where the beats fall and
 where the song changes gear. Pure-numpy DSP on the decoded waveform — no ML,
 tuned for music with a clear pulse (the montage use case).
 
@@ -351,12 +351,12 @@ def detect_sections(samples, rate: int) -> list[MusicSection]:
 
 def analyze_music(path: str, rate: int = 22050) -> MusicAnalysis:
     """Decode a song and return tempo, beat grid and energy sections."""
-    from fable.media import FableMediaError, read_audio
+    from monteur.media import MonteurMediaError, read_audio
 
     try:
         samples = read_audio(path, rate)
-    except FableMediaError as exc:
-        raise FableMediaError(f"could not analyze music in {path}: {exc}") from exc
+    except MonteurMediaError as exc:
+        raise MonteurMediaError(f"could not analyze music in {path}: {exc}") from exc
 
     tempo, beats = detect_beats(samples, rate)
     sections = detect_sections(samples, rate)

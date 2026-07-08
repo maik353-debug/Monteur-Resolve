@@ -1,6 +1,6 @@
 """Screenplay model and Fountain parser.
 
-Fountain (https://fountain.io) is the plain-text screenplay format. Fable
+Fountain (https://fountain.io) is the plain-text screenplay format. Monteur
 reads a screenplay to know, scene by scene, which dialogue lines the film
 needs — the reference the assembly engine matches take transcripts against.
 """

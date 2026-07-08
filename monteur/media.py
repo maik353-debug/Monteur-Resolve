@@ -1,11 +1,11 @@
-"""Media decoding for Fable's automatic features.
+"""Media decoding for Monteur's automatic features.
 
 Everything that touches actual video/audio goes through here: locating an
 ffmpeg binary, probing files, decoding audio to a numpy array, and decoding
 downscaled grayscale frames with per-frame metrics (brightness, sharpness,
-motion). The heavy lifting is ffmpeg's; Fable only reads the streams.
+motion). The heavy lifting is ffmpeg's; Monteur only reads the streams.
 
-Requires the optional media extra: ``pip install 'fable-tool[media]'``
+Requires the optional media extra: ``pip install 'monteur[media]'``
 (numpy + imageio-ffmpeg, which bundles an ffmpeg binary for every platform).
 """
 
@@ -23,7 +23,7 @@ MEDIA_EXTENSIONS = {
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".aif", ".aiff", ".ogg"}
 
 
-class FableMediaError(RuntimeError):
+class MonteurMediaError(RuntimeError):
     """Raised when ffmpeg/numpy are unavailable or decoding fails."""
 
 
@@ -31,8 +31,8 @@ def _numpy():
     try:
         import numpy
     except ImportError as exc:
-        raise FableMediaError(
-            "media features need numpy: pip install 'fable-tool[media]'"
+        raise MonteurMediaError(
+            "media features need numpy: pip install 'monteur[media]'"
         ) from exc
     return numpy
 
@@ -53,9 +53,9 @@ def find_ffmpeg() -> str:
         return imageio_ffmpeg.get_ffmpeg_exe()
     except ImportError:
         pass
-    raise FableMediaError(
+    raise MonteurMediaError(
         "ffmpeg not found — install it (https://ffmpeg.org) or run: "
-        "pip install 'fable-tool[media]'"
+        "pip install 'monteur[media]'"
     )
 
 
@@ -85,12 +85,12 @@ def probe(path: str | Path, runner=None) -> MediaInfo:
     """Read duration/fps/size/audio from ffmpeg's stream info."""
     path = Path(path)
     if not path.exists():
-        raise FableMediaError(f"no such file: {path}")
+        raise MonteurMediaError(f"no such file: {path}")
     result = _run([find_ffmpeg(), "-hide_banner", "-i", str(path)], runner)
     text = result.stderr.decode("utf-8", "replace")
     m = _DURATION_RE.search(text)
     if not m:
-        raise FableMediaError(f"ffmpeg could not read {path.name} — not a media file?")
+        raise MonteurMediaError(f"ffmpeg could not read {path.name} — not a media file?")
     duration = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
     video = _VIDEO_RE.search(text)
     fps_match = _FPS_RE.search(text)
@@ -116,7 +116,7 @@ def read_audio(path: str | Path, rate: int = 22050, runner=None):
     )
     if result.returncode != 0 or not result.stdout:
         stderr = result.stderr.decode("utf-8", "replace")[-400:]
-        raise FableMediaError(f"could not decode audio from {path}: {stderr}")
+        raise MonteurMediaError(f"could not decode audio from {path}: {stderr}")
     return np.frombuffer(result.stdout, dtype=np.float32)
 
 
@@ -157,7 +157,7 @@ def frame_metrics(
     frame_bytes = width * height
     if result.returncode != 0 or len(result.stdout) < frame_bytes:
         stderr = result.stderr.decode("utf-8", "replace")[-400:]
-        raise FableMediaError(f"could not decode video from {path}: {stderr}")
+        raise MonteurMediaError(f"could not decode video from {path}: {stderr}")
     count = len(result.stdout) // frame_bytes
     frames = np.frombuffer(
         result.stdout[: count * frame_bytes], dtype=np.uint8
@@ -186,7 +186,7 @@ def list_media(directory: str | Path) -> list[Path]:
     """Video files in a directory, sorted by name."""
     directory = Path(directory)
     if not directory.is_dir():
-        raise FableMediaError(f"not a directory: {directory}")
+        raise MonteurMediaError(f"not a directory: {directory}")
     return sorted(
         p for p in directory.iterdir() if p.suffix.lower() in MEDIA_EXTENSIONS
     )

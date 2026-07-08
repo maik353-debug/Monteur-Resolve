@@ -1,11 +1,11 @@
-"""Tests for fable.analysis pacing metrics."""
+"""Tests for monteur.analysis pacing metrics."""
 
 from __future__ import annotations
 
 import math
 
-from fable.analysis import analyze_timeline, compare, rhythm_signature
-from fable.model import Clip, Timeline
+from monteur.analysis import analyze_timeline, compare, rhythm_signature
+from monteur.model import Clip, Timeline
 
 FPS = 25.0
 

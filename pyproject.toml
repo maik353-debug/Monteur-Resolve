@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fable-tool"
+name = "monteur"
 version = "0.1.0"
-description = "Fable — AI-assisted editing room toolkit for DaVinci Resolve: transcript-based rough cuts, pacing analytics, and project organization."
+description = "Monteur — AI-assisted editing room toolkit for DaVinci Resolve: transcript-based rough cuts, pacing analytics, and project organization."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Maik" }]
@@ -24,13 +24,13 @@ media = ["numpy>=1.24", "imageio-ffmpeg>=0.4.9"]
 dev = ["pytest>=8"]
 
 [project.scripts]
-fable = "fable.cli:main"
+monteur = "monteur.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["fable*"]
+include = ["monteur*"]
 
 [tool.setuptools.package-data]
-"fable.web" = ["app.html"]
+"monteur.web" = ["app.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

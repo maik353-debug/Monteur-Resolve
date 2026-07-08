@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Fable Studio</title>
+<title>Monteur Studio</title>
 <style>
 /* ---------- theme ------------------------------------------------------ */
 :root {
@@ -473,7 +473,7 @@ svg text.axis {
           <rect x="1" y="3" width="18" height="14" rx="2.5" fill="none" stroke="var(--series-1)" stroke-width="2"/>
           <path d="M5 13 l3.4 -4 l2.8 2.6 l3.6 -5" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
-        <span>Fable Studio</span>
+        <span>Monteur Studio</span>
       </div>
       <p class="brand-sub">From raw clips to a better cut</p>
       <nav class="view-switch" aria-label="Studio view">
@@ -506,13 +506,13 @@ svg text.axis {
     <section id="home">
       <div class="home-hero">
         <h1>What would you like to do?</h1>
-        <p>Fable helps you turn raw footage into a first cut, and a cut into a better one.</p>
+        <p>Monteur helps you turn raw footage into a first cut, and a cut into a better one.</p>
       </div>
       <div class="task-cards">
         <button class="task-card" id="go-create" type="button">
           <span class="task-icon" aria-hidden="true">✨</span>
           <span class="tc-title">Create a first cut</span>
-          <span class="tc-desc">Point Fable at your footage and a song. It finds your best moments and cuts them to the beat.</span>
+          <span class="tc-desc">Point Monteur at your footage and a song. It finds your best moments and cuts them to the beat.</span>
           <span class="tc-go" aria-hidden="true">Start →</span>
         </button>
         <button class="task-card" id="go-pacing" type="button">
@@ -611,7 +611,7 @@ svg text.axis {
         <div class="dash-title">
           <p class="eyebrow">Assembly</p>
           <h1>Assembly from script</h1>
-          <p class="dash-meta">Fable matches your takes against the screenplay, picks the best one per scene, and builds a first rough assembly.</p>
+          <p class="dash-meta">Monteur matches your takes against the screenplay, picks the best one per scene, and builds a first rough assembly.</p>
           <p class="dash-meta">A take transcript is the words spoken in one recorded take — an .srt subtitle file or a Whisper .json.</p>
         </div>
       </header>
@@ -667,7 +667,7 @@ svg text.axis {
 
       <div class="wiz-step" id="cre-step-1">
         <h1>1. Your footage</h1>
-        <p class="wiz-lead">Tell Fable where your video clips live. It watches every clip and finds the good parts — your files are never moved or changed.</p>
+        <p class="wiz-lead">Tell Monteur where your video clips live. It watches every clip and finds the good parts — your files are never moved or changed.</p>
         <label class="sr-only" for="cre-folder">Footage folder path</label>
         <div class="path-row">
           <input type="text" id="cre-folder" placeholder="/Users/you/Movies/my-trip" spellcheck="false" autocomplete="off">
@@ -689,7 +689,7 @@ svg text.axis {
 
       <div class="wiz-step" id="cre-step-2" hidden>
         <h1>2. Your music</h1>
-        <p class="wiz-lead">Pick the song your cut should follow. Fable reads its beat and places every cut on the rhythm.</p>
+        <p class="wiz-lead">Pick the song your cut should follow. Monteur reads its beat and places every cut on the rhythm.</p>
         <label class="sr-only" for="cre-music">Song file path</label>
         <div class="path-row">
           <input type="text" id="cre-music" placeholder="/Users/you/Music/song.mp3" spellcheck="false" autocomplete="off">
@@ -722,12 +722,12 @@ svg text.axis {
 
       <div class="wiz-step" id="cre-step-3" hidden>
         <h1>3. Your cut</h1>
-        <p class="wiz-lead">Fable lines your best moments up with the beat and writes a small timeline file you can open in DaVinci Resolve.</p>
+        <p class="wiz-lead">Monteur lines your best moments up with the beat and writes a small timeline file you can open in DaVinci Resolve.</p>
         <div class="wiz-nav">
           <button class="btn ghost" id="cre-back-3" type="button">← Back</button>
           <button class="btn" id="cre-build-btn" type="button">Build my cut<span class="spin" aria-hidden="true"></span></button>
         </div>
-        <p class="scan-note" id="cre-build-note" hidden>Cutting to the beat — Fable reads your clips and the song, about a second per clip.</p>
+        <p class="scan-note" id="cre-build-note" hidden>Cutting to the beat — Monteur reads your clips and the song, about a second per clip.</p>
         <div class="card" id="cre-result" hidden>
           <h2>Your cut is ready</h2>
           <div class="result-stats" id="cre-summary"></div>
@@ -1585,12 +1585,12 @@ function readFileText(file) {
 var fpsResolve = null;
 function storedFps() {
   try {
-    var v = parseFloat(window.localStorage.getItem("fable:fps"));
+    var v = parseFloat(window.localStorage.getItem("monteur:fps"));
     return isFinite(v) && v > 0 ? v : 25;
   } catch (e) { return 25; }
 }
 function rememberFps(v) {
-  try { window.localStorage.setItem("fable:fps", String(v)); } catch (e) { /* private mode */ }
+  try { window.localStorage.setItem("monteur:fps", String(v)); } catch (e) { /* private mode */ }
 }
 /* fill a <select> with the fps presets, preselecting the remembered value */
 function populateFpsSelect(select) {
@@ -1688,7 +1688,7 @@ function loadFiles(fileList, viaButton) {
   if (analyzing) return;
   var files = Array.prototype.slice.call(fileList || []).filter(function (f) { return isTimelineFile(f.name); });
   if (!files.length) {
-    toast("That doesn’t look like a timeline export — Fable reads .edl, .fcpxml and .xml files.", "error");
+    toast("That doesn’t look like a timeline export — Monteur reads .edl, .fcpxml and .xml files.", "error");
     return;
   }
   files = files.slice(0, 2);
@@ -1729,7 +1729,7 @@ function compareWithFile(fileList) {
   if (!p || p.source.kind !== "file") return;
   var files = Array.prototype.slice.call(fileList || []).filter(function (f) { return isTimelineFile(f.name); });
   if (!files.length) {
-    toast("That doesn’t look like a timeline export — Fable reads .edl, .fcpxml and .xml files.", "error");
+    toast("That doesn’t look like a timeline export — Monteur reads .edl, .fcpxml and .xml files.", "error");
     return;
   }
   var button = $("compare-file-btn");
@@ -2214,7 +2214,7 @@ $("export-btn").addEventListener("click", function () {
     var body = { script: asm.script, takes: asm.takes, fps: fps, handles: handles, format: expFormat };
     if (Object.keys(asm.pins).length) body.forced = asm.pins;
     return api("/api/assembly/export", { method: "POST", body: body }).then(function (data) {
-      downloadText(data.filename || ("fable_assembly." + expFormat), data.content || "");
+      downloadText(data.filename || ("monteur_assembly." + expFormat), data.content || "");
       toast("Exported " + (data.filename || "timeline") + ".", "success");
     });
   });
@@ -2451,7 +2451,7 @@ $("cre-fmt-fcpxml").addEventListener("click", function () { setCreFormat("fcpxml
 $("cre-download").addEventListener("click", function () {
   if (!cre.result) return;
   if (cre.result.format === cre.format) {
-    downloadText(cre.result.data.filename || ("fable_montage." + cre.format), cre.result.data.content || "");
+    downloadText(cre.result.data.filename || ("monteur_montage." + cre.format), cre.result.data.content || "");
     toast("Downloaded " + (cre.result.data.filename || "timeline") + ".", "success");
     return;
   }
@@ -2460,7 +2460,7 @@ $("cre-download").addEventListener("click", function () {
     return api("/api/create/build", { method: "POST", body: creBuildBody() }).then(function (data) {
       cre.result = { data: data, format: cre.format };
       renderCreResult(data);
-      downloadText(data.filename || ("fable_montage." + cre.format), data.content || "");
+      downloadText(data.filename || ("monteur_montage." + cre.format), data.content || "");
       toast("Downloaded " + (data.filename || "timeline") + ".", "success");
     });
   });

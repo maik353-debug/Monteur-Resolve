@@ -1,4 +1,4 @@
-"""Tests for fable.io.edl (CMX3600 EDL read/write)."""
+"""Tests for monteur.io.edl (CMX3600 EDL read/write)."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from fable.io import load_timeline, read_edl, write_edl
-from fable.model import AUDIO, VIDEO, Clip, Timeline
+from monteur.io import load_timeline, read_edl, write_edl
+from monteur.model import AUDIO, VIDEO, Clip, Timeline
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -22,7 +22,7 @@ def test_read_sample_counts(sample: Timeline) -> None:
     assert len(sample.clips) == 10
     assert len(sample.video_clips()) == 5
     assert len(sample.audio_clips()) == 5
-    assert sample.name == "Fable Sample Cut"
+    assert sample.name == "Monteur Sample Cut"
     assert sample.metadata["fcm"] == "NON-DROP FRAME"
     assert sample.fps == 25.0
 
@@ -153,7 +153,7 @@ def test_load_timeline_edl_dispatch() -> None:
 
 
 def test_save_timeline_edl(tmp_path: Path) -> None:
-    from fable.io import save_timeline
+    from monteur.io import save_timeline
 
     timeline = Timeline(name="Saved", fps=25.0)
     timeline.clips = [Clip("x", "V1", VIDEO, 0, 50, 0, 50, source_name="TAPE1")]

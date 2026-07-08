@@ -1,4 +1,4 @@
-"""File I/O for Fable: EDL, FCPXML, SRT and Whisper JSON.
+"""File I/O for Monteur: EDL, FCPXML, SRT and Whisper JSON.
 
 ``load_timeline`` / ``save_timeline`` / ``load_transcript`` dispatch on
 file extension; the per-format ``read_*`` / ``write_*`` functions are
@@ -9,11 +9,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fable.io.edl import read_edl, write_edl
-from fable.io.fcpxml import read_fcpxml, write_fcpxml
-from fable.io.srt import read_srt, write_srt
-from fable.io.whisperjson import read_whisper_json
-from fable.model import Timeline, Transcript
+from monteur.io.edl import read_edl, write_edl
+from monteur.io.fcpxml import read_fcpxml, write_fcpxml
+from monteur.io.srt import read_srt, write_srt
+from monteur.io.whisperjson import read_whisper_json
+from monteur.model import Timeline, Transcript
 
 __all__ = [
     "load_timeline",

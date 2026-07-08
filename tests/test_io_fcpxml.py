@@ -1,4 +1,4 @@
-"""Tests for fable.io.fcpxml (FCPXML 1.x read/write)."""
+"""Tests for monteur.io.fcpxml (FCPXML 1.x read/write)."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from fable.io import load_timeline, read_fcpxml, write_fcpxml
-from fable.model import AUDIO, VIDEO, Clip, Timeline
+from monteur.io import load_timeline, read_fcpxml, write_fcpxml
+from monteur.model import AUDIO, VIDEO, Clip, Timeline
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -20,7 +20,7 @@ def sample() -> Timeline:
 
 def test_read_sample_counts(sample: Timeline) -> None:
     assert sample.fps == 25.0
-    assert sample.name == "Fable Sample Project"
+    assert sample.name == "Monteur Sample Project"
     assert len(sample.clips) == 5
     assert len(sample.video_clips()) == 4
     assert len(sample.audio_clips()) == 1
@@ -153,7 +153,7 @@ def test_load_timeline_fcpxml_dispatch() -> None:
 
 
 def test_save_timeline_fcpxml(tmp_path: Path) -> None:
-    from fable.io import save_timeline
+    from monteur.io import save_timeline
 
     timeline = Timeline(name="Saved", fps=25.0)
     timeline.clips = [Clip("x", "V1", VIDEO, 0, 50, 0, 50, source_name="Src")]

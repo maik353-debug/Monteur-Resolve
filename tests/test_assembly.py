@@ -1,4 +1,4 @@
-"""Tests for the auto-assembly engine (fable.assembly).
+"""Tests for the auto-assembly engine (monteur.assembly).
 
 All fixtures are synthetic and built in code: Screenplay/Scene/Element
 objects constructed directly (parse_fountain is not used) and transcripts
@@ -6,7 +6,7 @@ with hand-placed timings so windows and frame numbers can be asserted
 exactly.
 """
 
-from fable.assembly import (
+from monteur.assembly import (
     AssemblyPlan,
     SceneAssembly,
     Segment,
@@ -15,8 +15,8 @@ from fable.assembly import (
     match_takes_to_scene,
     plan_assembly,
 )
-from fable.model import Transcript, TranscriptSegment
-from fable.screenplay import ACTION, DIALOGUE, Element, Scene, Screenplay
+from monteur.model import Transcript, TranscriptSegment
+from monteur.screenplay import ACTION, DIALOGUE, Element, Scene, Screenplay
 
 
 def _seg(index, start, end, text):
@@ -327,9 +327,9 @@ def test_coverage_arithmetic():
 
 class TestForcedTakes:
     def test_pinned_take_wins_over_score(self):
-        from fable.assembly import TakeSource, plan_assembly
-        from fable.model import Transcript, TranscriptSegment
-        from fable.screenplay import DIALOGUE, Element, Scene, Screenplay
+        from monteur.assembly import TakeSource, plan_assembly
+        from monteur.model import Transcript, TranscriptSegment
+        from monteur.screenplay import DIALOGUE, Element, Scene, Screenplay
 
         scene = Scene(
             heading="INT. TEST",
@@ -357,9 +357,9 @@ class TestForcedTakes:
         assert any("pinned by editor" in n for n in plan.scenes[0].notes)
 
     def test_pinned_take_missing_noted(self):
-        from fable.assembly import TakeSource, plan_assembly
-        from fable.model import Transcript, TranscriptSegment
-        from fable.screenplay import DIALOGUE, Element, Scene, Screenplay
+        from monteur.assembly import TakeSource, plan_assembly
+        from monteur.model import Transcript, TranscriptSegment
+        from monteur.screenplay import DIALOGUE, Element, Scene, Screenplay
 
         scene = Scene(
             heading="INT. TEST",

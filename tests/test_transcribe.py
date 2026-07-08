@@ -1,4 +1,4 @@
-"""Tests for fable.transcribe — no real whisper install required."""
+"""Tests for monteur.transcribe — no real whisper install required."""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from fable import transcribe
-from fable.transcribe import (
-    FableTranscribeError,
+from monteur import transcribe
+from monteur.transcribe import (
+    MonteurTranscribeError,
     find_backend,
     scene_take_from_name,
     transcribe_directory,
@@ -98,7 +98,7 @@ def test_transcribe_file_nonzero_exit_carries_stderr(tmp_path, monkeypatch):
     media.write_bytes(b"\x00")
     runner = make_whisper_runner(returncode=1, stderr="RuntimeError: model 'tiny' not found")
 
-    with pytest.raises(FableTranscribeError) as exc:
+    with pytest.raises(MonteurTranscribeError) as exc:
         transcribe_file(media, runner=runner)
     msg = str(exc.value)
     assert "model 'tiny' not found" in msg
@@ -108,7 +108,7 @@ def test_transcribe_file_nonzero_exit_carries_stderr(tmp_path, monkeypatch):
 
 def test_transcribe_file_missing_media(monkeypatch, tmp_path):
     patch_whisper_only(monkeypatch)
-    with pytest.raises(FableTranscribeError, match="not found"):
+    with pytest.raises(MonteurTranscribeError, match="not found"):
         transcribe_file(tmp_path / "nope.mov", runner=make_whisper_runner())
 
 
@@ -119,7 +119,7 @@ def test_no_backend_raises_helpful_error(monkeypatch):
     monkeypatch.setattr(transcribe.shutil, "which", lambda name: None)
     monkeypatch.delenv("WHISPER_CPP", raising=False)
     monkeypatch.delenv("WHISPER_CPP_MODEL", raising=False)
-    with pytest.raises(FableTranscribeError) as exc:
+    with pytest.raises(MonteurTranscribeError) as exc:
         find_backend()
     msg = str(exc.value)
     assert "pip install openai-whisper" in msg
@@ -142,7 +142,7 @@ def test_cpp_backend_requires_model_env(monkeypatch):
     )
     monkeypatch.setenv("WHISPER_CPP", "/opt/wcpp/whisper-cli")
     monkeypatch.delenv("WHISPER_CPP_MODEL", raising=False)
-    with pytest.raises(FableTranscribeError, match="WHISPER_CPP_MODEL"):
+    with pytest.raises(MonteurTranscribeError, match="WHISPER_CPP_MODEL"):
         find_backend()
 
 
@@ -184,7 +184,7 @@ def test_whisper_cpp_non_wav_without_ffmpeg_errors(tmp_path, monkeypatch):
     patch_cpp_only(monkeypatch)
     media = tmp_path / "take.mov"
     media.write_bytes(b"\x00")
-    with pytest.raises(FableTranscribeError) as exc:
+    with pytest.raises(MonteurTranscribeError) as exc:
         transcribe_file(media, runner=lambda *a, **k: pytest.fail("must not run"))
     msg = str(exc.value)
     assert "16 kHz" in msg and "ffmpeg" in msg
@@ -267,7 +267,7 @@ def test_transcribe_directory_skips_sibling_json(tmp_path, monkeypatch, capsys):
 
 
 def test_transcribe_directory_not_a_directory(tmp_path):
-    with pytest.raises(FableTranscribeError, match="not a directory"):
+    with pytest.raises(MonteurTranscribeError, match="not a directory"):
         transcribe_directory(tmp_path / "missing")
 
 

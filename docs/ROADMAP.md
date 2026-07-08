@@ -1,8 +1,8 @@
-# Fable Roadmap
+# Monteur Roadmap
 
 Vision: the pacing assistant for narrative film editors — objective feedback
 on the rhythm of a cut, version by version, integrated with DaVinci Resolve.
-Personally useful first, marketable second. The GUI (Fable Studio) is the
+Personally useful first, marketable second. The GUI (Monteur Studio) is the
 product; the CLI is the workbench underneath.
 
 ## v0.1 — Foundation (this release)
@@ -10,14 +10,14 @@ product; the CLI is the workbench underneath.
 - Core data model: timecode (incl. drop-frame), timelines, clips, transcripts
 - I/O: CMX3600 EDL, FCPXML 1.x, SRT, Whisper JSON
 - Pacing analytics: ASL, pacing curve, sections, histogram, A/B compare
-- Fable Studio: local web app — drag & drop analysis, version history with
+- Monteur Studio: local web app — drag & drop analysis, version history with
   tempo trend, Resolve panel
-- Project version store (`.fable/versions.json` per film project)
+- Project version store (`.monteur/versions.json` per film project)
 - Self-contained HTML pacing report (light/dark)
 - DaVinci Resolve bridge (read timelines, import cuts)
 - Papercut: transcript → checklist → EDL/FCPXML rough cut (for dialogue/doc)
 - Optional Claude-powered selects, pacing notes, footage logs
-- CLI: `fable ui | analyze | papercut | convert | resolve | ai`
+- CLI: `monteur ui | analyze | papercut | convert | resolve | ai`
 
 ## v0.2 — In the editor's daily loop (Studio-first)
 

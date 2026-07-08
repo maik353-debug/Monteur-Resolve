@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from fable.analysis import PacingStats
+from monteur.analysis import PacingStats
 
 
 @dataclass(frozen=True)

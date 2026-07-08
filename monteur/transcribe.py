@@ -1,6 +1,6 @@
 """Transcription helper: drive a local Whisper install and return Transcripts.
 
-Fable does not bundle a speech model. Instead it shells out to whichever
+Monteur does not bundle a speech model. Instead it shells out to whichever
 Whisper implementation is installed:
 
 * **openai-whisper** — the ``whisper`` CLI (``pip install openai-whisper``).
@@ -8,7 +8,7 @@ Whisper implementation is installed:
   ``whisper-cpp`` or ``main``). Because those names are generic, this
   backend is only used when the ``WHISPER_CPP`` environment variable
   points at the binary, and ``WHISPER_CPP_MODEL`` points at a ggml/gguf
-  model file. whisper.cpp only accepts 16 kHz mono WAV input; Fable
+  model file. whisper.cpp only accepts 16 kHz mono WAV input; Monteur
   converts other media automatically when ``ffmpeg`` is on PATH.
 
 All subprocess execution goes through an injectable ``runner`` callable
@@ -28,12 +28,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from fable.io.srt import read_srt
-from fable.io.whisperjson import read_whisper_json
-from fable.model import Transcript
+from monteur.io.srt import read_srt
+from monteur.io.whisperjson import read_whisper_json
+from monteur.model import Transcript
 
 __all__ = [
-    "FableTranscribeError",
+    "MonteurTranscribeError",
     "Backend",
     "find_backend",
     "transcribe_file",
@@ -54,12 +54,12 @@ _INSTALL_HELP = (
     "        WHISPER_CPP=/path/to/whisper-cli    (the binary; also shipped as\n"
     "                                             'whisper-cpp' or 'main')\n"
     "        WHISPER_CPP_MODEL=/path/to/ggml-small.bin\n"
-    "    Note: whisper.cpp needs 16 kHz mono WAV input; Fable converts other\n"
+    "    Note: whisper.cpp needs 16 kHz mono WAV input; Monteur converts other\n"
     "    media automatically when ffmpeg is on PATH."
 )
 
 
-class FableTranscribeError(RuntimeError):
+class MonteurTranscribeError(RuntimeError):
     """Raised when no backend is available or a transcription run fails."""
 
 
@@ -79,7 +79,7 @@ def _excerpt(text: str, limit: int = 500) -> str:
 
 @dataclass(frozen=True)
 class Backend:
-    """A transcription tool Fable knows how to drive.
+    """A transcription tool Monteur knows how to drive.
 
     ``build_command(executable, input_path, output_dir, model, language)``
     returns the argv to run. The tool must leave a Whisper-style JSON file
@@ -121,7 +121,7 @@ def _whisper_cpp_command(
     # loads the model file named by WHISPER_CPP_MODEL.
     model_path = os.environ.get("WHISPER_CPP_MODEL", "")
     if not model_path:
-        raise FableTranscribeError(
+        raise MonteurTranscribeError(
             "whisper.cpp backend needs WHISPER_CPP_MODEL set to a ggml/gguf "
             "model file (e.g. WHISPER_CPP_MODEL=~/models/ggml-small.bin)."
         )
@@ -151,7 +151,7 @@ def find_backend() -> Backend:
        either as an absolute path or a command name resolvable on PATH.
        Requires ``WHISPER_CPP_MODEL`` as well.
 
-    Raises :class:`FableTranscribeError` with install instructions when
+    Raises :class:`MonteurTranscribeError` with install instructions when
     nothing usable is found.
     """
     exe = shutil.which("whisper")
@@ -162,23 +162,23 @@ def find_backend() -> Backend:
     if cpp:
         exe = shutil.which(cpp) or shutil.which(os.path.expanduser(cpp))
         if not exe:
-            raise FableTranscribeError(
+            raise MonteurTranscribeError(
                 f"WHISPER_CPP is set to {cpp!r} but no executable was found "
                 f"there (or on PATH under that name). Point WHISPER_CPP at "
                 f"the whisper.cpp binary (usually 'whisper-cli', "
                 f"'whisper-cpp' or 'main')."
             )
         if not os.environ.get("WHISPER_CPP_MODEL"):
-            raise FableTranscribeError(
+            raise MonteurTranscribeError(
                 "WHISPER_CPP is set but WHISPER_CPP_MODEL is not. Set it to "
                 "a ggml/gguf model file, e.g. "
                 "WHISPER_CPP_MODEL=~/models/ggml-small.bin. Reminder: "
-                "whisper.cpp needs 16 kHz mono WAV input; Fable converts "
+                "whisper.cpp needs 16 kHz mono WAV input; Monteur converts "
                 "with ffmpeg when it is on PATH."
             )
         return Backend("whisper.cpp", exe, _whisper_cpp_command)
 
-    raise FableTranscribeError(_INSTALL_HELP)
+    raise MonteurTranscribeError(_INSTALL_HELP)
 
 
 # --- Running -----------------------------------------------------------------
@@ -191,10 +191,10 @@ def _prepare_input_for_cpp(media: Path, workdir: Path, runner: Runner) -> Path:
         if media.suffix.lower() == ".wav":
             # Pass the WAV through and hope it is already 16 kHz mono.
             return media
-        raise FableTranscribeError(
+        raise MonteurTranscribeError(
             f"whisper.cpp needs 16 kHz mono WAV input, but {media.name!r} is "
             f"not a WAV and ffmpeg was not found on PATH. Install ffmpeg (so "
-            f"Fable can convert automatically) or convert manually:\n"
+            f"Monteur can convert automatically) or convert manually:\n"
             f"  ffmpeg -i {media.name} -ar 16000 -ac 1 -c:a pcm_s16le out.wav"
         )
     wav = workdir / (media.stem + "-16k.wav")
@@ -214,7 +214,7 @@ def _prepare_input_for_cpp(media: Path, workdir: Path, runner: Runner) -> Path:
     ]
     proc = runner(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
-        raise FableTranscribeError(
+        raise MonteurTranscribeError(
             f"ffmpeg failed converting {media.name!r} to 16 kHz WAV for "
             f"whisper.cpp (exit {proc.returncode}): {_excerpt(proc.stderr)}"
         )
@@ -227,7 +227,7 @@ def _parse_whisper_output(text: str, source_name: str = "") -> Transcript:
     whisper.cpp emits ``{"transcription": [{"offsets": {"from": ms, "to": ms},
     "text": ...}], "result": {"language": ...}}``; that shape is converted to
     the openai-whisper ``segments`` shape and fed through
-    :func:`fable.io.whisperjson.read_whisper_json` (which handles everything
+    :func:`monteur.io.whisperjson.read_whisper_json` (which handles everything
     else).
     """
     try:
@@ -260,18 +260,18 @@ def transcribe_file(
     """Transcribe one media file with the best available Whisper backend.
 
     ``runner`` (default :func:`subprocess.run`) executes the tool; inject a
-    fake in tests. Raises :class:`FableTranscribeError` when no backend is
+    fake in tests. Raises :class:`MonteurTranscribeError` when no backend is
     installed, the tool exits nonzero (message carries a stderr excerpt), or
     no parseable JSON output appears.
     """
     run = runner if runner is not None else subprocess.run
     media = Path(path)
     if not media.is_file():
-        raise FableTranscribeError(f"media file not found: {media}")
+        raise MonteurTranscribeError(f"media file not found: {media}")
     if backend is None:
         backend = find_backend()
 
-    with tempfile.TemporaryDirectory(prefix="fable-transcribe-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="monteur-transcribe-") as tmp:
         workdir = Path(tmp)
         input_path = media
         if backend.name == "whisper.cpp":
@@ -279,13 +279,13 @@ def transcribe_file(
         cmd = backend.command(input_path, workdir, model, language)
         proc = run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
-            raise FableTranscribeError(
+            raise MonteurTranscribeError(
                 f"{backend.name} failed on {media.name!r} "
                 f"(exit {proc.returncode}): {_excerpt(proc.stderr)}"
             )
         json_path = workdir / (input_path.stem + ".json")
         if not json_path.is_file():
-            raise FableTranscribeError(
+            raise MonteurTranscribeError(
                 f"{backend.name} exited 0 but produced no JSON at "
                 f"{json_path.name!r}; stderr: {_excerpt(proc.stderr)}"
             )
@@ -294,7 +294,7 @@ def transcribe_file(
                 json_path.read_text(encoding="utf-8"), source_name=media.name
             )
         except ValueError as exc:
-            raise FableTranscribeError(
+            raise MonteurTranscribeError(
                 f"{backend.name} output for {media.name!r} is not valid "
                 f"Whisper JSON: {exc}"
             ) from None
@@ -317,7 +317,7 @@ def transcribe_directory(
     """
     root = Path(path)
     if not root.is_dir():
-        raise FableTranscribeError(f"not a directory: {root}")
+        raise MonteurTranscribeError(f"not a directory: {root}")
     media_files = sorted(
         p
         for p in root.glob(pattern)
@@ -329,7 +329,7 @@ def transcribe_directory(
         sidecar_srt = media.with_suffix(".srt")
         if sidecar_json.is_file():
             print(
-                f"fable transcribe: skipping {media.name} "
+                f"monteur transcribe: skipping {media.name} "
                 f"(existing transcript {sidecar_json.name})"
             )
             transcript = _parse_whisper_output(
@@ -337,7 +337,7 @@ def transcribe_directory(
             )
         elif sidecar_srt.is_file():
             print(
-                f"fable transcribe: skipping {media.name} "
+                f"monteur transcribe: skipping {media.name} "
                 f"(existing transcript {sidecar_srt.name})"
             )
             transcript = read_srt(

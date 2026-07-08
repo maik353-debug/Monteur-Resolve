@@ -1,11 +1,11 @@
-"""Tests for fable.papercut."""
+"""Tests for monteur.papercut."""
 
 from __future__ import annotations
 
 import pytest
 
-from fable.model import Transcript, TranscriptSegment
-from fable.papercut import (
+from monteur.model import Transcript, TranscriptSegment
+from monteur.papercut import (
     Papercut,
     PapercutEntry,
     create_papercut,

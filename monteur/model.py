@@ -1,6 +1,6 @@
-"""Core data model for Fable.
+"""Core data model for Monteur.
 
-Everything in Fable speaks this vocabulary: frames at a given frame rate.
+Everything in Monteur speaks this vocabulary: frames at a given frame rate.
 Timelines are flat lists of clips with source and record ranges; all ranges
 are half-open (`in` inclusive, `out` exclusive), matching EDL semantics.
 """

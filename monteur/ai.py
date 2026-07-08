@@ -1,15 +1,15 @@
 """AI assistance for the editing room, powered by the Claude API.
 
 Optional feature: requires the ``anthropic`` package (``pip install
-fable-tool[ai]``) and credentials (``ANTHROPIC_API_KEY`` or an ``ant auth
-login`` profile). Everything else in Fable works without it.
+monteur[ai]``) and credentials (``ANTHROPIC_API_KEY`` or an ``ant auth
+login`` profile). Everything else in Monteur works without it.
 
 What it does:
 
 * :func:`suggest_selects` — reads a papercut (the transcript checklist) and an
   editorial brief, and returns the papercut with the strongest takes ticked,
   so the editor reviews a suggestion instead of starting from zero.
-* :func:`pacing_notes` — reads a :class:`~fable.analysis.PacingStats` and
+* :func:`pacing_notes` — reads a :class:`~monteur.analysis.PacingStats` and
   writes editorial notes on rhythm and dramaturgy.
 * :func:`summarize_footage` — condenses a transcript into a scene/topic
   overview for logging.
@@ -20,20 +20,20 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 
-from fable.analysis import PacingStats
-from fable.model import Transcript
+from monteur.analysis import PacingStats
+from monteur.model import Transcript
 
 DEFAULT_MODEL = "claude-opus-4-8"
 
 _SYSTEM = (
-    "You are Fable, an experienced film editor's assistant. You think like an "
+    "You are Monteur, an experienced film editor's assistant. You think like an "
     "editor: story first, rhythm second, coverage third. Be concrete and "
     "decisive; when you make a judgment call, state the editorial reason in "
     "one short clause. Answer in the language the user's material is in."
 )
 
 
-class FableAIError(RuntimeError):
+class MonteurAIError(RuntimeError):
     """Raised when the AI feature is unavailable or a request fails."""
 
 
@@ -41,8 +41,8 @@ def _client():
     try:
         import anthropic
     except ImportError as exc:
-        raise FableAIError(
-            "AI features need the 'anthropic' package: pip install 'fable-tool[ai]'"
+        raise MonteurAIError(
+            "AI features need the 'anthropic' package: pip install 'monteur[ai]'"
         ) from exc
     return anthropic.Anthropic()
 
@@ -60,9 +60,9 @@ def _run(prompt: str, model: str = DEFAULT_MODEL, effort: str = "high") -> str:
         ) as stream:
             message = stream.get_final_message()
     except Exception as exc:  # pragma: no cover - network/auth failures
-        raise FableAIError(f"Claude API request failed: {exc}") from exc
+        raise MonteurAIError(f"Claude API request failed: {exc}") from exc
     if message.stop_reason == "refusal":
-        raise FableAIError("The request was declined by the model's safety system.")
+        raise MonteurAIError("The request was declined by the model's safety system.")
     return "".join(block.text for block in message.content if block.type == "text")
 
 
@@ -72,7 +72,7 @@ def suggest_selects(papercut_text: str, brief: str, model: str = DEFAULT_MODEL) 
     ``brief`` describes what the cut should achieve (e.g. "90-second teaser,
     focus on the conflict between Anna and the mayor, keep it fast").
     The output preserves the papercut format exactly, so it can be parsed by
-    :func:`fable.papercut.parse_papercut` and reviewed line by line.
+    :func:`monteur.papercut.parse_papercut` and reviewed line by line.
     """
     prompt = (
         "Below is a papercut: a transcript checklist where '- [ ]' lines are "

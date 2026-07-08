@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import re
 
-from fable.model import (
+from monteur.model import (
     AUDIO,
     VIDEO,
     Clip,
