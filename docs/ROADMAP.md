@@ -62,10 +62,15 @@ Craft templates:
 - [ ] Watch mode: new footage auto-sifted overnight, report ready in the
       morning
 - [ ] Change list between versions for sound/VFX handoffs
-- [ ] Artlist (and Musicbed) integration: suggest licensed tracks matching
-      the cut's target tempo/mood/length, preview against the timeline,
-      and search sound effects for marker positions (depends on available
-      APIs; fall back to deep-linked searches)
+- [x] Song matcher (`monteur pick-music`, Artlist integration stage 1):
+      rank a folder of candidate songs against the footage — beat clarity,
+      length vs unique material, tempo vs motion, drop, dynamic arc —
+      with human-readable reasons; works on any downloaded files, no API
+- [ ] Artlist integration stage 2: deep-linked searches built from the
+      brief (music) and from title-slot/SFX markers (sound effects)
+- [ ] Artlist integration stage 3: Enterprise API partnership — in-app
+      search, preview against the timeline, direct download
+      (enterprise-api-support@artlist.io once the product is public)
 
 ## v1.0 — Product
 
