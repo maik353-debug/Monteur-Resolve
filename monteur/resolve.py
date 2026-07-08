@@ -119,6 +119,34 @@ def _candidate_module_dirs() -> list[str]:
     return dirs
 
 
+def _register_resolve_dll_dir() -> None:
+    """Windows: add Resolve's program folder to the DLL search path.
+
+    ``fusionscript.dll`` depends on sibling DLLs in Resolve's install folder.
+    When it is loaded from an external Python (not from inside Resolve), the
+    Windows loader may not find those siblings, and a missing/mismatched
+    dependency can access-violate rather than fail cleanly. Registering the
+    folder via ``os.add_dll_directory`` lets the loader resolve them. No-op off
+    Windows and fully guarded.
+    """
+    if not sys.platform.startswith("win"):
+        return
+    candidates = []
+    lib = os.environ.get("RESOLVE_SCRIPT_LIB")
+    if lib:
+        candidates.append(os.path.dirname(lib))
+    program_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+    candidates.append(
+        os.path.join(program_files, "Blackmagic Design", "DaVinci Resolve")
+    )
+    for directory in candidates:
+        if directory and os.path.isdir(directory):
+            try:
+                os.add_dll_directory(directory)
+            except (OSError, AttributeError):
+                pass
+
+
 def find_scripting_module() -> ModuleType:
     """Locate and import ``DaVinciResolveScript``.
 
@@ -126,6 +154,7 @@ def find_scripting_module() -> ModuleType:
     RESOLVE_SCRIPT_API / RESOLVE_SCRIPT_LIB, then the standard per-platform
     install paths. Raises MonteurResolveError with setup guidance if missing.
     """
+    _register_resolve_dll_dir()
     try:
         return importlib.import_module(_MODULE_NAME)
     except ImportError:
