@@ -1,35 +1,37 @@
 # Monteur 🎬
 
-**Your footage. A song. A first cut — automatically.**
+**The editing assistant that understands your footage — not just your
+timeline.**
 
-Monteur takes the tedious parts off a filmmaker's plate: it sifts your
-footage, finds the good moments, and cuts them to your music — then hands
-the result to DaVinci Resolve where you make it yours. Built for filmmakers
-who'd rather tell stories than scrub through clips.
+Generic Resolve remote controls exist. Monteur is the editorial
+intelligence layer: it knows *which* moments in your material are worth
+using, *where* the beat falls in your music, and *why* your cut drags in
+act two — and it hands finished timelines to DaVinci Resolve.
 
 - **Create a first cut** — point Monteur at a folder of clips and a song.
   It scans every clip (flags what's too dark, blurry or shaky), ranks the
   best moments, detects the music's tempo and beats, and builds a rough cut
-  on the beat grid — faster cutting where the song gets loud. Out comes a
-  timeline for Resolve.
-- **Footage sifting** — `monteur sift` alone tells you what's usable in a
-  shoot before you watch a single clip.
-- **Auto-assembly (dialogue scenes)** — from screenplay to first cut:
-  Monteur matches take transcripts against your script, scores takes
-  (coverage, accuracy, restarts), picks the best material per scene.
-- **Monteur Studio** — a local app in your browser with guided, step-by-step
-  workflows. No timeline jargon required to get started.
-- **Version history** — save every cut as a version and watch your film's
-  tempo evolve across weeks of editing. Compare any two versions and get a
-  plain-language verdict ("v5 is cut faster, with a more even rhythm, and
-  runs 40s shorter").
-- **Resolve bridge** — talks directly to a running DaVinci Resolve via its
-  scripting API: read timelines, import cuts.
-- **Papercut** — bonus for dialogue scenes and documentary work: turn
-  transcripts into a tickable checklist and render your selects as a real
-  timeline.
-- **AI assistance (optional)** — Claude writes editorial pacing notes on
-  your cut and suggests selects from transcripts.
+  on the beat grid — faster cutting where the song gets loud. Straight into
+  Resolve, or as an EDL/FCPXML file.
+- **Claude integration (MCP)** — `monteur mcp` gives your Claude account
+  editorial senses inside Resolve: "analyze my timeline and mark where it
+  drags", "build a 60-second montage from this folder to this track". Not
+  raw API remote control — judgment.
+- **Footage sifting** — `monteur sift` tells you what's usable in a shoot
+  before you watch a single clip.
+- **Pacing analytics** — shot-length stats, pacing curve, fast/slow
+  sections, genre reference bands, per-scene view, and version comparison
+  with a plain-language verdict ("v5 is cut faster, with a more even
+  rhythm, and runs 40s shorter").
+- **Monteur Studio** — a local app in your browser with guided,
+  step-by-step workflows. No timeline jargon required to get started.
+- **Assembly & papercut (dialogue/doc material)** — match take transcripts
+  against a screenplay, or tick takes in a transcript checklist, and render
+  the selects as a timeline.
+
+Works with the free DaVinci Resolve via timeline files; live control
+(markers, building timelines in place, MCP) uses the scripting API and
+needs Resolve Studio.
 
 Pure Python 3.10+, zero required dependencies (AI features optionally use
 the `anthropic` package).

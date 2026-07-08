@@ -1,9 +1,12 @@
 # Monteur Roadmap
 
-Vision: the pacing assistant for narrative film editors — objective feedback
-on the rhythm of a cut, version by version, integrated with DaVinci Resolve.
-Personally useful first, marketable second. The GUI (Monteur Studio) is the
-product; the CLI is the workbench underneath.
+Vision: the editorial intelligence layer for DaVinci Resolve — Monteur
+understands the material (which moments are good), the music (where the
+pulse is) and the cut (where it drags), and acts on that judgment. The two
+fields research showed are genuinely open: beat-driven auto-cutting for
+real filmmakers, and editorial intelligence as an AI-accessible layer
+(existing Resolve MCPs offer raw control only). Distribution via open
+MCP/CLI, product via Monteur Studio.
 
 ## v0.1 — Foundation (this release)
 
@@ -19,22 +22,38 @@ product; the CLI is the workbench underneath.
 - Optional Claude-powered selects, pacing notes, footage logs
 - CLI: `monteur ui | analyze | papercut | convert | resolve | ai`
 
-## v0.2 — In the editor's daily loop (Studio-first)
+## v0.2 — Deeper senses (specialist moat, part 1)
 
-- [ ] Scene-level view: pacing per scene (from Resolve markers / clip names)
-- [ ] Reference pacing profiles: compare your cut against genre baselines
-      and reference films
-- [ ] One-click "pull & save" from Resolve on every export (watch mode)
-- [ ] Notes on versions ("director saw this one", "tightened act 2")
-- [ ] AI pacing notes inside Studio (opt-in, per version)
-- [ ] Windows/macOS install docs + Resolve scripts-menu integration
+Musical intelligence:
+- [ ] Downbeat & bar detection; cut on musical phrases (4/8 bars), not
+      just beats
+- [ ] Drop/chorus detection — put the strongest shot on the drop
+- [ ] Named song sections (intro/verse/chorus) in the montage plan
 
-## v0.3 — Deeper dramaturgy
+Visual intelligence:
+- [ ] Motion-direction matching at cut points (exit motion ~ entry motion)
+- [ ] Shot-size estimate (wide/medium/close via face size) and alternation
+      rules — no two near-identical framings back to back
+- [ ] Audio-based sift signals: wind noise, clipping, on-set silence
+- [ ] Highlight detection from audio (laughter, cheers, action peaks)
 
-- [ ] Act/sequence structure overlay on the pacing curve
-- [ ] Audio-aware analysis: dialogue density, music vs. dialogue balance
-- [ ] Marker round-trip with Resolve (notes ↔ timeline markers)
-- [ ] Whisper integration for the papercut workflow
+Craft templates:
+- [ ] Montage structures per use case: travel film, wedding, event,
+      music video, trailer — each a pacing arc (opening/build/climax/outro),
+      not just a grid
+
+## v0.3 — Semantic understanding (specialist moat, part 2)
+
+- [ ] Claude-vision footage search: sample frames -> "find shots of the
+      bride laughing", "every shot of the red car" — local index,
+      Resolve-native, feeds the montage builder and MCP
+- [ ] Trailer mode: distill a finished long cut into 30/60s (scene
+      detection + pacing analysis + AI shot selection)
+- [ ] Learn from the editor: diff the editor's corrections against
+      Monteur's plan and adapt scoring preferences per project
+- [ ] Watch mode: new footage auto-sifted overnight, report ready in the
+      morning
+- [ ] Change list between versions for sound/VFX handoffs
 
 ## v1.0 — Product
 
