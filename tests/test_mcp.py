@@ -28,6 +28,7 @@ EXPECTED_TOOLS = {
     "sift_footage",
     "analyze_song",
     "create_montage",
+    "see_footage",
     "build_assembly",
     "save_version",
     "list_versions",
@@ -189,3 +190,51 @@ def test_importing_module_does_not_start_server():
 
     source = inspect.getsource(mcp_server)
     assert 'if __name__ == "__main__":' in source
+
+
+def test_create_montage_no_music_needs_original_audio(tmp_path):
+    result = mcp_server.create_montage(
+        folder=str(tmp_path), output=str(tmp_path / "out.fcpxml")
+    )
+    assert "error" in result and "original" in result["error"]
+    result = mcp_server.create_montage(
+        folder=str(tmp_path), output=str(tmp_path / "out.fcpxml"),
+        audio="original",
+    )
+    assert "error" in result and "max_duration" in result["error"]
+
+
+def test_see_footage_missing_dir_is_graceful(tmp_path):
+    result = mcp_server.see_footage(str(tmp_path / "nope"))
+    assert "error" in result
+
+
+def test_see_footage_with_fake_vision(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    demo = Path(
+        "/tmp/claude-0/-home-user-Fable-tool/"
+        "90401078-872b-52b4-9d55-214193ea4ea5/scratchpad/demo-footage"
+    )
+    if not demo.is_dir():
+        pytest.skip("demo footage not generated in this environment")
+
+    def fake_analyze(reports, **kwargs):
+        for report in reports:
+            for m in report.moments:
+                m.label = "a winding mountain road"
+                m.role = "build"
+                m.hero = 0.4
+                m.tags = ["road"]
+        return ["4 moments analyzed"]
+
+    fake = types.ModuleType("monteur.vision")
+    fake.analyze_reports = fake_analyze
+    monkeypatch.setitem(sys.modules, "monteur.vision", fake)
+
+    result = mcp_server.see_footage(str(demo))
+    assert result["notes"] == ["4 moments analyzed"]
+    labeled = [m for c in result["clips"] for m in c["moments"]]
+    assert labeled and all(m["label"] == "a winding mountain road" for m in labeled)
+    assert all(m["role"] == "build" for m in labeled)

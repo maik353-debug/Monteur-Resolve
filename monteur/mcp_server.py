@@ -409,7 +409,7 @@ def analyze_song(file: str) -> dict:
 @mcp_instance.tool()
 def create_montage(
     folder: str,
-    music: str,
+    music: str = "",
     output: str = "",
     order: str = "chronological",
     fps: float = 25,
@@ -417,6 +417,13 @@ def create_montage(
     style: str = "auto",
     into_resolve: bool = False,
     brief: str = "",
+    audio: str = "music",
+    pace: float = 0,
+    transitions: str = "auto",
+    canvas: str = "uhd",
+    allow_repeats: bool = False,
+    cut_lead: float = 0.04,
+    see: bool = False,
 ) -> dict:
     """Build a music-cut montage from a folder of footage — a first cut.
 
@@ -433,6 +440,24 @@ def create_montage(
     are still at their defaults. Prefer passing explicit style/order/
     max_duration values yourself — you can interpret the user's wish far
     better than the keyword matcher; ``brief`` is a convenience fallback.
+
+    Editorial controls: ``audio`` = "music" (song only), "mix" (song +
+    the clips' own camera sound) or "original" (NO song — e.g. a
+    ride-POV cut that keeps the engine sound; ``music`` may then be
+    empty, but ``max_duration`` is required). ``pace`` = approximate
+    seconds per shot in the fastest phase (0 = the style's own pacing;
+    rounded to whole beats so cuts stay on the music). ``transitions`` =
+    "auto" (the style's habits — the trailer smashes to black at act
+    changes with "Title slot" markers), "cuts", "dissolves" or "smash".
+    ``canvas`` = "hd"/"uhd" 16:9, "vertical"/"vertical-uhd" 9:16,
+    "cine"/"cine-uhd" 2.39:1. ``allow_repeats`` lifts the cap that stops
+    footage repeating beyond 1.5x the unique material. ``cut_lead``
+    places cuts that many seconds before the beat. ``see=True`` asks
+    Claude vision to label the moments first (needs the anthropic
+    package and ANTHROPIC_API_KEY on this machine) so the plan casts by
+    meaning — hero shots on the drop, openers up front; a vision failure
+    never fails the montage, it is reported as ``vision_error``.
+
     Destination — pick exactly one: ``into_resolve=True`` builds the
     timeline directly in the running DaVinci Resolve, or ``output`` saves
     it to an absolute .fcpxml/.edl path for import later. ``fps`` is the
@@ -446,6 +471,17 @@ def create_montage(
             "timeline in DaVinci Resolve, or output=<absolute .fcpxml/.edl "
             "path> to save it to a file."
         }
+    if not music:
+        if audio != "original":
+            return {
+                "error": "no music given — pass a song path, or set "
+                "audio='original' to cut to the clips' own sound"
+            }
+        if not max_duration:
+            return {
+                "error": "no music given — pass max_duration to set the "
+                "cut length"
+            }
     brief_rationale = ""
     if brief and style == "auto" and order == "chronological" and not max_duration:
         # Inside MCP the caller IS Claude — never spend an API round trip
@@ -474,14 +510,29 @@ def create_montage(
         return {"error": str(exc)}
     if not reports:
         return {"error": f"no video files found in {folder}"}
-    try:
-        song = analyze_music(music)
-    except MonteurMediaError as exc:
-        return {"error": str(exc)}
+    vision_error = ""
+    vision_notes: list[str] = []
+    if see:
+        # Vision is an upgrade, not a gate: a missing key/package must not
+        # fail the montage. Resolved via importlib so tests can inject a fake.
+        import importlib
+
+        try:
+            vision_mod = importlib.import_module("monteur.vision")
+            vision_notes = vision_mod.analyze_reports(reports)
+        except Exception as exc:  # noqa: BLE001 - report, never fail the cut
+            vision_error = str(exc)
+    song = None
+    if music:
+        try:
+            song = analyze_music(music)
+        except MonteurMediaError as exc:
+            return {"error": str(exc)}
     try:
         plan = plan_montage(
             reports, song, order=order, max_duration=max_duration or None,
-            style=style,
+            style=style, allow_repeats=allow_repeats, cut_lead=cut_lead,
+            pace=pace or None, transitions=transitions,
         )
     except ValueError as exc:
         return {"error": str(exc)}
@@ -494,12 +545,18 @@ def create_montage(
     result = {
         "cuts": len(plan.entries),
         "duration_seconds": _round(plan.duration),
-        "tempo_bpm": _round(song.tempo, 1),
+        "tempo_bpm": _round(song.tempo, 1) if song else 0,
         "clips_used": len({e.clip_path for e in plan.entries}),
         "order": order,
         "style": style,
+        "audio": audio,
+        "canvas": canvas,
         "notes": plan.notes,
     }
+    if vision_notes:
+        result["vision_notes"] = vision_notes
+    if vision_error:
+        result["vision_error"] = vision_error
     if brief_rationale:
         result["brief_rationale"] = brief_rationale
     if into_resolve:
@@ -510,13 +567,71 @@ def create_montage(
             return _resolve_error(exc)
         result["resolve_timeline"] = name
     else:
-        timeline = montage_to_timeline(plan, fps=fps)
         try:
+            timeline = montage_to_timeline(plan, fps=fps, audio=audio, canvas=canvas)
             io.save_timeline(timeline, output)
         except (ValueError, OSError) as exc:
             return {"error": str(exc)}
         result["output"] = output
     return result
+
+
+@mcp_instance.tool()
+def see_footage(folder: str, max_moments: int = 48) -> dict:
+    """Ask Claude vision what the footage shows, moment by moment.
+
+    Sifts every clip in ``folder`` (absolute path), extracts one frame per
+    good moment and has Claude label it: a one-line description, lowercase
+    tags, a dramaturgical role (opener/build/climax/closer), a hero-shot
+    score 0..1 and a scene-similarity group. Results are cached next to the
+    footage (``.monteur-vision.json``), so repeat calls only pay for new
+    material. Needs the anthropic package and ANTHROPIC_API_KEY on this
+    machine — a clear ``{"error": ...}`` is returned otherwise.
+    ``max_moments`` caps the analyzed moments across all clips (cost
+    control). Run this before ``create_montage(see=true)`` to preview what
+    the montage will cast from, or to answer "what did I actually shoot?".
+    """
+    import importlib
+
+    try:
+        from monteur.media import MonteurMediaError
+        from monteur.sift import sift_directory
+    except ImportError as exc:
+        return {"error": f"sift features unavailable: {exc}"}
+    try:
+        reports = sift_directory(folder)
+    except MonteurMediaError as exc:
+        return {"error": str(exc)}
+    if not reports:
+        return {"error": f"no video files found in {folder}"}
+    try:
+        vision_mod = importlib.import_module("monteur.vision")
+        notes = vision_mod.analyze_reports(reports, max_moments=max_moments)
+    except Exception as exc:  # noqa: BLE001 - surface as a tool error dict
+        return {"error": str(exc)}
+    clips = []
+    for report in reports:
+        moments = [
+            {
+                "start": _round(m.start),
+                "end": _round(m.end),
+                "label": m.label,
+                "tags": m.tags,
+                "role": m.role,
+                "hero": _round(m.hero),
+                "group": m.group,
+            }
+            for m in report.moments
+            if m.label or m.role or m.hero > 0
+        ]
+        clips.append(
+            {
+                "path": report.path,
+                "usable_ratio": _round(report.usable_ratio),
+                "moments": moments,
+            }
+        )
+    return {"clips": clips, "notes": notes}
 
 
 # --- Assembly -------------------------------------------------------------------
