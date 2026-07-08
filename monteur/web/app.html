@@ -818,6 +818,13 @@ svg text.axis {
             </div>
             <h3 class="fgroup-title">Shape</h3>
             <div class="radio-cards stack compact" role="radiogroup" aria-label="Timeline shape" id="cre-canvas-cards"></div>
+            <div class="pace-row" role="group" aria-label="Resolution" style="margin-top: 10px;">
+              <div class="seg-toggle">
+                <button type="button" id="res-uhd" aria-pressed="true">4K</button>
+                <button type="button" id="res-hd" aria-pressed="false">HD</button>
+              </div>
+              <span class="help-small" id="cre-res-note">3840&thinsp;×&thinsp;2160</span>
+            </div>
             <p class="help-small">Your footage keeps its own aspect ratio — reframe vertical or cinemascope shots in Resolve after import.</p>
           </div>
           <div>
@@ -2445,7 +2452,8 @@ var cre = {
   lenMode: "target",      // "whole" | "target" — target by default so a 2:30 song never sneaks in
   lenTouched: false,      // has the user made a deliberate length choice?
   style: "auto",
-  canvas: "hd",           // "hd" | "uhd" | "vertical" | "cine"
+  shape: "wide",          // "wide" | "vertical" | "cine"
+  res: "uhd",             // "uhd" | "hd" — 4K by default
   pace: null,             // seconds per clip in the fastest phase; null = style default
   transitions: "auto",    // "auto" | "cuts" | "dissolves" | "smash"
   order: "chronological", // "chronological" | "best_first"
@@ -2891,24 +2899,40 @@ STYLES.forEach(function (spec) {
   $("cre-style-cards").appendChild(cardBtn);
 });
 
-var CANVASES = [
-  ["hd", "YouTube 16:9", "1920×1080 — the standard wide format."],
-  ["uhd", "4K 16:9", "3840×2160 — same shape, four times the pixels."],
-  ["vertical", "Vertical 9:16", "1080×1920 for Shorts, Reels & TikTok."],
-  ["cine", "Cinemascope 2.39:1", "1920×804 — the wide film look."]
+var SHAPES = [
+  ["wide", "Wide 16:9", "YouTube & TV — the standard frame."],
+  ["vertical", "Vertical 9:16", "Shorts, Reels & TikTok."],
+  ["cine", "Cinemascope 2.39:1", "The wide film look."]
 ];
-function setCanvas(value) {
-  cre.canvas = value;
-  Array.prototype.forEach.call($("cre-canvas-cards").children, function (cardBtn) {
-    cardBtn.setAttribute("aria-checked", String(cardBtn.getAttribute("data-canvas") === value));
-  });
+// shape x resolution -> backend canvas key and pixel size for the note.
+var CANVAS_KEYS = {
+  wide: { uhd: ["uhd", "3840 × 2160"], hd: ["hd", "1920 × 1080"] },
+  vertical: { uhd: ["vertical-uhd", "2160 × 3840"], hd: ["vertical", "1080 × 1920"] },
+  cine: { uhd: ["cine-uhd", "3840 × 1608"], hd: ["cine", "1920 × 804"] }
+};
+function canvasKey() { return CANVAS_KEYS[cre.shape][cre.res][0]; }
+function refreshCanvasNote() {
+  $("cre-res-note").textContent = CANVAS_KEYS[cre.shape][cre.res][1];
 }
-CANVASES.forEach(function (spec) {
+function setShape(value) {
+  cre.shape = value;
+  Array.prototype.forEach.call($("cre-canvas-cards").children, function (cardBtn) {
+    cardBtn.setAttribute("aria-checked", String(cardBtn.getAttribute("data-shape") === value));
+  });
+  refreshCanvasNote();
+}
+function setRes(value) {
+  cre.res = value;
+  $("res-uhd").setAttribute("aria-pressed", String(value === "uhd"));
+  $("res-hd").setAttribute("aria-pressed", String(value === "hd"));
+  refreshCanvasNote();
+}
+SHAPES.forEach(function (spec) {
   var cardBtn = el("button", "radio-card");
   cardBtn.type = "button";
   cardBtn.setAttribute("role", "radio");
-  cardBtn.setAttribute("data-canvas", spec[0]);
-  cardBtn.setAttribute("aria-checked", String(spec[0] === cre.canvas));
+  cardBtn.setAttribute("data-shape", spec[0]);
+  cardBtn.setAttribute("aria-checked", String(spec[0] === cre.shape));
   var title = el("span", "rc-title");
   var dot = el("span", "radio-dot");
   dot.setAttribute("aria-hidden", "true");
@@ -2916,9 +2940,11 @@ CANVASES.forEach(function (spec) {
   title.appendChild(document.createTextNode(spec[1]));
   cardBtn.appendChild(title);
   cardBtn.appendChild(el("span", "rc-desc", spec[2]));
-  cardBtn.addEventListener("click", function () { setCanvas(spec[0]); });
+  cardBtn.addEventListener("click", function () { setShape(spec[0]); });
   $("cre-canvas-cards").appendChild(cardBtn);
 });
+$("res-uhd").addEventListener("click", function () { setRes("uhd"); });
+$("res-hd").addEventListener("click", function () { setRes("hd"); });
 
 function setOrder(order) {
   cre.order = order;
@@ -2991,7 +3017,7 @@ function creBuildBody() {
     audio: cre.audio,
     order: cre.order,
     style: cre.style,
-    canvas: cre.canvas,
+    canvas: canvasKey(),
     transitions: cre.transitions,
     fps: fpsFrom($("cre-fps")),
     format: cre.format,

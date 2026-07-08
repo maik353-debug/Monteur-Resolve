@@ -175,12 +175,14 @@ _AUDIO_MODES = ("music", "mix", "original")
 # smashes to black), "cuts" = hard cuts only, "dissolves" = dissolve on
 # every cut, "smash" = black title-slot gaps at act/section changes.
 TRANSITION_MODES = ("auto", "cuts", "dissolves", "smash")
-# Canvas presets for montage_to_timeline: what shape the video is.
+# Canvas presets for montage_to_timeline: shape x resolution.
 CANVASES: dict[str, tuple[int, int]] = {
-    "hd": (1920, 1080),  # YouTube / TV 16:9
+    "hd": (1920, 1080),  # 16:9 in HD
     "uhd": (3840, 2160),  # 16:9 in 4K
-    "vertical": (1080, 1920),  # Shorts / Reels / TikTok 9:16
-    "cine": (1920, 804),  # 2.39:1 cinemascope
+    "vertical": (1080, 1920),  # Shorts / Reels / TikTok 9:16 in HD
+    "vertical-uhd": (2160, 3840),  # 9:16 in 4K
+    "cine": (1920, 804),  # 2.39:1 cinemascope in HD
+    "cine-uhd": (3840, 1608),  # 2.39:1 in 4K
 }
 # Drop alignment only when the drop falls inside this share of the montage.
 _DROP_ALIGN_MARGIN = 0.05
@@ -1277,11 +1279,12 @@ def montage_to_timeline(
     Any other value raises ValueError listing the three; ``"music"``/
     ``"mix"`` raise ValueError when the plan has no ``music_path``.
 
-    ``canvas`` picks the timeline's shape from :data:`CANVASES`: ``"hd"``
-    (default, 1920x1080 for YouTube/TV), ``"uhd"`` (3840x2160),
-    ``"vertical"`` (1080x1920 for Shorts/Reels) or ``"cine"`` (1920x804,
-    2.39:1). Unknown values raise ValueError listing the presets. Footage
-    keeps its own aspect ratio — reframe in Resolve after import.
+    ``canvas`` picks the timeline's shape and resolution from
+    :data:`CANVASES`: ``"hd"`` (default, 1920x1080) / ``"uhd"``
+    (3840x2160) for 16:9, ``"vertical"`` / ``"vertical-uhd"`` for 9:16
+    Shorts/Reels, ``"cine"`` / ``"cine-uhd"`` for 2.39:1 cinemascope.
+    Unknown values raise ValueError listing the presets. Footage keeps
+    its own aspect ratio — reframe in Resolve after import.
 
     A plan with ``dips`` (smash-to-black title slots) leaves black gaps on
     V1 and drops a "Title slot" marker on each gap.

@@ -856,6 +856,10 @@ def test_canvas_presets_set_timeline_size():
     assert (vertical.width, vertical.height) == (1080, 1920)
     cine = montage_to_timeline(plan, fps=25.0, canvas="cine")
     assert (cine.width, cine.height) == (1920, 804)
+    vertical_4k = montage_to_timeline(plan, fps=25.0, canvas="vertical-uhd")
+    assert (vertical_4k.width, vertical_4k.height) == (2160, 3840)
+    cine_4k = montage_to_timeline(plan, fps=25.0, canvas="cine-uhd")
+    assert (cine_4k.width, cine_4k.height) == (3840, 1608)
     default = montage_to_timeline(plan, fps=25.0)
     assert (default.width, default.height) == (1920, 1080)
     with pytest.raises(ValueError, match="valid canvases"):

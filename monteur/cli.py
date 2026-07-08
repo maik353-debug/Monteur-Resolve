@@ -561,9 +561,12 @@ def build_parser() -> argparse.ArgumentParser:
              "it (default: the style's own pacing)",
     )
     p.add_argument(
-        "--canvas", choices=["hd", "uhd", "vertical", "cine"], default="hd",
-        help="timeline shape: hd 1920x1080 (YouTube), uhd 3840x2160, "
-             "vertical 1080x1920 (Shorts/Reels), cine 1920x804 (2.39:1)",
+        "--canvas",
+        choices=["hd", "uhd", "vertical", "vertical-uhd", "cine", "cine-uhd"],
+        default="uhd",
+        help="timeline shape and resolution: uhd 3840x2160 (default), "
+             "hd 1920x1080, vertical[-uhd] 9:16 for Shorts/Reels, "
+             "cine[-uhd] 2.39:1 cinemascope",
     )
     p.add_argument(
         "--transitions", choices=["auto", "cuts", "dissolves", "smash"],
