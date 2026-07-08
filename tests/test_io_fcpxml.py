@@ -421,16 +421,29 @@ def test_write_fade_metadata_becomes_head_and_tail_transitions():
     tl.metadata["fade_out_frames"] = 25
     root = ET.fromstring(write_fcpxml(tl))
     spine = root.find(".//spine")
-    transitions = spine.findall("transition")
-    assert len(transitions) == 2
-    head, tail = transitions
-    # head fade starts at 0 and runs 12 frames; with nothing before it in the
-    # spine it dissolves in from black
-    assert head.get("offset") == "0s"
+
+    # Resolve only imports transitions sitting BETWEEN two spine items, so
+    # the fades dissolve from/to black gaps: leading gap, head transition,
+    # the clip (shifted right by the fade-in), tail transition, trailing gap.
+    tags = [el.tag for el in spine]
+    assert tags == ["gap", "transition", "asset-clip", "transition", "gap"]
+
+    lead_gap, head, clip_el, tail, trail_gap = list(spine)
+    assert lead_gap.get("offset") == "0s"
+    assert lead_gap.get("duration") == "12/25s"
+    # head fade starts AT the shifted cut (start-aligned: no handles needed)
+    assert head.get("offset") == "12/25s"
     assert head.get("duration") == "12/25s"
-    # tail fade covers the last second of the timeline
-    assert tail.get("offset") == "3s"
+    # all content shifted right by the fade-in
+    assert clip_el.get("offset") == "12/25s"
+    # tail fade ends AT the cut into the trailing gap (end-aligned)
+    assert tail.get("offset") == "87/25s"  # (100 + 12 - 25) frames
     assert tail.get("duration") == "1s"
+    assert trail_gap.get("offset") == "112/25s"
+    assert trail_gap.get("duration") == "1s"
+
+    # the sequence covers the shift and the trailing gap
+    assert root.find(".//sequence").get("duration") == "137/25s"
 
 
 def test_write_no_fade_transitions_without_metadata():

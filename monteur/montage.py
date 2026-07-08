@@ -1786,7 +1786,11 @@ def montage_to_timeline(
     (3840x2160) for 16:9, ``"vertical"`` / ``"vertical-uhd"`` for 9:16
     Shorts/Reels, ``"cine"`` / ``"cine-uhd"`` for 2.39:1 cinemascope.
     Unknown values raise ValueError listing the presets. Footage keeps
-    its own aspect ratio — reframe in Resolve after import.
+    its own aspect ratio — reframe in Resolve after import. A ``cine*``
+    canvas appends a note to the plan explaining that 16:9 footage shows
+    SIDE bars (pillarbox) until Resolve's Image Scaling is set to "Scale
+    full frame with crop" — that setting fills the width and yields the
+    classic top/bottom cinema bars on a 16:9 export.
 
     A plan with ``dips`` (smash-to-black title slots) leaves black gaps on
     V1 and drops a "Title slot" marker on each gap. Entries with a vision
@@ -1817,6 +1821,18 @@ def montage_to_timeline(
         valid = ", ".join(sorted(CANVASES))
         raise ValueError(f"unknown canvas {canvas!r}; valid canvases: {valid}")
     width, height = CANVASES[canvas]
+    if canvas.startswith("cine"):
+        # A 2.39:1 timeline fits 16:9 footage with SIDE bars by default,
+        # which is never what "cinemascope" means to anyone. Tell the
+        # editor the one Resolve setting that produces the cinema look.
+        hint = (
+            "cine canvas: 16:9 footage shows side bars until Resolve "
+            "fills the width — set Project Settings > Image Scaling > "
+            '"Scale full frame with crop" (crops top/bottom; the classic '
+            "cinema bars appear when you export or view in 16:9)"
+        )
+        if hint not in plan.notes:
+            plan.notes.append(hint)
     timeline = Timeline(name=name, fps=fps, width=width, height=height)
     own_audio_track = {"mix": "A2", "original": "A1"}.get(audio)
     for entry in plan.entries:

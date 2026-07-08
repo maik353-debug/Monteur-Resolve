@@ -866,6 +866,19 @@ def test_canvas_presets_set_timeline_size():
         montage_to_timeline(plan, fps=25.0, canvas="imax")
 
 
+def test_cine_canvas_appends_scaling_hint_once():
+    plan = plan_montage(make_reports(), make_music(), allow_repeats=True)
+    assert not any("Scale full frame with crop" in n for n in plan.notes)
+    montage_to_timeline(plan, fps=25.0, canvas="cine")
+    montage_to_timeline(plan, fps=25.0, canvas="cine-uhd")
+    hints = [n for n in plan.notes if "Scale full frame with crop" in n]
+    assert len(hints) == 1  # idempotent across rebuilds
+    # non-cine canvases never add it
+    plain = plan_montage(make_reports(), make_music(), allow_repeats=True)
+    montage_to_timeline(plain, fps=25.0, canvas="uhd")
+    assert not any("Scale full frame with crop" in n for n in plain.notes)
+
+
 # --- transition modes ---------------------------------------------------------
 
 

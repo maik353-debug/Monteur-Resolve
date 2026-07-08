@@ -149,6 +149,24 @@ class TestDetectSections:
         assert sections[-1].label == "high"
         assert sections[0].energy < sections[-1].energy
 
+    def test_compressed_master_is_not_all_high(self):
+        # A loud master with only ~15% verse/chorus level difference must
+        # still yield quieter sections — labelling the whole song "high"
+        # makes the montage cut on every beat from start to finish.
+        rng = np.random.default_rng(5)
+        duration = 120.0
+        n = int(duration * RATE)
+        samples = rng.standard_normal(n).astype(np.float32)
+        t = np.arange(n) / RATE
+        level = 0.85 + 0.15 * (np.sin(2 * np.pi * t / 30.0) > 0)
+        samples *= level.astype(np.float32)
+
+        sections = detect_sections(samples, RATE)
+        _assert_tiles(sections, duration)
+        high_time = sum(s.end - s.start for s in sections if s.label == "high")
+        assert high_time < 0.6 * duration
+        assert any(s.label != "high" for s in sections)
+
     def test_silence_is_graceful(self):
         silence = np.zeros(10 * RATE, dtype=np.float32)
         sections = detect_sections(silence, RATE)

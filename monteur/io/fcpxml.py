@@ -50,12 +50,14 @@ Writing (:func:`write_fcpxml`):
   DaVinci Resolve imports spine transitions; :func:`read_fcpxml` ignores
   the element, leaving the clips intact.
 * Fades: ``timeline.metadata["fade_in_frames"]`` /
-  ``["fade_out_frames"]`` become spine ``<transition>`` elements at the
-  head (when the first clip starts at record 0) and tail of the video
-  track — with nothing on the far side, they dissolve from/to BLACK on
-  import. Audio fades are NOT written (they would need
-  ``<param>``/``adjust-volume`` elements); the plan notes the music
-  fade so the editor applies it in Resolve.
+  ``["fade_out_frames"]`` become Cross Dissolves BETWEEN a black
+  ``<gap>`` and the first/last clip — Resolve drops transitions that
+  have nothing on one side, so a head fade shifts ALL content right by
+  ``fade_in_frames`` behind a leading gap and a tail fade appends a
+  trailing gap. Gaps import as black with unlimited handles, so the
+  dissolves need no media beyond the clips' own frames. Audio fades are
+  NOT written (they would need ``<param>``/``adjust-volume`` elements);
+  the plan notes the music fade so the editor applies it in Resolve.
 * Markers: ``timeline.markers`` are written as ``<marker>`` children of
   the spine element containing them (asset-clip or gap), in that
   element's local timebase; a marker's ``note`` is folded into the
@@ -449,7 +451,16 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
         width=str(timeline.width),
         height=str(timeline.height),
     )
-    total = _fmt_time(timeline.duration, frame_dur)
+    # Fades are Cross Dissolves BETWEEN two spine items — Resolve's importer
+    # drops a transition with nothing on one side. A head fade therefore
+    # shifts all content right by fade_in frames behind a leading black gap;
+    # a tail fade appends a trailing black gap. Gaps have unlimited handles,
+    # so the dissolves never need media beyond the clips' own frames.
+    fade_in = int(timeline.metadata.get("fade_in_frames", 0) or 0)
+    fade_out = int(timeline.metadata.get("fade_out_frames", 0) or 0)
+    head_shift = fade_in if (video and fade_in > 0 and video[0].record_in == 0) else 0
+    tail_gap = fade_out if (video and fade_out > 0) else 0
+    total = _fmt_time(timeline.duration + head_shift + tail_gap, frame_dur)
     for key, rid in asset_ids.items():
         # start = the file's embedded start timecode (0s when unknown);
         # duration = the file's real length, else the furthest source frame
@@ -531,8 +542,15 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
                     value=value,
                 )
 
-    fade_in = int(timeline.metadata.get("fade_in_frames", 0) or 0)
-    fade_out = int(timeline.metadata.get("fade_out_frames", 0) or 0)
+    if head_shift > 0:
+        ET.SubElement(
+            spine,
+            "gap",
+            name="Gap",
+            offset="0s",
+            duration=_fmt_time(head_shift, frame_dur),
+            start="0s",
+        )
     playhead = 0
     first_clip_el: ET.Element | None = None
     first_clip_start = 0
@@ -548,18 +566,20 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
                 spine,
                 "gap",
                 name="Gap",
-                offset=_fmt_time(playhead, frame_dur),
+                offset=_fmt_time(playhead + head_shift, frame_dur),
                 duration=_fmt_time(clip.record_in - playhead, frame_dur),
                 start="0s",
             )
             attach_markers(gap_el, playhead, clip.record_in, 0)
-        if first_clip_el is None and clip.record_in == 0 and fade_in > 0:
-            # Head transition: nothing before it, so it fades in from black.
+        if first_clip_el is None and fade_in > 0:
+            # Head fade: dissolve from the black gap before the first clip
+            # (the shift gap, or a natural leading gap). Start-aligned at the
+            # cut, so the incoming clip needs no media handles.
             ET.SubElement(
                 spine,
                 "transition",
                 name="Cross Dissolve",
-                offset="0s",
+                offset=_fmt_time(clip.record_in + head_shift, frame_dur),
                 duration=_fmt_time(min(fade_in, clip.duration), frame_dur),
             )
         dissolve = _transition_frames(clip)
@@ -569,7 +589,7 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
                 spine,
                 "transition",
                 name="Cross Dissolve",
-                offset=_fmt_time(clip.record_in, frame_dur),
+                offset=_fmt_time(clip.record_in + head_shift, frame_dur),
                 duration=_fmt_time(dissolve, frame_dur),
             )
         # The source position is expressed in the asset's timescale, which
@@ -580,7 +600,7 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
             "asset-clip",
             ref=asset_ids[source_key(clip)],
             name=clip.name or source_key(clip),
-            offset=_fmt_time(clip.record_in, frame_dur),
+            offset=_fmt_time(clip.record_in + head_shift, frame_dur),
             duration=_fmt_time(clip.duration, frame_dur),
             start=_fmt_time(source_start, frame_dur),
             format="r1",
@@ -592,15 +612,25 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
             first_clip_start = source_start
         playhead = clip.record_out
     if video and fade_out > 0:
-        # Tail transition: nothing after it, so it fades out to black.
+        # Tail fade: dissolve into a trailing black gap. End-aligned at the
+        # cut, so the outgoing clip needs no media handles.
         last = video[-1]
         length = min(fade_out, last.duration)
+        end = last.record_out + head_shift
         ET.SubElement(
             spine,
             "transition",
             name="Cross Dissolve",
-            offset=_fmt_time(last.record_out - length, frame_dur),
+            offset=_fmt_time(end - length, frame_dur),
             duration=_fmt_time(length, frame_dur),
+        )
+        ET.SubElement(
+            spine,
+            "gap",
+            name="Gap",
+            offset=_fmt_time(end, frame_dur),
+            duration=_fmt_time(tail_gap, frame_dur),
+            start="0s",
         )
 
     # Attach unpaired audio (music bed) as a connected clip on the first video

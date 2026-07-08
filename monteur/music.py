@@ -372,6 +372,12 @@ _SECTION_SMOOTH_S = 4.0
 _SECTION_MIN_LEN_S = 4.0
 _LOW_THRESHOLD = 0.35
 _HIGH_THRESHOLD = 0.7
+# When at least this fraction of the track would be labelled "high", the
+# envelope is re-stretched over the track's own dynamics (see
+# detect_sections) — a compressed master must not cut on every beat from
+# start to finish.
+_RESTRETCH_QUANTILE = 40
+_RESTRETCH_FLOOR_QUANTILE = 10
 
 
 def _label_for(energy: float) -> str:
@@ -463,13 +469,31 @@ def detect_sections(samples, rate: int) -> list[MusicSection]:
     energy = _smoothed_energy(x, rate)
     n_windows = energy.size
 
+    # _smoothed_energy normalises to the track's own 95th percentile, so a
+    # compressed master with little dynamic range sits near 1.0 throughout
+    # and fixed cutoffs would label the whole song "high" — the montage
+    # would then cut on every beat from start to finish. When most of the
+    # track clears the "high" line, re-stretch the envelope over the
+    # track's own dynamics (quietest tenth -> 0) so low/mid/high follow
+    # the song's structure instead. A track with real quiet passages
+    # (e.g. a soft first half) never triggers this and keeps the
+    # absolute labels.
+    labelled = energy
+    if float(np.percentile(energy, _RESTRETCH_QUANTILE)) >= _HIGH_THRESHOLD:
+        floor = float(np.percentile(energy, _RESTRETCH_FLOOR_QUANTILE))
+        span = float(energy.max()) - floor
+        if span > 1e-9:
+            labelled = np.clip((energy - floor) / span, 0.0, 1.0)
+
     # One section per window, then merge.
     sections = []
     for i in range(n_windows):
         start = i * _SECTION_WINDOW_S
         end = min((i + 1) * _SECTION_WINDOW_S, duration)
         e = float(energy[i])
-        sections.append(MusicSection(start=start, end=end, energy=e, label=_label_for(e)))
+        sections.append(
+            MusicSection(start=start, end=end, energy=e, label=_label_for(float(labelled[i])))
+        )
 
     sections = _merge_same_label(sections)
     sections = _absorb_short_sections(sections)
