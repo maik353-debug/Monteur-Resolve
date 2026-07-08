@@ -190,3 +190,51 @@ def test_publish_kit_without_vision_suggests_see(tmp_path, monkeypatch):
     plan.entries = [entry("/f/plain.mp4", 0.0, 5.0, 0.0, 5.0)]
     notes = publish_kit(plan, [ClipReport(path="/f/plain.mp4", duration=10.0)], tmp_path)
     assert any("--see" in n for n in notes)
+
+
+# --- sound design -----------------------------------------------------------------
+
+
+def test_publish_kit_sound_design_section_with_artlist_links(tmp_path, monkeypatch):
+    import monteur.publish as publish
+    from monteur.montage import SfxCue
+
+    monkeypatch.setattr(
+        publish, "_ai_copy", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline"))
+    )
+    plan, reports = make_plan_and_reports()
+    plan.sfx = [
+        SfxCue(0.0, 4.0, "ambience", "mountain wind ambience", "opening"),
+        SfxCue(14.0, 2.0, "riser", "riser build up", "build -> climax"),
+        SfxCue(16.0, 1.0, "impact", "cinematic impact hit", "climax start"),
+        SfxCue(20.0, 1.0, "impact", "cinematic impact hit", "cut on the drop"),
+    ]
+    notes = publish_kit(plan, reports, tmp_path)
+    doc = (tmp_path / "publish.md").read_text(encoding="utf-8")
+    assert "## Sound design" in doc
+    # one line per cue: mm:ss, kind, query, why
+    assert "- 00:00  ambience — mountain wind ambience (opening)" in doc
+    assert "- 00:14  riser — riser build up (build -> climax)" in doc
+    assert "- 00:16  impact — cinematic impact hit (climax start)" in doc
+    # one urlencoded Artlist deep link per UNIQUE query (the impact query
+    # appears twice in the cues, once in the links)
+    assert (
+        "[mountain wind ambience]"
+        "(https://artlist.io/sfx/search?terms=mountain%20wind%20ambience)" in doc
+    )
+    assert doc.count("https://artlist.io/sfx/search?terms=cinematic%20impact%20hit") == 1
+    assert any("4 sfx cues" in n for n in notes)
+
+
+def test_publish_kit_without_sfx_has_no_sound_design_section(tmp_path, monkeypatch):
+    import monteur.publish as publish
+
+    monkeypatch.setattr(
+        publish, "_ai_copy", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline"))
+    )
+    plan, reports = make_plan_and_reports()
+    notes = publish_kit(plan, reports, tmp_path)
+    doc = (tmp_path / "publish.md").read_text(encoding="utf-8")
+    assert "## Sound design" not in doc
+    assert "artlist.io" not in doc
+    assert not any("sfx cues" in n for n in notes)

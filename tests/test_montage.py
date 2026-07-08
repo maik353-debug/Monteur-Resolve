@@ -1163,3 +1163,181 @@ def test_energy_matching_neutral_when_all_static():
     plan = plan_montage([a, b], _loud_music(), max_duration=1.0, cut_lead=0.0)
     # no motion data anywhere: pool order is preserved exactly as before
     assert [e.clip_path for e in plan.entries] == ["/f/a.mp4", "/f/b.mp4"]
+
+
+# --- sfx layer (film mode) -------------------------------------------------------
+
+
+def test_sfx_default_off_and_plan_unchanged():
+    # The compatibility bar: sfx=False (and the omitted default) plan
+    # byte-identically to a plan built before the parameter existed.
+    for order in (CHRONOLOGICAL, BEST_FIRST):
+        without = plan_montage(make_reports(), make_music(), order=order)
+        explicit = plan_montage(make_reports(), make_music(), order=order, sfx=False)
+        assert without.sfx == [] == explicit.sfx
+        assert [entry_key(e) for e in without.entries] == [
+            entry_key(e) for e in explicit.entries
+        ]
+        assert without.notes == explicit.notes
+        assert not any("sfx layer" in n for n in without.notes)
+
+
+def test_sfx_travel_places_ambience_risers_impact_whooshes():
+    # travel over the 40s arc track: phases 0-8 / 8-16 / 16-32 / 32-40.
+    plan = plan_montage(
+        make_long_reports(), make_arc_music(), style="travel", cut_lead=0.0, sfx=True
+    )
+    times = [c.time for c in plan.sfx]
+    assert times == sorted(times)
+    for c in plan.sfx:
+        assert 0.0 <= c.time and c.time + c.duration <= 40.0 + 1e-6
+    # opening ambience: at 0, exactly the opening phase long, honest fallback
+    # query (no vision labels anywhere)
+    ambience = [c for c in plan.sfx if c.kind == "ambience"]
+    assert len(ambience) == 1
+    assert ambience[0].time == 0.0
+    assert ambience[0].duration == pytest.approx(8.0)
+    assert ambience[0].query == "outdoor ambience"
+    assert ambience[0].note == "opening"
+    # risers END exactly on the act changes, min(2s, prior phase / 2) long
+    risers = {c.time + c.duration: c for c in plan.sfx if c.kind == "riser"}
+    assert set(risers) == {8.0, 16.0, 32.0}
+    assert all(c.duration == pytest.approx(2.0) for c in risers.values())
+    assert all(c.query == "riser build up" for c in risers.values())
+    assert risers[16.0].note == "build -> climax"
+    # impact ON the climax start
+    impacts = [c for c in plan.sfx if c.kind == "impact"]
+    assert len(impacts) == 1
+    assert impacts[0].time == pytest.approx(16.0)
+    assert impacts[0].query == "cinematic impact hit"
+    # whooshes: centered on real cuts (fastest slots live in the climax),
+    # 0.6s each, filling the density cap of ceil(40 / 5) = 8 cues
+    whooshes = [c for c in plan.sfx if c.kind == "whoosh"]
+    assert len(whooshes) == 3
+    cut_times = {e.record_start for e in plan.entries}
+    for c in whooshes:
+        assert c.duration == pytest.approx(0.6)
+        assert c.query == "whoosh transition fast"
+        center = c.time + c.duration / 2.0
+        assert any(abs(center - t) < 1e-6 for t in cut_times)
+        assert 16.0 <= center <= 32.0  # the fastest (0.5s) slots are the climax
+    assert len(plan.sfx) == 8
+    assert any(
+        "sfx layer: 8 cues planned "
+        "(markers on the timeline; queries for your SFX library)" in n
+        for n in plan.notes
+    )
+
+
+def test_sfx_trailer_with_drops_and_dips():
+    # trailer + drop at 20s: the climax is pinned to the drop, the other
+    # bounds snap to phrases -> phases 0-8 / 8-16 / 16-20 / 20-32 / 32-40,
+    # and the trailer smashes to black where the outgoing slot allows it.
+    plan = plan_montage(
+        make_long_reports(), make_arc_music(drops=[20.0]), style="trailer",
+        cut_lead=0.0, sfx=True,
+    )
+    assert plan.dips, "the trailer should still dip to black"
+    times = [c.time for c in plan.sfx]
+    assert times == sorted(times)
+    for c in plan.sfx:
+        assert 0.0 <= c.time and c.time + c.duration <= 40.0 + 1e-6
+    assert len(plan.sfx) <= 8  # ceil(40 / 5)
+    # ambience at 0 under the opening
+    assert plan.sfx[0].kind == "ambience" and plan.sfx[0].time == 0.0
+    # risers end exactly on the act changes (the split build gets none)
+    riser_ends = {round(c.time + c.duration, 6) for c in plan.sfx if c.kind == "riser"}
+    assert riser_ends == {8.0, 20.0, 32.0}
+    # impact ON the climax start — which IS the drop here
+    impacts = [c for c in plan.sfx if c.kind == "impact"]
+    assert [c.time for c in impacts] == pytest.approx([20.0])
+    assert impacts[0].note == "climax start"
+    # one sub-drop per dip, sitting exactly on the black
+    subs = sorted((c.time, c.duration) for c in plan.sfx if c.kind == "sub-drop")
+    assert subs == [
+        (pytest.approx(start), pytest.approx(length)) for start, length in sorted(plan.dips)
+    ]
+    assert all(c.query == "sub drop boom" for c in plan.sfx if c.kind == "sub-drop")
+    assert all(c.note == "title slot" for c in plan.sfx if c.kind == "sub-drop")
+
+
+def test_sfx_density_cap_drops_whooshes_then_risers():
+    # travel over the 12s song: cap = ceil(12 / 5) = 3 cues. Whooshes never
+    # make it in; of the three act-change risers only the one INTO the
+    # climax survives; the backbone (ambience + impact) always stays.
+    plan = plan_montage(
+        make_reports(), make_music(), style="travel", cut_lead=0.0, sfx=True
+    )
+    assert len(plan.sfx) == 3
+    kinds = [c.kind for c in plan.sfx]
+    assert sorted(kinds) == ["ambience", "impact", "riser"]
+    riser = next(c for c in plan.sfx if c.kind == "riser")
+    assert riser.note == "build -> climax"
+    assert any("sfx layer: 3 cues planned" in n for n in plan.notes)
+
+
+def test_sfx_impact_on_auto_drop_cut():
+    music = MusicAnalysis(
+        path="/music/track.wav",
+        duration=40.0,
+        tempo=200.0,
+        beats=[i * 0.3 for i in range(134)],
+        sections=[MusicSection(0.0, 40.0, 0.5, "mid")],
+        drops=[20.0],
+    )
+    report = ClipReport(
+        path="/footage/a.mp4",
+        duration=60.0,
+        moments=[Moment(0.0, 2.0, 0.9), Moment(10.0, 12.0, 0.8), Moment(30.0, 32.0, 0.4)],
+    )
+    plan = plan_montage(
+        [report], music, style="auto", allow_repeats=True, cut_lead=0.0, sfx=True
+    )
+    # "auto" has no arc: the drop-forced cut carries the impact instead
+    impacts = [c for c in plan.sfx if c.kind == "impact"]
+    assert [c.time for c in impacts] == pytest.approx([20.0])
+    assert impacts[0].note == "cut on the drop"
+    # ...and the arc-less ambience bed covers the first 4 seconds
+    assert plan.sfx[0].kind == "ambience"
+    assert plan.sfx[0].duration == pytest.approx(4.0)
+
+
+def test_sfx_ambience_query_built_from_opening_labels():
+    reports = make_long_reports()
+    for m in reports[0].moments:
+        m.label = "over the mountain pass"
+    plan = plan_montage(
+        reports, make_arc_music(), style="travel", cut_lead=0.0, sfx=True
+    )
+    ambience = next(c for c in plan.sfx if c.kind == "ambience")
+    # stopwords drop out, the first two meaningful label words search well
+    assert ambience.query == "mountain pass ambience"
+
+
+def test_sfx_cues_become_green_markers():
+    plan = plan_montage(
+        make_long_reports(), make_arc_music(), style="travel", cut_lead=0.0, sfx=True
+    )
+    assert plan.sfx
+    timeline = montage_to_timeline(plan, fps=25.0)
+    sfx_markers = [m for m in timeline.markers if m.name.startswith("SFX: ")]
+    assert len(sfx_markers) == len(plan.sfx)
+    for marker, cue in zip(sfx_markers, plan.sfx):
+        assert marker.frame == round(cue.time * 25.0)
+        assert marker.name == f"SFX: {cue.kind}"
+        assert marker.note == f"{cue.query} — {cue.note}"
+        assert marker.color == "Green"
+
+
+def test_sfx_works_without_music():
+    # The film mode proper: no song at all, the SFX layer carries the cut.
+    plan = plan_montage(
+        make_long_reports(), None, max_duration=20.0, style="travel",
+        cut_lead=0.0, sfx=True,
+    )
+    assert plan.sfx
+    assert len(plan.sfx) <= 4  # ceil(20 / 5)
+    assert plan.sfx[0].kind == "ambience" and plan.sfx[0].time == 0.0
+    impacts = [c for c in plan.sfx if c.kind == "impact"]
+    # pseudo-grid phases use the raw arc shares: climax starts at 50% of 20s
+    assert [c.time for c in impacts] == pytest.approx([10.0])

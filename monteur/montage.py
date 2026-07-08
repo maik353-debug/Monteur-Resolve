@@ -161,6 +161,39 @@ fast every ~0.75 s), with no drops/phrases/sections; ``music_path`` is
 takes ``audio=``: "music" (song on A1, today's behavior), "mix" (song on
 A1 plus each entry's own audio on A2) or "original" (no song clip; each
 entry's own audio on A1). A no-music plan only renders with "original".
+
+SFX layer (film mode)
+---------------------
+``plan_montage(..., sfx=True)`` plans a sound-design layer on top of the
+finished cut — for films where the effects carry the edit instead of (or
+alongside) the music, e.g. ride-POV cuts with ``audio="original"``.
+Monteur cannot render audio, so the deliverable is CUES: each
+:class:`SfxCue` says when (``time``/``duration``), what (``kind``), what
+to search for in an SFX library (``query``) and why (``note``). Placement
+reads what the plan already knows:
+
+* an **ambience** bed at 0 under the opening phase (the first
+  ``_SFX_AUTO_OPENING`` = 4 s for "auto"); its query comes from the
+  opening entries' vision labels ("mountain pass ambience"), falling back
+  to the honest generic "outdoor ambience",
+* a **riser** ENDING exactly on every act change (label changes only —
+  the trailer's split build ramps inside one act and gets no riser),
+  ``duration = min(2 s, prior phase / 2)``,
+* an **impact** ON the climax start and ON every drop-forced cut in
+  "auto",
+* a **sub-drop** under every smash-to-black dip (a title slot wants a
+  boom),
+* **whooshes** (0.6 s, centered on the cut) on up to 3 of the fastest
+  cuts, each keeping 1 s clearance from every other cue.
+
+Density is capped at ~1 cue per ``_SFX_SECONDS_PER_CUE`` (5 s) of cut:
+whooshes are dropped first, then risers (the riser INTO the climax
+survives longest, then earlier act changes); ambience/impact/sub-drop are
+the backbone and always stay. Cues are sorted by time and reported in the
+notes. :func:`montage_to_timeline` exports each cue as a Green timeline
+marker ("SFX: <kind>" / "<query> — <note>"), which the EDL/FCPXML writers
+and the Resolve bridge already carry. ``sfx=False`` (the default) plans
+exactly as before.
 """
 
 from __future__ import annotations
@@ -269,6 +302,31 @@ _AUTO_FADE_OUT = 1.0
 _DIP_SECONDS = 0.4
 _DIP_MIN_REMAINDER = 0.25
 
+# SFX layer (plan_montage(..., sfx=True)) — see the module docstring.
+# Density cap: at most ~one cue per this many seconds of cut, so the plan
+# never drowns in cues. Whooshes are dropped first, then risers; ambience,
+# impacts and sub-drops are the backbone and always survive.
+_SFX_SECONDS_PER_CUE = 5.0
+# Riser length: min(this, half the phase it builds out of) — it must grow
+# out of the prior act, not drown it.
+_SFX_RISER_MAX = 2.0
+# Impact hits ring out about this long (a length suggestion for the search,
+# not a trim instruction).
+_SFX_IMPACT_LENGTH = 1.0
+# Whoosh length, centered on its cut, and how many at most (the montage's
+# fastest cuts get them).
+_SFX_WHOOSH_LENGTH = 0.6
+_SFX_MAX_WHOOSHES = 3
+# A whoosh keeps this much clearance (seconds) from every other cue, so two
+# effects never pile onto the same moment.
+_SFX_WHOOSH_CLEARANCE = 1.0
+# "auto" has no opening phase; the ambience bed covers this many seconds.
+_SFX_AUTO_OPENING = 4.0
+# Label words too generic to search an SFX library with.
+_SFX_STOPWORDS = frozenset(
+    "the a an and of in on at to with into over under from through".split()
+)
+
 _EPS = 1e-6
 
 
@@ -363,6 +421,8 @@ class MontagePlan:
     notes: list[str] = field(default_factory=list)
     # (start, length) of black gaps on V1 (smash-to-black title slots).
     dips: list[tuple[float, float]] = field(default_factory=list)
+    # Planned sound-design cues (plan_montage(..., sfx=True); empty otherwise).
+    sfx: list["SfxCue"] = field(default_factory=list)
 
 
 @dataclass
@@ -377,6 +437,22 @@ class MontageEntry:
     media_start: float = 0.0  # seconds: the file's embedded start timecode (0 if none)
     clip_duration: float = 0.0  # seconds: the source file's real duration (0 if unknown)
     label: str = ""  # one-line vision label of the chosen moment ("" if unseen)
+
+
+@dataclass
+class SfxCue:
+    """One planned sound-design cue — Monteur plans it, the editor drops it in.
+
+    Monteur cannot render audio, so the deliverable is the CUE: when the
+    effect goes, what kind it is, what to type into an SFX library (the
+    ``query`` pastes straight into Artlist & co.) and why it is there.
+    """
+
+    time: float        # seconds in the cut
+    duration: float    # suggested length of the effect
+    kind: str          # "riser" | "impact" | "whoosh" | "sub-drop" | "ambience"
+    query: str         # ready-to-paste SFX search terms ("whoosh transition fast")
+    note: str          # one line WHY this cue is here ("act change into climax")
 
 
 # --- grid -------------------------------------------------------------------
@@ -1176,6 +1252,8 @@ def plan_montage(
     cut_lead: float = _DEFAULT_CUT_LEAD,
     pace: float | None = None,
     transitions: str = "auto",
+    *,
+    sfx: bool = False,
 ) -> MontagePlan:
     """Distribute the best moments across the song, in a cutting style.
 
@@ -1230,6 +1308,14 @@ def plan_montage(
     carries the intended fades (``fade_in`` / ``fade_out``) and per-entry
     dissolves for gentle phases (see the module docstring's Finishing
     section).
+
+    ``sfx`` (keyword-only, default False) additionally plans a sound-design
+    layer: ``plan.sfx`` is filled with :class:`SfxCue` entries — ambience
+    under the opening, risers into act changes, impacts on the climax/drop
+    cuts, sub-drops under smash-to-black dips, whooshes on the fastest cuts
+    (the module docstring's SFX layer section has the exact rules and the
+    density cap). False leaves ``plan.sfx`` empty and everything else
+    byte-identical to before.
     """
     if style not in STYLES:
         valid = ", ".join(sorted(STYLES))
@@ -1391,6 +1477,8 @@ def plan_montage(
     used = sum(1 for it in pool if it.uses)
     plan.notes.append(f"{len(slots)} slots filled, {used} of {len(pool)} moments used")
     _plan_finishing(plan, entries, grid_music, chosen, phases, transitions)
+    if sfx:
+        _plan_sfx(plan, phases, drop_starts)
     return plan
 
 
@@ -1493,6 +1581,175 @@ def _plan_finishing(
         )
 
 
+def _ambience_query(entries: list[MontageEntry], span: float) -> str:
+    """Search terms for the opening ambience bed.
+
+    Built from the vision labels of the entries inside the opening span:
+    the first two distinct meaningful words (stopwords and sub-3-letter
+    words dropped) plus "ambience" — a label "over the mountain pass"
+    makes "mountain pass ambience". Entries carry only the label, not the
+    vision tags, so the label's own words are the honest source; without
+    labels (no --see) the generic "outdoor ambience" is used.
+    """
+    words: list[str] = []
+    for entry in entries:
+        if entry.record_start >= span - _EPS:
+            break
+        for raw in entry.label.lower().split():
+            word = raw.strip(".,!?;:()[]'\"-")
+            if len(word) < 3 or word in _SFX_STOPWORDS or word in words:
+                continue
+            words.append(word)
+            if len(words) == 2:
+                return f"{words[0]} {words[1]} ambience"
+    if words:
+        return f"{words[0]} ambience"
+    return "outdoor ambience"
+
+
+def _plan_sfx(
+    plan: MontagePlan,
+    phases: list[tuple[float, float, str]],
+    drop_starts: list[float],
+) -> None:
+    """Plan the sound-design cue layer onto a filled plan (in place).
+
+    Reads only what the plan already knows — the arc ``phases``, the
+    "auto" style's drop-forced cut times (``drop_starts``), the dips and
+    the entries — and fills ``plan.sfx`` per the module docstring's SFX
+    layer section: ambience at 0, risers ending on act changes, impacts
+    on the climax start and drop cuts, sub-drops under the dips, whooshes
+    centered on the fastest cuts. The density cap (~1 cue per
+    ``_SFX_SECONDS_PER_CUE``) trims whooshes first, then risers
+    (into-the-climax survives longest, then earlier act changes);
+    ambience/impact/sub-drop cues always stay, even if the cut is so
+    short they alone exceed the cap. The result is sorted by time and
+    reported in the notes.
+    """
+    if not plan.entries or plan.duration <= _EPS:
+        return
+    duration = plan.duration
+
+    # 1. Opening ambience: a bed under the first shots, sized to the opening
+    #    phase (arc styles) or the first few seconds ("auto" has no phases).
+    opening = phases[0][1] - phases[0][0] if phases else min(_SFX_AUTO_OPENING, duration)
+    essential: list[SfxCue] = []
+    if opening > _EPS:
+        essential.append(
+            SfxCue(
+                time=0.0,
+                duration=opening,
+                kind="ambience",
+                query=_ambience_query(plan.entries, opening),
+                note="opening",
+            )
+        )
+
+    # 2. Risers into act changes: a build ENDING exactly on the boundary.
+    #    Only real act changes count — the trailer's split build ramps
+    #    inside one act and gets no riser there.
+    riser_items: list[tuple[str, SfxCue]] = []  # (incoming phase, cue)
+    for (p_start, p_end, p_label), (_, _, n_label) in zip(phases, phases[1:]):
+        if n_label == p_label or not (_EPS < p_end < duration - _EPS):
+            continue
+        length = min(_SFX_RISER_MAX, (p_end - p_start) / 2.0)
+        if length <= _EPS:
+            continue
+        riser_items.append(
+            (
+                n_label,
+                SfxCue(
+                    time=p_end - length,
+                    duration=length,
+                    kind="riser",
+                    query="riser build up",
+                    note=f"{p_label} -> {n_label}",
+                ),
+            )
+        )
+
+    # 3. Impacts: ON the climax start (arc styles; when a drop pinned the
+    #    climax this IS the drop) and ON every drop-forced cut in "auto".
+    climax_start = next((s for s, _, lab in phases if lab == "climax"), None)
+    if climax_start is not None and _EPS < climax_start < duration - _EPS:
+        essential.append(
+            SfxCue(
+                time=climax_start,
+                duration=min(_SFX_IMPACT_LENGTH, duration - climax_start),
+                kind="impact",
+                query="cinematic impact hit",
+                note="climax start",
+            )
+        )
+    for drop in drop_starts:
+        essential.append(
+            SfxCue(
+                time=drop,
+                duration=min(_SFX_IMPACT_LENGTH, duration - drop),
+                kind="impact",
+                query="cinematic impact hit",
+                note="cut on the drop",
+            )
+        )
+
+    # 4. Sub-drops under the smash-to-black dips: the black wants a boom,
+    #    and the title (the dip IS a title slot) lands on it.
+    for dip_start, dip_len in plan.dips:
+        essential.append(
+            SfxCue(
+                time=dip_start,
+                duration=dip_len,
+                kind="sub-drop",
+                query="sub drop boom",
+                note="title slot",
+            )
+        )
+
+    # Density cap: ~1 cue per _SFX_SECONDS_PER_CUE seconds of cut. Risers
+    # are trimmed to the room left by the backbone (into-the-climax riser
+    # first, then earlier act changes); whooshes only fill what remains.
+    max_cues = max(1, math.ceil(duration / _SFX_SECONDS_PER_CUE))
+    room = max_cues - len(essential)
+    if len(riser_items) > room:
+        riser_items.sort(key=lambda it: (it[0] != "climax", it[1].time))
+        riser_items = riser_items[: max(0, room)]
+    cues = essential + [cue for _, cue in riser_items]
+
+    # 5. Whooshes on the fastest cuts (shortest slots), centered on the cut,
+    #    each clear of every already-placed cue so effects never pile up.
+    def _distance(cue: SfxCue, t: float) -> float:
+        return max(cue.time - t, t - (cue.time + cue.duration), 0.0)
+
+    room = min(max_cues - len(cues), _SFX_MAX_WHOOSHES)
+    for entry in sorted(
+        plan.entries, key=lambda e: (e.record_end - e.record_start, e.record_start)
+    ):
+        if room <= 0:
+            break
+        cut = entry.record_start
+        if not (_EPS < cut < duration - _EPS):
+            continue
+        if any(_distance(c, cut) < _SFX_WHOOSH_CLEARANCE - _EPS for c in cues):
+            continue
+        cues.append(
+            SfxCue(
+                time=max(0.0, cut - _SFX_WHOOSH_LENGTH / 2.0),
+                duration=_SFX_WHOOSH_LENGTH,
+                kind="whoosh",
+                query="whoosh transition fast",
+                note="fast cut",
+            )
+        )
+        room -= 1
+
+    cues.sort(key=lambda c: c.time)
+    plan.sfx = cues
+    plan.notes.append(
+        f"sfx layer: {len(cues)} cues planned "
+        "(markers on the timeline; queries for your SFX library)"
+    )
+
+
 def montage_to_timeline(
     plan: MontagePlan,
     fps: float,
@@ -1532,6 +1789,11 @@ def montage_to_timeline(
     ``"transition_frames"`` = the length in frames) so the EDL/FCPXML
     writers can emit it; the plan's fades land in ``timeline.metadata``
     as ``"fade_in_frames"`` / ``"fade_out_frames"``.
+
+    A plan with an SFX layer (``plan.sfx``, from ``plan_montage(...,
+    sfx=True)``) gets one Green marker per cue at the cue's start frame —
+    name ``"SFX: <kind>"``, note ``"<query> — <note>"`` — so the planned
+    sound design shows up right on the timeline in Resolve.
     """
     if audio not in _AUDIO_MODES:
         valid = ", ".join(_AUDIO_MODES)
@@ -1665,6 +1927,18 @@ def montage_to_timeline(
                 name="Title slot",
                 note=note,
                 color="Blue",
+            )
+        )
+    for cue in plan.sfx:
+        # The planned sound-design layer rides along as Green markers: the
+        # editor sees WHERE each effect goes and gets the search query to
+        # paste into the SFX library right in the marker note.
+        timeline.markers.append(
+            Marker(
+                frame=seconds_to_frames(cue.time, fps),
+                name=f"SFX: {cue.kind}",
+                note=f"{cue.query} — {cue.note}",
+                color="Green",
             )
         )
     return timeline

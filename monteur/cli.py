@@ -440,7 +440,7 @@ def cmd_create(args: argparse.Namespace) -> None:
             reports, music, order=args.order, max_duration=args.max_duration,
             style=args.style, allow_repeats=args.allow_repeats,
             cut_lead=args.cut_lead, pace=args.pace,
-            transitions=args.transitions,
+            transitions=args.transitions, sfx=args.sfx,
         )
     except ValueError as exc:
         _fail(str(exc))
@@ -475,6 +475,19 @@ def cmd_create(args: argparse.Namespace) -> None:
             print(f"  {note}")
     for note in plan.notes:
         print(f"  {note}")
+    if plan.sfx:
+        # The planned sound-design layer, one line per cue: where it goes,
+        # what it is, what to paste into the SFX library, why it is there.
+        print(f"  SFX layer ({len(plan.sfx)} cues):")
+        kind_width = max(len(cue.kind) for cue in plan.sfx)
+        query_width = max(len(cue.query) for cue in plan.sfx)
+        for cue in plan.sfx:
+            total = int(cue.time)
+            print(
+                f"    {total // 60}:{total % 60:02d}  "
+                f"{cue.kind:<{kind_width}}  {cue.query:<{query_width}}  "
+                f"({cue.note})"
+            )
 
 
 def cmd_transcribe(args: argparse.Namespace) -> None:
@@ -662,6 +675,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--audio", choices=["music", "mix", "original"], default="music",
         help="what plays under the pictures: the song (music), song + the "
              "clips' own sound (mix), or only the clips' own sound (original)",
+    )
+    p.add_argument(
+        "--sfx", action="store_true",
+        help="plan a sound-design layer: timed cues (ambience, risers, "
+             "impacts, sub-drops, whooshes) as green timeline markers with "
+             "ready-to-paste SFX search queries — the film mode, best with "
+             "--audio original",
     )
     p.add_argument(
         "--allow-repeats", action="store_true",

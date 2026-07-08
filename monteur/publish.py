@@ -31,6 +31,13 @@ scene group (or, without vision data, the source clip) changes, at least
 at 00:00. Labels come from the vision labels; without them, from the
 clip's filename.
 
+Sound design
+------------
+A plan with an SFX layer (``plan_montage(..., sfx=True)``) gets a
+"## Sound design" section: one line per cue (mm:ss, kind, search query,
+why), plus an Artlist SFX deep link per unique query — the shopping list
+for the sound pass, clickable straight from the kit.
+
 Text
 ----
 With the ``anthropic`` package and ``ANTHROPIC_API_KEY``, one Claude call
@@ -46,6 +53,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePath
+from urllib.parse import quote
 
 from monteur.montage import MontagePlan
 from monteur.sift import ClipReport
@@ -56,6 +64,8 @@ _CHAPTER_MIN_SECONDS = 10.0
 _DEFAULT_MAX_THUMBS = 6
 # Full-HD frame height for thumbnail stills (JPEG quality 2 = visually lossless).
 _THUMB_HEIGHT = 1080
+# Artlist SFX search deep link; the urlencoded query is appended.
+_ARTLIST_SFX_SEARCH = "https://artlist.io/sfx/search?terms="
 
 _EPS = 1e-6
 
@@ -274,6 +284,19 @@ def publish_kit(
         )
     else:
         doc.append("_(no entries — nothing to chapter)_")
+    if plan.sfx:
+        # The sound-design shopping list: every planned cue, plus one
+        # Artlist search link per unique query.
+        doc += ["", "## Sound design", ""]
+        for cue in plan.sfx:
+            doc.append(f"- {_mmss(cue.time)}  {cue.kind} — {cue.query} ({cue.note})")
+        doc += ["", "Artlist SFX searches:", ""]
+        seen_queries: list[str] = []
+        for cue in plan.sfx:
+            if cue.query not in seen_queries:
+                seen_queries.append(cue.query)
+        for query in seen_queries:
+            doc.append(f"- [{query}]({_ARTLIST_SFX_SEARCH}{quote(query)})")
     doc += ["", "## Thumbnail candidates", ""]
     if thumbs:
         for item in thumbs:
@@ -287,10 +310,11 @@ def publish_kit(
     (out / "publish.md").write_text("\n".join(doc), encoding="utf-8")
 
     notes.insert(0, f"publish kit -> {out / 'publish.md'}")
+    sfx_part = f", {len(plan.sfx)} sfx cues" if plan.sfx else ""
     notes.insert(
         1,
-        f"{len(thumbs)} thumbnail candidates, {len(chapters)} chapters, "
-        f"copy by {copy_source}",
+        f"{len(thumbs)} thumbnail candidates, {len(chapters)} chapters"
+        f"{sfx_part}, copy by {copy_source}",
     )
     if not tags and not any(e.label for e in plan.entries):
         notes.append("tip: add --see so chapters, tags and thumbnails know the content")
