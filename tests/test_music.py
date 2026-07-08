@@ -12,8 +12,10 @@ import numpy as np
 import pytest
 
 from monteur.music import (
+    MusicAnalysis,
     MusicSection,
     analyze_music,
+    best_energy_window,
     detect_beats,
     detect_downbeats,
     detect_drops,
@@ -260,6 +262,53 @@ class TestStructureGracefulDegradation:
         assert detect_downbeats(silence, RATE, beats) == []
         assert detect_phrases([]) == []
         assert detect_drops(silence, RATE) == []
+
+
+class TestBestEnergyWindow:
+    def test_prefers_late_energy_peak(self):
+        music = MusicAnalysis(
+            path="/m.wav",
+            duration=60.0,
+            tempo=120.0,
+            sections=[
+                MusicSection(0.0, 40.0, 0.2, "low"),
+                MusicSection(40.0, 60.0, 0.95, "high"),
+            ],
+        )
+        start = best_energy_window(music, 10.0)
+        assert start >= 40.0  # window sits in the loud tail, not the intro
+        assert start + 10.0 <= 60.0 + 1e-9
+
+    def test_window_contains_first_drop_with_lead_in(self):
+        music = MusicAnalysis(
+            path="/m.wav",
+            duration=80.0,
+            tempo=120.0,
+            sections=[MusicSection(0.0, 80.0, 0.5, "mid")],
+            drops=[45.0],
+        )
+        start = best_energy_window(music, 20.0)
+        assert start <= 45.0 <= start + 20.0  # the drop is inside the window
+        assert start == pytest.approx(45.0 - 0.15 * 20.0)  # 15% lead-in = 42.0
+
+    def test_length_at_or_above_duration_returns_zero(self):
+        music = MusicAnalysis(
+            path="/m.wav",
+            duration=30.0,
+            tempo=120.0,
+            sections=[MusicSection(0.0, 30.0, 0.5, "mid")],
+        )
+        assert best_energy_window(music, 30.0) == 0.0
+        assert best_energy_window(music, 45.0) == 0.0
+
+    def test_uniform_energy_no_drop_starts_at_zero(self):
+        music = MusicAnalysis(
+            path="/m.wav",
+            duration=30.0,
+            tempo=120.0,
+            sections=[MusicSection(0.0, 30.0, 0.5, "mid")],
+        )
+        assert best_energy_window(music, 10.0) == 0.0  # ties keep the earliest
 
 
 @pytest.mark.skipif(

@@ -89,9 +89,15 @@ def test_no_beats_falls_back_to_fixed_grid():
 def test_max_duration_truncates_cleanly():
     plan = plan_montage(make_reports(), make_music(), max_duration=5.0)
     assert plan.duration == 5.0
+    # a 5s cut is placed against the song's strongest passage (the high tail
+    # at 8-12s), not its low-energy intro, so music_start jumps into the window
+    assert plan.music_start == pytest.approx(7.0)
+    assert any("using the song's strongest 5s (from 0:07)" in n for n in plan.notes)
+    # grid still tiles the montage window contiguously and ends on the length
+    assert plan.entries[0].record_start == 0.0
+    for prev, nxt in zip(plan.entries, plan.entries[1:]):
+        assert nxt.record_start == pytest.approx(prev.record_end)
     assert plan.entries[-1].record_end == pytest.approx(5.0)
-    # low slots 0-2, 2-4, then the mid remainder 4-5
-    assert [e.record_start for e in plan.entries] == pytest.approx([0.0, 2.0, 4.0])
 
 
 def test_anti_strobe_doubles_dense_grid():
@@ -363,6 +369,68 @@ def test_style_plan_renders_timeline_unchanged():
     audio = timeline.audio_clips()
     assert len(audio) == 1
     assert (audio[0].record_in, audio[0].record_out) == (0, 1000)
+
+
+# --- energy windowing (short cut from a long song) ------------------------------
+
+
+def make_windowed_music(drops: list[float] | None = None) -> MusicAnalysis:
+    """100s song, quiet intro (0-60s) and an energetic tail (60-100s).
+
+    Beats every 0.5s, downbeats every 2s, phrases every 8s, drop at 64s.
+    """
+    return MusicAnalysis(
+        path="/music/long.wav",
+        duration=100.0,
+        tempo=120.0,
+        beats=[i * 0.5 for i in range(200)],
+        sections=[
+            MusicSection(0.0, 60.0, 0.2, "low"),
+            MusicSection(60.0, 100.0, 0.9, "high"),
+        ],
+        downbeats=[i * 2.0 for i in range(50)],
+        phrases=[i * 8.0 for i in range(13)],
+        drops=drops if drops is not None else [64.0],
+    )
+
+
+def test_short_cut_uses_strongest_window_and_aligns_drop():
+    music = make_windowed_music(drops=[64.0])
+    plan = plan_montage(make_long_reports(), music, max_duration=20.0, style="travel")
+    # the cut is built against the drop's neighbourhood, with a 15% lead-in
+    assert plan.music_start == pytest.approx(64.0 - 0.15 * 20.0)  # 61.0
+    assert any(
+        "using the song's strongest 20s (from 1:01)" in n for n in plan.notes
+    )
+    # the drop now falls inside the window (at 3.0s), so the climax aligns
+    assert any("climax aligned to drop at 3.0s" in n for n in plan.notes)
+    # all cuts are placed within the montage window [0, 20]
+    assert plan.entries[0].record_start == 0.0
+    for e in plan.entries:
+        assert 0.0 - 1e-9 <= e.record_start < e.record_end <= 20.0 + 1e-9
+    assert plan.entries[-1].record_end == pytest.approx(20.0)
+
+
+def test_short_cut_music_clip_starts_at_window_offset():
+    music = make_windowed_music(drops=[64.0])
+    plan = plan_montage(make_long_reports(), music, max_duration=20.0, style="travel")
+    timeline = montage_to_timeline(plan, fps=25.0)
+    music_clip = timeline.audio_clips()[0]
+    # A1 spans [music_start, music_start + duration] in frames
+    assert music_clip.source_in == 1525  # 61.0s * 25fps
+    assert music_clip.source_out - music_clip.source_in == 500  # 20s * 25fps
+    assert (music_clip.record_in, music_clip.record_out) == (0, 500)
+
+
+def test_full_song_montage_music_start_zero():
+    plan = plan_montage(make_reports(), make_music())  # no max_duration
+    assert plan.music_start == 0.0
+    assert not any("using the song's strongest" in n for n in plan.notes)
+    timeline = montage_to_timeline(plan, fps=25.0)
+    music_clip = timeline.audio_clips()[0]
+    # full-song behaviour is unchanged: music plays from the top
+    assert music_clip.source_in == 0
+    assert (music_clip.source_in, music_clip.source_out) == (0, 300)
 
 
 # --- musical ending -------------------------------------------------------------

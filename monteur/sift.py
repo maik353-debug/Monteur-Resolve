@@ -7,7 +7,20 @@ material instead of watching everything.
 
 Heuristics (all deliberately simple and documented as approximate):
 
-* DARK — sample brightness (mean luma) below 40/255.
+* DARK — split into two ideas so a flat/Log colour profile is not thrown
+  away as "underexposed":
+
+  - genuinely near-BLACK (mean luma below _NEAR_BLACK_BRIGHTNESS, ~18/255):
+    no recoverable image — that IS unusable; OR
+  - dramatically darker than the clip's *own* median brightness (below
+    _DARK_RELATIVE_FRACTION x median): a real shadow within a normally-lit
+    clip.
+
+  A merely DIM sample (low absolute luma but not near-black and not far
+  below the clip's norm) is NOT dark — it is a flat/Log look and stays
+  usable. For a clip detected as flat/low-contrast (small brightness spread
+  but real detail; see :func:`_is_flat_log`) the relative check is relaxed
+  entirely, because the whole point of such material is to be low-contrast.
 * BLURRY — sample sharpness below 25% of the clip's *own* 90th-percentile
   sharpness. The threshold is relative because gradient-variance sharpness
   depends heavily on scene texture: a talking head against a plain wall may
@@ -24,11 +37,22 @@ one-frame flickers and cut transitions do not fragment segments.
 
 Audio heuristics (also approximate, thresholds are module constants):
 
-* CLIPPING — any window with a clipping fraction above 0.1% distorted; the
-  note counts affected windows.
+* UNRELIABLE — constant-level camera/drone audio (a steady motor tone)
+  carries no editorial signal, yet it defeats the naive checks below (it
+  reads as wind, or as clipping in nearly every window). A clip's audio is
+  judged unreliable when it is not genuinely silent AND either its rms
+  dynamic range is very low (coefficient of variation below
+  _AUDIO_LOW_DYNAMIC_CV) OR clipping is present in a LARGE fraction of
+  windows (> _AUDIO_UNRELIABLE_CLIP_FRACTION). Unreliable audio suppresses
+  the clipping/wind/silent notes, emits one calm note instead, and does not
+  drive highlight scoring (every highlight falls back to 0).
+* CLIPPING — occasional distortion (a SMALL fraction of windows above
+  _AUDIO_CLIP_WINDOW_MIN); the note counts affected windows.
 * WIND — median low-band (< 150 Hz) energy share above 0.6 while the clip is
   not silent: wind/handling rumble piles energy at the bottom of the spectrum.
-* SILENT — median window rms below 0.01 (≈ -40 dBFS).
+* SILENT — median window rms below 0.01 (≈ -40 dBFS). Genuine silence takes
+  precedence over the "constant tone" test, so a truly quiet clip is still
+  reported as silent rather than as unreliable.
 * HIGHLIGHT — cheers, laughter and action read as loudness bursts: windows
   louder than 1.8x the clip's median rms. A moment's highlight is
   min(1, burst_share_in_window * 3).
@@ -57,7 +81,18 @@ BLURRY = "blurry"
 SHAKY = "shaky"
 
 # Tunable heuristic constants (see module docstring).
-_DARK_BRIGHTNESS = 40.0  # mean luma below this = underexposed
+# Exposure: "dark" splits into near-black (unusable) vs. dim/flat (a Log look,
+# usable). A sample is DARK only if near-black OR far below the clip's median.
+_NEAR_BLACK_BRIGHTNESS = 18.0  # mean luma below this = genuinely near-black (unusable)
+_DARK_RELATIVE_FRACTION = 0.5  # ...or below this fraction of the clip's median brightness
+# Flat/Log detection: a low-contrast clip that nevertheless carries real detail
+# is intentionally graded — relax the (already unlikely) relative dark check.
+_FLAT_CONTRAST_RANGE = 45.0  # brightness p90-p10 below this = low-contrast clip
+_FLAT_MIN_DETAIL = 8.0  # ...and clip p90 sharpness at/above this = real detail (Log look)
+_FLAT_MAX_MEDIAN_BRIGHTNESS = 110.0  # ...and a dim-ish median (a bright uniform clip is not "Log")
+# A clip whose best sharpness is below this floor is featureless (truly
+# black/blank): only then may it be reduced to zero moments.
+_DETAIL_SHARPNESS_FLOOR = 4.0
 _BLURRY_P90_FRACTION = 0.25  # blurry if sharpness < 25% of clip's p90
 _SHAKY_MOTION_FACTOR = 3.0  # shaky candidates: motion > 3x clip median
 _JITTER_FACTOR = 0.5  # ...and local jitter > 0.5x clip mean motion
@@ -70,6 +105,10 @@ _MAX_MOMENTS = 12  # cap per clip
 _AUDIO_CLIP_WINDOW_MIN = 0.001  # a window "clips" above this clipping fraction
 _AUDIO_WIND_LOW_RATIO = 0.6  # median low_ratio above this = rumble-dominated
 _AUDIO_SILENCE_RMS = 0.01  # median rms below this = mostly silent (~-40 dBFS)
+# Unreliable (constant-level camera/drone) audio detection:
+_AUDIO_UNRELIABLE_CLIP_FRACTION = 0.30  # clipping in more than this share of windows = not real clipping
+_AUDIO_LOW_DYNAMIC_CV = 0.08  # rms coefficient of variation below this = constant-level tone
+_AUDIO_MIN_RELIABLE_WINDOWS = 4  # need at least this many windows to judge dynamic range
 _HIGHLIGHT_BURST_FACTOR = 1.8  # burst: window rms > 1.8x clip median rms
 _HIGHLIGHT_GAIN = 3.0  # highlight = min(1, burst_share * gain)
 _MOTION_EDGE_SAMPLES = 2  # samples averaged for entry/exit motion stability
@@ -133,9 +172,49 @@ def _sharpness_ranks(metrics: list[FrameMetric]) -> list[float]:
 
 
 def _brightness_adequacy(brightness: float) -> float:
-    """0 at the dark threshold, 1 at normal exposure (~120 mean luma)."""
-    span = _BRIGHT_FULL - _DARK_BRIGHTNESS
-    return min(1.0, max(0.0, (brightness - _DARK_BRIGHTNESS) / span))
+    """0 at near-black, 1 at normal exposure (~120 mean luma).
+
+    Anchored at _NEAR_BLACK_BRIGHTNESS (not an absolute "dark" cutoff) so that
+    dim-but-usable / flat-Log material still scores above zero.
+    """
+    span = _BRIGHT_FULL - _NEAR_BLACK_BRIGHTNESS
+    return min(1.0, max(0.0, (brightness - _NEAR_BLACK_BRIGHTNESS) / span))
+
+
+def _brightness_spread(metrics: list[FrameMetric]) -> float:
+    """Robust contrast proxy: 90th minus 10th percentile of brightness."""
+    values = [m.brightness for m in metrics]
+    return _percentile(values, 0.9) - _percentile(values, 0.1)
+
+
+def _clip_detail(metrics: list[FrameMetric]) -> float:
+    """The clip's best sharpness (90th percentile) — its detail ceiling."""
+    return _percentile([m.sharpness for m in metrics], 0.9)
+
+
+def _is_flat_log(metrics: list[FrameMetric]) -> bool:
+    """True for an intentional flat/Log look: low contrast, dim-ish, but detailed.
+
+    Such material must not be judged against the relative-darkness rule (it is
+    low-contrast on purpose); only genuine near-black still counts as dark.
+    """
+    if len(metrics) < 2:
+        return False
+    median_brightness = statistics.median(m.brightness for m in metrics)
+    return (
+        _brightness_spread(metrics) < _FLAT_CONTRAST_RANGE
+        and _clip_detail(metrics) >= _FLAT_MIN_DETAIL
+        and median_brightness < _FLAT_MAX_MEDIAN_BRIGHTNESS
+    )
+
+
+def _has_visual_detail(metrics: list[FrameMetric]) -> bool:
+    """True if the clip has any real detail (best sharpness above the noise floor).
+
+    A clip with detail must never be reduced to zero moments; only a truly
+    black / featureless clip may be skipped entirely.
+    """
+    return bool(metrics) and _clip_detail(metrics) >= _DETAIL_SHARPNESS_FLOOR
 
 
 def _motion_stats(metrics: list[FrameMetric]) -> tuple[float, float]:
@@ -167,10 +246,27 @@ def classify_metrics(metrics: list[FrameMetric], duration: float) -> list[ClipSe
     )
     median_motion, mean_motion = _motion_stats(metrics)
 
+    # Exposure: a sample is DARK only if genuinely near-black OR dramatically
+    # darker than this clip's own median brightness (a real shadow). For a
+    # flat/Log clip the relative test is dropped — the material is low-contrast
+    # on purpose — leaving only the near-black floor.
+    median_brightness = statistics.median(m.brightness for m in metrics)
+    flat_log = _is_flat_log(metrics)
+    dark_relative = _DARK_RELATIVE_FRACTION * median_brightness
+
     # Per-sample labels, first matching problem wins (dark > blurry > shaky).
+    # A dim AND featureless sample (low brightness with essentially no image
+    # detail) is unusable "mud" — botched night footage, not Log. Log footage
+    # is dim but detailed (sharpness above the floor), so it is NOT caught here.
     labels: list[str] = []
     for i, m in enumerate(metrics):
-        if m.brightness < _DARK_BRIGHTNESS:
+        near_black = m.brightness < _NEAR_BLACK_BRIGHTNESS
+        relatively_dark = (not flat_log) and m.brightness < dark_relative
+        featureless_dim = (
+            m.brightness < _FLAT_MAX_MEDIAN_BRIGHTNESS
+            and m.sharpness < _DETAIL_SHARPNESS_FLOOR
+        )
+        if near_black or relatively_dark or featureless_dim:
             labels.append(DARK)
         elif m.sharpness < blur_threshold:
             labels.append(BLURRY)
@@ -293,13 +389,52 @@ def find_moments(
     return kept
 
 
+def _audio_dynamic_range(audio: list[AudioMetric]) -> float:
+    """rms coefficient of variation (stdev / mean) across the windows.
+
+    Near 0 for a constant-level tone (drone motor, camera hiss); well above
+    _AUDIO_LOW_DYNAMIC_CV for real scenes where level rises and falls.
+    """
+    rms = [a.rms for a in audio]
+    mean_rms = sum(rms) / len(rms)
+    if mean_rms <= 0:
+        return 0.0
+    return statistics.pstdev(rms) / mean_rms
+
+
+def _audio_unreliable(audio: list[AudioMetric], median_rms: float) -> bool:
+    """True for constant-level camera/drone audio (see module docstring).
+
+    Genuine silence is handled elsewhere and is NOT treated as unreliable, so
+    a truly quiet clip is still reported as silent rather than as a tone.
+    """
+    if median_rms < _AUDIO_SILENCE_RMS:  # genuinely silent takes precedence
+        return False
+    if len(audio) < _AUDIO_MIN_RELIABLE_WINDOWS:
+        return False
+    # The signature of camera/drone noise is a CONSTANT level (low dynamic
+    # range) — NOT merely "lots of clipping". A genuinely loud, DYNAMIC event
+    # (fireworks, applause) can clip heavily yet varies over time; that is real
+    # audio worth flagging and worth scoring for highlights, so it must stay
+    # "reliable". Heavy clipping only counts as unreliable when it comes with a
+    # near-constant level.
+    # Reaching here means near-constant level (low CV): camera/drone tone,
+    # whether or not it also clips. That is the unreliable case.
+    return _audio_dynamic_range(audio) < _AUDIO_LOW_DYNAMIC_CV
+
+
 def audio_flags(audio: list[AudioMetric]) -> tuple[list[str], list[float]]:
     """(notes, per-window burst flags) for a clip's audio metrics.
 
-    Notes (thresholds are the approximate module constants above):
+    If the audio is UNRELIABLE (constant-level camera/drone tone — very low
+    dynamic range, or clipping in most windows; see :func:`_audio_unreliable`)
+    the clipping/wind/silent notes are suppressed in favour of one calm note,
+    and every burst flag is 0 so audio does not drive highlight scoring.
+
+    Otherwise the notes are (thresholds are the approximate module constants):
 
     * ``audio: clipping in N windows`` — N windows with a clipping fraction
-      above _AUDIO_CLIP_WINDOW_MIN.
+      above _AUDIO_CLIP_WINDOW_MIN (a small, genuine fraction).
     * ``audio: likely wind noise`` — median low_ratio above
       _AUDIO_WIND_LOW_RATIO while the median rms sits above the silence
       floor (quiet clips have meaningless spectra).
@@ -311,8 +446,12 @@ def audio_flags(audio: list[AudioMetric]) -> tuple[list[str], list[float]]:
     """
     if not audio:
         return [], []
-    notes: list[str] = []
     median_rms = statistics.median(a.rms for a in audio)
+    if _audio_unreliable(audio, median_rms):
+        note = "audio: constant/low-quality audio (camera or drone?) — audio signals ignored"
+        return [note], [0.0] * len(audio)
+
+    notes: list[str] = []
     median_low = statistics.median(a.low_ratio for a in audio)
     clipped = sum(1 for a in audio if a.clipping > _AUDIO_CLIP_WINDOW_MIN)
     if clipped:
@@ -382,6 +521,19 @@ def analyze_clip(path: str) -> ClipReport:
 
     report.segments = classify_metrics(metrics, info.duration)
     report.moments = find_moments(report.segments, metrics)
+
+    # One calm note for intentionally flat/Log material (never per-segment).
+    if _is_flat_log(metrics):
+        report.notes.append(
+            "flat / low-contrast (log?) footage — exposure check relaxed"
+        )
+
+    # HARD RULE: a clip with any real detail is never skipped to zero. If the
+    # per-label pass produced no moments (e.g. everything read dark/blurry) but
+    # the clip clearly has detail, surface its best stretches anyway.
+    if not report.moments and _has_visual_detail(metrics):
+        whole = [ClipSegment(start=0.0, end=info.duration, label=USABLE, score=0.0)]
+        report.moments = find_moments(whole, metrics)
 
     # Audio features are best-effort: no audio stream or a failed audio
     # decode silently skips them (highlights stay 0.0, no audio notes).

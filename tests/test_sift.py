@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from monteur.media import AudioMetric, FrameMetric
+from monteur.media import AudioMetric, FrameMetric, MediaInfo
 from monteur.sift import (
     BLURRY,
     DARK,
@@ -134,6 +134,30 @@ def test_classify_empty_metrics():
     assert classify_metrics([], 6.0) == []
 
 
+def test_flat_dim_detailed_clip_is_not_dark():
+    # Uniform dim brightness ~45 with real gradient detail = a flat/Log look.
+    # It must NOT read as dark; the whole clip stays usable.
+    metrics = make_metrics([45] * 12, [60] * 12, [2] * 12)
+    segments = classify_metrics(metrics, 6.0)
+    assert [s.label for s in segments] == [USABLE]
+    assert not any(s.label == DARK for s in segments)
+
+
+def test_near_black_featureless_clip_is_all_dark():
+    # Genuinely near-black (below the near-black floor) with no detail: unusable.
+    metrics = make_metrics([6] * 12, [0.5] * 12, [0.1] * 12)
+    segments = classify_metrics(metrics, 6.0)
+    assert all(s.label == DARK for s in segments)
+
+
+def test_uniform_dim_clip_is_usable_not_dark():
+    # A merely-dim clip (well above near-black) is usable, not dark — the old
+    # absolute-40 rule would have thrown the whole thing away.
+    metrics = make_metrics([30] * 12, [40] * 12, [2] * 12)
+    segments = classify_metrics(metrics, 6.0)
+    assert [s.label for s in segments] == [USABLE]
+
+
 # ----------------------------------------------------------------- moments
 
 
@@ -176,7 +200,10 @@ def test_moments_prefer_moderate_motion_over_static():
 
 def test_moments_respect_min_length():
     # Only a 2s usable stretch: no window fits at min_length=3.
-    brightness = [120] * 4 + [20] * 8
+    # The tail is genuinely near-black (below _NEAR_BLACK_BRIGHTNESS) so it is
+    # DARK regardless of the clip's median — a merely-dim 20 would now read as
+    # a usable Log look rather than dark.
+    brightness = [120] * 4 + [8] * 8
     metrics = make_metrics(brightness, [300] * 12, [2] * 12)
     segments = classify_metrics(metrics, 6.0)
     assert segments[0].label == USABLE and segments[0].end == 2.0
@@ -213,7 +240,9 @@ def make_audio(rms, clipping=None, low_ratio=None, step=0.5):
 
 
 def test_audio_flags_wind_note():
-    audio = make_audio(rms=[0.05] * 8, low_ratio=[0.8] * 8)
+    # Reliable audio (varying level) whose spectrum is bottom-heavy = wind.
+    # (A *constant* rumble would instead read as unreliable drone/camera tone.)
+    audio = make_audio(rms=[0.03, 0.06, 0.04, 0.08, 0.05, 0.07, 0.04, 0.06], low_ratio=[0.8] * 8)
     notes, _ = audio_flags(audio)
     assert "audio: likely wind noise" in notes
     assert "audio: mostly silent" not in notes
@@ -230,14 +259,20 @@ def test_audio_flags_silence_note_and_no_wind_when_silent():
 
 
 def test_audio_flags_clipping_note_counts_windows():
-    clipping = [0.0, 0.0, 0.05, 0.02, 0.9, 0.0, 0.0, 0.0]
-    audio = make_audio(rms=[0.2] * 8, clipping=clipping)
+    # Occasional, genuine clipping (3 of 12 windows = 25%, under the unreliable
+    # fraction) on reliable, varying-level audio: still counted and flagged.
+    rms = [0.1, 0.2, 0.15, 0.25, 0.12, 0.22, 0.14, 0.2, 0.16, 0.18, 0.13, 0.21]
+    clipping = [0.0, 0.0, 0.05, 0.02, 0.0, 0.0, 0.0, 0.9, 0.0, 0.0, 0.0, 0.0]
+    audio = make_audio(rms=rms, clipping=clipping)
     notes, _ = audio_flags(audio)
     assert "audio: clipping in 3 windows" in notes
 
 
 def test_audio_flags_clean_audio_has_no_notes():
-    audio = make_audio(rms=[0.1] * 8)
+    # Reliable, varying-level audio with no clipping/rumble/silence: no notes.
+    # (A perfectly *constant* level would now read as unreliable — see the
+    # low-dynamic-range test below.)
+    audio = make_audio(rms=[0.06, 0.14, 0.08, 0.13, 0.07, 0.15, 0.09, 0.12])
     notes, bursts = audio_flags(audio)
     assert notes == []
     assert bursts == [0.0] * 8
@@ -369,6 +404,104 @@ def test_progress_none_is_backwards_compatible(monkeypatch):
     assert len(reports) == 2
     reports2 = sift_directory("footage", progress=None)
     assert len(reports2) == 2
+
+
+# ---------------------------------------------- analyze_clip (patched media)
+
+
+def _patch_media(monkeypatch, metrics, duration, audio=None):
+    """Drive analyze_clip on synthetic metrics without ffmpeg."""
+    monkeypatch.setattr(
+        sift_module,
+        "probe",
+        lambda p: MediaInfo(
+            path=str(p), duration=duration, fps=2.0, width=160, height=90,
+            has_audio=bool(audio),
+        ),
+    )
+    monkeypatch.setattr(sift_module, "frame_metrics", lambda p: metrics)
+    monkeypatch.setattr(sift_module, "audio_metrics", lambda p: audio or [])
+
+
+def test_analyze_flat_log_clip_usable_and_yields_moments(monkeypatch):
+    # Regression for the drone bug: a flat/Log clip (uniform dim brightness ~45
+    # with real detail) must be mostly usable, never "100% dark", and yield
+    # moments — plus exactly one calm flat/low-contrast note.
+    metrics = make_metrics([45] * 24, [60] * 24, [2] * 24)
+    _patch_media(monkeypatch, metrics, 12.0)
+    report = analyze_clip("flat_D.mp4")
+
+    assert not any(s.label == DARK for s in report.segments)
+    assert report.usable_ratio > 0.9
+    assert report.moments
+    flat_notes = [n for n in report.notes if "flat" in n and "log" in n.lower()]
+    assert len(flat_notes) == 1  # one note, not per-segment spam
+    assert not any("too dark" in n for n in report.notes)
+    assert not any("skipped" in n for n in report.notes)
+
+
+def test_analyze_dim_but_detailed_clip_never_skipped_to_zero(monkeypatch):
+    # Even a near-black clip that still carries real gradient detail must have
+    # its best moments surfaced (HARD RULE), not be reduced to zero.
+    metrics = make_metrics([12] * 24, [50] * 24, [2] * 24)
+    _patch_media(monkeypatch, metrics, 12.0)
+    report = analyze_clip("dim_D.mp4")
+
+    assert report.moments, "clip with real detail must not be skipped to zero"
+    assert not any("skipped" in n for n in report.notes)
+
+
+def test_analyze_truly_black_clip_is_skipped(monkeypatch):
+    # A genuinely black, featureless clip (no detail anywhere) is still skipped.
+    metrics = make_metrics([6] * 24, [0.5] * 24, [0.1] * 24)
+    _patch_media(monkeypatch, metrics, 12.0)
+    report = analyze_clip("black.mp4")
+
+    assert all(s.label == DARK for s in report.segments)
+    assert report.moments == []
+    assert any("skipped" in n for n in report.notes)
+
+
+# --------------------------------------------------- audio: unreliable drone
+
+
+def test_audio_clipping_in_most_windows_is_unreliable():
+    # Drone/camera: clipping in nearly every window is not real clipping.
+    audio = make_audio(rms=[0.2] * 8, clipping=[0.5] * 8)
+    notes, bursts = audio_flags(audio)
+    assert not any("clipping in" in n for n in notes)
+    assert any("constant" in n or "drone" in n for n in notes)
+    assert len(notes) == 1
+    assert bursts == [0.0] * 8  # audio must not drive highlight scoring
+
+
+def test_audio_low_dynamic_range_constant_tone_is_unreliable():
+    # A steady motor tone (constant rms, no clipping) with a bottom-heavy
+    # spectrum: unreliable, so the "wind" note is suppressed.
+    audio = make_audio(rms=[0.2] * 8, low_ratio=[0.7] * 8)
+    notes, bursts = audio_flags(audio)
+    assert any("constant" in n for n in notes)
+    assert not any("wind" in n for n in notes)
+    assert bursts == [0.0] * 8
+
+
+def test_audio_occasional_clipping_still_flagged():
+    # Real occasional clipping (1 of 10 windows) on varying-level audio stays.
+    rms = [0.1, 0.2, 0.15, 0.25, 0.12, 0.22, 0.14, 0.2, 0.16, 0.18]
+    clipping = [0.0, 0.0, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    audio = make_audio(rms=rms, clipping=clipping)
+    notes, _ = audio_flags(audio)
+    assert "audio: clipping in 1 windows" in notes
+    assert not any("constant" in n for n in notes)
+
+
+def test_apply_audio_unreliable_leaves_highlight_zero():
+    # Unreliable audio does not drive highlights (falls back to 0).
+    audio = make_audio(rms=[0.2] * 8, clipping=[0.5] * 8)
+    moment = Moment(start=0.0, end=1.0, score=0.5)
+    notes = apply_audio([moment], audio)
+    assert moment.highlight == 0.0
+    assert any("constant" in n for n in notes)
 
 
 # ------------------------------------------------------------- integration

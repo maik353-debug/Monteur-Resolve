@@ -49,6 +49,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+_EPS = 1e-6
+
 
 @dataclass
 class MusicSection:
@@ -543,6 +545,82 @@ def detect_drops(
             drops = snapped
 
     return sorted(drops)
+
+
+# ----------------------------------------------------------------------------
+# Energy windowing
+# ----------------------------------------------------------------------------
+
+_WINDOW_DROP_LEAD = 0.15  # lead-in before a drop, as a fraction of the window
+
+
+def best_energy_window(music: MusicAnalysis, length: float) -> float:
+    """Start offset (seconds) of the most energetic ``length``-second window.
+
+    Used when a montage is cut SHORTER than the song, to place the cut against
+    the song's strongest passage instead of its intro.
+
+    Approximation
+    -------------
+    The fine RMS energy envelope built during analysis is not retained on
+    :class:`MusicAnalysis`, so this works from the coarse ``music.sections``
+    (each a stretch carrying a single 0..1 energy) rather than recomputing it:
+
+    * When ``music.drops`` is non-empty the window is placed to CONTAIN the
+      first drop with a short lead-in (``drop - 15% of length``) so the build
+      into the drop rides along — a drop is the strongest moment a section
+      summary can point at. The start is clamped to ``[0, duration - length]``,
+      which always keeps the drop inside the window.
+    * Otherwise the window whose section-energy-weighted average over
+      ``[start, start + length]`` is highest is chosen. That average is
+      piecewise-linear in ``start`` with breakpoints at section boundaries, so
+      only boundary-derived candidate starts need scoring; ties resolve to the
+      earliest start (deterministic).
+
+    ``length >= music.duration`` (or a non-positive length) returns 0.0 — the
+    whole song is used, exactly as before windowing existed.
+    """
+    duration = music.duration
+    if length <= 0.0 or length >= duration - _EPS:
+        return 0.0
+    max_start = duration - length
+
+    if music.drops:
+        drop = min(music.drops)
+        start = drop - _WINDOW_DROP_LEAD * length
+        return float(min(max(start, 0.0), max_start))
+
+    sections = music.sections
+    if not sections:
+        return 0.0
+
+    # The optimum aligns a window edge with a section boundary.
+    candidates = {0.0, max_start}
+    for s in sections:
+        candidates.add(s.start)
+        candidates.add(s.end - length)
+    starts = sorted(
+        min(max(c, 0.0), max_start)
+        for c in candidates
+        if -_EPS <= c <= max_start + _EPS
+    )
+
+    def window_energy(start: float) -> float:
+        end = start + length
+        total = 0.0
+        for s in sections:
+            lo = max(start, s.start)
+            hi = min(end, s.end)
+            if hi > lo:
+                total += s.energy * (hi - lo)
+        return total / length
+
+    best_start, best_energy = 0.0, -1.0
+    for start in starts:
+        e = window_energy(start)
+        if e > best_energy + _EPS:  # strict: ties keep the earlier start
+            best_energy, best_start = e, start
+    return float(best_start)
 
 
 # ----------------------------------------------------------------------------

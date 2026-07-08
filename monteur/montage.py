@@ -104,7 +104,7 @@ from dataclasses import dataclass, field
 from pathlib import PurePath
 
 from monteur.model import AUDIO, VIDEO, Clip, Marker, Timeline, seconds_to_frames
-from monteur.music import MusicAnalysis, MusicSection
+from monteur.music import MusicAnalysis, MusicSection, best_energy_window
 from monteur.sift import ClipReport, Moment
 
 CHRONOLOGICAL = "chronological"  # keep footage order (travel/event films)
@@ -219,6 +219,8 @@ class MontagePlan:
 
     music_path: str
     duration: float  # seconds, montage length (may be shorter than the song)
+    music_start: float = 0.0  # seconds into the song where the cut begins
+    song_duration: float = 0.0  # seconds, full length of the source song (0 = unknown)
     fade_in: float = 0.0  # seconds, intended music/video fade-in
     fade_out: float = 0.0  # seconds, intended music/video fade-out
     entries: list["MontageEntry"] = field(default_factory=list)
@@ -237,6 +239,50 @@ class MontageEntry:
 
 
 # --- grid -------------------------------------------------------------------
+
+
+def _mmss(seconds: float) -> str:
+    """Format a position as M:SS (e.g. 61.0 -> "1:01")."""
+    total = int(round(seconds))
+    return f"{total // 60}:{total % 60:02d}"
+
+
+def _window_music(music: MusicAnalysis, start: float, length: float) -> MusicAnalysis:
+    """A view of ``music`` over ``[start, start + length]`` in montage time.
+
+    Every musical position (beats, downbeats, phrases, drops) is shifted by
+    ``-start`` and clipped to the window; sections are cropped to the window,
+    shifted, and re-tiled so they still cover ``[0, length]`` exactly. The
+    montage grid can then be built as usual — in montage-relative time — while
+    only the song's strongest passage is in play.
+    """
+    end = start + length
+
+    def shift(times: list[float]) -> list[float]:
+        return [t - start for t in sorted(times) if start - _EPS <= t <= end + _EPS]
+
+    sections: list[MusicSection] = []
+    for s in music.sections:
+        lo = max(s.start, start)
+        hi = min(s.end, end)
+        if hi - lo > _EPS:
+            sections.append(MusicSection(lo - start, hi - start, s.energy, s.label))
+    if sections:  # guarantee exact tiling of [0, length]
+        sections[0].start = 0.0
+        sections[-1].end = length
+        for prev, nxt in zip(sections, sections[1:]):
+            nxt.start = prev.end
+
+    return MusicAnalysis(
+        path=music.path,
+        duration=length,
+        tempo=music.tempo,
+        beats=shift(music.beats),
+        sections=sections,
+        downbeats=shift(music.downbeats),
+        phrases=shift(music.phrases),
+        drops=shift(music.drops),
+    )
 
 
 def _label_at(sections: list[MusicSection], t: float) -> str:
@@ -718,10 +764,27 @@ def plan_montage(
         if snapped_length is not None:
             end_note = f"length snapped to {boundary_kind} at {snapped_length:.1f}s"
             length = snapped_length
-    plan = MontagePlan(music_path=music.path, duration=max(length, 0.0))
+
+    # A montage cut shorter than the song uses the song's strongest passage,
+    # not its intro: shift the whole grid onto [music_start, music_start+length].
+    music_start = 0.0
+    if max_duration is not None and _EPS < length < music.duration - _EPS:
+        music_start = best_energy_window(music, length)
+    grid_music = _window_music(music, music_start, length) if music_start > _EPS else music
+
+    plan = MontagePlan(
+        music_path=music.path,
+        duration=max(length, 0.0),
+        music_start=music_start,
+        song_duration=music.duration,
+    )
     plan.notes.append(f'style "{chosen.key}": {chosen.name}')
     if end_note:
         plan.notes.append(end_note)
+    if music_start > _EPS:
+        plan.notes.append(
+            f"using the song's strongest {length:.0f}s (from {_mmss(music_start)})"
+        )
     if length <= _EPS:
         plan.notes.append("montage length is zero; nothing planned")
         return plan
@@ -730,13 +793,13 @@ def plan_montage(
     highlight_phase: str | None = None
     drop_starts: list[float] = []
     if chosen.arc:
-        cuts, phases, grid_notes = _build_style_grid(music, length, chosen)
+        cuts, phases, grid_notes = _build_style_grid(grid_music, length, chosen)
         highlight_phase = chosen.prefer_highlights_in
     else:
-        cuts, grid_notes = _build_grid(music, length)
+        cuts, grid_notes = _build_grid(grid_music, length)
         # Auto style: every in-range drop forces a cut exactly on the drop;
         # the slot starting there is reserved for the strongest moment.
-        for d in sorted({d for d in music.drops if _EPS < d < length - _EPS}):
+        for d in sorted({d for d in grid_music.drops if _EPS < d < length - _EPS}):
             if not any(abs(c - d) <= _EPS for c in cuts):
                 bisect.insort(cuts, d)
             drop_starts.append(d)
@@ -760,7 +823,7 @@ def plan_montage(
         pool.sort(key=lambda it: (-it.moment.score, it.clip_path, it.moment.start))
         slot_order = sorted(
             range(len(slots)),
-            key=lambda i: (-_energy_at(music.sections, slots[i][0]), slots[i][0]),
+            key=lambda i: (-_energy_at(grid_music.sections, slots[i][0]), slots[i][0]),
         )
     else:
         raise ValueError(f"unknown order: {order!r}")
@@ -771,7 +834,7 @@ def plan_montage(
     plan.notes.extend(fill_notes)
     used = sum(1 for it in pool if it.uses)
     plan.notes.append(f"{len(slots)} slots filled, {used} of {len(pool)} moments used")
-    _plan_finishing(plan, entries, music, chosen, phases)
+    _plan_finishing(plan, entries, grid_music, chosen, phases)
     return plan
 
 
@@ -863,13 +926,23 @@ def montage_to_timeline(plan: MontagePlan, fps: float, name: str = "Monteur Mont
         timeline.metadata["fade_out_frames"] = seconds_to_frames(plan.fade_out, fps)
     music_stem = PurePath(plan.music_path).stem
     duration_frames = seconds_to_frames(plan.duration, fps)
+    # The music clip starts at the song offset the cut was built against, so a
+    # short montage plays the song's strongest passage rather than its intro.
+    music_in = seconds_to_frames(plan.music_start, fps)
+    # Keep the source range inside the song: if independent rounding of the
+    # offset and the length would read one frame past the end, shift the start
+    # back so the clip length stays exact and never over-reads the media.
+    if plan.song_duration > 0:
+        song_end = seconds_to_frames(plan.song_duration, fps)
+        if music_in + duration_frames > song_end:
+            music_in = max(0, song_end - duration_frames)
     timeline.clips.append(
         Clip(
             name=music_stem,
             track="A1",
             kind=AUDIO,
-            source_in=0,
-            source_out=duration_frames,
+            source_in=music_in,
+            source_out=music_in + duration_frames,
             record_in=0,
             record_out=duration_frames,
             source_name=music_stem,
