@@ -285,8 +285,10 @@ class FableHandler(BaseHTTPRequestHandler):
             max_takes_per_scene=int(payload.get("max_takes") or 1),
             forced=forced,
         )
+        handles_raw = payload.get("handles")
         timeline = assembly_to_timeline(
-            plan, takes, fps=fps, handles=float(payload.get("handles") or 0.5)
+            plan, takes, fps=fps,
+            handles=0.5 if handles_raw is None else float(handles_raw),
         )
         if not timeline.clips:
             raise ApiError(422, "nothing matched — no segments to export")

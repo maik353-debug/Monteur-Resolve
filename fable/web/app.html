@@ -23,6 +23,10 @@
   --tempo-slow: #86b6ef;
   --good: #006300;
   --critical: #d03b3b;
+  --warning: #fab219;
+  --warn-wash: rgba(250, 178, 25, 0.12);
+  --meter-track: #cde2fb;
+  --row-wash: rgba(42, 120, 214, 0.09);
   --btn-bg: #2a78d6;
   --btn-ink: #ffffff;
   --veil: rgba(249, 249, 247, 0.82);
@@ -46,6 +50,10 @@
     --tempo-slow: #184f95;
     --good: #0ca30c;
     --critical: #d03b3b;
+    --warning: #fab219;
+    --warn-wash: rgba(250, 178, 25, 0.10);
+    --meter-track: #0d366b;
+    --row-wash: rgba(57, 135, 229, 0.16);
     --btn-bg: #256abf;
     --btn-ink: #ffffff;
     --veil: rgba(13, 13, 13, 0.82);
@@ -265,6 +273,112 @@ svg text.axis {
 .fps-custom input { width: 90px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--ink); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
+/* ---------- view switcher ---------- */
+.view-switch {
+  display: flex; gap: 4px; margin-top: 12px; padding: 3px;
+  background: var(--surface-2); border-radius: 9px;
+}
+.view-tab {
+  flex: 1; border: 0; background: none; color: var(--ink-2);
+  padding: 6px 10px; border-radius: 7px; font-size: 12.5px; font-weight: 650; cursor: pointer;
+}
+.view-tab:hover { color: var(--ink); }
+.view-tab[aria-pressed="true"] {
+  background: var(--surface); color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+/* ---------- assembly view ---------- */
+#assembly { max-width: 960px; margin: 0 auto; padding: 26px 28px 56px; }
+.asm-sources { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+@media (max-width: 900px) { .asm-sources { grid-template-columns: 1fr; } }
+.asm-drop {
+  border: 1.5px dashed var(--axis); border-radius: 12px; background: var(--surface);
+  padding: 16px 18px; cursor: pointer; color: var(--ink-2);
+  transition: border-color 0.15s, background 0.15s;
+}
+.asm-drop:hover, .asm-drop.over, .asm-drop:focus-visible { border-color: var(--series-1); background: var(--surface-2); }
+.asm-drop h3 { font-size: 13px; font-weight: 650; color: var(--ink); margin-bottom: 3px; }
+.asm-drop p { font-size: 12px; color: var(--ink-muted); }
+.chiplist { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; padding: 0; }
+.chiplist:empty { margin: 0; }
+.chip {
+  display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600;
+  color: var(--ink); background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 999px; padding: 3px 5px 3px 10px; max-width: 100%;
+}
+.chip .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+.chip .x {
+  border: 0; background: none; color: var(--ink-muted); cursor: pointer;
+  font-size: 13px; line-height: 1; padding: 2px 5px; border-radius: 50%;
+}
+.chip .x:hover { color: var(--critical); background: var(--surface); }
+.asm-build { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 18px; }
+.asm-build .hint { font-size: 12.5px; color: var(--ink-muted); }
+.plan-head { display: flex; flex-wrap: wrap; gap: 16px 32px; align-items: flex-start; justify-content: space-between; }
+.plan-title { font-size: 20px; font-weight: 680; overflow-wrap: anywhere; }
+.scene-sub { font-size: 12px; color: var(--ink-muted); margin-top: 3px; }
+.cov-label { font-size: 12px; color: var(--ink-2); margin-bottom: 2px; }
+.cov-num { font-size: 38px; font-weight: 680; line-height: 1.1; }
+.meter { width: 220px; max-width: 100%; height: 8px; border-radius: 4px; background: var(--meter-track); overflow: hidden; margin-top: 8px; }
+.meter > span { display: block; height: 100%; background: var(--series-1); border-radius: 4px; }
+.export-bar { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: flex-end; border-top: 1px solid var(--grid); margin-top: 16px; padding-top: 14px; }
+.export-field { font-size: 11.5px; color: var(--ink-muted); display: flex; flex-direction: column; gap: 4px; }
+.export-field select, .export-field input {
+  padding: 6px 8px; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--page); color: var(--ink); width: 110px;
+}
+.seg-toggle { display: inline-flex; gap: 4px; padding: 3px; background: var(--surface-2); border-radius: 8px; }
+.seg-toggle button {
+  border: 0; background: none; padding: 5px 10px; border-radius: 6px;
+  font-size: 12.5px; font-weight: 650; color: var(--ink-2); cursor: pointer;
+}
+.seg-toggle button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: inset 0 0 0 1px var(--border); }
+.take-table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 4px 0 10px; }
+.take-table th {
+  text-align: left; font-size: 11.5px; font-weight: 650; color: var(--ink-2);
+  padding: 6px 10px; border-bottom: 1px solid var(--grid);
+}
+.take-table td { padding: 6px 10px; border-bottom: 1px solid var(--grid); }
+.take-table tr:last-child td { border-bottom: none; }
+.take-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.take-table tr.used td { background: var(--row-wash); }
+.take-table tr.used td:first-child { box-shadow: inset 2px 0 0 var(--series-1); }
+.take-name { font-weight: 600; overflow-wrap: anywhere; }
+.pin-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink-2);
+  border-radius: 7px; padding: 3px 9px; font-size: 11.5px; font-weight: 600;
+  cursor: pointer; white-space: nowrap;
+}
+.pin-btn:hover { background: var(--surface-2); color: var(--ink); }
+.pin-btn[aria-pressed="true"] { border-color: var(--series-1); color: var(--ink); box-shadow: inset 0 0 0 1px var(--series-1); }
+.pin-btn .spin {
+  width: 10px; height: 10px; flex: none; border-radius: 50%;
+  border: 2px solid currentColor; border-right-color: transparent;
+  animation: spin 0.7s linear infinite; display: none;
+}
+.pin-btn.busy .spin { display: inline-block; }
+.pin-btn[disabled] { opacity: 0.55; cursor: default; pointer-events: none; }
+.seg-heading { font-size: 12px; font-weight: 650; color: var(--ink-2); margin: 10px 0 2px; }
+.seg-list { list-style: none; margin: 0; padding: 0; }
+.seg-item { display: flex; gap: 10px; align-items: baseline; padding: 7px 0; border-top: 1px solid var(--grid); font-size: 13px; }
+.seg-item:first-child { border-top: none; }
+.seg-take { font-weight: 650; white-space: nowrap; }
+.seg-time { color: var(--ink-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.seg-text { color: var(--ink-2); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.warn-block {
+  border-left: 3px solid var(--warning); background: var(--warn-wash);
+  border-radius: 6px; padding: 9px 12px; margin-top: 12px; font-size: 12.5px;
+}
+.warn-block h4 { margin: 0 0 4px; font-size: 12px; font-weight: 650; display: flex; align-items: center; gap: 6px; }
+.warn-block ul { margin: 0; padding-left: 16px; }
+.warn-block li { margin-top: 2px; }
+.warn-block .who { font-weight: 650; }
+.plan-notes { margin: 12px 0 0; padding-left: 18px; font-size: 12px; color: var(--ink-muted); }
+.plan-notes li { margin-top: 2px; }
+.refetching { opacity: 0.55; pointer-events: none; }
+
 #drop-veil {
   position: fixed; inset: 0; z-index: 65; background: var(--veil);
   display: flex; align-items: center; justify-content: center; pointer-events: none;
@@ -295,6 +409,10 @@ svg text.axis {
         <span>Fable Studio</span>
       </div>
       <p class="brand-sub">Pacing &amp; rhythm for your cut</p>
+      <nav class="view-switch" aria-label="Studio view">
+        <button class="view-tab" id="tab-pacing" type="button" aria-pressed="true">Pacing</button>
+        <button class="view-tab" id="tab-assembly" type="button" aria-pressed="false">Assembly</button>
+      </nav>
     </div>
 
     <section class="side-section" id="versions-section" aria-label="Version history">
@@ -390,11 +508,66 @@ svg text.axis {
         </section>
       </div>
     </section>
+
+    <section id="assembly" hidden>
+      <header class="dash-head">
+        <div class="dash-title">
+          <p class="eyebrow">Assembly</p>
+          <h1>Script-driven assembly</h1>
+          <p class="dash-meta">Match take transcripts against your screenplay, rank the takes per scene, and export a first assembly.</p>
+        </div>
+      </header>
+
+      <div class="asm-sources">
+        <div class="asm-drop" id="script-drop" role="button" tabindex="0"
+             aria-label="Add screenplay: drop a fountain or plain-text script, or press Enter to browse">
+          <h3>Screenplay</h3>
+          <p>Drop your script here — .fountain or .txt — or click to browse.</p>
+          <ul class="chiplist" id="script-chip"></ul>
+        </div>
+        <div class="asm-drop" id="takes-drop" role="button" tabindex="0"
+             aria-label="Add takes: drop SRT or Whisper JSON transcripts, or press Enter to browse">
+          <h3>Takes</h3>
+          <p>Drop take transcripts — .srt or Whisper .json. Name clips like S12_T03 so they route to scene 12, take 3.</p>
+          <ul class="chiplist" id="takes-chips"></ul>
+        </div>
+      </div>
+
+      <div class="asm-build">
+        <button class="btn" id="plan-btn" type="button" disabled>Build assembly plan<span class="spin" aria-hidden="true"></span></button>
+        <span class="hint" id="plan-hint">Add a screenplay and at least one take to begin.</span>
+      </div>
+
+      <div id="plan-view" hidden>
+        <section class="card">
+          <div class="plan-head" id="plan-head"></div>
+          <div class="export-bar" aria-label="Export">
+            <label class="export-field">Frame rate
+              <select id="exp-fps"></select>
+            </label>
+            <label class="export-field">Handles (seconds)
+              <input type="number" id="exp-handles" min="0" step="0.1" value="0.5" inputmode="decimal">
+            </label>
+            <div class="export-field">
+              <span id="exp-fmt-label">Format</span>
+              <div class="seg-toggle" role="group" aria-labelledby="exp-fmt-label">
+                <button type="button" id="fmt-edl" aria-pressed="true">EDL</button>
+                <button type="button" id="fmt-fcpxml" aria-pressed="false">FCPXML</button>
+              </div>
+            </div>
+            <button class="btn" id="export-btn" type="button">Export timeline<span class="spin" aria-hidden="true"></span></button>
+          </div>
+        </section>
+        <div id="plan-scenes"></div>
+      </div>
+    </section>
   </main>
 </div>
 
 <input type="file" id="file-input" accept=".edl,.fcpxml,.xml" multiple hidden>
 <input type="file" id="compare-input" accept=".edl,.fcpxml,.xml" hidden>
+<input type="file" id="script-input" accept=".fountain,.txt" hidden>
+<input type="file" id="takes-input" accept=".srt,.json" multiple hidden>
 
 <div id="drop-veil" hidden aria-hidden="true"><div class="veil-card">Drop to analyze</div></div>
 
@@ -424,6 +597,7 @@ svg text.axis {
 /* ================= state ================= */
 
 var state = {
+  view: "pacing",  // "pacing" | "assembly"
   primary: null,   // {stats, label, source:{kind:'file'|'version'|'resolve', payload?, versionId?}}
   baseline: null,  // {stats, label, verdict?} — comparison overlay (series 2)
   versions: [],    // sidebar list entries from GET /api/versions
@@ -871,6 +1045,23 @@ function renderTrend() {
   container.appendChild(svg);
 }
 
+/* ================= views (Pacing | Assembly) ================= */
+
+function setView(view) {
+  state.view = view;
+  $("tab-pacing").setAttribute("aria-pressed", String(view === "pacing"));
+  $("tab-assembly").setAttribute("aria-pressed", String(view === "assembly"));
+  updateMainVisibility();
+}
+function updateMainVisibility() {
+  var pacing = state.view === "pacing";
+  $("assembly").hidden = pacing;
+  $("welcome").hidden = !pacing || !!state.primary;
+  $("dashboard").hidden = !pacing || !state.primary;
+}
+$("tab-pacing").addEventListener("click", function () { setView("pacing"); });
+$("tab-assembly").addEventListener("click", function () { setView("assembly"); });
+
 /* ================= dashboard ================= */
 
 var SOURCE_NAMES = { file: "Analyzed file", version: "Saved version", resolve: "DaVinci Resolve timeline" };
@@ -878,9 +1069,7 @@ var SOURCE_NAMES = { file: "Analyzed file", version: "Saved version", resolve: "
 function renderDashboard() {
   var p = state.primary;
   if (!p) return;
-  $("welcome").hidden = true;
-  var dash = $("dashboard");
-  dash.hidden = false;
+  updateMainVisibility();
 
   var stats = p.stats;
   $("dash-source").textContent = SOURCE_NAMES[p.source.kind] || "Cut";
@@ -1113,6 +1302,7 @@ function openVersion(id) {
   versionStats(id).then(function (stats) {
     state.primary = { stats: stats, label: versionLabel(id), source: { kind: "version", versionId: id } };
     clearCompareState();
+    setView("pacing");
     renderDashboard();
   }).catch(function (err) { toast(err.message, "error"); });
 }
@@ -1141,6 +1331,7 @@ function enterVersionCompare(aId, bId) {
     // first ticked = A (baseline), second ticked = B (primary in focus); deltas = B − A
     state.primary = { stats: pair[1], label: versionLabel(bId), source: { kind: "version", versionId: bId } };
     state.baseline = { stats: pair[0], label: versionLabel(aId), verdict: null };
+    setView("pacing");
     renderDashboard();
   }).catch(function (err) { toast(err.message, "error"); });
 }
@@ -1420,6 +1611,7 @@ function loadResolve() {
             };
             state.selected = [];
             state.baseline = null;
+            setView("pacing");
             renderDashboard();
             toast("Analyzed “" + state.primary.label + "” from Resolve.", "success");
           });
@@ -1446,8 +1638,415 @@ function loadResolve() {
   });
 }
 
+/* ================= assembly ================= */
+
+var asm = {
+  script: null,   // {filename, content} — kept in memory, re-planning never re-reads
+  takes: [],      // [{filename, content}]
+  pins: {},       // sceneIndex (string) -> take name; sent as "forced" on every plan/export
+  result: null    // last /api/assembly/plan response
+};
+var expFormat = "edl";
+
+function stemOf(name) { return String(name).replace(/\.[^.]+$/, ""); }
+function pct(x) { return Math.round((x || 0) * 100) + "%"; }
+function fmtInOut(seconds) { // M:SS.d
+  var tenths = Math.max(0, Math.round(seconds * 10));
+  var t = Math.floor(tenths / 10), d = tenths % 10;
+  var m = Math.floor(t / 60), s = t % 60;
+  return m + ":" + (s < 10 ? "0" : "") + s + "." + d;
+}
+
+function pinIcon(filled) {
+  var svg = svgEl("svg", { viewBox: "0 0 16 16", width: 12, height: 12, "aria-hidden": "true" });
+  svg.appendChild(svgEl("path", {
+    d: "M9.5 1.5 L14.5 6.5 L13.3 7.7 L12.4 7.4 L9.8 10 L9.8 12.4 L8.4 13.8 L5.6 11 L2.2 14.4 L1.6 13.8 L5 10.4 L2.2 7.6 L3.6 6.2 L6 6.2 L8.6 3.6 L8.3 2.7 Z",
+    fill: filled ? "var(--series-1)" : "none",
+    stroke: filled ? "var(--series-1)" : "currentColor",
+    "stroke-width": 1.2, "stroke-linejoin": "round"
+  }));
+  return svg;
+}
+function warnIcon() {
+  var svg = svgEl("svg", { viewBox: "0 0 16 16", width: 13, height: 13, "aria-hidden": "true" });
+  svg.appendChild(svgEl("path", { d: "M8 1.5 L15 14.5 H1 Z", fill: "var(--warning)" }));
+  svg.appendChild(svgEl("rect", { x: 7.3, y: 6, width: 1.4, height: 4.2, rx: 0.7, fill: "#0b0b0b" }));
+  svg.appendChild(svgEl("circle", { cx: 8, cy: 12.2, r: 0.9, fill: "#0b0b0b" }));
+  return svg;
+}
+
+/* ---- sources (script + takes, in memory) ---- */
+
+function makeChip(text, onRemove) {
+  var li = el("li", "chip");
+  li.appendChild(el("span", "name", text));
+  var x = el("button", "x", "×");
+  x.type = "button";
+  x.setAttribute("aria-label", "Remove " + text);
+  x.addEventListener("click", function (e) { e.stopPropagation(); onRemove(); });
+  li.appendChild(x);
+  li.addEventListener("click", function (e) { e.stopPropagation(); });
+  return li;
+}
+
+function renderSources() {
+  var scriptChip = $("script-chip");
+  clear(scriptChip);
+  if (asm.script) {
+    scriptChip.appendChild(makeChip(asm.script.filename, function () {
+      asm.script = null;
+      renderSources();
+    }));
+  }
+  var chips = $("takes-chips");
+  clear(chips);
+  asm.takes.forEach(function (take) {
+    chips.appendChild(makeChip(take.filename, function () { removeTake(take.filename); }));
+  });
+  var ready = !!asm.script && asm.takes.length > 0;
+  $("plan-btn").disabled = !ready;
+  $("plan-hint").textContent = !ready
+    ? "Add a screenplay and at least one take to begin."
+    : (asm.result
+        ? "The plan re-builds automatically when you pin takes or change sources."
+        : "Ready — build the plan to rank takes per scene.");
+}
+
+function addScriptFiles(fileList) {
+  var files = Array.prototype.slice.call(fileList || []).filter(function (f) {
+    return /\.(fountain|txt)$/i.test(f.name);
+  });
+  if (!files.length) {
+    toast("Screenplays are read from .fountain or .txt files.", "error");
+    return;
+  }
+  readFileText(files[0]).then(function (text) {
+    asm.script = { filename: files[0].name, content: text };
+    renderSources();
+    maybeReplan();
+  }).catch(function (err) { toast(err.message, "error"); });
+}
+
+function addTakeFiles(fileList) {
+  var files = Array.prototype.slice.call(fileList || []).filter(function (f) {
+    return /\.(srt|json)$/i.test(f.name);
+  });
+  if (!files.length) {
+    toast("Takes are read from .srt or Whisper .json transcripts.", "error");
+    return;
+  }
+  Promise.all(files.map(function (f) {
+    return readFileText(f).then(function (text) { return { filename: f.name, content: text }; });
+  })).then(function (items) {
+    items.forEach(function (item) {
+      var existing = -1;
+      for (var i = 0; i < asm.takes.length; i++) {
+        if (asm.takes[i].filename === item.filename) { existing = i; break; }
+      }
+      if (existing >= 0) asm.takes[existing] = item; else asm.takes.push(item);
+    });
+    renderSources();
+    maybeReplan();
+  }).catch(function (err) { toast(err.message, "error"); });
+}
+
+function removeTake(filename) {
+  asm.takes = asm.takes.filter(function (t) { return t.filename !== filename; });
+  var name = stemOf(filename);
+  Object.keys(asm.pins).forEach(function (key) {
+    if (asm.pins[key] === name) delete asm.pins[key];
+  });
+  if (!asm.takes.length) { asm.result = null; renderPlan(); renderSources(); return; }
+  renderSources();
+  maybeReplan();
+}
+
+/* re-plan automatically once a plan exists (hold the old render dimmed, no flash) */
+function maybeReplan() {
+  if (asm.result && asm.script && asm.takes.length) buildPlan();
+}
+
+/* ---- planning & pins ---- */
+
+function buildPlan(triggerBtn) {
+  if (!asm.script || !asm.takes.length) return Promise.resolve();
+  var btn = triggerBtn || $("plan-btn");
+  $("plan-view").classList.add("refetching");
+  return busy(btn, function () {
+    var body = { script: asm.script, takes: asm.takes };
+    if (Object.keys(asm.pins).length) body.forced = asm.pins;
+    return api("/api/assembly/plan", { method: "POST", body: body }).then(function (data) {
+      asm.result = data;
+      renderPlan();
+    });
+  }).then(function () {
+    $("plan-view").classList.remove("refetching");
+  });
+}
+
+function togglePin(sceneIndex, takeName, btn) {
+  var key = String(sceneIndex);
+  if (asm.pins[key] === takeName) delete asm.pins[key];
+  else asm.pins[key] = takeName;
+  buildPlan(btn);
+}
+
+/* ---- rendering ---- */
+
+function renderPlan() {
+  var view = $("plan-view");
+  if (!asm.result) { view.hidden = true; return; }
+  view.hidden = false;
+  renderPlanHead();
+  renderPlanScenes();
+  renderSources(); // refresh the hint copy
+}
+
+function renderPlanHead() {
+  var head = $("plan-head");
+  clear(head);
+  var r = asm.result;
+  var scenes = (r.plan && r.plan.scenes) || [];
+
+  var left = el("div");
+  left.appendChild(el("p", "eyebrow", "Assembly plan"));
+  left.appendChild(el("h2", "plan-title", (r.screenplay && r.screenplay.title) || "Untitled screenplay"));
+  left.appendChild(el("p", "scene-sub",
+    scenes.length + (scenes.length === 1 ? " scene" : " scenes") + " · " +
+    r.takes.length + (r.takes.length === 1 ? " take" : " takes") +
+    (Object.keys(asm.pins).length ? " · " + Object.keys(asm.pins).length + " pinned" : "")));
+  head.appendChild(left);
+
+  var right = el("div");
+  right.appendChild(el("div", "cov-label", "Dialogue coverage"));
+  right.appendChild(el("div", "cov-num", pct(r.coverage)));
+  var meter = el("div", "meter");
+  meter.setAttribute("role", "img");
+  meter.setAttribute("aria-label", "Dialogue coverage " + pct(r.coverage));
+  var fill = el("span");
+  fill.style.width = Math.max(0, Math.min(100, (r.coverage || 0) * 100)) + "%";
+  meter.appendChild(fill);
+  right.appendChild(meter);
+  head.appendChild(right);
+}
+
+function renderPlanScenes() {
+  var host = $("plan-scenes");
+  clear(host);
+  var r = asm.result;
+  var spScenes = (r.screenplay && r.screenplay.scenes) || [];
+
+  ((r.plan && r.plan.scenes) || []).forEach(function (scene) {
+    var card = el("section", "card");
+    var sp = spScenes[scene.scene_index] || {};
+    card.appendChild(el("h2", null, scene.heading || "Untitled scene"));
+    card.appendChild(el("p", "scene-sub", "Scene " + (sp.number || scene.scene_index + 1)));
+
+    // dialogue lookup for unmatched lines
+    var dlg = {};
+    (sp.dialogue || []).forEach(function (line) { dlg[line.index] = line; });
+
+    var usedTakes = {};
+    (scene.segments || []).forEach(function (seg) { usedTakes[seg.take] = true; });
+    var pinnedTake = asm.pins[String(scene.scene_index)] || null;
+
+    if (!scene.take_scores || !scene.take_scores.length) {
+      var none = el("div", "warn-block");
+      var h = el("h4");
+      h.appendChild(warnIcon());
+      h.appendChild(document.createTextNode("No takes matched this scene"));
+      none.appendChild(h);
+      none.appendChild(el("p", null,
+        "None of the loaded takes cover this scene’s dialogue. Check the clip naming (S" +
+        (sp.number || scene.scene_index + 1) + "_T01) or add more takes."));
+      card.appendChild(none);
+    } else {
+      var table = el("table", "take-table");
+      var thead = el("thead");
+      var hrow = el("tr");
+      hrow.appendChild(el("th", null, "Take"));
+      hrow.appendChild(el("th", "num", "Coverage"));
+      hrow.appendChild(el("th", "num", "Accuracy"));
+      hrow.appendChild(el("th", "num", "Fluffs"));
+      hrow.appendChild(el("th", "num", "Duration"));
+      hrow.appendChild(el("th", null, ""));
+      thead.appendChild(hrow);
+      table.appendChild(thead);
+      var tbody = el("tbody");
+      scene.take_scores.forEach(function (score) {
+        var row = el("tr", usedTakes[score.take] ? "used" : null);
+        row.appendChild(el("td", "take-name", score.take));
+        row.appendChild(el("td", "num", pct(score.coverage)));
+        row.appendChild(el("td", "num", pct(score.accuracy)));
+        row.appendChild(el("td", "num", String(score.fluffs)));
+        row.appendChild(el("td", "num", fmtSecs(score.duration)));
+        var cell = el("td");
+        var isPinned = pinnedTake === score.take;
+        var pin = el("button", "pin-btn");
+        pin.type = "button";
+        pin.setAttribute("aria-pressed", String(isPinned));
+        pin.setAttribute("aria-label", (isPinned ? "Unpin " : "Use ") + score.take + " for this scene");
+        pin.appendChild(pinIcon(isPinned));
+        pin.appendChild(document.createTextNode(isPinned ? "Pinned" : "Use this take"));
+        pin.appendChild(el("span", "spin"));
+        pin.addEventListener("click", function () { togglePin(scene.scene_index, score.take, pin); });
+        cell.appendChild(pin);
+        row.appendChild(cell);
+        tbody.appendChild(row);
+      });
+      table.appendChild(tbody);
+      card.appendChild(table);
+    }
+
+    if (scene.segments && scene.segments.length) {
+      card.appendChild(el("p", "seg-heading", "Planned segments"));
+      var list = el("ul", "seg-list");
+      scene.segments.forEach(function (seg) {
+        var item = el("li", "seg-item");
+        item.appendChild(el("span", "seg-take", seg.take));
+        item.appendChild(el("span", "seg-time", fmtInOut(seg.start) + "–" + fmtInOut(seg.end) +
+          " (" + fmtSecs(seg.end - seg.start) + ")"));
+        var text = String(seg.text || "");
+        var excerpt = text.length > 160 ? text.slice(0, 157) + "…" : text;
+        var span = el("span", "seg-text", excerpt);
+        span.setAttribute("title", text);
+        item.appendChild(span);
+        list.appendChild(item);
+      });
+      card.appendChild(list);
+    }
+
+    if (scene.unmatched_lines && scene.unmatched_lines.length) {
+      var warn = el("div", "warn-block");
+      var wh = el("h4");
+      wh.appendChild(warnIcon());
+      wh.appendChild(document.createTextNode(
+        scene.unmatched_lines.length + (scene.unmatched_lines.length === 1 ? " line" : " lines") +
+        " not covered by any take"));
+      warn.appendChild(wh);
+      var ul = el("ul");
+      scene.unmatched_lines.forEach(function (index) {
+        var line = dlg[index];
+        var li = el("li");
+        if (line) {
+          li.appendChild(el("span", "who", (line.character || "?") + ": "));
+          li.appendChild(document.createTextNode(line.text || ""));
+        } else {
+          li.textContent = "Dialogue line " + index;
+        }
+        ul.appendChild(li);
+      });
+      warn.appendChild(ul);
+      card.appendChild(warn);
+    }
+
+    if (scene.notes && scene.notes.length) {
+      var notes = el("ul", "plan-notes");
+      scene.notes.forEach(function (note) { notes.appendChild(el("li", null, note)); });
+      card.appendChild(notes);
+    }
+
+    host.appendChild(card);
+  });
+}
+
+/* ---- export ---- */
+
+function initExportBar() {
+  var select = $("exp-fps");
+  var chosen = storedFps();
+  var listed = false;
+  FPS_PRESETS.forEach(function (fps) {
+    var option = document.createElement("option");
+    option.value = String(fps);
+    option.textContent = String(fps);
+    if (fps === chosen) { option.selected = true; listed = true; }
+    select.appendChild(option);
+  });
+  if (!listed) {
+    var custom = document.createElement("option");
+    custom.value = String(chosen);
+    custom.textContent = String(chosen);
+    custom.selected = true;
+    select.appendChild(custom);
+  }
+  select.addEventListener("change", function () {
+    var v = parseFloat(select.value);
+    if (isFinite(v) && v > 0) rememberFps(v);
+  });
+  function setFormat(fmt) {
+    expFormat = fmt;
+    $("fmt-edl").setAttribute("aria-pressed", String(fmt === "edl"));
+    $("fmt-fcpxml").setAttribute("aria-pressed", String(fmt === "fcpxml"));
+  }
+  $("fmt-edl").addEventListener("click", function () { setFormat("edl"); });
+  $("fmt-fcpxml").addEventListener("click", function () { setFormat("fcpxml"); });
+}
+initExportBar();
+
+function downloadText(filename, content) {
+  var blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+}
+
+$("export-btn").addEventListener("click", function () {
+  if (!asm.script || !asm.takes.length) return;
+  busy($("export-btn"), function () {
+    var fps = parseFloat($("exp-fps").value);
+    if (!isFinite(fps) || fps <= 0) fps = 25;
+    var handles = parseFloat($("exp-handles").value);
+    if (!isFinite(handles) || handles < 0) handles = 0.5;
+    rememberFps(fps);
+    var body = { script: asm.script, takes: asm.takes, fps: fps, handles: handles, format: expFormat };
+    if (Object.keys(asm.pins).length) body.forced = asm.pins;
+    return api("/api/assembly/export", { method: "POST", body: body }).then(function (data) {
+      downloadText(data.filename || ("fable_assembly." + expFormat), data.content || "");
+      toast("Exported " + (data.filename || "timeline") + ".", "success");
+    });
+  });
+});
+
+/* ---- assembly drop zones & pickers ---- */
+
+function wireAsmDrop(zoneId, inputId, onFiles) {
+  var zone = $(zoneId);
+  var input = $(inputId);
+  zone.addEventListener("click", function () { input.click(); });
+  zone.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); }
+  });
+  zone.addEventListener("dragover", function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    zone.classList.add("over");
+  });
+  zone.addEventListener("dragleave", function () { zone.classList.remove("over"); });
+  zone.addEventListener("drop", function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    zone.classList.remove("over");
+    onFiles(e.dataTransfer.files);
+  });
+  input.addEventListener("change", function () {
+    onFiles(input.files);
+    input.value = "";
+  });
+}
+wireAsmDrop("script-drop", "script-input", addScriptFiles);
+wireAsmDrop("takes-drop", "takes-input", addTakeFiles);
+
+$("plan-btn").addEventListener("click", function () { buildPlan($("plan-btn")); });
+
 /* ================= boot ================= */
 
+updateMainVisibility();
 refreshVersions();
 loadResolve();
 
