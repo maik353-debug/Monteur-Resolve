@@ -25,6 +25,7 @@ API (all JSON):
 * ``POST /api/create/distill`` {"timeline": {"filename",
   "content", "fps"?}, "music"?, "target"?, "style"?,
   "canvas"?, "audio"?, "format"?}                               -> {"job": id}
+* ``POST /api/create/resolve`` {"plan_json", "fps"?, "name"?}   -> {"job": id}
 * ``POST /api/find``      {"folder", "query", "limit"?}         -> {"shots"} | {"error"}
 * ``POST /api/movie/load``    {"project_dir"}                   -> {"project", "progress"}
 * ``POST /api/movie/new``     {"project_dir", "brief",
@@ -85,6 +86,22 @@ noted honestly, never fatal), optional music is analyzed with the usual
 ``"music"`` progress entry, and the trailer comes back serialized exactly
 like a build result (audio auto-falls back to "original" when no music is
 given).
+
+``/api/create/resolve`` builds the current cut as a real timeline in the
+OPEN DaVinci Resolve project (a ``"resolve-build"`` job) — no file, no
+import step, and the plan's black fades and act titles arrive as real
+Text+ instead of being lost in the FCPXML round-trip. The browser sends
+the ``"plan_json"`` a build/revise result carries; the job rebuilds it
+with :func:`monteur.montage.plan_from_dict` (a bad plan fails the job
+with the loader's message) and hands it to
+:func:`monteur.resolve.build_plan_isolated` — crash-safe by contract:
+Resolve scripting runs in a disposable child process (honoring
+``MONTEUR_RESOLVE_PYTHON``) and NEVER raises. Title specs come from
+:func:`monteur.resolve.titles_from_plan` when the plan has dips. A
+failure dict (Resolve not running, scripting disabled, incompatible
+Python, native crash, timeout) fails the job with the worker's own error
+message verbatim — it already explains the fix. Success carries the
+created ``"timeline"`` name plus any non-fatal title ``"warnings"``.
 
 The ``/api/movie/*`` endpoints drive the Studio's Movie view on top of
 :mod:`monteur.movie`. ``load`` and ``assign`` are instant (no job; both
@@ -281,7 +298,7 @@ _PICK_LOCK = threading.Lock()
 def _new_job(kind: str) -> dict:
     job = {
         "id": secrets.token_hex(4),
-        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "distill" | "movie" | "scene-check" | "movie-assemble"
+        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "distill" | "resolve-build" | "movie" | "scene-check" | "movie-assemble"
         "state": "running",  # -> "done" | "error" | "cancelled"
         "progress": [],  # dicts: {"index","total","name","stage"[,"usable_ratio"]}
         "message": "",  # human-readable reason when state == "error"
@@ -872,6 +889,62 @@ def _run_distill_job(job: dict, payload: dict, timeline) -> None:
         job["state"] = "error"
 
 
+def _run_resolve_build_job(job: dict, payload: dict) -> None:
+    """Daemon-thread body for POST /api/create/resolve (plan -> Resolve).
+
+    Mirrors ``monteur create --into-resolve`` (cli) and the MCP server's
+    ``into_resolve`` path: the plan is rebuilt from the browser's
+    ``"plan_json"`` (bad input -> ValueError -> job error), title specs are
+    derived from the plan's own dips (:func:`monteur.resolve.
+    titles_from_plan` — plans without dips pass ``None``), and the build
+    runs through :func:`monteur.resolve.build_plan_isolated`, which NEVER
+    raises: Resolve scripting lives in a disposable child process, so even
+    a native crash comes back as a graceful ``{"ok": False}`` dict. Its
+    error message is surfaced verbatim as the job error — it already
+    explains fixes like MONTEUR_RESOLVE_PYTHON.
+
+    ``build_plan_isolated`` / ``titles_from_plan`` are resolved at CALL
+    time via the ``from``-import below, so tests can monkeypatch them on
+    :mod:`monteur.resolve` without ever needing a running Resolve.
+    """
+    from monteur.montage import plan_from_dict
+    from monteur.resolve import build_plan_isolated, titles_from_plan
+
+    try:
+        plan = plan_from_dict(payload.get("plan_json") or {})  # bad -> ValueError
+        if not plan.entries:
+            raise ValueError("the plan has no entries — nothing to build")
+        fps = float(payload.get("fps") or 25)
+        name = str(payload.get("name") or "Monteur Montage")
+        titles = titles_from_plan(plan) if plan.dips else None
+        with _JOBS_LOCK:
+            job["progress"].append(
+                {"stage": "resolve", "name": "building the timeline in Resolve"}
+            )
+        built = build_plan_isolated(plan, fps=fps, name=name, titles=titles)
+        if not built.get("ok"):
+            # Never raises by contract — a failure dict carries the worker's
+            # user-ready message (Resolve not running, scripting disabled,
+            # incompatible interpreter, timeout). Pass it through verbatim.
+            job["message"] = str(
+                built.get("error")
+                or "DaVinci Resolve could not build the timeline."
+            )
+            job["state"] = "error"
+            return
+        job["result"] = {
+            "timeline": built.get("timeline") or name,
+            "warnings": [str(w) for w in built.get("warnings") or []],
+        }
+        job["state"] = "done"
+    except ValueError as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
 def _movie_module():
     """Resolve :mod:`monteur.movie` at CALL time (same seam as vision).
 
@@ -1208,6 +1281,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/create/kit"): self._create_kit,
             ("POST", "/api/create/revise"): self._create_revise,
             ("POST", "/api/create/distill"): self._create_distill,
+            ("POST", "/api/create/resolve"): self._create_resolve,
             ("POST", "/api/find"): self._find,
             ("POST", "/api/movie/load"): self._movie_load,
             ("POST", "/api/movie/new"): self._movie_new,
@@ -1503,6 +1577,21 @@ class MonteurHandler(BaseHTTPRequestHandler):
             target=_run_distill_job,
             args=(job, payload, timeline),
             name=f"monteur-distill-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _create_resolve(self) -> None:
+        payload = self._read_json()
+        if not isinstance(payload.get("plan_json"), dict):
+            raise ApiError(
+                400, "missing 'plan_json' (the plan a build result carries)"
+            )
+        job = _new_job("resolve-build")
+        threading.Thread(
+            target=_run_resolve_build_job,
+            args=(job, payload),
+            name=f"monteur-resolve-build-{job['id']}",
             daemon=True,
         ).start()
         self._send_json({"job": job["id"]})

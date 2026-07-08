@@ -1447,3 +1447,136 @@ class TestDistillApi:
             _post(f"{server}/api/create/distill", {"timeline": timeline})
         assert exc_info.value.code == 400
         assert "fps" in json.loads(exc_info.value.read())["error"]
+
+
+class TestResolveBuildApi:
+    """POST /api/create/resolve — build the plan straight into Resolve.
+
+    ``build_plan_isolated`` is replaced at its import site: the job body
+    does ``from monteur.resolve import build_plan_isolated`` at CALL time,
+    so ``monkeypatch.setattr`` on :mod:`monteur.resolve` is a complete test
+    hook — no running Resolve (and no worker child process) needed.
+    ``titles_from_plan`` stays real: it is pure and Resolve-free.
+    """
+
+    def _plan_json(self, dips=False):
+        """A real plan in the save format, exactly what a build result carries."""
+        from monteur.montage import MontageEntry, MontagePlan, plan_to_dict
+
+        plan = MontagePlan(
+            music_path="/music/song.wav",
+            duration=4.0,
+            entries=[
+                MontageEntry(
+                    clip_path="/media/a.mov", source_start=1.0, source_end=3.0,
+                    record_start=0.0, record_end=2.0, score=1.0,
+                ),
+                MontageEntry(
+                    clip_path="/media/b.mov", source_start=0.5, source_end=2.5,
+                    record_start=2.0, record_end=4.0, score=0.8,
+                    label="the mountain pass",
+                ),
+            ],
+            dips=[(2.0, 0.4)] if dips else [],
+        )
+        return plan_to_dict(plan)
+
+    def _patch_build(self, monkeypatch, result):
+        """Fake build_plan_isolated; returns the recorded calls."""
+        import monteur.resolve as resolve_module
+
+        calls = []
+
+        def fake_build(plan, fps, name="Monteur Montage", titles=None, timeout=180.0):
+            calls.append({"plan": plan, "fps": fps, "name": name, "titles": titles})
+            return dict(result)
+
+        monkeypatch.setattr(resolve_module, "build_plan_isolated", fake_build)
+        return calls
+
+    def _resolve(self, server, **payload):
+        data = _post(f"{server}/api/create/resolve", payload)
+        assert isinstance(data["job"], str) and data["job"]
+        return _wait_for_job(server, data["job"])
+
+    def test_resolve_build_happy_path(self, server, monkeypatch):
+        calls = self._patch_build(
+            monkeypatch, {"ok": True, "timeline": "Monteur Montage 3", "warnings": []}
+        )
+        plan_json = self._plan_json()
+        job = self._resolve(server, plan_json=plan_json, fps=30)
+        assert job["state"] == "done"
+        assert job["kind"] == "resolve-build"
+        assert job["result"] == {"timeline": "Monteur Montage 3", "warnings": []}
+        assert {
+            "stage": "resolve", "name": "building the timeline in Resolve"
+        } in job["progress"]
+
+        # The worker got the browser's plan back, faithfully round-tripped.
+        from monteur.montage import plan_to_dict
+
+        assert len(calls) == 1
+        call = calls[0]
+        assert plan_to_dict(call["plan"]) == plan_json
+        assert call["fps"] == 30.0
+        assert call["name"] == "Monteur Montage"  # the default timeline name
+        assert call["titles"] is None  # no dips -> no titles
+
+    def test_resolve_build_dips_plan_sends_titles_and_warnings(
+        self, server, monkeypatch
+    ):
+        calls = self._patch_build(
+            monkeypatch,
+            {"ok": True, "timeline": "Trailer",
+             "warnings": ["title 1 overlaps the next clip"]},
+        )
+        job = self._resolve(
+            server, plan_json=self._plan_json(dips=True), name="Trailer"
+        )
+        assert job["state"] == "done"
+        assert job["result"]["timeline"] == "Trailer"
+        # Non-fatal title placement warnings are surfaced to the browser.
+        assert job["result"]["warnings"] == ["title 1 overlaps the next clip"]
+
+        # A plan WITH dips gets its act titles, derived by the real
+        # titles_from_plan from the plan the job reconstructed.
+        from monteur.resolve import titles_from_plan
+
+        assert calls[0]["name"] == "Trailer"
+        assert calls[0]["titles"] == titles_from_plan(calls[0]["plan"])
+        assert calls[0]["titles"]  # the dip really yielded a title spec
+
+    def test_resolve_build_failure_is_job_error_with_worker_message(
+        self, server, monkeypatch
+    ):
+        message = (
+            "Resolve scripting crashed the worker process — set "
+            "MONTEUR_RESOLVE_PYTHON to a Resolve-compatible Python"
+        )
+        self._patch_build(
+            monkeypatch, {"ok": False, "error": message, "reason": "native-crash"}
+        )
+        job = self._resolve(server, plan_json=self._plan_json())
+        assert job["state"] == "error"
+        assert job["message"] == message  # verbatim — it already names the fix
+        assert job["result"] is None
+
+    def test_resolve_build_missing_plan_json_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/resolve", {"fps": 25})
+        assert exc_info.value.code == 400
+        assert "plan_json" in json.loads(exc_info.value.read())["error"]
+
+    def test_resolve_build_bad_plan_json_is_job_error(self, server):
+        job = self._resolve(server, plan_json={"bogus": 1})
+        assert job["state"] == "error"
+        assert "not a Monteur plan" in job["message"]
+        assert job["result"] is None
+
+    def test_resolve_build_empty_plan_is_job_error(self, server):
+        from monteur.montage import MontagePlan, plan_to_dict
+
+        empty = plan_to_dict(MontagePlan(music_path="", duration=0.0))
+        job = self._resolve(server, plan_json=empty)
+        assert job["state"] == "error"
+        assert "no entries" in job["message"]

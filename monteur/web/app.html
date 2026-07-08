@@ -543,6 +543,10 @@ svg text.axis {
 .rank-reasons { margin: 6px 0 10px; padding-left: 18px; font-size: 12px; color: var(--ink-2); }
 .rank-reasons li { margin-top: 2px; }
 
+/* send to Resolve (result card) */
+.resolve-send { margin: 4px 0 2px; }
+.resolve-send .help-small { margin-top: 8px; max-width: 620px; }
+
 /* publish kit */
 .kit-block { border-top: 1px solid var(--grid); margin-top: 16px; padding-top: 14px; }
 .thumb-strip { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 6px; }
@@ -975,6 +979,7 @@ svg text.axis {
               <span class="help-small" id="cre-res-note">3840&thinsp;×&thinsp;2160</span>
             </div>
             <p class="help-small">Your footage keeps its own aspect ratio — reframe vertical or cinemascope shots in Resolve after import.</p>
+            <p class="help-small" id="cre-cine-note" hidden>Cinemascope heads-up: 16:9 footage shows bars on the SIDES at first — for the classic cinema look, set Resolve&rsquo;s Project Settings &gt; Image Scaling &gt; &ldquo;Scale full frame with crop&rdquo;.</p>
           </div>
           <div>
             <h3 class="fgroup-title">Length</h3>
@@ -1075,6 +1080,16 @@ svg text.axis {
           <p class="rev-rationale" id="cre-rev-rationale" role="status" hidden></p>
           <div class="result-stats" id="cre-summary"></div>
           <ul class="plan-notes" id="cre-notes"></ul>
+          <div class="resolve-send">
+            <button class="btn primary" id="cre-resolve-btn" type="button">Build in DaVinci Resolve<span class="spin" aria-hidden="true"></span></button>
+            <p class="help-small">One click, no file: builds this cut as a timeline directly in the Resolve project you have open — including the black fades and the act titles as real Text+. The file download below needs a manual import instead, and Resolve skips those niceties there.</p>
+            <div id="cre-resolve-panel"></div>
+            <p class="scan-note" id="cre-resolve-msg" role="status" hidden></p>
+            <div id="cre-resolve-result" hidden>
+              <p class="scan-note" id="cre-resolve-done" role="status"></p>
+              <ul class="plan-notes" id="cre-resolve-warnings"></ul>
+            </div>
+          </div>
           <div class="export-bar">
             <div class="export-field">
               <span id="cre-fmt-label">File format</span>
@@ -1105,14 +1120,15 @@ svg text.axis {
             <p class="scan-note" id="cre-rev-msg" role="status" hidden></p>
           </div>
           <div class="kit-block" id="cre-kit">
-            <p class="seg-heading">Publish kit</p>
-            <p class="help-small">Everything the upload needs, drafted from this cut: title ideas, a description with YouTube chapters, tags, and thumbnail stills — written as publish.md plus a thumbs/ folder.</p>
-            <label class="sr-only" for="cre-kit-dir">Publish kit folder path</label>
+            <p class="seg-heading">Publish kit — the upload package for this cut</p>
+            <p class="help-small">Uploading a video means writing a title, a description, chapters and tags, and hunting for a thumbnail — the kit drafts all of that from the cut above so publishing takes minutes, not an evening. It writes one <code>publish.md</code> with title suggestions and a short description (drafted by Claude when your Anthropic API key is set — otherwise from an honest offline template that says so), YouTube chapter timestamps taken from the cut&rsquo;s own scene changes, a ready-to-paste tag list, and real thumbnail stills of your strongest moments in a <code>thumbs/</code> folder. A planned SFX layer adds its sound-design shopping list with Artlist search links.</p>
+            <label class="sr-only" for="cre-kit-dir">Folder to write the publish kit into</label>
             <div class="path-row">
               <input type="text" id="cre-kit-dir" placeholder="/Users/you/Movies/my-trip/publish" spellcheck="false" autocomplete="off">
               <button class="btn ghost" id="cre-browse-kit" type="button">Browse&hellip;</button>
               <button class="btn" id="cre-kit-btn" type="button">Write publish kit<span class="spin" aria-hidden="true"></span></button>
             </div>
+            <p class="help-small">Where the kit lands: only publish.md and thumbs/ are written into this folder (it&rsquo;s created if needed) — a publish folder next to your footage works well. &ldquo;Write publish kit&rdquo; drafts from the cut exactly as shown above, so revise first, publish after.</p>
             <div id="cre-kit-panel"></div>
             <p class="scan-note" id="cre-kit-msg" role="status" hidden></p>
             <div id="cre-kit-result" hidden>
@@ -2874,6 +2890,8 @@ function makeJobPanel(hostId, texts) {
         lines.push(stext);
       } else if (p.stage === "kit") {
         lines.push(String(p.name || "writing publish kit") + "…");
+      } else if (p.stage === "resolve") {
+        lines.push(String(p.name || "building the timeline in Resolve") + "…");
       } else if (p.stage === "movie") {
         lines.push("Claude · " + String(p.name || "drafting the screenplay") + "…");
       } else if (p.stage === "scene") {
@@ -2891,6 +2909,7 @@ function makeJobPanel(hostId, texts) {
     else if (last && last.stage === "vision") status.textContent = "Claude is watching your clips…";
     else if (last && last.stage === "song") status.textContent = "Listening to your songs…";
     else if (last && last.stage === "kit") status.textContent = "Writing the publish kit…";
+    else if (last && last.stage === "resolve") status.textContent = "Building the timeline in Resolve…";
     else if (last && last.stage === "movie") status.textContent = "Claude is writing your screenplay…";
     else if (last && last.stage === "scene") status.textContent = "Assembling scene " + (typeof last.index === "number" ? last.index : "") + (typeof last.total === "number" && last.total > 0 ? " of " + last.total : "") + "…";
     else if (cached > 0 && (total === 0 || done >= total)) status.textContent = "Using your previous scan — nothing to re-watch.";
@@ -2964,6 +2983,7 @@ var buildPanel = makeJobPanel("cre-build-panel", { starting: "Starting the build
 var rankPanel = makeJobPanel("cre-rank-panel", { starting: "Starting the ranking…", working: "Ranking your songs…" });
 var kitPanel = makeJobPanel("cre-kit-panel", { starting: "Starting the publish kit…", working: "Writing the publish kit…" });
 var revisePanel = makeJobPanel("cre-rev-panel", { starting: "Starting the revision…", working: "Revising your cut…" });
+var resolveBuildPanel = makeJobPanel("cre-resolve-panel", { starting: "Contacting DaVinci Resolve…", working: "Building the timeline in Resolve…" });
 var distillPanel = makeJobPanel("cre-dst-panel", { starting: "Starting the distillation…", working: "Distilling your trailer…" });
 
 function setScanBusy(on) {
@@ -2999,6 +3019,11 @@ function setReviseBusy(on) {
   btn.disabled = on;
   $("cre-rev-brief").disabled = on;
 }
+function setResolveBuildBusy(on) {
+  var btn = $("cre-resolve-btn");
+  btn.classList.toggle("busy", on);
+  btn.disabled = on;
+}
 function setDistillBusy(on) {
   var btn = $("cre-dst-btn");
   btn.classList.toggle("busy", on);
@@ -3015,6 +3040,7 @@ function creStopJobs() {
   if (rankPanel.running()) { rankPanel.stop(); setRankBusy(false); }
   if (kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
   if (revisePanel.running()) { revisePanel.stop(); setReviseBusy(false); }
+  if (resolveBuildPanel.running()) { resolveBuildPanel.stop(); setResolveBuildBusy(false); }
   if (distillPanel.running()) { distillPanel.stop(); setDistillBusy(false); }
 }
 
@@ -3031,6 +3057,7 @@ function creShowStep(n, focusHeading) {
   if (n !== 3 && buildPanel.running()) { buildPanel.stop(); setBuildBusy(false); }
   if (n !== 3 && kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
   if (n !== 3 && revisePanel.running()) { revisePanel.stop(); setReviseBusy(false); }
+  if (n !== 3 && resolveBuildPanel.running()) { resolveBuildPanel.stop(); setResolveBuildBusy(false); }
   cre.step = n;
   var names = { 1: "Your footage", 2: "Music & options", 3: "Your cut" };
   $("wiz-progress").textContent = "Step " + n + " of 3 — " + names[n];
@@ -3387,6 +3414,8 @@ function setShape(value) {
   Array.prototype.forEach.call($("cre-canvas-cards").children, function (cardBtn) {
     cardBtn.setAttribute("aria-checked", String(cardBtn.getAttribute("data-shape") === value));
   });
+  // the up-front cinemascope warning (the build's plan notes repeat it later)
+  $("cre-cine-note").hidden = value !== "cine";
   refreshCanvasNote();
 }
 function setRes(value) {
@@ -3620,6 +3649,10 @@ function startBuild(andThen) {
   if (kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
   $("cre-kit-msg").hidden = true;
   $("cre-kit-result").hidden = true;
+  // ...and so is any previous "timeline created in Resolve" outcome
+  if (resolveBuildPanel.running()) { resolveBuildPanel.stop(); setResolveBuildBusy(false); }
+  $("cre-resolve-msg").hidden = true;
+  $("cre-resolve-result").hidden = true;
   setBuildBusy(true);
   api("/api/create/build", { method: "POST", body: body }).then(function (data) {
     buildPanel.start(data.job, {
@@ -3844,6 +3877,8 @@ function creResetRevise() {
   $("cre-revise").hidden = true;
   $("cre-rev-rationale").hidden = true;
   $("cre-rev-msg").hidden = true;
+  $("cre-resolve-msg").hidden = true;
+  $("cre-resolve-result").hidden = true;
 }
 
 /* a pin stamp must land INSIDE [record_start, record_end) — the midpoint is
@@ -3883,6 +3918,9 @@ function renderReviseEntries() {
 function startRevise(body, andThen) {
   if (revisePanel.running() || buildPanel.running()) return;
   $("cre-rev-msg").hidden = true;
+  // a revision replaces the plan — a previous Resolve outcome is stale
+  $("cre-resolve-msg").hidden = true;
+  $("cre-resolve-result").hidden = true;
   setReviseBusy(true);
   api("/api/create/revise", { method: "POST", body: body }).then(function (data) {
     revisePanel.start(data.job, {
@@ -3945,6 +3983,66 @@ $("cre-rev-btn").addEventListener("click", function () {
 $("cre-rev-brief").addEventListener("keydown", function (e) {
   if (e.key === "Enter") { e.preventDefault(); $("cre-rev-btn").click(); }
 });
+
+/* ---- step 3: build the cut directly in DaVinci Resolve ----------------
+   POST /api/create/resolve sends the CURRENT plan (rev.planJson — the
+   build's plan, or the latest revision's) and the server builds it as a
+   real timeline in the open Resolve project, titles and fades included.
+   The engine call is crash-safe on the server side; a failure is a calm
+   job error whose message already names the fix. */
+
+function buildInResolve() {
+  if (resolveBuildPanel.running() || buildPanel.running() || revisePanel.running()) return;
+  if (!rev.planJson) {
+    creNote("cre-resolve-msg", "Build your cut first — Resolve gets the finished plan.", true);
+    return;
+  }
+  var built = (cre.result && cre.result.body) || {};
+  var body = {
+    plan_json: rev.planJson,
+    fps: built.fps || fpsFrom($("cre-fps"))
+  };
+  $("cre-resolve-msg").hidden = true;
+  $("cre-resolve-result").hidden = true;
+  setResolveBuildBusy(true);
+  api("/api/create/resolve", { method: "POST", body: body }).then(function (data) {
+    resolveBuildPanel.start(data.job, {
+      onDone: function (result) {
+        setResolveBuildBusy(false);
+        $("cre-resolve-done").textContent = "Timeline “" +
+          String((result && result.timeline) || "Monteur Montage") +
+          "” is now in your open Resolve project — switch over and press play.";
+        var warnings = $("cre-resolve-warnings");
+        clear(warnings);
+        ((result && result.warnings) || []).forEach(function (w) {
+          warnings.appendChild(el("li", null, String(w)));
+        });
+        $("cre-resolve-result").hidden = false;
+        toast("Timeline built in DaVinci Resolve.", "success");
+      },
+      onCancelled: function () {
+        setResolveBuildBusy(false);
+        creNote("cre-resolve-msg", "Resolve build cancelled.");
+      },
+      onError: function (message) {
+        setResolveBuildBusy(false);
+        var text = String(message);
+        // the engine's errors usually name the fix themselves — only add
+        // the hint when the message doesn't already point at the setting
+        if (!/Preferences/i.test(text)) {
+          text += " Make sure DaVinci Resolve is running with scripting enabled " +
+            "(Preferences > System > General > External scripting using: Local) — " +
+            "or use the file download below.";
+        }
+        creNote("cre-resolve-msg", text, true);
+      }
+    });
+  }).catch(function (err) {
+    setResolveBuildBusy(false);
+    creNote("cre-resolve-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+$("cre-resolve-btn").addEventListener("click", buildInResolve);
 
 /* ---- distill a trailer from a finished cut (monteur.distill) ---------- */
 
