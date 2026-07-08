@@ -1,7 +1,6 @@
 # Monteur 🎬
 
-**The editing assistant that understands your footage — not just your
-timeline.**
+**The editing assistant that understands your footage**
 
 Generic Resolve remote controls exist. Monteur is the editorial
 intelligence layer: it knows *which* moments in your material are worth
