@@ -15,8 +15,8 @@ API (all JSON):
 * ``DELETE /api/versions/<id>``                                 -> {"ok": true}
 * ``GET  /api/resolve/status``                                  -> {"connected", ...}
 * ``POST /api/resolve/analyze`` {"timeline"?, "save"?}          -> {"stats", "version"?}
-* ``POST /api/create/scan``   {"folder"}                        -> {"job": id}
-* ``POST /api/create/build``  {"folder", "music"?, ...}         -> {"job": id}
+* ``POST /api/create/scan``   {"folder", "see"?}                -> {"job": id}
+* ``POST /api/create/build``  {"folder", "music"?, "see"?, ...} -> {"job": id}
 * ``GET  /api/jobs/<id>``                                       -> the job dict
 * ``POST /api/jobs/<id>/cancel``                                -> {"ok": true}
 * ``POST /api/pick``          {"kind": "folder"|"music"|"file"} -> {"path"} | {"error"}
@@ -29,6 +29,11 @@ immediately, a daemon thread does the slow sifting/planning, and the browser
 polls ``GET /api/jobs/<id>`` for live per-clip progress. A successful scan is
 cached (folder + per-file mtimes), so a build straight after a scan reuses the
 reports instead of sifting the same footage twice.
+
+``"see": true`` on scan/build asks Claude vision (:mod:`monteur.vision`) to
+label the good moments after the sift. Vision is an upgrade, not a gate: a
+missing anthropic package or API key (``MonteurVisionError``) never fails the
+job — the result simply carries ``"vision_error"`` instead of annotations.
 """
 
 from __future__ import annotations
@@ -279,7 +284,45 @@ def _cached_reports(folder: str):
     return cache["reports"]
 
 
-def _run_scan_job(job: dict, folder: str) -> None:
+def _apply_vision(job: dict, reports: list) -> tuple[list, str]:
+    """Let Claude vision annotate ``reports`` IN PLACE; soft-fail by contract.
+
+    Returns ``(vision_notes, vision_error)`` — exactly one of them is truthy
+    (or both empty when vision produced no notes). A missing anthropic
+    package / API key (``MonteurVisionError``) or an absent vision module
+    degrades to ``([], "<message>")``: the scan/build carries on with the
+    un-annotated reports, because vision is an upgrade, not a gate.
+
+    Vision's own progress stages ("frames"/"vision"/"cache") are folded into
+    a single job-progress stage ``"vision"`` — the UI shows one kind of
+    "Claude is watching" line either way.
+
+    ``monteur.vision.analyze_reports`` is deliberately resolved at CALL time
+    via :func:`importlib.import_module` (which honours ``sys.modules``,
+    unlike ``import a.b as c``'s parent-attribute shortcut), so tests can
+    either ``monkeypatch.setattr("monteur.vision.analyze_reports", fake)``
+    or replace the whole module in ``sys.modules`` with a fake.
+    """
+
+    def progress(index, total, name, stage):
+        entry = {"stage": "vision", "index": index, "total": total, "name": name}
+        with _JOBS_LOCK:
+            job["progress"].append(entry)
+
+    import importlib
+
+    try:
+        vision = importlib.import_module("monteur.vision")
+    except ImportError as exc:  # an older/partial install — same soft contract
+        return [], f"vision support is not installed: {exc}"
+    try:
+        notes = vision.analyze_reports(reports, progress=progress)
+    except vision.MonteurVisionError as exc:
+        return [], str(exc)
+    return list(notes or []), ""
+
+
+def _run_scan_job(job: dict, folder: str, see: bool = False) -> None:
     """Daemon-thread body for POST /api/create/scan."""
     from monteur.media import MonteurMediaError
     from monteur.sift import SiftCancelled, sift_directory
@@ -291,7 +334,19 @@ def _run_scan_job(job: dict, folder: str) -> None:
         if not reports:
             raise MonteurMediaError(f"no video files found in {folder}")
         _remember_scan(folder, reports)
-        job["result"] = {"clips": [asdict(r) for r in reports]}
+        result: dict = {}
+        if see:
+            # After _remember_scan: the cache holds these same report objects,
+            # so in-place annotation lands in the cache too — a build straight
+            # after a see-scan reuses the ANNOTATED reports.
+            notes, error = _apply_vision(job, reports)
+            if error:
+                result["vision_error"] = error
+            else:
+                result["vision_notes"] = notes
+        # asdict AFTER vision so the clip payload includes the annotations.
+        result["clips"] = [asdict(r) for r in reports]
+        job["result"] = result
         job["state"] = "done"
     except SiftCancelled:
         job["state"] = "cancelled"
@@ -312,9 +367,16 @@ def _run_build_job(job: dict, payload: dict) -> None:
 
     folder = payload.get("folder", "")
     music_path = payload.get("music") or ""
+    see = bool(payload.get("see"))
+    vision_notes: list = []
+    vision_error = ""
+    vision_ran = False
     try:
         reports = _cached_reports(folder)
         if reports is not None:
+            # A cache hit after a see-scan already carries the annotations
+            # (vision annotates the cached report objects in place) — no
+            # second vision pass, no double spend.
             with _JOBS_LOCK:
                 job["progress"].append(
                     {"stage": "cache", "name": "using previous scan"}
@@ -326,6 +388,9 @@ def _run_build_job(job: dict, payload: dict) -> None:
             if not reports:
                 raise MonteurMediaError(f"no video files found in {folder}")
             _remember_scan(folder, reports)
+            if see:  # fresh sift: annotate before planning (soft-fail)
+                vision_ran = True
+                vision_notes, vision_error = _apply_vision(job, reports)
         if job["cancel"].is_set():
             raise SiftCancelled("build cancelled")
 
@@ -375,7 +440,7 @@ def _run_build_job(job: dict, payload: dict) -> None:
             content, filename = write_edl(timeline), "monteur_montage.edl"
         else:
             content, filename = write_fcpxml(timeline), "monteur_montage.fcpxml"
-        job["result"] = {
+        result = {
             "filename": filename,
             "content": content,
             "plan": {
@@ -385,6 +450,11 @@ def _run_build_job(job: dict, payload: dict) -> None:
                 "notes": plan.notes,
             },
         }
+        if vision_error:
+            result["vision_error"] = vision_error
+        elif vision_ran:
+            result["vision_notes"] = vision_notes
+        job["result"] = result
         job["state"] = "done"
     except SiftCancelled:
         job["state"] = "cancelled"
@@ -720,7 +790,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
         job = _new_job("scan")
         threading.Thread(
             target=_run_scan_job,
-            args=(job, folder),
+            args=(job, folder, bool(payload.get("see"))),
             name=f"monteur-scan-{job['id']}",
             daemon=True,
         ).start()

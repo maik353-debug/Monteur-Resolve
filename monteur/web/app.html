@@ -451,6 +451,26 @@ svg text.axis {
 .clip-meta { font-size: 12px; color: var(--ink-muted); margin: 2px 0 8px; font-variant-numeric: tabular-nums; }
 .clip-note { font-size: 12px; margin-top: 8px; color: var(--ink-2); display: flex; gap: 6px; align-items: flex-start; }
 .clip-note svg { flex: none; margin-top: 1px; }
+/* Claude-vision toggle + semantic moment lines */
+.see-check {
+  display: inline-flex; align-items: center; gap: 8px; margin: 2px 0 4px;
+  font-size: 13px; font-weight: 650; cursor: pointer;
+}
+.see-check input { width: 15px; height: 15px; accent-color: var(--series-1); margin: 0; flex: none; }
+.clip-sem {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 7px;
+  font-size: 12px; margin-top: 8px; color: var(--ink-2);
+}
+.sem-pill {
+  flex: none; font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; border-radius: 999px; padding: 1px 8px 2px;
+  background: var(--row-wash); color: var(--series-1); white-space: nowrap;
+}
+.sem-pill.hero { background: var(--warn-wash); color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--warning); }
+.sem-label { overflow-wrap: anywhere; }
+.sem-tags { color: var(--ink-muted); overflow-wrap: anywhere; }
+.vision-notes { margin: 4px 0 8px; }
+.vision-notes p { font-size: 12px; color: var(--ink-muted); margin-top: 3px; }
 .wiz-nav { display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap; }
 .radio-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 6px 0 16px; }
 @media (max-width: 700px) { .radio-cards { grid-template-columns: 1fr; } }
@@ -771,9 +791,16 @@ svg text.axis {
           <button class="btn primary" id="cre-scan-btn" type="button">Scan my clips<span class="spin" aria-hidden="true"></span></button>
         </div>
         <p class="hint-small">Use Browse to pick the folder — or paste its path (macOS: right-click the folder, hold Option, “Copy as Pathname”; Windows: Shift + right-click, “Copy as path”).</p>
+        <label class="see-check">
+          <input type="checkbox" id="cre-see">
+          <span>Let Claude watch your clips</span>
+        </label>
+        <p class="help-small" style="max-width: 620px; margin: 0 0 14px;">Needs the anthropic package and your Anthropic API key (ANTHROPIC_API_KEY) on the machine running <code>monteur ui</code>. Claude looks at one frame per good moment (about a cent per scan) and labels what it shows.</p>
         <div id="cre-scan-panel"></div>
         <p class="scan-note" id="cre-scan-msg" role="status" hidden></p>
+        <p class="scan-note" id="cre-vision-msg" role="status" hidden></p>
         <div class="clip-grid" id="cre-clips"></div>
+        <div class="vision-notes" id="cre-vision-notes" hidden></div>
         <div class="legend" id="cre-legend" hidden>
           <span class="key"><span class="swatch" style="background:var(--series-1)"></span>Usable</span>
           <span class="key"><span class="swatch" style="background:var(--seg-dark)"></span>Too dark</span>
@@ -2518,7 +2545,9 @@ function makeJobPanel(hostId, texts) {
     var total = 0, done = 0, cached = 0;
     var lines = [];
     progress.forEach(function (p) {
-      if (p.total > total) total = p.total;
+      // vision entries count MOMENTS, not clips — keep them out of the
+      // "x / y clips" total so the bar keeps meaning clips.
+      if (p.stage !== "vision" && p.total > total) total = p.total;
       if (p.stage === "done" || p.stage === "cache") {
         done += 1;
         if (p.stage === "cache") cached += 1;
@@ -2528,11 +2557,19 @@ function makeJobPanel(hostId, texts) {
         lines.push(text);
       } else if (p.stage === "music") {
         lines.push("♪ " + String(p.name || "music") + " — reading the beat");
+      } else if (p.stage === "vision") {
+        var vtext = "Claude · watching moment";
+        if (typeof p.index === "number" && typeof p.total === "number" && p.total > 0) {
+          vtext += " " + p.index + "/" + p.total;
+        }
+        vtext += " — " + String(p.name || "clip");
+        lines.push(vtext);
       }
     });
     var last = progress.length ? progress[progress.length - 1] : null;
     if (last && last.stage === "start") status.textContent = "Watching " + String(last.name || "clip") + "…";
     else if (last && last.stage === "music") status.textContent = "Listening to the song…";
+    else if (last && last.stage === "vision") status.textContent = "Claude is watching your clips…";
     else if (cached > 0 && (total === 0 || done >= total)) status.textContent = "Using your previous scan — nothing to re-watch.";
     else status.textContent = texts.working;
     if (total > 0) {
@@ -2668,6 +2705,29 @@ $("cre-browse-music").addEventListener("click", function () { browsePath("music"
 
 /* ---- step 1: scan the footage folder ---- */
 
+/* "Let Claude watch your clips" — off by default, remembered per browser */
+function storedSee() {
+  try { return window.localStorage.getItem("monteur:see") === "1"; } catch (e) { return false; }
+}
+$("cre-see").checked = storedSee();
+$("cre-see").addEventListener("change", function () {
+  try { window.localStorage.setItem("monteur:see", this.checked ? "1" : "0"); } catch (e) { /* private mode */ }
+});
+function seeEnabled() { return $("cre-see").checked; }
+
+/* the scan's vision extras: notes under the clip cards + a calm inline
+   notice when Claude could not watch (the scan itself still worked) */
+function renderVisionExtras(result) {
+  var notesBox = $("cre-vision-notes");
+  clear(notesBox);
+  var notes = (result && result.vision_notes) || [];
+  notes.forEach(function (note) { notesBox.appendChild(el("p", null, String(note))); });
+  notesBox.hidden = notes.length === 0;
+  if (result && result.vision_error) {
+    creNote("cre-vision-msg", "Claude couldn't watch the clips: " + String(result.vision_error) + " The scan still worked.");
+  }
+}
+
 function scanFolder() {
   if (scanPanel.running()) return;
   var folder = $("cre-folder").value.trim();
@@ -2677,20 +2737,26 @@ function scanFolder() {
     return;
   }
   $("cre-scan-msg").hidden = true;
+  $("cre-vision-msg").hidden = true;
+  $("cre-vision-notes").hidden = true;
   cre.clips = null;
   cre.result = null; // footage changed — any previous build is stale
   $("cre-result").hidden = true;
   clear($("cre-clips"));
+  clear($("cre-vision-notes"));
   $("cre-legend").hidden = true;
   $("cre-next-1").hidden = true;
   updateSuggestion();
   setScanBusy(true);
-  api("/api/create/scan", { method: "POST", body: { folder: folder } }).then(function (data) {
+  var body = { folder: folder };
+  if (seeEnabled()) body.see = true;
+  api("/api/create/scan", { method: "POST", body: body }).then(function (data) {
     scanPanel.start(data.job, {
       onDone: function (result) {
         setScanBusy(false);
         cre.clips = (result && result.clips) || [];
         renderClips();
+        renderVisionExtras(result);
         updateSuggestion();
         toast("Scanned " + cre.clips.length + (cre.clips.length === 1 ? " clip." : " clips."), "success");
         if (cre.clips.length) $("cre-next-1").focus();
@@ -2777,6 +2843,23 @@ function renderClips() {
       p.appendChild(warnIcon());
       p.appendChild(document.createTextNode(note));
       card.appendChild(p);
+    });
+    // Claude-vision annotations: one line per labeled moment, below the
+    // quality strip and notes. Purely additive — clips scanned without
+    // vision carry none of these fields and render exactly as before.
+    (clip.moments || []).forEach(function (m) {
+      if (!m) return;
+      var role = String(m.role || "");
+      var label = String(m.label || "");
+      var tags = Array.isArray(m.tags) ? m.tags : [];
+      var hero = typeof m.hero === "number" && m.hero >= 0.7;
+      if (!role && !label && !tags.length && !hero) return;
+      var line = el("p", "clip-sem");
+      if (role) line.appendChild(el("span", "sem-pill", role.toUpperCase()));
+      if (hero) line.appendChild(el("span", "sem-pill hero", "hero shot"));
+      if (label) line.appendChild(el("span", "sem-label", label));
+      if (tags.length) line.appendChild(el("span", "sem-tags", tags.map(String).join(" · ")));
+      card.appendChild(line);
     });
     grid.appendChild(card);
   });
@@ -3034,6 +3117,7 @@ function creBuildBody() {
     format: cre.format,
     allow_repeats: $("cre-repeats").checked
   };
+  if (seeEnabled()) body.see = true;
   var music = $("cre-music").value.trim();
   if (cre.audio !== "original" && music) body.music = music;
   if (cre.lenMode === "target" && targetLen()) body.max_duration = targetLen();
@@ -3061,6 +3145,9 @@ function renderCreResult(data) {
   var notes = $("cre-notes");
   clear(notes);
   (plan.notes || []).forEach(function (note) { notes.appendChild(el("li", null, note)); });
+  if (data.vision_error) {
+    creNote("cre-build-msg", "Claude couldn't watch the clips: " + String(data.vision_error) + " The cut still built without labels.");
+  }
   $("cre-result").hidden = false;
 }
 

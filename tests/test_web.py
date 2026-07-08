@@ -1,8 +1,10 @@
 import json
 import os
 import socket
+import sys
 import threading
 import time
+import types
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -307,6 +309,177 @@ class TestJobsApi:
         job = _wait_for_job(server, data["job"])
         assert job["state"] == "error"
         assert "not a directory" in job["message"]
+
+
+def _fake_vision(fail_with=None):
+    """A stand-in for monteur.vision, injected via sys.modules.
+
+    The server resolves the vision module at CALL time with
+    ``importlib.import_module("monteur.vision")`` inside the job thread —
+    which honours ``sys.modules`` (unlike ``import a.b as c``, whose
+    parent-attribute shortcut would keep returning the real module). So
+    ``monkeypatch.setitem(sys.modules, "monteur.vision", fake)`` is a
+    complete test hook: it works in the same process as the server threads
+    and whether or not the real module exists on disk. No production code
+    path changes for tests.
+    """
+    module = types.ModuleType("monteur.vision")
+
+    class MonteurVisionError(RuntimeError):
+        pass
+
+    calls: list[int] = []
+
+    def analyze_reports(reports, *, model=None, max_moments=48,
+                        frame_height=360, progress=None, cache_path=None):
+        calls.append(len(reports))
+        if fail_with:
+            raise MonteurVisionError(fail_with)
+        total = len(reports)
+        for i, report in enumerate(reports, start=1):
+            name = Path(report.path).name
+            if progress is not None:
+                progress(i, total, name, "vision")
+            for j, moment in enumerate(report.moments):
+                moment.label = f"labeled moment {j} in {name}"
+                moment.tags = ["outdoor", "demo"]
+                moment.role = "opener" if j == 0 else ""
+                moment.hero = 0.9 if j == 0 else 0.1
+                moment.group = "demo"
+        return [f"fake vision annotated {total} clips"]
+
+    module.MonteurVisionError = MonteurVisionError
+    module.analyze_reports = analyze_reports
+    module.calls = calls
+    return module
+
+
+def _clear_scan_cache():
+    from monteur.web import server as web_server
+
+    with web_server._SCAN_CACHE_LOCK:
+        web_server._SCAN_CACHE.clear()
+
+
+class TestVisionApi:
+    DEMO = TestCreateApi.DEMO
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+        _clear_scan_cache()  # each test decides for itself whether a scan is cached
+
+    def _scan_see(self, server):
+        data = _post(f"{server}/api/create/scan", {"folder": self.DEMO, "see": True})
+        return _wait_for_job(server, data["job"])
+
+    def test_scan_with_see_annotates_clips(self, server, monkeypatch):
+        fake = _fake_vision()
+        monkeypatch.setitem(sys.modules, "monteur.vision", fake)
+        job = self._scan_see(server)
+        assert job["state"] == "done"
+
+        result = job["result"]
+        assert result["vision_notes"] == ["fake vision annotated 4 clips"]
+        assert "vision_error" not in result
+        clips = result["clips"]
+        assert len(clips) == 4
+        assert any(clip["moments"] for clip in clips)
+        for clip in clips:
+            name = Path(clip["path"]).name
+            for j, moment in enumerate(clip["moments"]):
+                assert moment["label"] == f"labeled moment {j} in {name}"
+                assert moment["tags"] == ["outdoor", "demo"]
+                assert moment["role"] == ("opener" if j == 0 else "")
+                assert moment["hero"] == (0.9 if j == 0 else 0.1)
+                assert moment["group"] == "demo"
+
+        vision_entries = [p for p in job["progress"] if p["stage"] == "vision"]
+        assert len(vision_entries) == 4
+        assert all(p["total"] == 4 for p in vision_entries)
+        assert sorted(p["index"] for p in vision_entries) == [1, 2, 3, 4]
+        assert {p["name"] for p in vision_entries} == {
+            "clip_A.mp4", "clip_B.mp4", "clip_C.mp4", "clip_D.mp4",
+        }
+
+    def test_scan_with_see_vision_error_still_succeeds(self, server, monkeypatch):
+        fake = _fake_vision(fail_with="anthropic package is not installed")
+        monkeypatch.setitem(sys.modules, "monteur.vision", fake)
+        job = self._scan_see(server)
+        assert job["state"] == "done"  # vision is an upgrade, not a gate
+
+        result = job["result"]
+        assert result["vision_error"] == "anthropic package is not installed"
+        assert "vision_notes" not in result
+        assert len(result["clips"]) == 4
+        for clip in result["clips"]:  # the clips came through un-annotated
+            for moment in clip["moments"]:
+                assert not moment.get("label")
+        assert not any(p["stage"] == "vision" for p in job["progress"])
+
+    def test_scan_without_see_never_calls_vision(self, server, monkeypatch):
+        fake = _fake_vision()
+        monkeypatch.setitem(sys.modules, "monteur.vision", fake)
+        data = _post(f"{server}/api/create/scan", {"folder": self.DEMO})
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert fake.calls == []
+        assert "vision_notes" not in job["result"]
+        assert "vision_error" not in job["result"]
+
+    def test_build_with_see_reuses_annotated_scan(self, server, monkeypatch):
+        fake = _fake_vision()
+        monkeypatch.setitem(sys.modules, "monteur.vision", fake)
+        scan_job = self._scan_see(server)
+        assert scan_job["state"] == "done"
+        assert fake.calls == [4]
+
+        data = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "see": True, "format": "edl"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        # Cache hit: the cached reports already carry the scan's annotations,
+        # so vision ran exactly ONCE — during the scan.
+        assert fake.calls == [4]
+        assert {"stage": "cache", "name": "using previous scan"} in job["progress"]
+        assert not any(p["stage"] == "vision" for p in job["progress"])
+        assert "vision_error" not in job["result"]
+        assert job["result"]["plan"]["cuts"] > 0
+
+    def test_build_with_see_fresh_sift_runs_vision(self, server, monkeypatch):
+        fake = _fake_vision()
+        monkeypatch.setitem(sys.modules, "monteur.vision", fake)
+        data = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "see": True, "format": "edl"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert fake.calls == [4]  # cache miss -> vision ran before planning
+        assert any(p["stage"] == "vision" for p in job["progress"])
+        assert job["result"]["vision_notes"] == ["fake vision annotated 4 clips"]
+        assert job["result"]["plan"]["cuts"] > 0
+
+    def test_build_with_see_vision_error_still_builds(self, server, monkeypatch):
+        fake = _fake_vision(fail_with="ANTHROPIC_API_KEY is not set")
+        monkeypatch.setitem(sys.modules, "monteur.vision", fake)
+        data = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "see": True, "format": "edl"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"  # the build proceeds without vision
+        result = job["result"]
+        assert result["vision_error"] == "ANTHROPIC_API_KEY is not set"
+        assert "vision_notes" not in result
+        assert result["plan"]["cuts"] > 0
+        assert result["content"].startswith("TITLE:")
 
 
 class TestPickApi:
