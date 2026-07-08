@@ -911,3 +911,218 @@ def test_transitions_smash_on_auto_uses_section_changes():
 def test_transitions_rejects_unknown_mode():
     with pytest.raises(ValueError, match="valid modes"):
         plan_montage(make_reports(), make_music(), transitions="wipes")
+
+
+# --- semantic casting (vision annotations) --------------------------------------
+
+
+def sem_moment(start: float, end: float, score: float, **vision) -> Moment:
+    """A Moment carrying vision annotations (label/tags/role/hero/group).
+
+    Set via setattr so the helper works with and without the vision fields
+    declared on the dataclass — montage reads them tolerantly either way.
+    """
+    m = Moment(start, end, score)
+    for key, value in vision.items():
+        setattr(m, key, value)
+    return m
+
+
+def entry_key(e) -> tuple:
+    return (
+        e.clip_path,
+        e.source_start,
+        e.source_end,
+        e.record_start,
+        e.record_end,
+        e.score,
+        e.transition,
+        e.label,
+    )
+
+
+def test_role_bonus_flips_pick_in_matching_phase():
+    # 20 equal-score moments; the third is a vision-tagged opener. Plain
+    # order would spend it on the slot at 4.0s; the role bonus pulls it one
+    # window position forward into the opening slot at 2.0s.
+    moments = [Moment(i * 4.0, i * 4.0 + 2.0, 0.8) for i in range(20)]
+    moments[2] = sem_moment(8.0, 10.0, 0.8, role="opener")
+    reports = [ClipReport(path="/footage/long.mp4", duration=120.0, moments=moments)]
+    plan = plan_montage(reports, make_arc_music(), style="travel", cut_lead=0.0)
+    by_start = {round(e.record_start, 6): e for e in plan.entries}
+    # slot 0 keeps the pool leader: the opener sits TWO order steps behind,
+    # and the mild bonus flips one step, never two
+    assert by_start[0.0].source_start == pytest.approx(0.0)
+    # at the 2.0s slot (opening phase) the opener is one step behind: it wins
+    assert by_start[2.0].source_start == pytest.approx(8.0)
+    assert any("semantic casting: 1 of 48 slots matched to roles" in n for n in plan.notes)
+
+
+def test_first_and_last_slot_prefer_opener_and_closer_in_auto():
+    # "auto" has no arc phases, but the montage's first/last slot still ask
+    # for an opener/closer. make_music() yields 14 slots; with neutral
+    # motion the fill would walk the pool in order — the roles flip it.
+    moments = [Moment(i * 4.0, i * 4.0 + 2.0, 0.8) for i in range(16)]
+    moments[1] = sem_moment(4.0, 6.0, 0.8, role="opener")
+    moments[14] = sem_moment(56.0, 58.0, 0.8, role="closer")
+    reports = [ClipReport(path="/footage/long.mp4", duration=120.0, moments=moments)]
+    plan = plan_montage(reports, make_music(), cut_lead=0.0)
+    assert len(plan.entries) == 14
+    assert plan.entries[0].source_start == pytest.approx(4.0)  # the opener opens
+    assert plan.entries[-1].source_start == pytest.approx(56.0)  # the closer closes
+    assert any("2 of 14 slots matched to roles" in n for n in plan.notes)
+
+
+def test_hero_shot_wins_the_drop_slot():
+    music = MusicAnalysis(
+        path="/music/track.wav",
+        duration=40.0,
+        tempo=200.0,
+        beats=[i * 0.3 for i in range(134)],
+        sections=[MusicSection(0.0, 40.0, 0.5, "mid")],
+        drops=[20.0],
+    )
+
+    def moments(with_hero: bool):
+        return [
+            Moment(0.0, 2.0, 0.9, highlight=0.9),  # loudest: wins the drop today
+            sem_moment(10.0, 12.0, 0.8, highlight=0.5, hero=0.9 if with_hero else 0.0),
+            Moment(30.0, 32.0, 0.4, highlight=0.2),
+        ]
+
+    # baseline: without the hero annotation the highest highlight takes the drop
+    report = ClipReport(path="/footage/a.mp4", duration=60.0, moments=moments(False))
+    plan = plan_montage([report], music, style="auto", allow_repeats=True, cut_lead=0.0)
+    drop_entry = next(e for e in plan.entries if e.record_start == pytest.approx(20.0))
+    assert drop_entry.source_start == pytest.approx(0.0)
+    # with hero=0.9 the hero shot outweighs the louder moment on the drop
+    report = ClipReport(path="/footage/a.mp4", duration=60.0, moments=moments(True))
+    plan = plan_montage([report], music, style="auto", allow_repeats=True, cut_lead=0.0)
+    drop_entry = next(e for e in plan.entries if e.record_start == pytest.approx(20.0))
+    assert drop_entry.source_start == pytest.approx(10.0)
+    assert any("semantic casting: hero shot on the drop" in n for n in plan.notes)
+
+
+def test_hero_bonus_beats_motion_continuity_in_climax():
+    # Mirrors test_highlight_preference_in_climax_phase: at the first climax
+    # slot the higher-scored moment leads the window, but the hero shot one
+    # step behind takes it — the hero bonus outweighs order and motion.
+    fillers = [Moment(i * 2.0, i * 2.0 + 2.0, 0.8) for i in range(12)]
+    quiet_good = Moment(40.0, 42.0, 0.9)
+    hero_shot = sem_moment(44.0, 46.0, 0.5, hero=0.9)
+    report = ClipReport(
+        path="/footage/a.mp4",
+        duration=60.0,
+        moments=fillers + [quiet_good, hero_shot],
+    )
+    plan = plan_montage(
+        [report], make_arc_music(), style="travel", order=CHRONOLOGICAL, cut_lead=0.0
+    )
+    climax_first = [e for e in plan.entries if e.record_start == pytest.approx(16.0)]
+    assert len(climax_first) == 1
+    assert climax_first[0].source_start == pytest.approx(44.0)
+
+
+def test_same_group_never_back_to_back_when_alternative_exists():
+    music = MusicAnalysis(
+        path="/music/track.wav",
+        duration=1.5,
+        tempo=120.0,
+        beats=[i * 0.5 for i in range(4)],
+        sections=[MusicSection(0.0, 1.5, 0.9, "high")],  # 3 slots of 0.5s
+    )
+    report = ClipReport(
+        path="/footage/a.mp4",
+        duration=60.0,
+        moments=[
+            sem_moment(0.0, 2.0, 0.9, group="lake"),
+            sem_moment(10.0, 12.0, 0.8, group="lake"),  # same scene, next in order
+            sem_moment(20.0, 22.0, 0.7, group="ridge"),
+        ],
+    )
+    plan = plan_montage([report], music, order=CHRONOLOGICAL, cut_lead=0.0)
+    # the ridge take jumps the queue so two lake takes don't sit together
+    assert [e.source_start for e in plan.entries] == pytest.approx([0.0, 20.0, 10.0])
+    assert any("semantic casting: 1 same-scene cut avoided" in n for n in plan.notes)
+
+
+def test_same_group_kept_when_no_alternative():
+    music = MusicAnalysis(
+        path="/music/track.wav",
+        duration=1.5,
+        tempo=120.0,
+        beats=[i * 0.5 for i in range(4)],
+        sections=[MusicSection(0.0, 1.5, 0.9, "high")],
+    )
+    report = ClipReport(
+        path="/footage/a.mp4",
+        duration=60.0,
+        moments=[
+            sem_moment(0.0, 2.0, 0.9, group="lake"),
+            sem_moment(10.0, 12.0, 0.8, group="lake"),
+            sem_moment(20.0, 22.0, 0.7, group="lake"),
+        ],
+    )
+    plan = plan_montage([report], music, order=CHRONOLOGICAL, cut_lead=0.0)
+    # all takes share the scene: the penalty hits every candidate equally,
+    # so the order is unchanged and nothing is claimed in the notes
+    assert [e.source_start for e in plan.entries] == pytest.approx([0.0, 10.0, 20.0])
+    assert not any("semantic casting" in n for n in plan.notes)
+
+
+def test_entry_labels_flow_to_metadata_and_dip_markers():
+    reports = make_reports()
+    for r in reports:
+        for i, m in enumerate(r.moments):
+            setattr(m, "label", f"{r.path}:{i}")
+    plan = plan_montage(
+        reports, make_music(), style="trailer", cut_lead=0.0, allow_repeats=True
+    )
+    assert plan.dips
+    assert all(e.label for e in plan.entries)
+    # labels alone are not "semantic data used": the fill must not claim casting
+    assert not any("semantic casting" in n for n in plan.notes)
+    timeline = montage_to_timeline(plan, fps=25.0)
+    for clip, entry in zip(timeline.video_clips(), plan.entries):
+        assert clip.metadata["label"] == entry.label
+    titles = [m for m in timeline.markers if m.name == "Title slot"]
+    assert len(titles) == len(plan.dips)
+    for marker, (dip_start, dip_len) in zip(titles, plan.dips):
+        incoming = next(
+            e for e in plan.entries
+            if abs(e.record_start - (dip_start + dip_len)) < 1e-6
+        )
+        assert marker.note == f"{dip_len:g}s of black — next: {incoming.label}"
+
+
+def test_unlabeled_dips_keep_generic_title_note():
+    plan = plan_montage(
+        make_reports(), make_music(), style="trailer", cut_lead=0.0,
+        allow_repeats=True,
+    )
+    timeline = montage_to_timeline(plan, fps=25.0)
+    titles = [m for m in timeline.markers if m.name == "Title slot"]
+    assert titles
+    assert all("drop a title here" in m.note for m in titles)
+    assert all("label" not in c.metadata for c in timeline.video_clips())
+
+
+def test_all_default_vision_fields_change_nothing():
+    # The compatibility bar: a plan from plain moments and a plan from
+    # moments carrying explicit all-default vision fields are identical.
+    for order in (CHRONOLOGICAL, BEST_FIRST):
+        plain = plan_montage(make_reports(), make_music(), order=order)
+        annotated_reports = make_reports()
+        for r in annotated_reports:
+            for m in r.moments:
+                for key, value in (
+                    ("label", ""), ("tags", []), ("role", ""),
+                    ("hero", 0.0), ("group", ""),
+                ):
+                    setattr(m, key, value)
+        annotated = plan_montage(annotated_reports, make_music(), order=order)
+        assert [entry_key(e) for e in plain.entries] == [
+            entry_key(e) for e in annotated.entries
+        ]
+        assert plain.notes == annotated.notes
+        assert not any("semantic casting" in n for n in plain.notes)

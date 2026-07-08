@@ -268,6 +268,77 @@ def cmd_sift(args: argparse.Namespace) -> None:
             print(f"  {note}")
 
 
+def _clock(seconds: float) -> str:
+    """Format a clip position as MM:SS (e.g. 75.4 -> "01:15")."""
+    total = int(seconds)
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def _vision_progress(index: int, total: int, name: str, stage: str) -> None:
+    """Per-clip feedback for a vision pass, in the same sequential-line
+    style as :func:`_sift_progress` (robust across terminals, scrollable).
+    """
+    wording = {
+        "frames": "grabbing frames ...",
+        "vision": "asking the vision model ...",
+        "cache": "from cache",
+    }
+    print(f"[{index}/{total}] {name} — {wording.get(stage, stage)}", flush=True)
+
+
+def _run_vision(reports, *, model=None, max_moments: int = 48) -> None:
+    """Annotate sifted reports with the vision pass; print its notes.
+
+    Imports :mod:`monteur.vision` lazily (it needs the anthropic package)
+    and fails cleanly when the vision pass can't run.
+    """
+    from monteur.vision import MonteurVisionError, analyze_reports
+
+    print("Looking at the footage ...", flush=True)
+    try:
+        notes = analyze_reports(
+            reports, model=model, max_moments=max_moments, progress=_vision_progress
+        )
+    except MonteurVisionError as exc:
+        _fail(str(exc))
+    for note in notes:
+        print(f"  {note}")
+
+
+def cmd_see(args: argparse.Namespace) -> None:
+    from monteur.media import MonteurMediaError
+    from monteur.sift import list_media, sift_directory
+
+    try:
+        count = len(list_media(args.folder))
+    except MonteurMediaError as exc:
+        _fail(str(exc))
+    if not count:
+        _fail(f"no video files found in {args.folder}")
+    print(
+        f"Scanning {count} clips in {args.folder} — this decodes each clip, "
+        f"so it can take a few seconds per clip.",
+        flush=True,
+    )
+    try:
+        reports = sift_directory(args.folder, progress=_sift_progress)
+    except MonteurMediaError as exc:
+        _fail(str(exc))
+    if not reports:
+        _fail(f"no video files found in {args.folder}")
+    _run_vision(reports, model=args.model, max_moments=args.max_moments)
+    for report in reports:
+        seen = [m for m in report.moments if m.label or m.role or m.tags or m.hero]
+        if not seen:
+            continue
+        print(f"\n{report.path}")
+        for m in seen:
+            line = f"  {_clock(m.start)}-{_clock(m.end)}  [{m.role or '-'}] {m.label}"
+            if m.tags:
+                line += f" ({', '.join(m.tags)})"
+            print(f"{line} hero={m.hero:.1f}")
+
+
 def cmd_create(args: argparse.Namespace) -> None:
     from monteur import io
     from monteur.media import MonteurMediaError
@@ -321,6 +392,10 @@ def cmd_create(args: argparse.Namespace) -> None:
                   f"{music.duration:.0f}s")
     except MonteurMediaError as exc:
         _fail(str(exc))
+    if args.see:
+        # Vision pass: annotate the moments (labels, roles, hero shots,
+        # scene groups); plan_montage picks the annotations up by itself.
+        _run_vision(reports, max_moments=args.max_moments)
     try:
         plan = plan_montage(
             reports, music, order=args.order, max_duration=args.max_duration,
@@ -581,11 +656,36 @@ def build_parser() -> argparse.ArgumentParser:
         help='natural-language brief, e.g. "90 Sekunden, energiegeladen" — '
              "sets style/order/max-duration; explicit flags win over the brief",
     )
+    p.add_argument(
+        "--see", action="store_true",
+        help="look at the footage with a vision model first: openers open, "
+             "hero shots land on the drop, same-scene takes stay apart "
+             "(needs the anthropic package and ANTHROPIC_API_KEY)",
+    )
+    p.add_argument(
+        "--max-moments", type=int, default=48,
+        help="how many of the strongest moments the vision pass looks at "
+             "(default 48; only with --see)",
+    )
     p.set_defaults(func=cmd_create)
 
     p = sub.add_parser("sift", help="scan footage: what's usable, what's not")
     p.add_argument("folder", help="directory with your video clips")
     p.set_defaults(func=cmd_sift)
+
+    p = sub.add_parser(
+        "see", help="look at footage with a vision model: what each moment shows"
+    )
+    p.add_argument("folder", help="directory with your video clips")
+    p.add_argument(
+        "--model", default=None,
+        help="vision model to ask (default: monteur's own choice)",
+    )
+    p.add_argument(
+        "--max-moments", type=int, default=48,
+        help="how many of the strongest moments to look at (default 48)",
+    )
+    p.set_defaults(func=cmd_see)
 
     p = sub.add_parser("transcribe", help="transcribe media files (whisper)")
     p.add_argument("path", help="media file or directory")

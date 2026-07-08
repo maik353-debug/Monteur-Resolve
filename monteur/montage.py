@@ -75,6 +75,29 @@ exit motion and the candidate's entry motion (neutral 0 unless both
 vectors exceed 0.5 px). With neutral motion the earliest candidate always
 wins, so behavior without motion data is unchanged.
 
+Semantic casting
+----------------
+:mod:`monteur.vision` can annotate moments with what is IN the picture: a
+one-line ``label``, a story ``role`` (opener/build/climax/closer), a
+``hero`` strength (0..1, the poster shot) and a scene-similarity ``group``.
+When at least one pool moment carries a role, hero or group, the slot
+filling reads them — always as mild bonuses on the candidate blend above,
+never as hard filters; moments without annotations behave exactly as
+before. A slot in an arc phase prefers the matching role (opening ->
+opener, build -> build, climax -> climax, outro -> closer), and the
+montage's FIRST slot prefers an opener and its LAST slot a closer in every
+style; a fitting role adds :data:`_ROLE_WEIGHT` (0.2) — enough to flip one
+order position, never two. Drop-slot reservation adds :data:`_HERO_WEIGHT`
+(0.5) x ``hero`` to the (highlight, score) key and climax-phase candidates
+get the same hero bonus, so the real hero shot wins the drop even against
+slightly better motion continuity. A candidate whose group matches an
+already-filled neighbouring slot loses :data:`_GROUP_PENALTY` (0.25), so
+two takes of the same scene never sit back to back while an alternative
+exists. Labels ride along: ``MontageEntry.label`` feeds the video clip's
+``"label"`` metadata and the title-slot markers ("0.4s of black — next:
+<label>"), and a plan note reports what the casting actually did (e.g.
+"semantic casting: 9 of 14 slots matched to roles, hero shot on the drop").
+
 Finishing
 ---------
 A montage shorter than the song ends on a musical boundary:
@@ -193,6 +216,31 @@ _ORDER_WEIGHT = 0.7
 _MOTION_WEIGHT = 0.3
 # Below this magnitude (px) a motion vector counts as "no motion" (neutral).
 _MOTION_MIN_MAGNITUDE = 0.5
+# Semantic casting (vision annotations on moments; see the module docstring).
+# The bonuses are sized against the candidate blend above: one order-
+# preference step is _ORDER_WEIGHT / _CANDIDATE_WINDOW = 0.175 and the
+# motion term peaks at ±_MOTION_WEIGHT = 0.3.
+# A candidate whose role fits the slot (its arc phase, or the montage's
+# first/last slot) gains this much: flips ONE order position, never two —
+# a mild preference, not a filter.
+_ROLE_WEIGHT = 0.2
+# Hero bonus: this x moment.hero on drop-reserved and climax-phase slots.
+# A full hero (1.0) outweighs the motion term plus one order step, so the
+# real hero shot wins the drop even against better motion continuity.
+_HERO_WEIGHT = 0.5
+# A candidate whose scene group matches a neighbouring filled slot loses
+# this much — two takes of the same scene back to back read like a jump
+# cut; an alternative one order step behind wins instead.
+_GROUP_PENALTY = 0.25
+# A drop-slot moment at/above this hero level is called out in the notes.
+_HERO_NOTE_LEVEL = 0.5
+# Which vision role each arc phase asks for.
+_ROLE_FOR_PHASE = {
+    "opening": "opener",
+    "build": "build",
+    "climax": "climax",
+    "outro": "closer",
+}
 # Musical ending: max relative change when snapping the length to a phrase.
 _END_SNAP_TOLERANCE = 0.12
 # Dissolve INTO a gentle-phase entry: min(this, half the slot length).
@@ -313,6 +361,7 @@ class MontageEntry:
     transition: float = 0.0  # seconds of dissolve INTO this entry (0 = cut)
     media_start: float = 0.0  # seconds: the file's embedded start timecode (0 if none)
     clip_duration: float = 0.0  # seconds: the source file's real duration (0 if unknown)
+    label: str = ""  # one-line vision label of the chosen moment ("" if unseen)
 
 
 # --- grid -------------------------------------------------------------------
@@ -769,6 +818,26 @@ class _PoolItem:
     def remaining(self) -> float:
         return self.moment.end - (self.moment.start + self.consumed)
 
+    # Vision annotations (see monteur.vision). getattr keeps Moment objects
+    # from before the vision fields existed working: the defaults mean "not
+    # seen", which disables all semantic casting for that moment.
+
+    @property
+    def role(self) -> str:
+        return getattr(self.moment, "role", "")
+
+    @property
+    def hero(self) -> float:
+        return getattr(self.moment, "hero", 0.0)
+
+    @property
+    def group(self) -> str:
+        return getattr(self.moment, "group", "")
+
+    @property
+    def label(self) -> str:
+        return getattr(self.moment, "label", "")
+
 
 def _pick_reuse(
     pool: list[_PoolItem], start: int, held: set[int] | frozenset[int] = frozenset()
@@ -818,6 +887,30 @@ def _phase_label_at(phases: list[tuple[float, float, str]], t: float) -> str | N
     return None
 
 
+def _wanted_roles(
+    slot_idx: int,
+    n_slots: int,
+    phases: list[tuple[float, float, str]] | None,
+    rec_start: float,
+) -> set[str]:
+    """Vision roles a slot asks for.
+
+    The slot's arc phase maps through :data:`_ROLE_FOR_PHASE`; on top of
+    that the montage's FIRST slot always asks for an "opener" and its LAST
+    slot for a "closer", in every style (also the arc-less "auto").
+    """
+    wanted: set[str] = set()
+    if slot_idx == 0:
+        wanted.add("opener")
+    if slot_idx == n_slots - 1:
+        wanted.add("closer")
+    if phases:
+        role = _ROLE_FOR_PHASE.get(_phase_label_at(phases, rec_start) or "")
+        if role:
+            wanted.add(role)
+    return wanted
+
+
 def _fill(
     slots: list[tuple[float, float]],
     slot_order: list[int],
@@ -825,6 +918,7 @@ def _fill(
     phases: list[tuple[float, float, str]] | None = None,
     highlight_phase: str | None = None,
     drop_slots: set[int] | frozenset[int] = frozenset(),
+    semantic: bool = False,
 ) -> tuple[list[MontageEntry], list[str]]:
     """Assign pool moments to slots.
 
@@ -846,6 +940,15 @@ def _fill(
 
     Reuse (pool exhausted) is unchanged — cyclic scan for unconsumed tails,
     then rewind — except a drop slot still grabs the best remaining material.
+
+    ``semantic=True`` (any pool moment carries vision annotations) layers
+    the semantic-casting bonuses onto the candidate blend: a fitting role
+    adds ``_ROLE_WEIGHT``, climax-phase candidates add ``_HERO_WEIGHT`` x
+    hero (drop reservation weighs hero the same way), and a candidate whose
+    scene group matches an already-filled neighbouring slot loses
+    ``_GROUP_PENALTY`` (see the module docstring). A note reports what the
+    casting actually changed. With all-default annotations every bonus is
+    zero, so behavior is exactly the unannotated one.
     """
     entries: list[MontageEntry] = []
     notes: list[str] = []
@@ -859,7 +962,9 @@ def _fill(
         pos = max(
             range(len(unused)),
             key=lambda p: (
-                pool[unused[p]].moment.highlight,
+                # Hero shots belong on the drop: hero weighs in next to the
+                # audio highlight (identical to before when hero is 0).
+                pool[unused[p]].moment.highlight + _HERO_WEIGHT * pool[unused[p]].hero,
                 pool[unused[p]].moment.score,
                 -unused[p],  # ties: earliest in pool order
             ),
@@ -868,6 +973,7 @@ def _fill(
     held = set(reserved.values())  # kept out of reuse until their drop is served
 
     by_slot: dict[int, _PoolItem] = {}
+    same_scene_avoided = 0
     for visit, slot_idx in enumerate(slot_order):
         rec_start, rec_end = slots[slot_idx]
         slot_len = rec_end - rec_start
@@ -888,12 +994,46 @@ def _fill(
                 )
             prev = by_slot.get(slot_idx - 1)
             prev_exit = prev.moment.exit_motion if prev is not None else None
+            # Semantic casting: mild per-candidate adjustments (see the
+            # module docstring). Bonuses (role fit, climax hero) and the
+            # scene-variety penalty are kept apart so we can honestly note
+            # when the penalty actually diverted a pick.
+            sem_bonus: dict[int, float] = {}
+            sem_penalty: dict[int, float] = {}
+            if semantic:
+                wanted = _wanted_roles(slot_idx, len(slots), phases, rec_start)
+                in_climax = bool(phases) and _phase_label_at(phases, rec_start) == "climax"
+                neighbour_groups = {
+                    by_slot[j].group
+                    for j in (slot_idx - 1, slot_idx + 1)
+                    if j in by_slot and by_slot[j].group
+                }
+                for idx in window:
+                    bonus = 0.0
+                    if pool[idx].role and pool[idx].role in wanted:
+                        bonus += _ROLE_WEIGHT
+                    if in_climax:
+                        bonus += _HERO_WEIGHT * pool[idx].hero
+                    sem_bonus[idx] = bonus
+                    if pool[idx].group and pool[idx].group in neighbour_groups:
+                        sem_penalty[idx] = _GROUP_PENALTY
+
+            def _blend(pos: int, idx: int) -> float:
+                return (
+                    _ORDER_WEIGHT * (1.0 - pos / _CANDIDATE_WINDOW)
+                    + _MOTION_WEIGHT
+                    * _motion_continuity(prev_exit, pool[idx].moment.entry_motion)
+                    + sem_bonus.get(idx, 0.0)
+                )
+
             best = max(
                 enumerate(window),
-                key=lambda pi: _ORDER_WEIGHT * (1.0 - pi[0] / _CANDIDATE_WINDOW)
-                + _MOTION_WEIGHT
-                * _motion_continuity(prev_exit, pool[pi[1]].moment.entry_motion),
+                key=lambda pi: _blend(*pi) - sem_penalty.get(pi[1], 0.0),
             )[1]
+            if sem_penalty:
+                unguarded = max(enumerate(window), key=lambda pi: _blend(*pi))[1]
+                if unguarded != best:
+                    same_scene_avoided += 1
             unused.remove(best)
             item = pool[best]
         else:
@@ -904,7 +1044,11 @@ def _fill(
                 ]
                 if leftovers:
                     item = max(
-                        leftovers, key=lambda it: (it.moment.highlight, it.moment.score)
+                        leftovers,
+                        key=lambda it: (
+                            it.moment.highlight + _HERO_WEIGHT * it.hero,
+                            it.moment.score,
+                        ),
                     )
             if item is None:
                 item = _pick_reuse(pool, visit % n, held)
@@ -941,6 +1085,7 @@ def _fill(
                 score=moment.score,
                 media_start=item.media_start,
                 clip_duration=item.clip_duration,
+                label=item.label,
             )
         )
     if len(slot_order) > n:
@@ -948,6 +1093,32 @@ def _fill(
         if rewound:
             msg += " (some footage repeats)"
         notes.append(msg)
+    if semantic:
+        pieces: list[str] = []
+        if any(it.role for it in pool):
+            matched = sum(
+                1
+                for idx, it in by_slot.items()
+                if it.role and it.role in _wanted_roles(idx, len(slots), phases, slots[idx][0])
+            )
+            pieces.append(f"{matched} of {len(slots)} slots matched to roles")
+        heroes = sum(
+            1
+            for idx in drop_slots
+            if idx in by_slot and by_slot[idx].hero >= _HERO_NOTE_LEVEL
+        )
+        if heroes:
+            pieces.append(
+                "hero shot on the drop" if heroes == 1 else f"hero shots on {heroes} drops"
+            )
+        if same_scene_avoided:
+            pieces.append(
+                f"{same_scene_avoided} same-scene cut"
+                + ("s" if same_scene_avoided != 1 else "")
+                + " avoided"
+            )
+        if pieces:
+            notes.append("semantic casting: " + ", ".join(pieces))
     return entries, notes
 
 
@@ -972,6 +1143,11 @@ def plan_montage(
     section-energy beat grid; a named style cuts on its story arc instead
     (see the module docstring for the grid, drop, highlight and motion
     rules). Unknown styles raise ValueError listing the valid ones.
+
+    Moments annotated by :mod:`monteur.vision` (role / hero / group / label)
+    steer the fill — roles gravitate to their arc phases, hero shots to the
+    drop, same-scene takes apart (the module docstring's Semantic casting
+    section has the weights). Unannotated moments plan exactly as before.
 
     ``music=None`` plans a cut with no song at all (ride-POV videos whose
     own sound is the point): ``max_duration`` is then required, the grid
@@ -1152,7 +1328,12 @@ def plan_montage(
     else:
         raise ValueError(f"unknown order: {order!r}")
 
-    entries, fill_notes = _fill(slots, slot_order, pool, phases, highlight_phase, drop_slots)
+    # Semantic casting kicks in only when the vision pass annotated at least
+    # one pool moment (labels alone still ride along, but change nothing).
+    semantic = any(it.role or it.hero > _EPS or it.group for it in pool)
+    entries, fill_notes = _fill(
+        slots, slot_order, pool, phases, highlight_phase, drop_slots, semantic=semantic
+    )
     entries.sort(key=lambda e: e.record_start)
     plan.entries = entries
     plan.notes.extend(fill_notes)
@@ -1290,7 +1471,10 @@ def montage_to_timeline(
     its own aspect ratio — reframe in Resolve after import.
 
     A plan with ``dips`` (smash-to-black title slots) leaves black gaps on
-    V1 and drops a "Title slot" marker on each gap.
+    V1 and drops a "Title slot" marker on each gap. Entries with a vision
+    ``label`` carry it as clip metadata (``"label"``); when the entry right
+    after a dip has one, the marker's note names it ("0.4s of black —
+    next: <label>") instead of the generic title reminder.
 
     Entries with a dissolve (``transition`` > 0) carry it in the video
     clip's metadata (``"transition"`` = ``"dissolve"``,
@@ -1342,6 +1526,10 @@ def montage_to_timeline(
         # (source_in/source_out stay file-relative here).
         clip.metadata["media_start_seconds"] = entry.media_start
         clip.metadata["media_duration_seconds"] = entry.clip_duration
+        if entry.label:
+            # The vision label travels with the clip so exports and the web
+            # UI can say WHAT each cut shows, not just where it came from.
+            clip.metadata["label"] = entry.label
         transition_frames = round(entry.transition * fps)
         if transition_frames > 0:
             clip.metadata["transition"] = "dissolve"
@@ -1406,11 +1594,25 @@ def montage_to_timeline(
         )
         timeline.markers.append(Marker(frame=0, name=f"Cut to {music_stem}"))
     for dip_start, dip_len in plan.dips:
+        # When the vision pass labeled the shot that hits out of the black,
+        # the title-slot marker says what comes next — a real title cue.
+        incoming = next(
+            (
+                e
+                for e in plan.entries
+                if abs(e.record_start - (dip_start + dip_len)) <= 1e-3
+            ),
+            None,
+        )
+        if incoming is not None and incoming.label:
+            note = f"{dip_len:g}s of black — next: {incoming.label}"
+        else:
+            note = f"{dip_len:g}s of black — drop a title here"
         timeline.markers.append(
             Marker(
                 frame=seconds_to_frames(dip_start, fps),
                 name="Title slot",
-                note=f"{dip_len:g}s of black — drop a title here",
+                note=note,
                 color="Blue",
             )
         )
