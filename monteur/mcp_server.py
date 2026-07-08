@@ -709,6 +709,52 @@ def see_footage(folder: str, max_moments: int = 48) -> dict:
     return {"clips": clips, "notes": notes}
 
 
+@mcp_instance.tool()
+def find_shots(folder: str, query: str, limit: int = 20) -> dict:
+    """Search the footage by what Claude saw — zero cost, instant.
+
+    Searches the CACHED vision annotations in ``folder`` (absolute path):
+    no API call, no re-analysis — it only reads the ``.monteur-vision.json``
+    sidecar that ``see_footage`` wrote. Typical flow: run ``see_footage``
+    once per shoot, then ``find_shots`` as many times as you like ("zeig mir
+    alle Kurven-Shots", "waterfall", "tunnel"). Matching is offline keyword
+    matching against each moment's label/tags/group/role, with prefix
+    matching so German plurals work ("kurve" finds "kurven"); relevance is
+    0..1 and hero shots rank first among equals. The special query "hero"
+    (or "held") returns the strongest hero shots. Returned ``start``/``end``
+    timestamps are file-relative seconds, ready for Resolve markers or a
+    papercut. Stale entries (clip renamed, re-exported or deleted since
+    analysis) are skipped. Returns ``{"error": ...}`` when the folder has
+    not been analyzed yet — run ``see_footage`` first.
+    """
+    from monteur.find import search_footage
+
+    try:
+        shots = search_footage(folder, query, limit=limit)
+    except FileNotFoundError:
+        return {
+            "error": f"no vision annotations for {folder} yet — run "
+            "see_footage on it once, then find_shots is free and instant."
+        }
+    except ValueError as exc:
+        return {"error": str(exc)}
+    return {
+        "shots": [
+            {
+                "clip": s.clip_path,
+                "start": _round(s.start),
+                "end": _round(s.end),
+                "label": s.label,
+                "tags": s.tags,
+                "role": s.role,
+                "hero": _round(s.hero),
+                "relevance": _round(s.relevance),
+            }
+            for s in shots
+        ]
+    }
+
+
 # --- Assembly -------------------------------------------------------------------
 
 

@@ -31,6 +31,7 @@ EXPECTED_TOOLS = {
     "create_montage",
     "pick_music",
     "see_footage",
+    "find_shots",
     "build_assembly",
     "save_version",
     "list_versions",
@@ -224,6 +225,64 @@ def test_create_montage_no_music_needs_original_audio(tmp_path):
 def test_see_footage_missing_dir_is_graceful(tmp_path):
     result = mcp_server.see_footage(str(tmp_path / "nope"))
     assert "error" in result
+
+
+def _write_vision_cache(folder: Path) -> Path:
+    """A minimal .monteur-vision.json in vision.py's exact format."""
+    import json
+    import os
+
+    clip = folder / "ride.mp4"
+    clip.write_bytes(b"not really a video")
+    key = f"{os.path.abspath(clip)}|{os.path.getmtime(clip)}|3.00-7.50|claude-test"
+    cache = {
+        key: {
+            "label": "overtake in a left-hand curve",
+            "tags": ["kurven", "berge"],
+            "role": "climax",
+            "hero": 0.8,
+            "group": "mountain pass",
+        }
+    }
+    (folder / ".monteur-vision.json").write_text(
+        json.dumps(cache), encoding="utf-8"
+    )
+    return clip
+
+
+def test_find_shots_happy_path_from_cache(tmp_path):
+    clip = _write_vision_cache(tmp_path)
+    result = mcp_server.find_shots(str(tmp_path), "kurve")
+    assert "error" not in result
+    assert len(result["shots"]) == 1
+    shot = result["shots"][0]
+    assert shot["clip"] == str(clip)
+    assert shot["start"] == 3.0
+    assert shot["end"] == 7.5
+    assert shot["label"] == "overtake in a left-hand curve"
+    assert shot["tags"] == ["kurven", "berge"]
+    assert shot["role"] == "climax"
+    assert shot["hero"] == 0.8
+    assert shot["relevance"] == 1.0  # full token match + hero bonus, capped
+
+
+def test_find_shots_no_match_returns_empty_list(tmp_path):
+    _write_vision_cache(tmp_path)
+    result = mcp_server.find_shots(str(tmp_path), "unterwasser")
+    assert result == {"shots": []}
+
+
+def test_find_shots_missing_cache_points_to_see_footage(tmp_path):
+    result = mcp_server.find_shots(str(tmp_path), "kurve")
+    assert "error" in result
+    assert "see_footage" in result["error"]
+
+
+def test_find_shots_empty_query_is_graceful(tmp_path):
+    _write_vision_cache(tmp_path)
+    result = mcp_server.find_shots(str(tmp_path), "")
+    assert "error" in result
+    assert "something to look for" in result["error"]
 
 
 def test_see_footage_with_fake_vision(tmp_path, monkeypatch):
