@@ -53,10 +53,20 @@ Craft templates:
       role (opener/build/climax/closer) and a scene-similarity group;
       cached next to the footage; feeds semantic casting in the montage
       (hero on the drop, opener up front, no same-scene adjacency)
-- [ ] Claude-vision footage search: "find shots of the bride laughing",
-      "every shot of the red car" — local index, feeds MCP
-- [ ] Trailer mode: distill a finished long cut into 30/60s (scene
-      detection + pacing analysis + AI shot selection)
+- [x] Footage search (`monteur find`, MCP `find_shots`): full-text over
+      the cached vision annotations — instant, offline, free; German
+      plural tolerance, hero ranking, stale-entry skipping
+- [x] Trailer distillation (`monteur distill`): a finished long cut
+      becomes the 30/60s trailer — the cut's own shots are the material,
+      screen time is the editor's prior
+- [x] Revision loop (`monteur create --save-plan` + `monteur revise`):
+      iterate in plain German/English ("zweite Hälfte ruhiger"), pinned
+      shots survive verbatim, untouched regions stay bit-identical,
+      cuts stay on the beat grid
+- [ ] Marry Whisper to the montage: speech-aware cutting for travel
+      films with voice — don't cut mid-sentence, duck-the-music cues in
+      mix mode, spoken moments as protected slots; transcript words as
+      a search signal in `monteur find`; a transcribe button in Studio
 - [ ] Learn from the editor: diff the editor's corrections against
       Monteur's plan and adapt scoring preferences per project
 - [ ] Watch mode: new footage auto-sifted overnight, report ready in the
