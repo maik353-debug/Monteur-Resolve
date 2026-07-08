@@ -245,6 +245,30 @@ def _sift_progress(index: int, total: int, name: str, stage: str, report) -> Non
         )
 
 
+def cmd_movie_new(args: argparse.Namespace) -> None:
+    from monteur.ai import MonteurAIError
+    from monteur.movie import generate_movie, save_project
+
+    print("Drafting your blueprint — Claude is writing the screenplay ...", flush=True)
+    try:
+        project = generate_movie(args.brief, genre=args.genre)
+    except MonteurAIError as exc:
+        _fail(str(exc))
+    paths = save_project(project, args.project_dir)
+    print(f"\n{project.title!r} — {len(project.scenes)} scenes")
+    if project.logline:
+        print(f"  {project.logline}")
+    for note in project.notes:
+        print(f"  {note}")
+    print("\nWritten:")
+    for path in paths:
+        print(f"  {path}")
+    print(
+        "\nNext: print shotlist.md, shoot the scenes (2-3 takes, name files "
+        "S03_T02), then come back for the assembly."
+    )
+
+
 def cmd_find(args: argparse.Namespace) -> None:
     from monteur.find import search_footage
 
@@ -949,6 +973,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="save the revised plan as JSON for the next iteration",
     )
     p.set_defaults(func=cmd_revise)
+
+    p = sub.add_parser(
+        "movie",
+        help="movie creator: from an idea to a production blueprint "
+             "(screenplay, scene list, shooting tips)",
+    )
+    movie_sub = p.add_subparsers(dest="movie_action", required=True)
+    p_new = movie_sub.add_parser(
+        "new", help="draft a blueprint from your idea (needs ANTHROPIC_API_KEY)"
+    )
+    p_new.add_argument("project_dir", help="project folder to create/fill")
+    p_new.add_argument(
+        "--brief", required=True,
+        help='idea + constraints, e.g. "5 Minuten Thriller, 2 Personen, '
+             'Wald und Auto, nachts, kein Budget"',
+    )
+    p_new.add_argument("--genre", default="", help="genre (optional)")
+    p_new.set_defaults(func=cmd_movie_new)
 
     p = sub.add_parser(
         "find",

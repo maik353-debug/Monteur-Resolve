@@ -199,6 +199,22 @@ monteur create footage/ track.mp3 --see --style trailer -o cut.fcpxml
 Results are cached next to your footage (`.monteur-vision.json`), so a
 re-run only pays for new material — a scan costs on the order of a cent.
 
+**Movie creator.** Monteur can stand beside you BEFORE the shoot: give
+it your idea and your real-world constraints, and it drafts the whole
+pre-production package —
+
+```bash
+monteur movie new projekt/ --genre thriller \
+    --brief "5 Minuten, 2 Personen, Wald und Auto, nachts, kein Budget"
+# projekt/script.fountain  — the screenplay (assembly-ready)
+# projekt/shotlist.md      — scene-by-scene shooting tips, sound notes,
+#                            take checklists, file-naming plan
+# projekt/movie.json       — the machine-readable project
+```
+
+Shoot the scenes (files named `S03_T02` route themselves), then
+`monteur assembly projekt/script.fountain takes/` builds the first cut.
+
 **Publish kit.** The upload needs more than a timeline — `--kit` writes
 it in one go, straight from the cut:
 

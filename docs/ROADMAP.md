@@ -67,6 +67,16 @@ Craft templates:
       films with voice — don't cut mid-sentence, duck-the-music cues in
       mix mode, spoken moments as protected slots; transcript words as
       a search signal in `monteur find`; a transcribe button in Studio
+- [x] Movie creator stage 1 (`monteur movie new`): idea + constraints ->
+      Claude drafts the blueprint — Fountain screenplay (assembly-ready),
+      scene list with concrete shooting tips, sound notes, cut intents,
+      printable shotlist with take checklists
+- [ ] Movie creator stage 2: Studio movie view — scene slots, assign
+      footage per scene, shoot progress, vision checks the match
+      ("scene 5 should be exterior dusk; this clip looks interior")
+- [ ] Movie creator stage 3: assemble the film along the screenplay
+      (assembly for dialogue scenes, slot assignment for silent ones)
+      with pacing from the cut intents, then the usual finishing
 - [ ] Learn from the editor: diff the editor's corrections against
       Monteur's plan and adapt scoring preferences per project
 - [ ] Watch mode: new footage auto-sifted overnight, report ready in the
