@@ -26,6 +26,8 @@ API (all JSON):
 * ``POST /api/movie/assign``  {"project_dir", "scene",
   "folder"}                                                     -> {"project", "progress"}
 * ``POST /api/movie/check``   {"project_dir", "scene", "see"?}  -> {"job": id}
+* ``POST /api/movie/assemble`` {"project_dir", "fps"?,
+  "canvas"?, "format"?}                                         -> {"job": id}
 * ``GET  /api/jobs/<id>``                                       -> the job dict
 * ``POST /api/jobs/<id>/cancel``                                -> {"ok": true}
 * ``POST /api/pick``          {"kind": "folder"|"music"|"file"} -> {"path"} | {"error"}
@@ -62,12 +64,19 @@ same scan cache as build/pick/kit) as a ``"scene-check"`` job, optionally
 lets Claude vision label it (``"see"``, soft-fail as above), and holds the
 footage against the scene text with
 :func:`monteur.movie.check_scene_footage` — honest hints, not verdicts.
+``assemble`` cuts the whole film along the screenplay as a
+``"movie-assemble"`` job (:func:`monteur.movie.assemble_movie`): scenes
+without footage are skipped (noted, never fatal — only a project with NO
+assigned scene fails the job), the per-scene sifts run through the same
+scan cache, and the finished timeline comes back serialized as FCPXML or
+EDL exactly like a build result.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import sys
 import threading
@@ -230,7 +239,7 @@ _PICK_LOCK = threading.Lock()
 def _new_job(kind: str) -> dict:
     job = {
         "id": secrets.token_hex(4),
-        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "movie" | "scene-check"
+        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "movie" | "scene-check" | "movie-assemble"
         "state": "running",  # -> "done" | "error" | "cancelled"
         "progress": [],  # dicts: {"index","total","name","stage"[,"usable_ratio"]}
         "message": "",  # human-readable reason when state == "error"
@@ -761,6 +770,107 @@ def _run_scene_check_job(job: dict, payload: dict) -> None:
         job["state"] = "error"
 
 
+def _title_slug(title: str) -> str:
+    """A filesystem-friendly filename stem from a project title."""
+    slug = re.sub(r"[^a-z0-9]+", "-", str(title or "").lower()).strip("-")
+    return slug or "movie"
+
+
+def _run_movie_assemble_job(job: dict, payload: dict) -> None:
+    """Daemon-thread body for POST /api/movie/assemble (cut the film).
+
+    :func:`monteur.movie.assemble_movie` walks the screenplay and sifts each
+    scene's assigned folder itself, driven by a ``sift_cache`` dict
+    ``{folder: [ClipReport]}``. The server pre-populates that dict from the
+    module scan cache for every assigned folder whose cached sift is still
+    fresh (same mtime check as build/pick/kit), so a Check followed by an
+    Assemble never re-sifts the shared folder — each hit is announced with
+    the usual ``{"stage": "cache"}`` progress entry. Folders the engine had
+    to sift fresh are fed back through :func:`_remember_scan` afterwards
+    (the module cache keeps its "last successful sift" semantics), so a
+    Check straight after an Assemble is free too.
+
+    Engine progress arrives through one callback: ``"scene"`` entries (one
+    per scene, name = the scene heading, index/total over all scenes) plus
+    the usual per-clip sift stages. A ValueError from the engine (e.g. no
+    scene has footage assigned) is user-ready and fails the job with its
+    message.
+    """
+    from monteur.media import MonteurMediaError
+    from monteur.sift import SiftCancelled
+    from monteur.io import write_edl, write_fcpxml
+
+    movie = _movie_module()
+    try:
+        project = movie.load_project(payload.get("project_dir", ""))
+
+        sift_cache: dict = {}
+        for scene in project.scenes:
+            if not scene.folder or scene.folder in sift_cache:
+                continue
+            reports = _cached_reports(scene.folder)
+            if reports is not None:
+                sift_cache[scene.folder] = reports
+                with _JOBS_LOCK:
+                    job["progress"].append(
+                        {"stage": "cache", "name": "using previous scan"}
+                    )
+        prefilled = set(sift_cache)
+
+        def progress(index, total, name, stage, report=None):
+            entry = {"index": index, "total": total, "name": name, "stage": stage}
+            if stage == "done" and report is not None:
+                entry["usable_ratio"] = report.usable_ratio
+            with _JOBS_LOCK:
+                job["progress"].append(entry)
+
+        timeline, notes = movie.assemble_movie(
+            project,
+            fps=float(payload.get("fps") or 25),
+            canvas=payload.get("canvas") or "uhd",
+            progress=progress,
+            sift_cache=sift_cache,
+        )
+        # The engine has no cancel seam; honour a cancel that arrived while
+        # it ran by discarding the result (nothing was written anywhere).
+        if job["cancel"].is_set():
+            raise SiftCancelled("cancelled")
+        # Freshly sifted folders feed the module cache back — like a scan,
+        # the cache ends up holding the last folder sifted in this job.
+        for folder, reports in sift_cache.items():
+            if folder not in prefilled and reports:
+                _remember_scan(folder, reports)
+
+        fmt = (payload.get("format") or "fcpxml").lower()
+        if fmt == "edl":
+            content, ext = write_edl(timeline), "edl"
+        else:
+            content, ext = write_fcpxml(timeline), "fcpxml"
+        # The engine drops one "Scene N: ..." marker per scene that actually
+        # made it into the film (skipped scenes get a note, not a marker).
+        scenes_used = sum(
+            1
+            for marker in timeline.markers
+            if str(getattr(marker, "name", "")).startswith("Scene ")
+        )
+        job["result"] = {
+            "filename": f"{_title_slug(project.title)}.{ext}",
+            "content": content,
+            "notes": list(notes),
+            "duration_seconds": timeline.duration_seconds,
+            "scenes_used": scenes_used,
+        }
+        job["state"] = "done"
+    except SiftCancelled:
+        job["state"] = "cancelled"
+    except (MonteurMediaError, ValueError, FileNotFoundError, OSError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
 _AUDIO_FILETYPES = [
     ("Audio files", "*.wav *.mp3 *.m4a *.aac *.flac *.ogg *.aiff *.aif *.wma"),
     ("All files", "*.*"),
@@ -887,6 +997,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/movie/new"): self._movie_new,
             ("POST", "/api/movie/assign"): self._movie_assign,
             ("POST", "/api/movie/check"): self._movie_check,
+            ("POST", "/api/movie/assemble"): self._movie_assemble,
             ("POST", "/api/pick"): self._pick,
         }
         if (method, path) in routes:
@@ -1202,6 +1313,18 @@ class MonteurHandler(BaseHTTPRequestHandler):
             target=_run_scene_check_job,
             args=(job, payload),
             name=f"monteur-scene-check-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _movie_assemble(self) -> None:
+        payload = self._read_json()
+        self._movie_dir(payload)
+        job = _new_job("movie-assemble")
+        threading.Thread(
+            target=_run_movie_assemble_job,
+            args=(job, payload),
+            name=f"monteur-movie-assemble-{job['id']}",
             daemon=True,
         ).start()
         self._send_json({"job": job["id"]})

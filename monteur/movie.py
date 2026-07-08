@@ -24,7 +24,69 @@ written in the language of the brief.
 The scene objects deliberately carry production-workflow fields
 (``status``, ``folder``) that stay empty in stage 1 — stage 2 (the Studio
 movie view) assigns shot footage per scene and tracks progress, stage 3
-assembles the film along the screenplay with the existing engines.
+(:func:`assemble_movie`) assembles the film along the screenplay with the
+existing engines.
+
+Stage 3: the assembly engine
+----------------------------
+``monteur movie assemble`` builds the FILM along the screenplay: scenes in
+order, each filled from its assigned footage folder, paced by its
+``cut_intent``, with the clips' own sound. The rules, in full:
+
+1. **Scene duration target** (:func:`scene_duration_target`) — a heuristic
+   from the blueprint: base 6 s, plus 2.5 s per dialogue line, plus
+   ``min(10, action_word_count / 4)`` seconds (words = whitespace-split
+   ``scene.action``), clamped to 4..45 s. The notes state the estimate
+   basis once ("scene lengths estimated from the script — trim in
+   Resolve").
+2. **Material per scene** — the scene's folder is sifted
+   (:func:`monteur.sift.sift_directory`), or its reports are taken from
+   the optional ``sift_cache`` (``{folder: [ClipReport]}``; folders not in
+   the cache are sifted and ADDED to it, so several scenes shot into one
+   folder sift it once). Take-numbered coverage is preferred: when
+   filenames match ``S<scene>_T<take>`` for THIS scene's number (e.g.
+   ``S03_T02.mp4`` for scene 3, case-insensitive, leading zeros optional),
+   only those files are used and a note says so; otherwise everything in
+   the folder is used. The scene's target duration is then filled with the
+   best moments in CHRONOLOGICAL order (a scene has internal continuity)
+   via the public :func:`monteur.montage.plan_montage`
+   (``music=None, max_duration=target``, audio-original semantics); the
+   resulting entries are shifted by the scene's record offset, so scenes
+   tile the film timeline contiguously with no overlaps. When the folder
+   holds less material than the target, the montage machinery's repetition
+   guard shortens the scene rather than looping footage, and a note says
+   how short it ran.
+3. **cut_intent -> pacing/transitions** (:func:`parse_cut_intent`) — an
+   offline keyword parse (German + English, mirroring
+   :mod:`monteur.revise`'s vocabulary), never a model call:
+   "ruhig/calm/langsam/slow" -> pace 3.0 s per shot;
+   "schnell/fast/hektisch/snappy" -> pace 1.0 s; default 2.0 s (calm wins
+   when both appear). "blende/dissolve/weich" -> "dissolves" for the
+   scene's INTERNAL cuts; "harter schnitt/hard cut" -> "cuts" (hard-cut
+   words win over dissolve words: "harter Schnitt, keine Blende" cuts);
+   default "cuts". BETWEEN scenes the film cuts hard by default; when the
+   PREVIOUS assembled scene's cut_intent asked for dissolves, the incoming
+   scene's first clip carries a dissolve instead (clip metadata
+   ``"transition"`` / ``"transition_frames"``, exactly like montage
+   entries). Per-scene fades are never planned — a film's scenes butt
+   together.
+4. **Sound** — every video clip's own audio rides on A1 (audio="original"
+   semantics: same source range, kind AUDIO, track A1), so the film keeps
+   the sound recorded on set.
+5. **Markers** — one Blue marker per scene start: name
+   ``"Scene 3: EXT. WALDWEG - NIGHT"``, note = the scene summary. Fill
+   notes (gaps, reused material) are kept, prefixed with the scene number.
+6. **Dialogue scenes** — v1 keeps it honest: when a scene has dialogue
+   lines AND transcript sidecars (``.json``/``.srt`` next to its clips,
+   the :mod:`monteur.transcribe` convention) exist, a note recommends
+   ``monteur assembly`` for line-accurate takes; the scene is still
+   assembled visually here. No transcript matching is attempted — no fake
+   precision.
+7. **Notes** lead with a summary ("assembled 'Nachtfahrt': 6 of 8 scenes,
+   94s at 25 fps"); scenes without a folder are skipped with a note.
+8. **Canvas** — validated against :data:`monteur.montage.CANVASES` exactly
+   like ``montage_to_timeline`` (invalid -> ValueError listing the
+   presets).
 """
 
 from __future__ import annotations
@@ -33,11 +95,12 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from monteur.ai import DEFAULT_MODEL, MonteurAIError, _client
 
-if TYPE_CHECKING:  # only for type hints — stage 2 never needs sift at runtime
+if TYPE_CHECKING:  # only for type hints — stages 2/3 import lazily at runtime
+    from monteur.model import Timeline
     from monteur.sift import ClipReport
 
 MOVIE_FORMAT_VERSION = 1
@@ -573,3 +636,324 @@ def check_scene_footage(scene: MovieScene, reports: list[ClipReport]) -> dict:
         "avg_usable": avg_usable,
         "findings": findings,
     }
+
+
+# --- stage 3: the assembly engine ----------------------------------------------------
+#
+# assemble_movie builds the FILM along the screenplay (rules documented in the
+# module docstring's "Stage 3" section). Everything here is deterministic and
+# offline; the only slow part is sifting the scene folders, which the optional
+# sift_cache short-circuits.
+
+# Scene duration heuristic (seconds); see the module docstring, rule 1.
+_SCENE_BASE_SECONDS = 6.0
+_SCENE_SECONDS_PER_LINE = 2.5
+_SCENE_ACTION_MAX_SECONDS = 10.0
+_SCENE_ACTION_WORDS_PER_SECOND = 4.0
+_SCENE_MIN_SECONDS = 4.0
+_SCENE_MAX_SECONDS = 45.0
+
+# cut_intent keyword tables (DE + EN, mirrors monteur.revise's vocabulary).
+# Substring matches on the lowercased intent, so "ruhiger"/"Blenden" hit too.
+_PACE_CALM_WORDS = ("ruhig", "calm", "langsam", "slow")
+_PACE_FAST_WORDS = ("schnell", "fast", "hektisch", "snappy")
+_HARD_CUT_WORDS = ("harter schnitt", "harte schnitte", "hard cut")
+_DISSOLVE_WORDS = ("blende", "dissolve", "weich")
+_PACE_CALM = 3.0
+_PACE_DEFAULT = 2.0
+_PACE_FAST = 1.0
+
+# Dissolve INTO a new scene (seconds): min(this, half the incoming first
+# clip) — the same sizing rule montage uses for its gentle-phase dissolves.
+_SCENE_DISSOLVE = 0.5
+
+
+def scene_duration_target(scene: MovieScene) -> float:
+    """Estimated screen time (seconds) a scene should get in the assembly.
+
+    Heuristic from the blueprint: base 6 s + 2.5 s per dialogue line +
+    ``min(10, action_word_count / 4)`` s (words = whitespace-split
+    ``scene.action``), clamped to 4..45 s. An estimate, not a verdict —
+    the notes tell the editor to trim in Resolve.
+    """
+    action_words = len(scene.action.split())
+    target = (
+        _SCENE_BASE_SECONDS
+        + _SCENE_SECONDS_PER_LINE * len(scene.dialogue)
+        + min(_SCENE_ACTION_MAX_SECONDS, action_words / _SCENE_ACTION_WORDS_PER_SECOND)
+    )
+    return min(_SCENE_MAX_SECONDS, max(_SCENE_MIN_SECONDS, target))
+
+
+def parse_cut_intent(text: str) -> tuple[float, str]:
+    """``(pace_seconds, transitions)`` from a scene's free-text cut_intent.
+
+    Offline German + English keyword parse (mirrors :mod:`monteur.revise`'s
+    vocabulary — no model call): "ruhig/calm/langsam/slow" -> pace 3.0,
+    "schnell/fast/hektisch/snappy" -> pace 1.0, default 2.0 (calm wins when
+    both appear). Transitions for the scene's INTERNAL cuts:
+    "harter schnitt/hard cut" -> "cuts", "blende/dissolve/weich" ->
+    "dissolves" (hard-cut words win when both appear), default "cuts".
+    Text with no recognizable cue yields the defaults — it never guesses.
+    """
+    t = (text or "").lower()
+    if any(w in t for w in _PACE_CALM_WORDS):
+        pace = _PACE_CALM
+    elif any(w in t for w in _PACE_FAST_WORDS):
+        pace = _PACE_FAST
+    else:
+        pace = _PACE_DEFAULT
+    if any(w in t for w in _HARD_CUT_WORDS):
+        transitions = "cuts"
+    elif any(w in t for w in _DISSOLVE_WORDS):
+        transitions = "dissolves"
+    else:
+        transitions = "cuts"
+    return pace, transitions
+
+
+def _take_pattern(scene_number: int) -> re.Pattern:
+    """Filename pattern for this scene's take-numbered coverage (S03_T02).
+
+    Case-insensitive, leading zeros optional, and the ``S`` must not be
+    preceded by a letter or digit so ``S11_T01`` never reads as scene 1.
+    """
+    return re.compile(rf"(?:^|[^0-9a-z])s0*{scene_number}_t\d+", re.IGNORECASE)
+
+
+def _notify(progress: Callable | None, index: int, total: int, name: str, stage: str) -> None:
+    """Invoke the assembly progress callback, swallowing its exceptions."""
+    if progress is None:
+        return
+    try:
+        progress(index, total, name, stage)
+    except Exception:  # noqa: BLE001 — a broken callback must not abort assembly
+        pass
+
+
+def _has_transcript_sidecars(reports: list["ClipReport"]) -> bool:
+    """True when any clip has a ``.json``/``.srt`` transcript next to it
+    (the :mod:`monteur.transcribe` sidecar convention)."""
+    for report in reports:
+        clip = Path(report.path)
+        if clip.with_suffix(".json").is_file() or clip.with_suffix(".srt").is_file():
+            return True
+    return False
+
+
+def assemble_movie(
+    project: MovieProject,
+    fps: float = 25.0,
+    canvas: str = "uhd",
+    progress: Callable | None = None,
+    sift_cache: dict | None = None,
+) -> tuple["Timeline", list[str]]:
+    """Assemble the film along the screenplay: ``(timeline, notes)``.
+
+    Scenes in order, each filled from its assigned ``scene.folder``, paced
+    by its ``cut_intent``, with the clips' own sound on A1 — the full rules
+    live in the module docstring's "Stage 3" section.
+
+    ``progress(index, total, name, stage)`` is called with stage
+    ``"scene"`` once per scene (``name`` = the heading, ``index``/``total``
+    over ALL scenes), and the sift's own per-clip callbacks are forwarded
+    with their stages (``"start"``/``"done"``, per-folder clip counts).
+    Callback exceptions are swallowed.
+
+    ``sift_cache`` (``{folder: [ClipReport]}``) reuses pre-sifted reports;
+    folders not in the dict are sifted and ADDED to it, so callers can keep
+    the cache across runs and several scenes shot into one folder sift it
+    once.
+
+    Raises ValueError when no scene has a folder assigned, or on an unknown
+    ``canvas`` (same presets as :func:`monteur.montage.montage_to_timeline`).
+    Scenes without a folder are skipped with a note; a folder that cannot
+    be sifted (missing directory, no ffmpeg) skips its scene with a note
+    instead of aborting the film.
+    """
+    from monteur.media import MonteurMediaError
+    from monteur.model import AUDIO, VIDEO, Clip, Marker, Timeline, seconds_to_frames
+    from monteur.montage import CANVASES, CHRONOLOGICAL, plan_montage
+    from monteur.sift import sift_directory
+
+    if canvas not in CANVASES:
+        valid = ", ".join(sorted(CANVASES))
+        raise ValueError(f"unknown canvas {canvas!r}; valid canvases: {valid}")
+    if not any(s.folder.strip() for s in project.scenes):
+        raise ValueError(
+            "no scene has footage assigned — assign folders in the Movie "
+            "view or movie.json first"
+        )
+
+    width, height = CANVASES[canvas]
+    timeline = Timeline(
+        name=project.title or "Monteur Movie", fps=fps, width=width, height=height
+    )
+    cache = sift_cache if sift_cache is not None else {}
+    scene_notes: list[str] = []
+    total = len(project.scenes)
+    cursor = 0  # record frames: where the next scene starts
+    assembled = 0
+    prev_transitions = "cuts"  # the previous ASSEMBLED scene's parsed intent
+
+    def _forward_sift(index: int, clip_total: int, name: str, stage: str, _report) -> None:
+        _notify(progress, index, clip_total, name, stage)
+
+    for index, scene in enumerate(project.scenes, start=1):
+        _notify(progress, index, total, scene.heading, "scene")
+        where = f"scene {scene.number} ({scene.heading})"
+        folder = scene.folder.strip()
+        if not folder:
+            scene_notes.append(f"{where}: no footage assigned — skipped")
+            continue
+
+        # -- material: cached reports or a fresh sift of the scene's folder --
+        if folder in cache:
+            reports = cache[folder]
+        else:
+            try:
+                reports = sift_directory(folder, progress=_forward_sift)
+            except MonteurMediaError as exc:
+                scene_notes.append(f"{where}: {exc} — skipped")
+                continue
+            cache[folder] = reports
+
+        # Prefer take-numbered coverage shot FOR this scene (S03_T02 for
+        # scene 3); without take-named files, everything in the folder plays.
+        take_re = _take_pattern(scene.number)
+        takes = [r for r in reports if take_re.search(Path(r.path).name)]
+        if takes:
+            scene_reports = takes
+            scene_notes.append(
+                f"{where}: {len(takes)} take file"
+                f"{'s' if len(takes) != 1 else ''} named "
+                f"S{scene.number:02d}_T## — using only those"
+            )
+        else:
+            scene_reports = reports
+
+        if not any(r.moments for r in scene_reports):
+            scene_notes.append(f"{where}: no usable footage in {folder} — skipped")
+            continue
+
+        # -- fill the scene: chronological best moments, paced by intent --
+        target = scene_duration_target(scene)
+        pace, transitions = parse_cut_intent(scene.cut_intent)
+        plan = plan_montage(
+            scene_reports,
+            music=None,
+            order=CHRONOLOGICAL,
+            max_duration=target,
+            style="auto",
+            pace=pace,
+            transitions=transitions,
+        )
+        if not plan.entries:
+            scene_notes.append(f"{where}: no usable footage in {folder} — skipped")
+            continue
+        if plan.duration < target - 0.5:
+            # The repetition guard shortened the scene rather than looping
+            # its footage — say so in movie terms, not montage terms.
+            scene_notes.append(
+                f"{where}: footage supports about {plan.duration:.0f}s of the "
+                f"{target:.0f}s target — scene runs short"
+            )
+        for note in plan.notes:
+            if "gap at" in note or "material ran short" in note:
+                scene_notes.append(f"scene {scene.number}: {note}")
+
+        # -- render: shift the scene's entries onto the film timeline --
+        timeline.markers.append(
+            Marker(
+                frame=cursor,
+                name=f"Scene {scene.number}: {scene.heading}",
+                note=scene.summary,
+                color="Blue",
+            )
+        )
+        scene_first_clip = len(timeline.clips)
+        for entry in plan.entries:
+            stem = Path(entry.clip_path).stem
+            rec_in = cursor + seconds_to_frames(entry.record_start, fps)
+            rec_out = cursor + seconds_to_frames(entry.record_end, fps)
+            if rec_out <= rec_in:  # a slot rounded away at this frame rate
+                continue
+            src_in = seconds_to_frames(entry.source_start, fps)
+            src_len = entry.source_end - entry.source_start
+            rec_len = entry.record_end - entry.record_start
+            if abs(src_len - rec_len) < 1e-6:
+                # Keep source and record durations frame-exact together
+                # (montage_to_timeline's rule).
+                src_out = src_in + (rec_out - rec_in)
+            else:
+                src_out = seconds_to_frames(entry.source_end, fps)
+            video = Clip(
+                name=stem,
+                track="V1",
+                kind=VIDEO,
+                source_in=src_in,
+                source_out=src_out,
+                record_in=rec_in,
+                record_out=rec_out,
+                source_name=stem,
+                source_file=entry.clip_path,
+            )
+            video.metadata["media_start_seconds"] = entry.media_start
+            video.metadata["media_duration_seconds"] = entry.clip_duration
+            if entry.label:
+                video.metadata["label"] = entry.label
+            transition_frames = round(entry.transition * fps)
+            if transition_frames > 0:
+                video.metadata["transition"] = "dissolve"
+                video.metadata["transition_frames"] = transition_frames
+            timeline.clips.append(video)
+            # The clip's own sound on A1 (audio="original" semantics): same
+            # source range, kind AUDIO, track A1.
+            timeline.clips.append(
+                Clip(
+                    name=stem,
+                    track="A1",
+                    kind=AUDIO,
+                    source_in=src_in,
+                    source_out=src_out,
+                    record_in=rec_in,
+                    record_out=rec_out,
+                    source_name=stem,
+                    source_file=entry.clip_path,
+                    metadata={
+                        "media_start_seconds": entry.media_start,
+                        "media_duration_seconds": entry.clip_duration,
+                    },
+                )
+            )
+
+        # Between scenes: hard cut by default; a previous scene that asked
+        # for dissolves hands over with a dissolve INTO this scene instead.
+        if assembled and prev_transitions == "dissolves":
+            incoming = timeline.clips[scene_first_clip]
+            half_clip = (incoming.record_out - incoming.record_in) / fps / 2.0
+            frames = round(min(_SCENE_DISSOLVE, half_clip) * fps)
+            if frames > 0:
+                incoming.metadata["transition"] = "dissolve"
+                incoming.metadata["transition_frames"] = frames
+
+        # Dialogue scenes: v1 assembles them visually and says so — no
+        # transcript matching, no fake precision (that is monteur assembly).
+        if scene.dialogue and _has_transcript_sidecars(scene_reports):
+            scene_notes.append(
+                f"scene {scene.number} has dialogue and transcripts — "
+                "consider 'monteur assembly' for line-accurate takes; "
+                "assembled visually here"
+            )
+
+        cursor += seconds_to_frames(plan.duration, fps)
+        assembled += 1
+        prev_transitions = transitions
+
+    notes = [
+        f"assembled {project.title!r}: {assembled} of {total} scenes, "
+        f"{round(timeline.duration / fps)}s at {fps:g} fps",
+        "scene lengths estimated from the script — trim in Resolve",
+    ]
+    notes.extend(scene_notes)
+    return timeline, notes

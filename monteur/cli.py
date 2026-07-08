@@ -269,6 +269,69 @@ def cmd_movie_new(args: argparse.Namespace) -> None:
     )
 
 
+def _movie_progress(index: int, total: int, name: str, stage: str) -> None:
+    """Per-scene and per-clip feedback for a movie assembly, in the same
+    sequential-line style as :func:`_sift_progress` (robust across
+    terminals, scrollable). Scene lines are flush left; the sift's own
+    per-clip lines are indented under their scene.
+    """
+    if stage == "scene":
+        print(f"[scene {index}/{total}] {name}", flush=True)
+    elif stage == "start":
+        print(f"  [{index}/{total}] {name} ...", flush=True)
+    elif stage == "done":
+        print(f"  [{index}/{total}] {name} — sifted", flush=True)
+
+
+def cmd_movie_assemble(args: argparse.Namespace) -> None:
+    from monteur import io
+    from monteur.media import MonteurMediaError
+    from monteur.movie import assemble_movie, load_project
+
+    try:
+        project = load_project(args.project_dir)
+    except (ValueError, FileNotFoundError) as exc:
+        _fail(str(exc))
+    print(
+        f"Assembling {project.title!r} — sifting each scene's footage "
+        "(this decodes the clips, so it can take a while) ...",
+        flush=True,
+    )
+    try:
+        timeline, notes = assemble_movie(
+            project, fps=args.fps, canvas=args.canvas, progress=_movie_progress
+        )
+    except (ValueError, FileNotFoundError, MonteurMediaError) as exc:
+        _fail(str(exc))
+    io.save_timeline(timeline, args.output)
+    print(
+        f"\nFilm -> {args.output} "
+        f"({timeline.duration_seconds:.1f}s at {args.fps:g} fps)"
+    )
+    for note in notes:
+        print(f"  {note}")
+
+
+def cmd_movie_status(args: argparse.Namespace) -> None:
+    from monteur.movie import load_project, project_progress
+
+    try:
+        project = load_project(args.project_dir)
+    except (ValueError, FileNotFoundError) as exc:
+        _fail(str(exc))
+    progress = project_progress(project)
+    print(
+        f"{project.title} — {progress['assigned']}/{progress['scenes']} "
+        f"scenes assigned ({progress['percent']}%)"
+    )
+    for scene in project.scenes:
+        mark = "x" if scene.status == "assigned" else " "
+        line = f"  [{mark}] {scene.number:>2}  {scene.heading}"
+        if scene.folder:
+            line += f"  -> {scene.folder}"
+        print(line)
+
+
 def cmd_find(args: argparse.Namespace) -> None:
     from monteur.find import search_footage
 
@@ -991,6 +1054,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_new.add_argument("--genre", default="", help="genre (optional)")
     p_new.set_defaults(func=cmd_movie_new)
+    p_asm = movie_sub.add_parser(
+        "assemble",
+        help="assemble the film along the screenplay: scenes in order, each "
+             "filled from its assigned footage folder, paced by its cut "
+             "intent, with the clips' own sound",
+    )
+    p_asm.add_argument("project_dir", help="project folder with movie.json")
+    p_asm.add_argument("-o", "--output", required=True, help="output .fcpxml/.edl")
+    p_asm.add_argument("--fps", type=float, default=25.0)
+    p_asm.add_argument(
+        "--canvas",
+        choices=["hd", "uhd", "vertical", "vertical-uhd", "cine", "cine-uhd"],
+        default="uhd",
+        help="timeline shape and resolution (same presets as 'create')",
+    )
+    p_asm.set_defaults(func=cmd_movie_assemble)
+    p_status = movie_sub.add_parser(
+        "status", help="shooting progress: per-scene status and folders"
+    )
+    p_status.add_argument("project_dir", help="project folder with movie.json")
+    p_status.set_defaults(func=cmd_movie_status)
 
     p = sub.add_parser(
         "find",

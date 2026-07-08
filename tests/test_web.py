@@ -1038,3 +1038,94 @@ class TestMovieCheckApi:
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             _post(f"{server}/api/movie/check", {"project_dir": project_dir})
         assert exc_info.value.code == 400
+
+
+class TestMovieAssembleApi:
+    """POST /api/movie/assemble — cut the whole film along the screenplay."""
+
+    DEMO = TestCreateApi.DEMO
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+        _clear_scan_cache()
+
+    def _project_with_demo(self, tmp_path):
+        """A real 2-scene project, both scenes shooting from the demo folder."""
+        return _write_movie_project(
+            tmp_path / "proj", n_scenes=2, folders=[self.DEMO, self.DEMO]
+        )
+
+    def _assemble(self, server, project_dir, **extra):
+        data = _post(
+            f"{server}/api/movie/assemble", {"project_dir": project_dir, **extra}
+        )
+        assert isinstance(data["job"], str) and data["job"]
+        return _wait_for_job(server, data["job"])
+
+    def test_assemble_end_to_end(self, server, tmp_path):
+        project_dir = self._project_with_demo(tmp_path)
+        job = self._assemble(server, project_dir)
+        assert job["state"] == "done"
+        assert job["kind"] == "movie-assemble"
+
+        # one "scene" progress entry per scene, name = the heading
+        scenes = [p for p in job["progress"] if p["stage"] == "scene"]
+        assert len(scenes) == 2
+        assert [p["name"] for p in scenes] == [
+            "INT. AUTO - NIGHT", "EXT. WALDWEG - NIGHT",
+        ]
+        # the shared folder was sifted exactly once, with per-clip progress
+        stages = [p["stage"] for p in job["progress"]]
+        assert stages.count("start") == 4
+        assert stages.count("done") == 4
+
+        result = job["result"]
+        assert result["filename"] == "nachtfahrt.fcpxml"  # <title-slug>.fcpxml
+        assert result["content"].startswith("<?xml")
+        assert result["notes"]
+        assert result["duration_seconds"] > 0
+        assert result["scenes_used"] == 2
+
+    def test_assemble_edl_format(self, server, tmp_path):
+        project_dir = self._project_with_demo(tmp_path)
+        job = self._assemble(server, project_dir, format="edl")
+        assert job["state"] == "done"
+        assert job["result"]["filename"] == "nachtfahrt.edl"
+        assert job["result"]["content"].startswith("TITLE:")
+
+    def test_assemble_unassigned_project_is_error_job(self, server, tmp_path):
+        project_dir = _write_movie_project(tmp_path / "proj")  # nothing assigned
+        job = self._assemble(server, project_dir)
+        assert job["state"] == "error"
+        assert "assign" in job["message"]
+        assert job["result"] is None
+
+    def test_assemble_bad_project_dir_is_error_job(self, server, tmp_path):
+        job = self._assemble(server, str(tmp_path / "nope"))
+        assert job["state"] == "error"
+        assert "movie.json" in job["message"]
+
+    def test_assemble_missing_project_dir_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/movie/assemble", {})
+        assert exc_info.value.code == 400
+        assert "project_dir" in json.loads(exc_info.value.read())["error"]
+
+    def test_check_then_assemble_reuses_scan_cache(self, server, tmp_path):
+        project_dir = self._project_with_demo(tmp_path)
+        check = _post(
+            f"{server}/api/movie/check", {"project_dir": project_dir, "scene": 1}
+        )
+        assert _wait_for_job(server, check["job"])["state"] == "done"
+
+        job = self._assemble(server, project_dir)
+        assert job["state"] == "done"
+        # The check's sift is reused: the cache entry is announced and there
+        # is no second per-clip start/done pass for the shared folder.
+        assert {"stage": "cache", "name": "using previous scan"} in job["progress"]
+        assert not any(p["stage"] in ("start", "done") for p in job["progress"])
+        assert len([p for p in job["progress"] if p["stage"] == "scene"]) == 2
+        assert job["result"]["scenes_used"] == 2
+        assert job["result"]["duration_seconds"] > 0

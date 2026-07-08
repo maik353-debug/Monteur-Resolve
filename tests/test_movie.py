@@ -426,3 +426,493 @@ class TestCheckSceneFootage:
         check = check_scene_footage(scene, reports)
         assert any("85% unusable: mostly too dark" in f for f in check["findings"])
         assert not any("fits a NIGHT scene" in f for f in check["findings"])
+
+
+# --- stage 3: the assembly engine ----------------------------------------------------
+
+
+import shutil
+from pathlib import Path
+
+from monteur.movie import assemble_movie, parse_cut_intent, scene_duration_target
+
+DEMO = Path(
+    "/tmp/claude-0/-home-user-Fable-tool/90401078-872b-52b4-9d55-214193ea4ea5"
+    "/scratchpad/demo-footage"
+)
+needs_demo = pytest.mark.skipif(not DEMO.is_dir(), reason="demo footage not available")
+
+
+def _sift_report(path, duration=30.0, n_moments=6):
+    """A synthetic sifted clip: n_moments 3s moments, chronological, scored."""
+    moments = [
+        Moment(start=4.0 * i, end=4.0 * i + 3.0, score=0.9 - 0.05 * i)
+        for i in range(n_moments)
+    ]
+    return ClipReport(
+        path=str(path), duration=duration, moments=moments, usable_ratio=0.9
+    )
+
+
+def _movie_scene(number, heading="EXT. WALDWEG - NIGHT", folder="", cut_intent="",
+                 dialogue=(), action="a", summary=""):
+    return MovieScene(
+        number=number,
+        heading=heading,
+        summary=summary or f"Szene {number}",
+        action=action,
+        dialogue=list(dialogue),
+        cut_intent=cut_intent,
+        folder=folder,
+        status="assigned" if folder else "planned",
+    )
+
+
+def _movie(scenes):
+    return MovieProject(
+        title="Nachtfahrt", genre="thriller", brief="b", logline="l", scenes=scenes
+    )
+
+
+@pytest.fixture(scope="module")
+def demo_cache():
+    """Sift the demo footage once for the whole module (it decodes video)."""
+    from monteur.sift import sift_directory
+
+    return {str(DEMO): sift_directory(str(DEMO))}
+
+
+class TestSceneDurationTarget:
+    def test_base_only(self):
+        scene = _movie_scene(1, action="")
+        assert scene_duration_target(scene) == 6.0
+
+    def test_action_words_add_time(self):
+        scene = _movie_scene(1, action="eins zwei drei vier fünf sechs sieben acht")
+        assert scene_duration_target(scene) == 8.0  # 6 + 8/4
+
+    def test_dialogue_lines_add_time(self):
+        scene = _movie_scene(
+            1,
+            action="eins zwei drei vier fünf sechs sieben acht",
+            dialogue=[DialogueLine("A", "hi"), DialogueLine("B", "ho")],
+        )
+        assert scene_duration_target(scene) == 13.0  # 6 + 2*2.5 + 2
+
+    def test_action_contribution_is_capped_at_ten(self):
+        scene = _movie_scene(1, action="wort " * 100)
+        assert scene_duration_target(scene) == 16.0  # 6 + min(10, 25)
+
+    def test_clamped_to_45(self):
+        scene = _movie_scene(
+            1,
+            action="wort " * 100,
+            dialogue=[DialogueLine("A", "x")] * 16,  # 6 + 40 + 10 = 56
+        )
+        assert scene_duration_target(scene) == 45.0
+
+    def test_never_below_four(self):
+        # the base alone is 6s, so the low clamp is a safety net
+        assert scene_duration_target(_movie_scene(1, action="")) >= 4.0
+
+
+class TestParseCutIntent:
+    @pytest.mark.parametrize(
+        ("intent", "expected"),
+        [
+            ("", (2.0, "cuts")),
+            ("ruhig halten", (3.0, "cuts")),
+            ("calm opening", (3.0, "cuts")),
+            ("langsamer Aufbau", (3.0, "cuts")),
+            ("slow build", (3.0, "cuts")),
+            ("schnell geschnitten", (1.0, "cuts")),
+            ("fast and punchy", (1.0, "cuts")),
+            ("hektisch, atemlos", (1.0, "cuts")),
+            ("snappy energy", (1.0, "cuts")),
+            ("weiche Blende in die nächste Szene", (2.0, "dissolves")),
+            ("dissolve to black", (2.0, "dissolves")),
+            ("weich enden", (2.0, "dissolves")),
+            ("harter Schnitt", (2.0, "cuts")),
+            ("hard cut into the chase", (2.0, "cuts")),
+            ("ruhig, weiche Blenden", (3.0, "dissolves")),
+            # hard-cut words win over dissolve words
+            ("harter Schnitt, keine Blende", (2.0, "cuts")),
+            # calm wins when both pace cues appear
+            ("ruhig, dann schnell", (3.0, "cuts")),
+            # the stage-1 fixture intent
+            ("ruhig halten, harter Schnitt in die nächste Szene", (3.0, "cuts")),
+        ],
+    )
+    def test_table(self, intent, expected):
+        assert parse_cut_intent(intent) == expected
+
+
+class TestAssembleMovie:
+    def test_nothing_assigned_is_value_error(self):
+        project = _movie([_movie_scene(1), _movie_scene(2)])
+        with pytest.raises(ValueError, match="no scene has footage assigned"):
+            assemble_movie(project)
+
+    def test_unknown_canvas_is_value_error(self):
+        project = _movie([_movie_scene(1, folder="/footage")])
+        with pytest.raises(ValueError, match="canvas.*hd"):
+            assemble_movie(project, canvas="imax")
+
+    def test_skipped_scene_note_and_summary(self):
+        cache = {"/footage/auto": [_sift_report("/footage/auto/clip.mp4")]}
+        project = _movie(
+            [
+                _movie_scene(1, heading="INT. AUTO - NIGHT", folder="/footage/auto"),
+                _movie_scene(2, heading="EXT. WALDWEG - NIGHT"),
+            ]
+        )
+        timeline, notes = assemble_movie(project, sift_cache=cache)
+        assert notes[0].startswith("assembled 'Nachtfahrt': 1 of 2 scenes,")
+        assert notes[0].endswith("at 25 fps")
+        assert "scene lengths estimated from the script — trim in Resolve" in notes
+        assert (
+            "scene 2 (EXT. WALDWEG - NIGHT): no footage assigned — skipped" in notes
+        )
+        assert timeline.video_clips()  # scene 1 was assembled
+
+    def test_take_files_restrict_scene_material(self):
+        cache = {
+            "/f": [
+                _sift_report("/f/S01_T01.mp4"),
+                _sift_report("/f/S01_T02.MP4"),
+                _sift_report("/f/S11_T01.mp4"),
+                _sift_report("/f/broll.mp4"),
+            ]
+        }
+        project = _movie([_movie_scene(1, folder="/f")])
+        timeline, notes = assemble_movie(project, sift_cache=cache)
+        sources = {Path(c.source_file).name for c in timeline.video_clips()}
+        assert sources <= {"S01_T01.mp4", "S01_T02.MP4"}  # S11/broll excluded
+        assert any("2 take files named S01_T##" in n for n in notes)
+
+    def test_take_restriction_matches_the_right_scene_number(self):
+        cache = {
+            "/f": [_sift_report("/f/S01_T01.mp4"), _sift_report("/f/S11_T01.mp4")]
+        }
+        project = _movie([_movie_scene(11, folder="/f")])
+        timeline, _notes = assemble_movie(project, sift_cache=cache)
+        sources = {Path(c.source_file).name for c in timeline.video_clips()}
+        assert sources == {"S11_T01.mp4"}
+
+    def test_without_take_files_everything_plays(self):
+        cache = {
+            "/f": [_sift_report("/f/morgen.mp4"), _sift_report("/f/abend.mp4")]
+        }
+        project = _movie(
+            [_movie_scene(1, folder="/f", action="wort " * 60)]  # 21s target
+        )
+        timeline, notes = assemble_movie(project, sift_cache=cache)
+        sources = {Path(c.source_file).name for c in timeline.video_clips()}
+        assert sources == {"morgen.mp4", "abend.mp4"}
+        assert not any("take file" in n for n in notes)
+
+    def test_dissolve_intent_hands_over_between_scenes(self):
+        cache = {
+            "/a": [_sift_report("/a/x.mp4")],
+            "/b": [_sift_report("/b/y.mp4")],
+        }
+        project = _movie(
+            [
+                _movie_scene(1, folder="/a", cut_intent="weiche Blende zur nächsten"),
+                _movie_scene(2, folder="/b", cut_intent="harter Schnitt"),
+            ]
+        )
+        timeline, _notes = assemble_movie(project, sift_cache=cache)
+        clips = timeline.video_clips()
+        scene2_start = timeline.markers[1].frame
+        incoming = next(c for c in clips if c.record_in == scene2_start)
+        assert incoming.metadata["transition"] == "dissolve"
+        assert incoming.metadata["transition_frames"] > 0
+        # the film's very first clip never dissolves in
+        assert "transition" not in clips[0].metadata
+
+    def test_hard_cut_between_scenes_by_default(self):
+        cache = {
+            "/a": [_sift_report("/a/x.mp4")],
+            "/b": [_sift_report("/b/y.mp4")],
+        }
+        project = _movie(
+            [_movie_scene(1, folder="/a"), _movie_scene(2, folder="/b")]
+        )
+        timeline, _notes = assemble_movie(project, sift_cache=cache)
+        scene2_start = timeline.markers[1].frame
+        incoming = next(
+            c for c in timeline.video_clips() if c.record_in == scene2_start
+        )
+        assert "transition" not in incoming.metadata
+
+    def test_dialogue_with_transcripts_recommends_assembly(self, tmp_path):
+        clip = tmp_path / "take.mp4"
+        clip.touch()
+        (tmp_path / "take.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\nhi\n")
+        cache = {str(tmp_path): [_sift_report(clip)]}
+        project = _movie(
+            [
+                _movie_scene(
+                    5, folder=str(tmp_path),
+                    dialogue=[DialogueLine("LENA", "Halt an.")],
+                )
+            ]
+        )
+        _timeline, notes = assemble_movie(project, sift_cache=cache)
+        assert (
+            "scene 5 has dialogue and transcripts — consider 'monteur assembly' "
+            "for line-accurate takes; assembled visually here" in notes
+        )
+
+    def test_dialogue_without_transcripts_stays_quiet(self, tmp_path):
+        clip = tmp_path / "take.mp4"
+        clip.touch()
+        cache = {str(tmp_path): [_sift_report(clip)]}
+        project = _movie(
+            [
+                _movie_scene(
+                    5, folder=str(tmp_path),
+                    dialogue=[DialogueLine("LENA", "Halt an.")],
+                )
+            ]
+        )
+        _timeline, notes = assemble_movie(project, sift_cache=cache)
+        assert not any("monteur assembly" in n for n in notes)
+
+    def test_sift_cache_reuse_and_population(self, monkeypatch):
+        calls = []
+
+        def fake_sift(folder, progress=None, cancel=None):
+            calls.append(folder)
+            return [_sift_report(f"{folder}/clip.mp4")]
+
+        monkeypatch.setattr("monteur.sift.sift_directory", fake_sift)
+        cache = {"/pre": [_sift_report("/pre/a.mp4")]}
+        project = _movie(
+            [
+                _movie_scene(1, folder="/pre"),
+                _movie_scene(2, folder="/neu"),
+                _movie_scene(3, folder="/neu"),
+            ]
+        )
+        _timeline, _notes = assemble_movie(project, sift_cache=cache)
+        assert calls == ["/neu"]  # /pre reused; /neu sifted exactly once
+        assert set(cache) == {"/pre", "/neu"}  # ... and added to the cache
+
+    def test_progress_reports_scenes_and_forwards_sift_stages(self, monkeypatch):
+        def fake_sift(folder, progress=None, cancel=None):
+            report = _sift_report(f"{folder}/clip.mp4")
+            if progress is not None:
+                progress(1, 1, "clip.mp4", "start", None)
+                progress(1, 1, "clip.mp4", "done", report)
+            return [report]
+
+        monkeypatch.setattr("monteur.sift.sift_directory", fake_sift)
+        events = []
+        project = _movie(
+            [_movie_scene(1, heading="INT. AUTO - NIGHT", folder="/f"), _movie_scene(2)]
+        )
+        assemble_movie(
+            project, progress=lambda i, t, n, s: events.append((i, t, n, s))
+        )
+        assert (1, 2, "INT. AUTO - NIGHT", "scene") in events
+        assert (2, 2, "EXT. WALDWEG - NIGHT", "scene") in events  # skipped scenes too
+        assert (1, 1, "clip.mp4", "start") in events
+        assert (1, 1, "clip.mp4", "done") in events
+
+    def test_broken_progress_callback_does_not_abort(self):
+        cache = {"/f": [_sift_report("/f/x.mp4")]}
+        project = _movie([_movie_scene(1, folder="/f")])
+
+        def boom(*_args):
+            raise RuntimeError("broken UI")
+
+        timeline, _notes = assemble_movie(project, sift_cache=cache, progress=boom)
+        assert timeline.video_clips()
+
+    def test_unsiftable_folder_skips_scene_with_note(self, tmp_path):
+        cache = {"/ok": [_sift_report("/ok/x.mp4")]}
+        project = _movie(
+            [
+                _movie_scene(1, folder=str(tmp_path / "fehlt")),  # not a directory
+                _movie_scene(2, folder="/ok"),
+            ]
+        )
+        timeline, notes = assemble_movie(project, sift_cache=cache)
+        assert any("scene 1" in n and "skipped" in n for n in notes)
+        assert notes[0].startswith("assembled 'Nachtfahrt': 1 of 2 scenes")
+        assert timeline.video_clips()
+
+    def test_short_footage_shortens_scene_with_note(self):
+        # one 3s moment against a 16s target: the repetition guard caps it
+        cache = {"/f": [_sift_report("/f/x.mp4", n_moments=1)]}
+        project = _movie([_movie_scene(1, folder="/f", action="wort " * 100)])
+        timeline, notes = assemble_movie(project, sift_cache=cache)
+        assert any("scene runs short" in n for n in notes)
+        assert timeline.duration_seconds < 16.0
+
+
+@needs_demo
+class TestAssembleMovieDemo:
+    """Geometry tests against a real sift of the demo footage."""
+
+    def test_two_scene_film_tiles_contiguously(self, demo_cache):
+        project = _movie(
+            [
+                _movie_scene(
+                    1, heading="INT. AUTO - NIGHT", folder=str(DEMO),
+                    cut_intent="ruhig", summary="Die Fahrt beginnt.",
+                ),
+                _movie_scene(
+                    2, heading="EXT. WALDWEG - NIGHT", folder=str(DEMO),
+                    cut_intent="schnell", summary="Der Wald schluckt das Licht.",
+                ),
+            ]
+        )
+        timeline, notes = assemble_movie(project, fps=25.0, sift_cache=demo_cache)
+
+        # scenes tile the timeline contiguously: no gaps, no overlaps
+        video = timeline.video_clips()
+        assert video and video[0].record_in == 0
+        for prev, nxt in zip(video, video[1:]):
+            assert nxt.record_in == prev.record_out
+        assert video[-1].record_out == timeline.duration
+
+        # one Blue marker per scene start, note = the scene summary
+        assert [m.name for m in timeline.markers] == [
+            "Scene 1: INT. AUTO - NIGHT",
+            "Scene 2: EXT. WALDWEG - NIGHT",
+        ]
+        assert all(m.color == "Blue" for m in timeline.markers)
+        assert timeline.markers[0].frame == 0
+        assert timeline.markers[0].note == "Die Fahrt beginnt."
+        # scene 2 starts exactly where a video clip starts
+        assert timeline.markers[1].frame in {c.record_in for c in video}
+
+        # every video clip carries its own sound on A1, same ranges
+        audio = timeline.audio_clips()
+        assert {c.track for c in audio} == {"A1"}
+        assert len(audio) == len(video)
+        for v, a in zip(video, audio):
+            assert (a.record_in, a.record_out) == (v.record_in, v.record_out)
+            assert (a.source_in, a.source_out) == (v.source_in, v.source_out)
+            assert a.source_file == v.source_file
+
+        # the calm scene cuts slower than the fast scene
+        split = timeline.markers[1].frame
+        scene1 = [c for c in video if c.record_in < split]
+        scene2 = [c for c in video if c.record_in >= split]
+        asl1 = sum(c.duration for c in scene1) / len(scene1)
+        asl2 = sum(c.duration for c in scene2) / len(scene2)
+        assert asl1 > asl2
+
+        assert notes[0].startswith("assembled 'Nachtfahrt': 2 of 2 scenes,")
+        assert notes[0].endswith("at 25 fps")
+
+    def test_take_files_from_real_footage(self, tmp_path, demo_cache):
+        # cheap file copies: two demo clips become scene-1 takes, one stays b-roll
+        clips = sorted(DEMO.glob("*.mp4"))
+        shutil.copy(clips[0], tmp_path / "S01_T01.mp4")
+        shutil.copy(clips[1], tmp_path / "S01_T02.mp4")
+        shutil.copy(clips[2], tmp_path / "broll.mp4")
+        project = _movie([_movie_scene(1, folder=str(tmp_path))])
+        timeline, notes = assemble_movie(project, sift_cache={})
+        sources = {Path(c.source_file).name for c in timeline.video_clips()}
+        assert sources and sources <= {"S01_T01.mp4", "S01_T02.mp4"}
+        assert any("take files named S01_T##" in n for n in notes)
+
+
+# --- stage 3: CLI (movie assemble / movie status) -----------------------------------
+
+
+def test_cli_movie_assemble_parses():
+    from monteur.cli import build_parser, cmd_movie_assemble
+
+    args = build_parser().parse_args(
+        ["movie", "assemble", "proj", "-o", "film.fcpxml", "--fps", "24",
+         "--canvas", "hd"]
+    )
+    assert args.func is cmd_movie_assemble
+    assert args.project_dir == "proj"
+    assert args.output == "film.fcpxml"
+    assert args.fps == 24.0
+    assert args.canvas == "hd"
+
+
+def test_cli_movie_assemble_defaults():
+    from monteur.cli import build_parser
+
+    args = build_parser().parse_args(["movie", "assemble", "proj", "-o", "f.edl"])
+    assert args.fps == 25.0
+    assert args.canvas == "uhd"
+
+
+def test_cli_movie_assemble_writes_film(tmp_path, monkeypatch, capsys):
+    from monteur.cli import build_parser
+
+    monkeypatch.setattr(
+        "monteur.sift.sift_directory",
+        lambda folder, progress=None, cancel=None: [
+            _sift_report(f"{folder}/clip.mp4")
+        ],
+    )
+    project = _movie([_movie_scene(1, folder=str(tmp_path / "footage"))])
+    save_project(project, tmp_path / "proj")
+    out = tmp_path / "film.fcpxml"
+    args = build_parser().parse_args(
+        ["movie", "assemble", str(tmp_path / "proj"), "-o", str(out)]
+    )
+    args.func(args)
+    printed = capsys.readouterr().out
+    assert out.is_file()
+    assert "assembled 'Nachtfahrt': 1 of 1 scenes" in printed
+    assert "[scene 1/1] EXT. WALDWEG - NIGHT" in printed
+
+
+def test_cli_movie_assemble_missing_project_fails_cleanly(tmp_path, capsys):
+    from monteur.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["movie", "assemble", str(tmp_path), "-o", str(tmp_path / "f.fcpxml")]
+    )
+    with pytest.raises(SystemExit):
+        args.func(args)
+    assert "movie new" in capsys.readouterr().err
+
+
+def test_cli_movie_assemble_nothing_assigned_fails_cleanly(tmp_path, capsys):
+    from monteur.cli import build_parser
+
+    save_project(_movie([_movie_scene(1)]), tmp_path / "proj")
+    args = build_parser().parse_args(
+        ["movie", "assemble", str(tmp_path / "proj"), "-o", str(tmp_path / "f.edl")]
+    )
+    with pytest.raises(SystemExit):
+        args.func(args)
+    assert "no scene has footage assigned" in capsys.readouterr().err
+
+
+def test_cli_movie_status(tmp_path, capsys):
+    from monteur.cli import build_parser, cmd_movie_status
+
+    project = _movie(
+        [_movie_scene(1, folder="/footage/auto"), _movie_scene(2)]
+    )
+    save_project(project, tmp_path / "proj")
+    args = build_parser().parse_args(["movie", "status", str(tmp_path / "proj")])
+    assert args.func is cmd_movie_status
+    args.func(args)
+    printed = capsys.readouterr().out
+    assert "Nachtfahrt — 1/2 scenes assigned (50%)" in printed
+    assert "[x]  1" in printed and "-> /footage/auto" in printed
+    assert "[ ]  2" in printed
+
+
+def test_cli_movie_status_missing_project_fails_cleanly(tmp_path, capsys):
+    from monteur.cli import build_parser
+
+    args = build_parser().parse_args(["movie", "status", str(tmp_path)])
+    with pytest.raises(SystemExit):
+        args.func(args)
+    assert "movie new" in capsys.readouterr().err

@@ -628,6 +628,11 @@ svg text.axis {
   flex: none; width: 44px; text-align: right; color: var(--ink-muted);
   font-variant-numeric: tabular-nums;
 }
+.mov-assemble { border-top: 1px solid var(--grid); margin-top: 16px; padding-top: 4px; }
+.mov-assemble .export-bar { border-top: 0; margin-top: 4px; padding-top: 0; }
+.mov-asm-result { border-top: 1px solid var(--grid); margin-top: 16px; padding-top: 12px; }
+.mov-asm-result h3 { font-size: 15px; margin-bottom: 8px; }
+.mov-asm-result .btn { margin-top: 12px; }
 
 #drop-veil {
   position: fixed; inset: 0; z-index: 65; background: var(--veil);
@@ -1142,6 +1147,36 @@ svg text.axis {
                 <div class="meter"><span id="mov-progress-fill"></span></div>
               </div>
               <button class="btn ghost small" id="mov-switch" type="button">Open another project&hellip;</button>
+            </div>
+          </div>
+          <div class="mov-assemble" aria-labelledby="mov-asm-h">
+            <h3 class="seg-heading" id="mov-asm-h">Assemble the film</h3>
+            <p class="help-small">Monteur sifts every assigned folder and cuts the film along the screenplay, scene by scene, into one timeline for DaVinci Resolve.</p>
+            <div class="export-bar" aria-label="Assemble">
+              <label class="export-field">Frame rate
+                <select id="mov-fps"></select>
+              </label>
+              <label class="export-field">Canvas
+                <select id="mov-canvas"></select>
+              </label>
+              <div class="export-field">
+                <span id="mov-fmt-label">File format</span>
+                <div class="seg-toggle" role="group" aria-labelledby="mov-fmt-label">
+                  <button type="button" id="mov-fmt-edl" aria-pressed="false">EDL</button>
+                  <button type="button" id="mov-fmt-fcpxml" aria-pressed="true">FCPXML</button>
+                </div>
+              </div>
+              <button class="btn primary" id="mov-assemble-btn" type="button">Assemble film<span class="spin" aria-hidden="true"></span></button>
+            </div>
+            <p class="help-small" id="mov-asm-hint" role="status">Assign footage to at least one scene first — scenes without footage are skipped.</p>
+            <div id="mov-asm-panel"></div>
+            <p class="scan-note" id="mov-asm-msg" role="status" hidden></p>
+            <div class="mov-asm-result" id="mov-asm-result" hidden>
+              <h3 id="mov-asm-result-title" tabindex="-1">Your film is ready</h3>
+              <div class="result-stats" id="mov-asm-summary"></div>
+              <ul class="plan-notes" id="mov-asm-notes"></ul>
+              <button class="btn primary" id="mov-asm-download" type="button">Download timeline<span class="spin" aria-hidden="true"></span></button>
+              <p class="help-small">Import it in Resolve via File → Import → Timeline… and point Resolve at your footage folders.</p>
             </div>
           </div>
         </section>
@@ -2728,10 +2763,10 @@ function makeJobPanel(hostId, texts) {
     var total = 0, done = 0, cached = 0;
     var lines = [];
     progress.forEach(function (p) {
-      // vision entries count MOMENTS and song entries count SONGS, not
-      // clips — keep both out of the "x / y clips" total so the bar keeps
-      // meaning clips.
-      if (p.stage !== "vision" && p.stage !== "song" && p.total > total) total = p.total;
+      // vision entries count MOMENTS, song entries count SONGS and scene
+      // entries count SCENES, not clips — keep them out of the "x / y
+      // clips" total so the bar keeps meaning clips.
+      if (p.stage !== "vision" && p.stage !== "song" && p.stage !== "scene" && p.total > total) total = p.total;
       if (p.stage === "done" || p.stage === "cache") {
         done += 1;
         if (p.stage === "cache") cached += 1;
@@ -2758,6 +2793,13 @@ function makeJobPanel(hostId, texts) {
         lines.push(String(p.name || "writing publish kit") + "…");
       } else if (p.stage === "movie") {
         lines.push("Claude · " + String(p.name || "drafting the screenplay") + "…");
+      } else if (p.stage === "scene") {
+        var scText = "Scene";
+        if (typeof p.index === "number" && typeof p.total === "number" && p.total > 0) {
+          scText += " " + p.index + "/" + p.total;
+        }
+        scText += " — " + String(p.name || "");
+        lines.push(scText);
       }
     });
     var last = progress.length ? progress[progress.length - 1] : null;
@@ -2767,6 +2809,7 @@ function makeJobPanel(hostId, texts) {
     else if (last && last.stage === "song") status.textContent = "Listening to your songs…";
     else if (last && last.stage === "kit") status.textContent = "Writing the publish kit…";
     else if (last && last.stage === "movie") status.textContent = "Claude is writing your screenplay…";
+    else if (last && last.stage === "scene") status.textContent = "Assembling scene " + (typeof last.index === "number" ? last.index : "") + (typeof last.total === "number" && last.total > 0 ? " of " + last.total : "") + "…";
     else if (cached > 0 && (total === 0 || done >= total)) status.textContent = "Using your previous scan — nothing to re-watch.";
     else status.textContent = texts.working;
     if (total > 0) {
@@ -3626,9 +3669,144 @@ function setMovCheckBusy(entry, on) {
   entry.checkBtn.disabled = on || (entry.scene.status !== "assigned");
 }
 
+/* ---- assemble the film (stage 3: /api/movie/assemble) ---- */
+
+var movAsm = {
+  busy: false,
+  format: "fcpxml",  // download format, like the Create wizard's toggle
+  result: null       // {data, format} from the last finished assemble job
+};
+
+var movAsmPanel = makeJobPanel("mov-asm-panel", {
+  starting: "Starting the assemble…",
+  working: "Assembling your film…"
+});
+
+/* the button needs >= 1 assigned scene AND no running assemble */
+function movUpdateAssemble() {
+  var assigned = mov.progress ? mov.progress.assigned : 0;
+  $("mov-assemble-btn").disabled = movAsm.busy || assigned < 1;
+  $("mov-asm-hint").textContent = assigned >= 1
+    ? "Scenes without footage are skipped — assign more slots anytime, then assemble again."
+    : "Assign footage to at least one scene first — scenes without footage are skipped.";
+}
+
+function setMovAsmBusy(on) {
+  movAsm.busy = on;
+  $("mov-assemble-btn").classList.toggle("busy", on);
+  $("mov-fps").disabled = on;
+  $("mov-canvas").disabled = on;
+  $("mov-fmt-edl").disabled = on;
+  $("mov-fmt-fcpxml").disabled = on;
+  movUpdateAssemble();
+}
+
+function setMovFormat(fmt) {
+  movAsm.format = fmt;
+  $("mov-fmt-edl").setAttribute("aria-pressed", String(fmt === "edl"));
+  $("mov-fmt-fcpxml").setAttribute("aria-pressed", String(fmt === "fcpxml"));
+}
+$("mov-fmt-edl").addEventListener("click", function () { setMovFormat("edl"); });
+$("mov-fmt-fcpxml").addEventListener("click", function () { setMovFormat("fcpxml"); });
+
+function movRenderAssembleResult(data) {
+  var summary = $("mov-asm-summary");
+  clear(summary);
+  var used = data.scenes_used || 0;
+  [
+    [fmtClock(data.duration_seconds || 0), "long"],
+    [String(used), used === 1 ? "scene used" : "scenes used"]
+  ].forEach(function (pair) {
+    var stat = el("div", "result-stat");
+    stat.appendChild(el("div", "rs-num", pair[0]));
+    stat.appendChild(el("div", "rs-label", pair[1]));
+    summary.appendChild(stat);
+  });
+  var notes = $("mov-asm-notes");
+  clear(notes);
+  (data.notes || []).forEach(function (note) {
+    notes.appendChild(el("li", null, String(note)));
+  });
+  $("mov-asm-result").hidden = false;
+}
+
+function startMovAssemble(andThen) {
+  if (movAsm.busy) return;
+  var body = {
+    project_dir: mov.dir,
+    fps: fpsFrom($("mov-fps")),
+    canvas: $("mov-canvas").value,
+    format: movAsm.format
+  };
+  rememberFps(body.fps);
+  $("mov-asm-msg").hidden = true;
+  $("mov-asm-result").hidden = true;
+  setMovAsmBusy(true);
+  api("/api/movie/assemble", { method: "POST", body: body }).then(function (data) {
+    movAsmPanel.start(data.job, {
+      onDone: function (result) {
+        setMovAsmBusy(false);
+        movAsm.result = { data: result || {}, format: body.format };
+        movRenderAssembleResult(result || {});
+        $("mov-asm-result-title").focus();
+        if (andThen) andThen(result || {});
+      },
+      onCancelled: function () {
+        setMovAsmBusy(false);
+        creNote("mov-asm-msg", "Assemble cancelled — nothing was written. Assemble again whenever you're ready.");
+      },
+      onError: function (message) {
+        setMovAsmBusy(false);
+        creNote("mov-asm-msg", message, true);
+        toast(message, "error");
+      }
+    });
+  }).catch(function (err) {
+    setMovAsmBusy(false);
+    var message = err && err.message ? err.message : String(err);
+    creNote("mov-asm-msg", message, true);
+    toast(message, "error");
+  });
+}
+$("mov-assemble-btn").addEventListener("click", function () { startMovAssemble(null); });
+
+$("mov-asm-download").addEventListener("click", function () {
+  if (!movAsm.result || movAsm.busy) return;
+  if (movAsm.result.format === movAsm.format) {
+    downloadText(movAsm.result.data.filename || ("movie." + movAsm.format), movAsm.result.data.content || "");
+    toast("Downloaded " + (movAsm.result.data.filename || "timeline") + ".", "success");
+    return;
+  }
+  // format changed since the assemble — re-run the job, then download
+  startMovAssemble(function (result) {
+    downloadText(result.filename || ("movie." + movAsm.format), result.content || "");
+    toast("Downloaded " + (result.filename || "timeline") + ".", "success");
+  });
+});
+
+var MOV_CANVASES = [
+  ["uhd", "Wide 16:9 · 4K"],
+  ["hd", "Wide 16:9 · HD"],
+  ["vertical-uhd", "Vertical 9:16 · 4K"],
+  ["vertical", "Vertical 9:16 · HD"],
+  ["cine-uhd", "Cinemascope 2.39:1 · 4K"],
+  ["cine", "Cinemascope 2.39:1 · HD"]
+];
+MOV_CANVASES.forEach(function (spec) {
+  var option = document.createElement("option");
+  option.value = spec[0];
+  option.textContent = spec[1];
+  if (spec[0] === "uhd") option.selected = true;  // the engine's default canvas
+  $("mov-canvas").appendChild(option);
+});
+populateFpsSelect($("mov-fps"));
+setMovFormat("fcpxml");
+movUpdateAssemble();
+
 /* called when the user leaves the Movie view — poll loops must not outlive it */
 function movStopJobs() {
   if (movNewPanel.running()) { movNewPanel.stop(); setMovNewBusy(false); }
+  if (movAsmPanel.running()) { movAsmPanel.stop(); setMovAsmBusy(false); }
   Object.keys(mov.scenes).forEach(function (n) {
     var entry = mov.scenes[n];
     if (entry.panel && entry.panel.running()) {
@@ -3658,6 +3836,7 @@ function movRenderProgress() {
   $("mov-progress-label").textContent =
     pr.assigned + "/" + pr.scenes + " scenes assigned";
   $("mov-progress-fill").style.width = Math.max(0, Math.min(100, pr.percent)) + "%";
+  movUpdateAssemble(); // the assemble button follows the assignment count
 }
 
 function movSlugClass(heading) {
@@ -3930,6 +4109,10 @@ function movOpenProjectData(dir, data) {
   mov.dir = dir;
   mov.project = data.project;
   mov.progress = data.progress;
+  // a different (or reloaded) project makes the last assemble stale
+  movAsm.result = null;
+  $("mov-asm-msg").hidden = true;
+  $("mov-asm-result").hidden = true;
   movShowProject();
   movRenderScenes();
 }

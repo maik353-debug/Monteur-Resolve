@@ -75,9 +75,11 @@ Craft templates:
       in the browser, scene slots with shooting tips, assign footage per
       scene, shoot progress, footage checks (technical + vision content
       match, INT/EXT and DAY/NIGHT consistency, dark-fits-night)
-- [ ] Movie creator stage 3: assemble the film along the screenplay
-      (assembly for dialogue scenes, slot assignment for silent ones)
-      with pacing from the cut intents, then the usual finishing
+- [x] Movie creator stage 3: assemble the film along the screenplay —
+      scene lengths estimated from the script, pacing and transitions
+      from each scene's cut intent, S03_T02 take files auto-restricted,
+      original sound on A1, a scene marker per act, CLI + Studio button
+      (line-accurate dialogue matching via transcripts = follow-up)
 - [ ] Learn from the editor: diff the editor's corrections against
       Monteur's plan and adapt scoring preferences per project
 - [ ] Watch mode: new footage auto-sifted overnight, report ready in the
