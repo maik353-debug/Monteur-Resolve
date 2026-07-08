@@ -106,6 +106,12 @@ Every export opens and closes on black, a trailer smashes to black
 between acts (each gap carries a "Title slot" marker), and cuts land a
 frame before the beat so the incoming shot hits ON it.
 
+One heads-up for the `cine[-uhd]` canvases: a 2.39:1 timeline fits your
+16:9 footage with bars on the SIDES at first. For the classic cinema
+look, set Resolve's Project Settings > Image Scaling > "Scale full frame
+with crop" — the picture fills the width and the top/bottom bars appear
+when you view or export in 16:9 (the plan reminds you, too).
+
 **Iterate in plain language.** Save the plan, then revise it — pinned
 shots stay exactly where they are, untouched regions stay bit-identical,
 and every cut stays on the beat grid:
