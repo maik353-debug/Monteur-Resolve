@@ -184,20 +184,47 @@ def cmd_resolve(args: argparse.Namespace) -> None:
         _fail(str(exc))
 
 
+def _sift_progress(index: int, total: int, name: str, stage: str, report) -> None:
+    """Per-clip feedback for a sift run: one line as a clip starts, then the
+    result appended when it finishes.
+
+    Sequential lines (not a \\r progress bar) are used deliberately: they are
+    robust across terminals and give an honest, scrollable log of what was
+    analysed. ``flush=True`` on every print so Windows consoles (which buffer
+    without a newline flush) show progress live.
+    """
+    if stage == "start":
+        print(f"[{index}/{total}] {name} ...", flush=True)
+    elif stage == "done":
+        print(
+            f"[{index}/{total}] {name} — {report.usable_ratio * 100:.0f}% usable, "
+            f"{len(report.moments)} good moments",
+            flush=True,
+        )
+
+
 def cmd_sift(args: argparse.Namespace) -> None:
     from monteur.media import MonteurMediaError
-    from monteur.sift import sift_directory
+    from monteur.sift import list_media, sift_directory
 
     try:
-        reports = sift_directory(args.folder)
+        count = len(list_media(args.folder))
+    except MonteurMediaError as exc:
+        _fail(str(exc))
+    if not count:
+        _fail(f"no video files found in {args.folder}")
+    print(
+        f"Scanning {count} clips in {args.folder} — this decodes each clip, "
+        f"so it can take a few seconds per clip.",
+        flush=True,
+    )
+    try:
+        reports = sift_directory(args.folder, progress=_sift_progress)
     except MonteurMediaError as exc:
         _fail(str(exc))
     if not reports:
         _fail(f"no video files found in {args.folder}")
     for report in reports:
-        name = Path(report.path).name
-        print(f"{name}: {report.usable_ratio * 100:.0f}% usable, "
-              f"{len(report.moments)} good moments")
         for note in report.notes:
             print(f"  {note}")
 
@@ -226,8 +253,15 @@ def cmd_create(args: argparse.Namespace) -> None:
             f"max duration {args.max_duration if args.max_duration else 'full song'}"
         )
     try:
-        print("Scanning footage ...")
-        reports = sift_directory(args.folder)
+        from monteur.sift import list_media
+
+        count = len(list_media(args.folder))
+        print(
+            f"Scanning {count} clips in {args.folder} — this decodes each clip, "
+            f"so it can take a few seconds per clip.",
+            flush=True,
+        )
+        reports = sift_directory(args.folder, progress=_sift_progress)
         print(f"  {len(reports)} clips, "
               f"{sum(len(r.moments) for r in reports)} good moments found")
         print("Analyzing music ...")

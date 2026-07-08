@@ -39,6 +39,7 @@ from __future__ import annotations
 import statistics
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from monteur.media import (
     MonteurMediaError,
@@ -413,21 +414,59 @@ def analyze_clip(path: str) -> ClipReport:
     return report
 
 
-def sift_directory(directory: str) -> list[ClipReport]:
+def _call_progress(progress, index, total, name, stage, report):
+    """Invoke a progress callback, swallowing any exception it raises.
+
+    A broken callback (a UI that throws, a closed stream) must never abort
+    the sift, so every call is guarded.
+    """
+    if progress is None:
+        return
+    try:
+        progress(index, total, name, stage, report)
+    except Exception:  # noqa: BLE001 — a broken callback must not abort sifting
+        pass
+
+
+def sift_directory(directory: str, progress=None) -> list[ClipReport]:
     """Reports for every video file in a directory.
 
     Individual clip failures become a note in that clip's report; only a
     missing ffmpeg (which dooms every clip) aborts the run.
+
+    ``progress`` is an optional callback invoked around each clip so callers
+    (e.g. the CLI) can show per-clip feedback while the slow frame/audio
+    decode runs. Its signature is::
+
+        progress(index: int, total: int, name: str, stage: str,
+                 report: ClipReport | None)
+
+    * ``index`` — 1-based position of the clip being analysed (1..total).
+    * ``total`` — number of clips in the directory.
+    * ``name`` — the clip's file name (no directory).
+    * ``stage`` — ``"start"`` just BEFORE the clip is analysed (``report`` is
+      ``None``), then ``"done"`` just AFTER (``report`` is the finished
+      :class:`ClipReport`).
+
+    The callback is called exactly twice per clip: once with
+    ``stage="start"`` and once with ``stage="done"``. Any exception the
+    callback raises is swallowed so a broken callback cannot abort the sift.
+    ``progress=None`` (the default) disables all feedback and keeps the
+    function fully backwards compatible.
     """
+    media = list_media(directory)
+    total = len(media)
     reports: list[ClipReport] = []
-    for media_path in list_media(directory):
+    for i, media_path in enumerate(media, start=1):
+        name = Path(media_path).name
+        _call_progress(progress, i, total, name, "start", None)
         try:
-            reports.append(analyze_clip(str(media_path)))
+            report = analyze_clip(str(media_path))
         except MonteurMediaError as exc:
             _reraise_if_ffmpeg_missing(exc)
-            reports.append(
-                ClipReport(
-                    path=str(media_path), duration=0.0, notes=[f"skipped: {exc}"]
-                )
+            report = ClipReport(
+                path=str(media_path), duration=0.0, notes=[f"skipped: {exc}"]
             )
+        reports.append(report)
+        _call_progress(progress, i, total, name, "done", report)
     return reports

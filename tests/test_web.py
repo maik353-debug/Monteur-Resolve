@@ -1,14 +1,21 @@
 import json
+import socket
 import threading
 import urllib.error
 import urllib.request
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
 from monteur.project import Project
-from monteur.web.server import MonteurHandler, _APP_HTML
+from monteur.web.server import (
+    MonteurHandler,
+    MonteurServer,
+    _APP_HTML,
+    _install_diagnostic_hooks,
+    _restore_diagnostic_hooks,
+    serve,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -16,7 +23,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 @pytest.fixture()
 def server(tmp_path):
     handler = type("TestHandler", (MonteurHandler,), {"project": Project(tmp_path)})
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd = MonteurServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -191,3 +198,103 @@ class TestCreateApi:
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             _post(f"{server}/api/create/scan", {})
         assert exc_info.value.code == 400
+
+
+def _host_port(url):
+    """('http://127.0.0.1:1234') -> ('127.0.0.1', 1234)."""
+    hostport = url.split("://", 1)[1]
+    host, port = hostport.rsplit(":", 1)
+    return host, int(port)
+
+
+def _free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class TestCrashRobustness:
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_serving_page_twice_survives(self, server):
+        # Opening the page is exactly what crashed the real Windows process.
+        # The server must survive serving it AND keep serving afterwards.
+        with urllib.request.urlopen(f"{server}/") as r1:
+            assert r1.status == 200
+        with urllib.request.urlopen(f"{server}/") as r2:
+            assert r2.status == 200
+
+    def test_survives_aborted_connection(self, server):
+        host, port = _host_port(server)
+        # Send a partial/garbage request line, then slam the socket shut with a
+        # hard RST (SO_LINGER 0) — this is what a browser closing a tab mid-load
+        # looks like, and on Windows it raises ConnectionAbortedError in wfile.
+        raw = socket.create_connection((host, port))
+        raw.setsockopt(
+            socket.SOL_SOCKET, socket.SO_LINGER,
+            __import__("struct").pack("ii", 1, 0),
+        )
+        raw.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n")  # no blank line = partial
+        raw.close()
+        # A second, well-formed request must still be answered normally.
+        data = _post(f"{server}/api/analyze", _edl_payload())
+        assert data["stats"]["shot_count"] == 5
+
+    def test_handle_error_does_not_raise(self, server):
+        host, port = _host_port(server)
+        # Build a throwaway server instance just to call handle_error on it.
+        handler = type("H", (MonteurHandler,), {})
+        httpd = MonteurServer(("127.0.0.1", _free_port()), handler)
+        try:
+            # Must be called from within an active exception context (it reads
+            # sys.exc_info()); it must print and NOT raise.
+            try:
+                raise ConnectionAbortedError(10053, "aborted")
+            except ConnectionAbortedError:
+                httpd.handle_error(object(), ("127.0.0.1", 12345))
+        finally:
+            httpd.server_close()
+
+    def test_server_is_hardened(self, server):
+        assert MonteurServer.daemon_threads is True
+        assert MonteurServer.allow_reuse_address is True
+
+    def test_install_restore_hooks_roundtrip(self):
+        orig_thread_hook = threading.excepthook
+        orig_sys_hook = __import__("sys").excepthook
+        prev = _install_diagnostic_hooks()
+        try:
+            assert threading.excepthook is not orig_thread_hook
+            assert __import__("sys").excepthook is not orig_sys_hook
+        finally:
+            _restore_diagnostic_hooks(*prev)
+        assert threading.excepthook is orig_thread_hook
+        assert __import__("sys").excepthook is orig_sys_hook
+
+    def test_serve_restores_threading_excepthook(self, tmp_path):
+        original = threading.excepthook
+        captured = {}
+        ready = threading.Event()
+
+        def grab(srv):
+            captured["srv"] = srv
+
+        t = threading.Thread(
+            target=serve,
+            kwargs={
+                "port": _free_port(),
+                "project_root": str(tmp_path),
+                "open_browser": False,
+                "ready": ready,
+                "on_bind": grab,
+            },
+            daemon=True,
+        )
+        t.start()
+        assert ready.wait(timeout=5)
+        # While serving, our diagnostic hook is installed (not the original).
+        assert threading.excepthook is not original
+        captured["srv"].shutdown()
+        t.join(timeout=5)
+        assert not t.is_alive()
+        # serve()'s finally block must have restored the original.
+        assert threading.excepthook is original

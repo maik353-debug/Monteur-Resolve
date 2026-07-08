@@ -23,6 +23,7 @@ required for EDL files.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 import webbrowser
@@ -35,6 +36,99 @@ from monteur.analysis import analyze_timeline, compare
 from monteur.project import Project
 
 _APP_HTML = Path(__file__).with_name("app.html")
+
+# Writing a response to a socket the browser already closed raises one of these
+# — very common on Windows (WinError 10053 ConnectionAbortedError / 10054
+# ConnectionResetError). The client simply went away; it is not worth crashing a
+# worker thread over. (ConnectionReset/Aborted/BrokenPipe are all subclasses of
+# ConnectionError, but we spell them out for clarity / defensiveness.)
+_CLIENT_GONE = (
+    ConnectionError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+)
+
+
+def _install_diagnostic_hooks():
+    """Install excepthooks that make an otherwise-silent crash VISIBLE.
+
+    A crash inside a ThreadingHTTPServer worker thread (i.e. while handling a
+    request) never reaches serve()'s main-thread ``except`` — it dies in the
+    worker. Without a ``threading.excepthook`` that would print a traceback and
+    vanish (or, worse, be swallowed). We install one here that always flushes,
+    and chain to whatever was installed before.
+
+    Returns ``(prev_threading_hook, prev_sys_hook)`` so serve() can restore the
+    originals in its ``finally`` block — importing this module must not globally
+    mutate the hooks (keeps the test suite clean).
+    """
+    prev_thread_hook = threading.excepthook
+    prev_sys_hook = sys.excepthook
+
+    def worker_hook(args):
+        import traceback
+
+        name = getattr(args.thread, "name", "?")
+        print(
+            f"Monteur Studio: uncaught error in worker thread {name}:",
+            flush=True,
+        )
+        traceback.print_exception(
+            args.exc_type, args.exc_value, args.exc_traceback
+        )
+        sys.stderr.flush()
+        if prev_thread_hook is not None:
+            try:
+                prev_thread_hook(args)
+            except Exception:  # noqa: BLE001 - a chained hook must not re-crash
+                pass
+
+    def main_hook(exc_type, exc_value, exc_tb):
+        try:
+            if prev_sys_hook is not None:
+                prev_sys_hook(exc_type, exc_value, exc_tb)
+        finally:
+            sys.stderr.flush()
+            sys.stdout.flush()
+
+    threading.excepthook = worker_hook
+    sys.excepthook = main_hook
+    return prev_thread_hook, prev_sys_hook
+
+
+def _restore_diagnostic_hooks(prev_thread_hook, prev_sys_hook) -> None:
+    """Undo :func:`_install_diagnostic_hooks` (used by serve()'s finally)."""
+    threading.excepthook = prev_thread_hook
+    sys.excepthook = prev_sys_hook
+
+
+class MonteurServer(ThreadingHTTPServer):
+    """Hardened server class used by serve().
+
+    * ``daemon_threads`` — worker threads don't keep the process alive on exit.
+    * ``allow_reuse_address`` — restart-friendly (no TIME_WAIT bind failures).
+    * ``handle_error`` — one concise line per bad request instead of
+      socketserver's default multi-line stderr dump, so a single dropped
+      connection never *looks* catastrophic.
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def handle_error(self, request, client_address) -> None:
+        exc = sys.exc_info()[1]
+        if isinstance(exc, _CLIENT_GONE):
+            return  # the client simply disconnected — not worth a line
+        print(
+            f"Monteur Studio: error serving {client_address} — "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        import traceback
+
+        traceback.print_exc()  # a real error here deserves its full stack
+        sys.stderr.flush()
 
 
 class ApiError(Exception):
@@ -77,11 +171,14 @@ class MonteurHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, data: dict, status: int = 200) -> None:
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except _CLIENT_GONE:
+            pass  # client closed the socket mid-response — nothing to do
 
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
@@ -102,7 +199,15 @@ class MonteurHandler(BaseHTTPRequestHandler):
             self._send_json({"error": exc.message}, status=exc.status)
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=400)
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:  # a genuine handler bug — surface it, don't hide it
+            import traceback
+
+            print(
+                f"Monteur Studio: unhandled error in {method} {self.path}:",
+                flush=True,
+            )
+            traceback.print_exc()
+            sys.stderr.flush()
             self._send_json({"error": f"internal error: {exc}"}, status=500)
 
     def _route(self, method: str):
@@ -146,11 +251,14 @@ class MonteurHandler(BaseHTTPRequestHandler):
 
     def _app(self) -> None:
         body = _APP_HTML.read_bytes()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except _CLIENT_GONE:
+            pass  # browser closed the tab mid-load — not an error
 
     def _favicon(self) -> None:
         svg = (
@@ -158,11 +266,14 @@ class MonteurHandler(BaseHTTPRequestHandler):
             '<rect width="16" height="16" rx="3" fill="#2a78d6"/>'
             '<path d="M3 11 6.5 6l2.5 3 2-2.5L13 11z" fill="#fff"/></svg>'
         ).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "image/svg+xml")
-        self.send_header("Content-Length", str(len(svg)))
-        self.end_headers()
-        self.wfile.write(svg)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml")
+            self.send_header("Content-Length", str(len(svg)))
+            self.end_headers()
+            self.wfile.write(svg)
+        except _CLIENT_GONE:
+            pass  # client went away — nothing to send to
 
     def _analyze(self) -> None:
         stats = _analyze_payload(self._read_json())
@@ -409,17 +520,57 @@ def serve(
     project_root: str = ".",
     open_browser: bool = True,
     ready: threading.Event | None = None,
+    on_bind=None,
 ) -> None:
-    """Run Monteur Studio until interrupted."""
+    """Run Monteur Studio until interrupted.
+
+    ``on_bind`` (optional) is called with the bound server object right before
+    the serve loop starts — a small seam so callers/tests can shut the server
+    down cleanly from another thread.
+    """
+    # faulthandler turns a C-level access violation (the prime suspect for
+    # "process just vanishes with no Python exception" while serving) into a
+    # printed native traceback instead of a silent death. Idempotent + guarded
+    # so enabling it can never itself take the server down.
+    try:
+        import faulthandler
+
+        if not faulthandler.is_enabled():
+            # enable() captures stderr's fileno and raises if there isn't one
+            # (e.g. under pythonw.exe). Fall back to the original stderr, then
+            # to a log file, so a native crash is never silent just because the
+            # console stream is unusual.
+            try:
+                faulthandler.enable(all_threads=True)
+            except (ValueError, AttributeError, OSError):
+                target = getattr(sys, "__stderr__", None)
+                if target is not None:
+                    faulthandler.enable(file=target, all_threads=True)
+                else:
+                    log = open(Path(project_root) / "monteur-crash.log", "a")
+                    faulthandler.enable(file=log, all_threads=True)
+                    print(
+                        f"(Native-crash logging goes to {log.name})", flush=True
+                    )
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never break startup
+        print(
+            f"(Note: could not enable native crash reporting: {exc})", flush=True
+        )
+
+    # Make worker-thread and main-thread crashes visible; restore on the way out
+    # so importing/embedding this module does not permanently mutate the hooks.
+    prev_hooks = _install_diagnostic_hooks()
+
     handler = type("BoundHandler", (MonteurHandler,), {"project": Project(project_root)})
     server = None
     for candidate in range(port, port + 10):
         try:
-            server = ThreadingHTTPServer(("127.0.0.1", candidate), handler)
+            server = MonteurServer(("127.0.0.1", candidate), handler)
             break
         except OSError as exc:
             bind_error = exc
     if server is None:
+        _restore_diagnostic_hooks(*prev_hooks)
         raise OSError(
             f"ports {port}-{port + 9} are all in use ({bind_error}) — "
             f"is another Monteur Studio still running?"
@@ -431,6 +582,8 @@ def serve(
     print("Leave this window open. Press Ctrl+C here to stop.", flush=True)
     if ready is not None:
         ready.set()
+    if on_bind is not None:
+        on_bind(server)
     if open_browser:
         _open_browser_safely(url)
     try:
@@ -447,6 +600,7 @@ def serve(
         raise
     finally:
         server.server_close()
+        _restore_diagnostic_hooks(*prev_hooks)
 
 
 def _open_browser_safely(url: str) -> None:

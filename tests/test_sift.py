@@ -4,6 +4,7 @@ ffmpeg-backed integration test."""
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -13,13 +14,16 @@ from monteur.sift import (
     DARK,
     SHAKY,
     USABLE,
+    ClipReport,
     Moment,
     analyze_clip,
     apply_audio,
     audio_flags,
     classify_metrics,
     find_moments,
+    sift_directory,
 )
+import monteur.sift as sift_module
 
 try:
     import imageio_ffmpeg
@@ -291,6 +295,80 @@ def test_moments_carry_entry_exit_motion():
         assert mom.entry_motion == pytest.approx((expected_entry, -1.0))
         assert mom.exit_motion == pytest.approx((expected_exit, -1.0))
         assert mom.entry_motion != mom.exit_motion
+
+
+# ------------------------------------------------------------ progress feedback
+
+
+def _fake_sift(monkeypatch, names):
+    """Make sift_directory operate on fake clips: list_media returns ``names``
+    (as paths) and analyze_clip returns a stub report — no ffmpeg needed."""
+    from pathlib import Path
+
+    monkeypatch.setattr(sift_module, "list_media", lambda directory: [Path(n) for n in names])
+
+    def fake_analyze(path):
+        return ClipReport(path=str(path), duration=6.0, moments=[Moment(0.0, 1.0, 0.5)])
+
+    monkeypatch.setattr(sift_module, "analyze_clip", fake_analyze)
+
+
+def test_progress_called_with_start_and_done_sequence(monkeypatch):
+    names = ["clip_A.mp4", "clip_B.mp4", "clip_C.mp4"]
+    _fake_sift(monkeypatch, names)
+    events = []
+
+    def progress(index, total, name, stage, report):
+        events.append((index, total, name, stage, report is not None))
+
+    reports = sift_directory("footage", progress=progress)
+
+    assert len(reports) == 3
+    assert events == [
+        (1, 3, "clip_A.mp4", "start", False),
+        (1, 3, "clip_A.mp4", "done", True),
+        (2, 3, "clip_B.mp4", "start", False),
+        (2, 3, "clip_B.mp4", "done", True),
+        (3, 3, "clip_C.mp4", "start", False),
+        (3, 3, "clip_C.mp4", "done", True),
+    ]
+    # index is 1-based and total is correct across the run.
+    assert all(1 <= idx <= total == 3 for idx, total, *_ in events)
+
+
+def test_progress_done_receives_finished_report(monkeypatch):
+    _fake_sift(monkeypatch, ["clip_A.mp4"])
+    seen = {}
+
+    def progress(index, total, name, stage, report):
+        if stage == "done":
+            seen["report"] = report
+
+    sift_directory("footage", progress=progress)
+    assert isinstance(seen["report"], ClipReport)
+    assert seen["report"].path.endswith("clip_A.mp4")
+
+
+def test_broken_progress_callback_does_not_abort(monkeypatch):
+    names = ["a.mp4", "b.mp4", "c.mp4"]
+    _fake_sift(monkeypatch, names)
+
+    def boom(index, total, name, stage, report):
+        raise RuntimeError("callback is broken")
+
+    reports = sift_directory("footage", progress=boom)
+    # All clips still processed despite the callback raising every time.
+    assert len(reports) == 3
+    assert [Path(r.path).name for r in reports] == names
+
+
+def test_progress_none_is_backwards_compatible(monkeypatch):
+    names = ["a.mp4", "b.mp4"]
+    _fake_sift(monkeypatch, names)
+    reports = sift_directory("footage")
+    assert len(reports) == 2
+    reports2 = sift_directory("footage", progress=None)
+    assert len(reports2) == 2
 
 
 # ------------------------------------------------------------- integration
