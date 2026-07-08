@@ -38,6 +38,9 @@ API (all JSON):
 * ``GET  /api/jobs/<id>``                                       -> the job dict
 * ``POST /api/jobs/<id>/cancel``                                -> {"ok": true}
 * ``POST /api/pick``          {"kind": "folder"|"music"|"file"} -> {"path"} | {"error"}
+* ``GET  /api/settings``                                        -> the AI settings view
+* ``POST /api/settings``      {"backend"?, "api_key"?}          -> the view after applying
+* ``POST /api/settings/test``                                   -> {"job": id}
 
 Timeline content is passed as text (EDL/FCPXML are text formats); ``fps`` is
 required for EDL files.
@@ -102,6 +105,23 @@ failure dict (Resolve not running, scripting disabled, incompatible
 Python, native crash, timeout) fails the job with the worker's own error
 message verbatim — it already explains the fix. Success carries the
 created ``"timeline"`` name plus any non-fatal title ``"warnings"``.
+
+The ``/api/settings`` endpoints manage how Monteur reaches Claude — the end
+user has a finished application, not a CLI, so the backend choice and the
+API key live in the UI, backed by :mod:`monteur.settings`
+(``~/.monteur/settings.json``). The GET/POST view is ``{"backend":
+"auto"|"api"|"claude-cli", "api_key_set", "api_key_hint" ("…" + last 4,
+NEVER the key itself), "env_key_set", "cli_found", "backend_forced_by_env",
+"effective": "api"|"claude-cli"|"none"}`` where ``effective`` is what
+:func:`monteur.ai._resolve_backend` would pick right now — settings are read
+per AI call, so a change applies to the very next request, no restart.
+POST validates: ``backend`` must be auto/api/claude-cli (400 otherwise);
+``api_key`` ``""`` clears the stored key, non-empty keys are stripped and
+must not contain whitespace (400). ``/api/settings/test`` is the user's
+"does my key / Claude Code work?" button: an ``"ai-test"`` job (the browser
+must not freeze on a network round-trip) that runs one tiny completion
+through the CURRENT effective backend and returns ``{"backend", "reply"}``
+— a MonteurAIError fails the job with its own actionable message.
 
 The ``/api/movie/*`` endpoints drive the Studio's Movie view on top of
 :mod:`monteur.movie`. ``load`` and ``assign`` are instant (no job; both
@@ -298,7 +318,7 @@ _PICK_LOCK = threading.Lock()
 def _new_job(kind: str) -> dict:
     job = {
         "id": secrets.token_hex(4),
-        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "distill" | "resolve-build" | "movie" | "scene-check" | "movie-assemble"
+        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "distill" | "resolve-build" | "movie" | "scene-check" | "movie-assemble" | "ai-test"
         "state": "running",  # -> "done" | "error" | "cancelled"
         "progress": [],  # dicts: {"index","total","name","stage"[,"usable_ratio"]}
         "message": "",  # human-readable reason when state == "error"
@@ -1157,6 +1177,67 @@ def _run_movie_assemble_job(job: dict, payload: dict) -> None:
         job["state"] = "error"
 
 
+# --- AI connection settings (backend choice + API key, managed in the UI) ------
+
+
+def _settings_view() -> dict:
+    """The JSON view GET and POST /api/settings share.
+
+    Never contains the key itself — only ``api_key_set`` and a "…" + last-4
+    ``api_key_hint`` so the UI can say WHICH key is saved without ever
+    round-tripping the secret. ``effective`` is what the next AI call would
+    actually use, computed by the same resolver the calls go through.
+    """
+    from monteur import ai as ai_mod
+    from monteur.settings import ai_backend, api_key
+
+    key = api_key()
+    try:
+        effective = ai_mod._resolve_backend()
+    except ai_mod.MonteurAIError:
+        effective = "none"
+    return {
+        "backend": ai_backend(),
+        "api_key_set": bool(key),
+        "api_key_hint": ("…" + key[-4:]) if key else "",
+        "env_key_set": bool(
+            os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        ),
+        "cli_found": ai_mod._cli_path() is not None,
+        "backend_forced_by_env": bool(os.environ.get(ai_mod.BACKEND_ENV, "").strip()),
+        "effective": effective,
+    }
+
+
+def _run_ai_test_job(job: dict) -> None:
+    """Daemon-thread body for POST /api/settings/test (one tiny completion).
+
+    The user's "does my key / Claude Code work?" button: resolve the
+    backend exactly like a real call would, then ask for one word through
+    it. A MonteurAIError (no backend, bad key, CLI not logged in, network)
+    fails the job with its own message — those messages already explain
+    the fix, so they go to the UI verbatim.
+    """
+    from monteur import ai as ai_mod
+
+    try:
+        backend = ai_mod._resolve_backend()
+        with _JOBS_LOCK:
+            job["progress"].append({"stage": "ai-test", "name": backend})
+        reply = ai_mod.complete(
+            "Reply with the single word OK.", max_tokens=200, effort="low"
+        )
+        job["result"] = {"backend": backend, "reply": reply.strip()}
+        job["state"] = "done"
+    except ai_mod.MonteurAIError as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
 _AUDIO_FILETYPES = [
     ("Audio files", "*.wav *.mp3 *.m4a *.aac *.flac *.ogg *.aiff *.aif *.wma"),
     ("All files", "*.*"),
@@ -1289,6 +1370,9 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/movie/check"): self._movie_check,
             ("POST", "/api/movie/assemble"): self._movie_assemble,
             ("POST", "/api/pick"): self._pick,
+            ("GET", "/api/settings"): self._settings_get,
+            ("POST", "/api/settings"): self._settings_set,
+            ("POST", "/api/settings/test"): self._settings_test,
         }
         if (method, path) in routes:
             return routes[(method, path)]
@@ -1720,6 +1804,49 @@ class MonteurHandler(BaseHTTPRequestHandler):
         if kind not in ("folder", "music", "file"):
             raise ApiError(400, "'kind' must be 'folder', 'music' or 'file'")
         self._send_json(_native_pick(kind))
+
+    # -- AI connection settings ---------------------------------------------
+
+    def _settings_get(self) -> None:
+        self._send_json(_settings_view())
+
+    def _settings_set(self) -> None:
+        from monteur.settings import save_settings
+
+        payload = self._read_json()
+        updates: dict = {}
+        if "backend" in payload:
+            backend = str(payload.get("backend") or "").strip().lower()
+            if backend not in ("auto", "api", "claude-cli"):
+                raise ApiError(
+                    400, "'backend' must be 'auto', 'api' or 'claude-cli'"
+                )
+            updates["ai_backend"] = backend
+        if "api_key" in payload:
+            raw = payload.get("api_key")
+            if not isinstance(raw, str):
+                raise ApiError(400, "'api_key' must be a string ('' clears it)")
+            key = raw.strip()
+            if any(ch.isspace() for ch in key):
+                raise ApiError(
+                    400,
+                    "that doesn't look like an API key — keys are one "
+                    "unbroken string with no spaces",
+                )
+            updates["api_key"] = key
+        if updates:
+            save_settings(updates)
+        self._send_json(_settings_view())
+
+    def _settings_test(self) -> None:
+        job = _new_job("ai-test")
+        threading.Thread(
+            target=_run_ai_test_job,
+            args=(job,),
+            name=f"monteur-ai-test-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
 
     def _resolve_status(self) -> None:
         # Isolated in a child process: Resolve's native module can hard-crash

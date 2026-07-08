@@ -34,8 +34,10 @@ Cost control, because vision requests are billed per image:
 A clip whose frame extraction fails gets a note and is skipped — a corrupt
 file must never abort annotating the rest of the shoot.
 
-Requires the optional AI extra (``pip install 'monteur[ai]'``) and Claude
-credentials (``ANTHROPIC_API_KEY``), like everything in :mod:`monteur.ai`.
+Requires the optional AI extra (``pip install 'monteur[ai]'``) and an
+Anthropic API key — ``ANTHROPIC_API_KEY`` in the environment, or the key
+saved in Studio's settings (:mod:`monteur.settings`), same lookup as
+:mod:`monteur.ai`.
 """
 
 from __future__ import annotations
@@ -115,10 +117,14 @@ class MonteurVisionError(RuntimeError):
 def _client():
     """Create the Claude client; tests monkeypatch this single seam.
 
-    A missing package raises immediately with an actionable message. A
-    missing ANTHROPIC_API_KEY typically only surfaces at request time (the
-    SDK resolves credentials lazily) — that path is caught broadly around
-    the request itself in :func:`_describe_batch`.
+    Key lookup matches :mod:`monteur.ai` exactly, so a key pasted into
+    Studio's settings enables footage vision too: environment credentials
+    (``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN``) win, else the
+    settings-file key is passed to the client directly, else the SDK's own
+    resolution gets its chance. A missing package raises immediately with
+    an actionable message; a missing key typically only surfaces at request
+    time (the SDK resolves credentials lazily) — that path is caught
+    broadly around the request itself in :func:`_describe_batch`.
     """
     try:
         import anthropic
@@ -127,12 +133,22 @@ def _client():
             "vision analysis needs the 'anthropic' package: pip install 'monteur[ai]'"
         ) from exc
     try:
+        if not (
+            os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        ):
+            from monteur.settings import api_key
+
+            key = api_key()
+            if key:
+                return anthropic.Anthropic(api_key=key)
         return anthropic.Anthropic()
     except Exception as exc:  # pragma: no cover - constructor-time auth failures
         raise MonteurVisionError(
             "could not create the Claude client — footage vision needs an "
-            "Anthropic API key (ANTHROPIC_API_KEY) specifically; unlike the "
-            f"writing features it cannot use the Claude Code CLI: {exc}"
+            "Anthropic API key (ANTHROPIC_API_KEY, or a key pasted in "
+            "Studio's settings) specifically; unlike the writing features "
+            f"it cannot use the Claude Code CLI: {exc}"
         ) from exc
 
 
@@ -340,7 +356,8 @@ def _describe_batch(client, model: str, batch: list[tuple]) -> dict[int, dict]:
             f"Claude vision request failed: {exc} — footage vision sends "
             "images, so unlike Monteur's writing features it cannot use the "
             "Claude Code CLI: it needs the 'anthropic' package (pip install "
-            "'monteur[ai]') and an Anthropic API key (ANTHROPIC_API_KEY)."
+            "'monteur[ai]') and an Anthropic API key (ANTHROPIC_API_KEY, or "
+            "a key pasted in Studio's settings)."
         ) from exc
     if getattr(response, "stop_reason", None) == "refusal":
         raise MonteurVisionError(

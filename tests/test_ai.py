@@ -28,11 +28,16 @@ def test_missing_anthropic_raises_helpful_error():
 
 
 @pytest.fixture
-def clean_env(monkeypatch):
-    """No forced backend, no credentials — the auto-selection baseline."""
+def clean_env(monkeypatch, tmp_path):
+    """No forced backend, no credentials, no settings file — the baseline.
+
+    MONTEUR_SETTINGS_PATH points at a scratch file so these tests never
+    read (or leak into) the developer's real ~/.monteur/settings.json.
+    """
     monkeypatch.delenv("MONTEUR_AI_BACKEND", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("MONTEUR_SETTINGS_PATH", str(tmp_path / "settings.json"))
     return monkeypatch
 
 
@@ -58,10 +63,11 @@ def test_backend_neither_raises_combined_message(clean_env):
     with pytest.raises(MonteurAIError) as err:
         ai._resolve_backend()
     message = str(err.value)
-    # one message, BOTH ways out: the API key and Claude Code
+    # one message, EVERY way out: the API key (env or Studio) and Claude Code
     assert "ANTHROPIC_API_KEY" in message
     assert "Claude Code" in message
     assert "'claude'" in message
+    assert "Studio's settings" in message
 
 
 def test_backend_env_forces_cli_over_credentials(clean_env):
@@ -88,6 +94,123 @@ def test_backend_env_unknown_value_raises(clean_env):
     clean_env.setenv("MONTEUR_AI_BACKEND", "gemini")
     with pytest.raises(MonteurAIError, match="MONTEUR_AI_BACKEND"):
         ai._resolve_backend()
+
+
+# --- backend selection via the settings file (Studio's settings panel) ---------------
+
+
+def _write_settings(**settings):
+    """Write the scratch settings file clean_env pointed MONTEUR_SETTINGS_PATH at."""
+    from monteur.settings import save_settings
+
+    save_settings(settings)
+
+
+def test_settings_force_api_without_credentials(clean_env):
+    _write_settings(ai_backend="api")
+    clean_env.setattr(ai, "_cli_path", lambda: "/usr/local/bin/claude")
+    assert ai._resolve_backend() == "api"
+
+
+def test_settings_force_cli_over_credentials(clean_env):
+    clean_env.setenv("ANTHROPIC_API_KEY", "sk-test")
+    _write_settings(ai_backend="claude-cli")
+    clean_env.setattr(ai, "_cli_path", lambda: "/usr/local/bin/claude")
+    assert ai._resolve_backend() == "claude-cli"
+
+
+def test_settings_force_cli_without_executable_raises(clean_env):
+    _write_settings(ai_backend="claude-cli")
+    clean_env.setattr(ai, "_cli_path", lambda: None)
+    with pytest.raises(MonteurAIError, match="PATH"):
+        ai._resolve_backend()
+
+
+def test_env_backend_wins_over_settings(clean_env):
+    _write_settings(ai_backend="api")
+    clean_env.setenv("MONTEUR_AI_BACKEND", "claude-cli")
+    clean_env.setattr(ai, "_cli_path", lambda: "/usr/local/bin/claude")
+    assert ai._resolve_backend() == "claude-cli"
+
+
+def test_settings_key_selects_api_in_auto_mode(clean_env):
+    _write_settings(api_key="sk-from-studio")
+    clean_env.setattr(ai, "_cli_path", lambda: "/usr/local/bin/claude")
+    assert ai._resolve_backend() == "api"
+
+
+def test_settings_unknown_backend_reads_as_auto(clean_env):
+    _write_settings(ai_backend="gemini")
+    clean_env.setattr(ai, "_cli_path", lambda: "/usr/local/bin/claude")
+    assert ai._resolve_backend() == "claude-cli"  # auto: no key -> CLI
+
+
+def test_cleared_key_falls_back_to_cli(clean_env):
+    # The Studio "Clear" button stores "" — auto must treat that as no key.
+    _write_settings(api_key="")
+    clean_env.setattr(ai, "_cli_path", lambda: "/usr/local/bin/claude")
+    assert ai._resolve_backend() == "claude-cli"
+
+
+class _FakeAnthropicModule:
+    """A stand-in anthropic module whose Anthropic() records its kwargs."""
+
+    def __init__(self):
+        self.constructed_with = []
+        module = self
+
+        class Anthropic:
+            def __init__(self, **kwargs):
+                module.constructed_with.append(kwargs)
+
+        self.Anthropic = Anthropic
+
+
+def test_client_passes_settings_key_when_no_env_key(clean_env):
+    _write_settings(api_key="sk-from-studio")
+    fake = _FakeAnthropicModule()
+    with mock.patch.dict(sys.modules, {"anthropic": fake}):
+        ai._client()
+    assert fake.constructed_with == [{"api_key": "sk-from-studio"}]
+
+
+def test_client_env_key_wins_over_settings_key(clean_env):
+    _write_settings(api_key="sk-from-studio")
+    clean_env.setenv("ANTHROPIC_API_KEY", "sk-from-env")
+    fake = _FakeAnthropicModule()
+    with mock.patch.dict(sys.modules, {"anthropic": fake}):
+        ai._client()
+    # no explicit kwarg: the SDK's own env resolution must win
+    assert fake.constructed_with == [{}]
+
+
+def test_client_without_any_key_uses_default_resolution(clean_env):
+    fake = _FakeAnthropicModule()
+    with mock.patch.dict(sys.modules, {"anthropic": fake}):
+        ai._client()
+    assert fake.constructed_with == [{}]  # e.g. an `ant auth login` profile
+
+
+def test_vision_client_uses_settings_key(clean_env):
+    """A key pasted in Studio must enable footage vision too."""
+    import monteur.vision as vision
+
+    _write_settings(api_key="sk-from-studio")
+    fake = _FakeAnthropicModule()
+    with mock.patch.dict(sys.modules, {"anthropic": fake}):
+        vision._client()
+    assert fake.constructed_with == [{"api_key": "sk-from-studio"}]
+
+
+def test_vision_client_env_key_wins_over_settings_key(clean_env):
+    import monteur.vision as vision
+
+    _write_settings(api_key="sk-from-studio")
+    clean_env.setenv("ANTHROPIC_API_KEY", "sk-from-env")
+    fake = _FakeAnthropicModule()
+    with mock.patch.dict(sys.modules, {"anthropic": fake}):
+        vision._client()
+    assert fake.constructed_with == [{}]
 
 
 # --- the claude-cli backend -----------------------------------------------------------

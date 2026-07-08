@@ -24,6 +24,16 @@ from monteur.web.server import (
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+@pytest.fixture(autouse=True)
+def _isolated_settings(tmp_path, monkeypatch):
+    """Every web test gets a scratch settings file — the server reads
+    monteur.settings per request, and tests must never touch (or depend
+    on) the developer's real ~/.monteur/settings.json."""
+    monkeypatch.setenv(
+        "MONTEUR_SETTINGS_PATH", str(tmp_path / "web-settings.json")
+    )
+
+
 @pytest.fixture()
 def server(tmp_path):
     handler = type("TestHandler", (MonteurHandler,), {"project": Project(tmp_path)})
@@ -1580,3 +1590,151 @@ class TestResolveBuildApi:
         job = self._resolve(server, plan_json=empty)
         assert job["state"] == "error"
         assert "no entries" in job["message"]
+
+
+class TestSettingsApi:
+    """The AI connection settings endpoints (backend choice + API key).
+
+    The autouse _isolated_settings fixture already points
+    MONTEUR_SETTINGS_PATH at a scratch file; this fixture additionally
+    strips machine-level state (env credentials, forced backend, a real
+    `claude` on PATH) so the assertions are deterministic everywhere.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_machine(self, monkeypatch):
+        import monteur.ai as ai
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("MONTEUR_AI_BACKEND", raising=False)
+        monkeypatch.setattr(ai, "_cli_path", lambda: None)
+        self.ai = ai
+        self.monkeypatch = monkeypatch
+
+    def _raw_get(self, server):
+        with urllib.request.urlopen(f"{server}/api/settings") as response:
+            return response.read().decode()
+
+    def test_get_shape_on_a_fresh_machine(self, server):
+        data = _get(f"{server}/api/settings")
+        assert data == {
+            "backend": "auto",
+            "api_key_set": False,
+            "api_key_hint": "",
+            "env_key_set": False,
+            "cli_found": False,
+            "backend_forced_by_env": False,
+            "effective": "none",  # nothing to reach Claude with yet
+        }
+
+    def test_post_key_saves_and_never_leaks_it(self, server):
+        secret = "sk-ant-test-abcd1234wxyz"
+        data = _post(f"{server}/api/settings", {"api_key": secret})
+        assert data["api_key_set"] is True
+        assert data["api_key_hint"] == "…wxyz"  # last 4 only
+        assert data["effective"] == "api"  # auto now resolves to the key
+        # The full key appears in NO response body, GET or POST.
+        assert secret not in json.dumps(data)
+        assert secret not in self._raw_get(server)
+        # ...but it did land in the settings file (0600 on POSIX).
+        from monteur.settings import api_key, settings_path
+
+        assert api_key() == secret
+        if os.name == "posix":
+            assert (settings_path().stat().st_mode & 0o777) == 0o600
+
+    def test_post_key_is_stripped(self, server):
+        data = _post(f"{server}/api/settings", {"api_key": "  sk-ant-pad-1234  "})
+        assert data["api_key_hint"] == "…1234"
+
+    def test_post_empty_key_clears(self, server):
+        _post(f"{server}/api/settings", {"api_key": "sk-ant-test-abcd"})
+        data = _post(f"{server}/api/settings", {"api_key": ""})
+        assert data["api_key_set"] is False
+        assert data["api_key_hint"] == ""
+        assert data["effective"] == "none"  # no key, no CLI -> nothing again
+
+    def test_post_key_with_inner_whitespace_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/settings", {"api_key": "sk-ant oops"})
+        assert exc_info.value.code == 400
+        assert "API key" in json.loads(exc_info.value.read())["error"]
+
+    def test_post_key_non_string_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/settings", {"api_key": 42})
+        assert exc_info.value.code == 400
+
+    def test_post_backend_saves_and_resolves(self, server):
+        self.monkeypatch.setattr(self.ai, "_cli_path", lambda: "/fake/claude")
+        data = _post(f"{server}/api/settings", {"backend": "claude-cli"})
+        assert data["backend"] == "claude-cli"
+        assert data["cli_found"] is True
+        assert data["effective"] == "claude-cli"
+        # The saved choice steers the SAME resolver every AI call goes
+        # through — a later completion would use the CLI.
+        assert self.ai._resolve_backend() == "claude-cli"
+
+    def test_post_backend_invalid_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/settings", {"backend": "gemini"})
+        assert exc_info.value.code == 400
+        assert "backend" in json.loads(exc_info.value.read())["error"]
+
+    def test_forced_cli_without_executable_is_effective_none(self, server):
+        data = _post(f"{server}/api/settings", {"backend": "claude-cli"})
+        assert data["backend"] == "claude-cli"
+        assert data["cli_found"] is False
+        assert data["effective"] == "none"  # resolution raises -> "none"
+
+    def test_env_key_reported_and_wins(self, server):
+        self.monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
+        data = _get(f"{server}/api/settings")
+        assert data["env_key_set"] is True
+        assert data["effective"] == "api"
+
+    def test_env_backend_reported_as_forced(self, server):
+        self.monkeypatch.setenv("MONTEUR_AI_BACKEND", "api")
+        data = _post(f"{server}/api/settings", {"backend": "claude-cli"})
+        assert data["backend"] == "claude-cli"  # stored all the same
+        assert data["backend_forced_by_env"] is True
+        assert data["effective"] == "api"  # ...but the env var wins
+
+    def test_ai_test_job_happy_path(self, server):
+        self.monkeypatch.setattr(self.ai, "_cli_path", lambda: "/fake/claude")
+        _post(f"{server}/api/settings", {"backend": "claude-cli"})
+        calls = []
+
+        def fake_complete(prompt, **kwargs):
+            calls.append((prompt, kwargs))
+            return "  OK \n"
+
+        self.monkeypatch.setattr(self.ai, "complete", fake_complete)
+        data = _post(f"{server}/api/settings/test", {})
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert job["kind"] == "ai-test"
+        assert job["result"] == {"backend": "claude-cli", "reply": "OK"}
+        assert {"stage": "ai-test", "name": "claude-cli"} in job["progress"]
+        (call,) = calls
+        assert "OK" in call[0]  # the sign-of-life prompt
+
+    def test_ai_test_job_failure_carries_the_ai_message(self, server):
+        self.monkeypatch.setattr(self.ai, "_cli_path", lambda: "/fake/claude")
+
+        def failing_complete(prompt, **kwargs):
+            raise self.ai.MonteurAIError("the 'claude' CLI exited with code 1")
+
+        self.monkeypatch.setattr(self.ai, "complete", failing_complete)
+        data = _post(f"{server}/api/settings/test", {})
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert job["message"] == "the 'claude' CLI exited with code 1"
+
+    def test_ai_test_job_without_any_backend_fails_helpfully(self, server):
+        data = _post(f"{server}/api/settings/test", {})
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        # the combined no-backend message, mentioning the Studio settings
+        assert "Studio's settings" in job["message"]

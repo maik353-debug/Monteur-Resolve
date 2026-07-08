@@ -353,6 +353,42 @@ svg text.axis {
 .fps-custom input { width: 90px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 3px; background: var(--input-bg); color: var(--ink); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
+/* ---------- settings modal (AI — Claude connection) --------------------- */
+.settings-card { width: min(480px, 100%); }
+.set-status { margin: 6px 0 0; font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.set-status.off { color: var(--warning); }
+.set-env-note { margin-top: 4px; }
+.set-group { border: 0; margin: 12px 0 0; padding: 0; }
+.set-group legend {
+  padding: 0; margin-bottom: 4px; font-size: 10.5px; font-weight: 650;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-muted);
+}
+.set-radio { display: flex; align-items: flex-start; gap: 9px; padding: 5px 8px; margin: 0 -8px; border-radius: 3px; cursor: pointer; }
+.set-radio:hover { background: var(--surface-2); }
+.set-radio input { margin: 3px 0 0; accent-color: var(--accent); flex: none; cursor: pointer; }
+.set-radio input[disabled] { cursor: default; }
+.set-radio-text strong { font-size: 12.5px; font-weight: 650; }
+.set-radio-text .help-small { display: block; margin-top: 0; }
+.set-badges {
+  display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 10px; padding-top: 9px;
+  border-top: 1px solid var(--grid); font-size: 12px; color: var(--ink-2);
+}
+.set-key-block { margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--grid); }
+.set-key-label {
+  display: block; margin-bottom: 5px; font-size: 10.5px; font-weight: 650;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-muted);
+}
+.set-key-row { display: flex; gap: 8px; }
+.set-key-row input {
+  flex: 1; min-width: 0; padding: 5px 8px; border: 1px solid var(--border); border-radius: 3px;
+  background: var(--input-bg); color: var(--ink); font-family: var(--mono); font-size: 12px;
+}
+.set-test-row { display: flex; align-items: baseline; gap: 10px; margin-top: 12px; }
+.set-test-result { max-width: none; margin-top: 0; }
+.set-test-result:empty { display: none; }
+.set-test-result.ok { color: var(--good); }
+.settings-card .modal-actions { margin-top: 14px; }
+
 /* ---------- assembly view ---------- */
 #assembly { max-width: 980px; margin: 0 auto; padding: 18px 22px 48px; }
 .asm-sources { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
@@ -784,6 +820,12 @@ svg text.axis {
     <button class="view-tab" id="tab-assembly" type="button" aria-pressed="false">Assembly</button>
   </nav>
   <div class="tb-right">
+    <button class="theme-btn" id="settings-open" type="button" aria-label="Settings">
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M8 1.4 V3.6 M8 12.4 V14.6 M1.4 8 H3.6 M12.4 8 H14.6 M3.3 3.3 L4.9 4.9 M11.1 11.1 L12.7 12.7 M12.7 3.3 L11.1 4.9 M4.9 11.1 L3.3 12.7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+    </button>
     <button class="theme-btn" id="theme-toggle" type="button" aria-label="Switch color theme">
       <svg viewBox="0 0 16 16" aria-hidden="true">
         <circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" stroke-width="1.5"/>
@@ -1433,6 +1475,59 @@ svg text.axis {
     <div class="modal-actions">
       <button class="btn ghost" id="fps-cancel" type="button">Cancel</button>
       <button class="btn primary" id="fps-ok" type="button">Analyze</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="settings-modal" hidden>
+  <div class="modal-card settings-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <h2 id="settings-title">AI &mdash; Claude connection</h2>
+    <p class="set-status" id="set-status" role="status"></p>
+    <p class="help-small set-env-note" id="set-env-note" hidden>These settings are overridden by this machine&rsquo;s MONTEUR_AI_BACKEND environment variable &mdash; the choice below takes effect again once it is unset.</p>
+
+    <fieldset class="set-group">
+      <legend>How Monteur reaches Claude</legend>
+      <label class="set-radio">
+        <input type="radio" name="set-backend" value="auto" id="set-b-auto">
+        <span class="set-radio-text"><strong>Auto (recommended)</strong>
+          <span class="help-small">Uses your API key if one is set, otherwise Claude Code if it&rsquo;s installed.</span></span>
+      </label>
+      <label class="set-radio">
+        <input type="radio" name="set-backend" value="api" id="set-b-api">
+        <span class="set-radio-text"><strong>API key</strong>
+          <span class="help-small">Always the key (pay per use, also powers footage vision).</span></span>
+      </label>
+      <label class="set-radio">
+        <input type="radio" name="set-backend" value="claude-cli" id="set-b-cli">
+        <span class="set-radio-text"><strong>Claude Code</strong>
+          <span class="help-small">Always the installed claude app (covered by your Claude subscription; footage vision still needs a key).</span></span>
+      </label>
+    </fieldset>
+
+    <div class="set-badges">
+      <span id="set-badge-cli"></span>
+      <span id="set-badge-key"></span>
+    </div>
+
+    <div class="set-key-block">
+      <label class="set-key-label" for="set-key">Anthropic API key</label>
+      <div class="set-key-row">
+        <input type="password" id="set-key" placeholder="sk-ant-&hellip;" autocomplete="off" spellcheck="false">
+        <button class="btn small" id="set-key-save" type="button"><span class="spin" aria-hidden="true"></span>Save</button>
+        <button class="btn ghost small" id="set-key-clear" type="button"><span class="spin" aria-hidden="true"></span>Clear</button>
+      </div>
+      <p class="help-small">Stored only on this computer (~/.monteur/settings.json), sent only to Anthropic. Get one at console.anthropic.com. Also unlocks &ldquo;Let Claude watch your clips&rdquo;.</p>
+    </div>
+
+    <div class="set-test-row">
+      <button class="btn small" id="set-test" type="button"><span class="spin" aria-hidden="true"></span>Test connection</button>
+      <span class="help-small set-test-result" id="set-test-result" role="status" aria-live="polite"></span>
+    </div>
+
+    <p class="help-small">Changes apply immediately &mdash; the next thing you ask Claude for uses them. No restart needed.</p>
+
+    <div class="modal-actions">
+      <button class="btn ghost" id="settings-close" type="button">Close</button>
     </div>
   </div>
 </div>
@@ -4889,6 +4984,138 @@ $("mov-browse-open").addEventListener("click", function () {
 });
 $("mov-browse-new").addEventListener("click", function () {
   browsePath("folder", "mov-new-dir", "mov-browse-new");
+});
+
+/* ================= settings (AI — Claude connection) ================= */
+
+var settingsState = null;
+
+function settingsStatusText(s) {
+  if (s.effective === "claude-cli") return "Using: Claude Code (your subscription)";
+  if (s.effective === "api") return "Using: Anthropic API key";
+  return "No connection — set one up below.";
+}
+
+function renderSettings(s) {
+  settingsState = s;
+  var status = $("set-status");
+  status.textContent = settingsStatusText(s);
+  status.classList.toggle("off", s.effective === "none");
+  $("set-env-note").hidden = !s.backend_forced_by_env;
+  [["set-b-auto", "auto"], ["set-b-api", "api"], ["set-b-cli", "claude-cli"]].forEach(function (pair) {
+    var radio = $(pair[0]);
+    radio.checked = (s.backend === pair[1]);
+    radio.disabled = !!s.backend_forced_by_env; // the machine's env var wins
+  });
+  $("set-badge-cli").textContent = "Claude Code: " + (s.cli_found ? "found" : "not found");
+  var key;
+  if (s.env_key_set) key = "from this machine's environment";
+  else if (s.api_key_set) key = "saved (" + s.api_key_hint + ")";
+  else key = "none";
+  $("set-badge-key").textContent = "API key: " + key;
+  $("set-key-clear").disabled = !s.api_key_set;
+}
+
+function saveSettings(body) {
+  return api("/api/settings", { method: "POST", body: body }).then(renderSettings);
+}
+
+function openSettings() {
+  var out = $("set-test-result");
+  out.textContent = "";
+  out.classList.remove("ok");
+  $("set-key").value = "";
+  api("/api/settings").then(function (s) {
+    renderSettings(s);
+    $("settings-modal").hidden = false;
+    $("settings-close").focus();
+  }).catch(function (err) {
+    toast(err && err.message ? err.message : String(err), "error");
+  });
+}
+
+function closeSettings() {
+  $("settings-modal").hidden = true;
+  $("settings-open").focus();
+}
+
+$("settings-open").addEventListener("click", openSettings);
+$("settings-close").addEventListener("click", closeSettings);
+$("settings-modal").addEventListener("keydown", function (e) {
+  if (e.key === "Escape") closeSettings();
+});
+
+["set-b-auto", "set-b-api", "set-b-cli"].forEach(function (id) {
+  $(id).addEventListener("change", function () {
+    if (!$(id).checked) return;
+    saveSettings({ backend: $(id).value }).catch(function (err) {
+      toast(err && err.message ? err.message : String(err), "error");
+      if (settingsState) renderSettings(settingsState); // snap back
+    });
+  });
+});
+
+$("set-key-save").addEventListener("click", function () {
+  var key = $("set-key").value.trim();
+  if (!key) {
+    toast("Paste your API key first — it starts with sk-ant-…", "error");
+    $("set-key").focus();
+    return;
+  }
+  busy($("set-key-save"), function () {
+    return saveSettings({ api_key: key }).then(function () {
+      $("set-key").value = "";
+      toast("API key saved — the next Claude request uses it.", "success");
+    });
+  });
+});
+$("set-key").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); $("set-key-save").click(); }
+});
+
+$("set-key-clear").addEventListener("click", function () {
+  busy($("set-key-clear"), function () {
+    return saveSettings({ api_key: "" }).then(function () {
+      $("set-key").value = "";
+      toast("API key removed from this computer.", "success");
+    });
+  }).then(function () {
+    // busy() re-enables its button; re-apply "no key -> Clear disabled".
+    if (settingsState) renderSettings(settingsState);
+  });
+});
+
+$("set-test").addEventListener("click", function () {
+  var btn = $("set-test");
+  if (btn.classList.contains("busy")) return;
+  var out = $("set-test-result");
+  out.classList.remove("ok");
+  out.textContent = "Asking Claude for a sign of life…";
+  btn.classList.add("busy");
+  btn.disabled = true;
+  function finish(text, ok) {
+    btn.classList.remove("busy");
+    btn.disabled = false;
+    out.textContent = text;
+    out.classList.toggle("ok", !!ok);
+  }
+  api("/api/settings/test", { method: "POST", body: {} }).then(function (data) {
+    (function poll() {
+      api("/api/jobs/" + data.job).then(function (job) {
+        if (job.state === "running") { window.setTimeout(poll, 700); return; }
+        if (job.state === "done") {
+          var via = (job.result && job.result.backend) === "claude-cli" ? "Claude Code" : "your API key";
+          finish("Connected — Claude answered via " + via + ".", true);
+        } else {
+          finish(job.message ? String(job.message) : "Something went wrong.", false);
+        }
+      }).catch(function (err) {
+        finish(err && err.message ? err.message : String(err), false);
+      });
+    })();
+  }).catch(function (err) {
+    finish(err && err.message ? err.message : String(err), false);
+  });
 });
 
 /* ================= boot ================= */

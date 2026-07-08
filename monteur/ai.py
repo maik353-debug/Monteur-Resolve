@@ -6,17 +6,29 @@ knows two ways to reach Claude:
 
 * **api** — the Claude API via the ``anthropic`` package (``pip install
   monteur[ai]``), authenticated with ``ANTHROPIC_API_KEY`` or
-  ``ANTHROPIC_AUTH_TOKEN`` (or an ``ant auth login`` profile).
+  ``ANTHROPIC_AUTH_TOKEN``, the key saved in Studio's settings
+  (:mod:`monteur.settings`), or an ``ant auth login`` profile.
 * **claude-cli** — the Claude Code command-line tool (``claude``) in
   headless mode, using its own login/subscription. No API key and no
   ``anthropic`` package needed; Monteur runs it as a pure completion with
   all tools disabled.
 
-Backend selection is automatic: the API when credentials are set
-(``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN``), otherwise the
-``claude`` CLI when it is on PATH, otherwise a :class:`MonteurAIError`
-explaining both options. Set ``MONTEUR_AI_BACKEND=api`` or
-``MONTEUR_AI_BACKEND=claude-cli`` to force one.
+Backend resolution order (see :func:`_resolve_backend`):
+
+1. ``MONTEUR_AI_BACKEND=api|claude-cli`` in the environment — the
+   developer escape hatch, it always wins;
+2. else the settings file's ``ai_backend`` when Studio's settings panel
+   forced ``"api"`` or ``"claude-cli"`` (:mod:`monteur.settings` —
+   ``~/.monteur/settings.json``);
+3. else auto: the API when a key exists (environment OR settings file),
+   otherwise the ``claude`` CLI when it is on PATH, otherwise a
+   :class:`MonteurAIError` explaining every option.
+
+Within the API path the key precedence is: ``ANTHROPIC_API_KEY`` /
+``ANTHROPIC_AUTH_TOKEN`` from the environment win (an explicit
+machine-level override), else the key saved in Studio's settings is passed
+to the client directly, else the SDK's own resolution (e.g. an ``ant auth
+login`` profile) gets its chance.
 
 Footage vision (:mod:`monteur.vision`) is the exception: it sends images,
 which the CLI cannot, so it always needs the API key.
@@ -64,6 +76,20 @@ class MonteurAIError(RuntimeError):
     """Raised when the AI feature is unavailable or a request fails."""
 
 
+def _env_credentials() -> bool:
+    """True when the environment itself carries Claude API credentials."""
+    return bool(
+        os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    )
+
+
+def _settings_api_key() -> str:
+    """The API key saved in Studio's settings (``""`` when none)."""
+    from monteur.settings import api_key
+
+    return api_key()
+
+
 def _client():
     try:
         import anthropic
@@ -71,7 +97,23 @@ def _client():
         raise MonteurAIError(
             "AI features need the 'anthropic' package: pip install 'monteur[ai]'"
         ) from exc
-    return anthropic.Anthropic()
+    # Env credentials win (explicit machine-level override); otherwise a key
+    # saved in Studio's settings is passed to the client directly; otherwise
+    # the SDK's own resolution (e.g. an `ant auth login` profile) may apply.
+    try:
+        if not _env_credentials():
+            key = _settings_api_key()
+            if key:
+                return anthropic.Anthropic(api_key=key)
+        return anthropic.Anthropic()
+    except MonteurAIError:
+        raise
+    except Exception as exc:  # pragma: no cover - constructor-time auth failures
+        raise MonteurAIError(
+            "could not create the Claude client — the API backend needs an "
+            "Anthropic API key: set ANTHROPIC_API_KEY, or paste a key in "
+            f"Studio's settings: {exc}"
+        ) from exc
 
 
 def _cli_path() -> str | None:
@@ -86,18 +128,21 @@ def _cli_path() -> str | None:
 _NO_BACKEND_MESSAGE = (
     "No way to reach Claude found. Monteur's writing features need one of "
     "two things: set the ANTHROPIC_API_KEY environment variable (an API key "
-    "from console.anthropic.com, billed per use), OR install Claude Code "
+    "from console.anthropic.com, billed per use) — or paste an API key in "
+    "Studio's settings — OR install Claude Code "
     "(https://claude.com/claude-code) — then Monteur uses the 'claude' "
     "command with its login/subscription at no extra cost."
 )
 
 
 def _resolve_backend() -> str:
-    """Pick the backend: forced by MONTEUR_AI_BACKEND, else auto.
+    """Pick the backend. Resolution order (documented in the module docstring):
 
-    Auto order: the API when credentials are set (ANTHROPIC_API_KEY or
-    ANTHROPIC_AUTH_TOKEN), else the ``claude`` CLI when on PATH, else a
-    MonteurAIError explaining both options.
+    1. ``MONTEUR_AI_BACKEND`` in the environment (developer escape hatch),
+    2. else a forced choice saved in Studio's settings file,
+    3. else auto: the API when a key exists (environment or settings),
+       else the ``claude`` CLI when on PATH, else a MonteurAIError
+       explaining every option.
     """
     forced = os.environ.get(BACKEND_ENV, "").strip().lower()
     if forced:
@@ -112,7 +157,23 @@ def _resolve_backend() -> str:
                 f"or unset {BACKEND_ENV}"
             )
         return forced
-    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+    from monteur.settings import ai_backend
+
+    chosen = ai_backend()
+    if chosen == "claude-cli":
+        if _cli_path() is None:
+            raise MonteurAIError(
+                "Monteur is set to use Claude Code (Studio settings), but no "
+                "'claude' executable is on PATH — install Claude Code "
+                "(https://claude.com/claude-code), or switch the setting "
+                "back to Auto"
+            )
+        return "claude-cli"
+    if chosen == "api":
+        # A forced-api choice without any key fails inside the API request
+        # with its own clear message; resolution honours the user's choice.
+        return "api"
+    if _env_credentials() or _settings_api_key():
         return "api"
     if _cli_path() is not None:
         return "claude-cli"
