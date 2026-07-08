@@ -211,6 +211,20 @@ def cmd_create(args: argparse.Namespace) -> None:
 
     if not args.output and not args.into_resolve:
         _fail("create needs -o/--output and/or --into-resolve")
+    if args.brief:
+        from monteur.brief import merge_brief, resolve_brief
+
+        settings = resolve_brief(args.brief)
+        # Explicit flags win over the brief: only values still at their
+        # argparse defaults are overridden (see monteur.brief.merge_brief).
+        args.style, args.order, args.max_duration = merge_brief(
+            args.style, args.order, args.max_duration, settings
+        )
+        print(f"Brief: {settings.rationale}")
+        print(
+            f"  -> style {args.style}, order {args.order}, "
+            f"max duration {args.max_duration if args.max_duration else 'full song'}"
+        )
     try:
         print("Scanning footage ...")
         reports = sift_directory(args.folder)
@@ -422,6 +436,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--style", default="auto",
         help="montage style: auto, travel, wedding, music_video, trailer",
+    )
+    p.add_argument(
+        "--brief", default="",
+        help='natural-language brief, e.g. "90 Sekunden, energiegeladen" — '
+             "sets style/order/max-duration; explicit flags win over the brief",
     )
     p.set_defaults(func=cmd_create)
 

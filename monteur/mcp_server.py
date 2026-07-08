@@ -408,7 +408,9 @@ def create_montage(
     order: str = "chronological",
     fps: float = 25,
     max_duration: float = 0,
+    style: str = "auto",
     into_resolve: bool = False,
+    brief: str = "",
 ) -> dict:
     """Build a music-cut montage from a folder of footage — a first cut.
 
@@ -416,13 +418,21 @@ def create_montage(
     ``music`` (absolute path), and lays the best moments on the beat grid:
     calm sections cut slower, high-energy sections faster. ``order`` is
     "chronological" (keep footage order — travel/event films) or
-    "best_first" (strongest material on the loudest music).
+    "best_first" (strongest material on the loudest music). ``style`` is
+    one of "auto", "travel", "wedding", "music_video", "trailer".
     ``max_duration`` caps the montage length in seconds (0 = full song).
+    ``brief`` is an optional natural-language brief (German or English,
+    e.g. "90 Sekunden, energiegeladen"); it is interpreted with a rough
+    offline keyword matcher and applied only where style/order/max_duration
+    are still at their defaults. Prefer passing explicit style/order/
+    max_duration values yourself — you can interpret the user's wish far
+    better than the keyword matcher; ``brief`` is a convenience fallback.
     Destination — pick exactly one: ``into_resolve=True`` builds the
     timeline directly in the running DaVinci Resolve, or ``output`` saves
     it to an absolute .fcpxml/.edl path for import later. ``fps`` is the
     timeline frame rate. Returns the plan summary: number of cuts,
-    duration, tempo, and planner notes.
+    duration, tempo, planner notes, and (when a brief was used) the
+    interpretation rationale.
     """
     if not into_resolve and not output:
         return {
@@ -430,6 +440,17 @@ def create_montage(
             "timeline in DaVinci Resolve, or output=<absolute .fcpxml/.edl "
             "path> to save it to a file."
         }
+    brief_rationale = ""
+    if brief and style == "auto" and order == "chronological" and not max_duration:
+        # Inside MCP the caller IS Claude — never spend an API round trip
+        # here; the offline keyword interpreter is the only sensible option.
+        from monteur.brief import resolve_brief
+
+        settings = resolve_brief(brief, use_ai=False)
+        style, order = settings.style, settings.order
+        if settings.max_duration:
+            max_duration = settings.max_duration
+        brief_rationale = settings.rationale
     if order not in ("chronological", "best_first"):
         return {
             "error": f"unknown order {order!r} — use 'chronological' or 'best_first'"
@@ -451,9 +472,13 @@ def create_montage(
         song = analyze_music(music)
     except MonteurMediaError as exc:
         return {"error": str(exc)}
-    plan = plan_montage(
-        reports, song, order=order, max_duration=max_duration or None
-    )
+    try:
+        plan = plan_montage(
+            reports, song, order=order, max_duration=max_duration or None,
+            style=style,
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
     if not plan.entries:
         return {
             "error": "no usable material found in the footage — use "
@@ -466,8 +491,11 @@ def create_montage(
         "tempo_bpm": _round(song.tempo, 1),
         "clips_used": len({e.clip_path for e in plan.entries}),
         "order": order,
+        "style": style,
         "notes": plan.notes,
     }
+    if brief_rationale:
+        result["brief_rationale"] = brief_rationale
     if into_resolve:
         try:
             bridge = connect()
