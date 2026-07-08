@@ -341,6 +341,7 @@ svg text.axis {
 }
 .seg-toggle button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: inset 0 0 0 1px var(--border); }
 .pace-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.style-info { border-left: 2px solid var(--border); padding-left: 10px; margin-top: 8px; }
 .pace-custom { display: inline-flex; align-items: center; gap: 5px; }
 .pace-custom input { width: 74px; padding: 7px 9px; font: inherit; font-size: 13px; color: var(--ink); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
 .take-table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 4px 0 10px; }
@@ -842,8 +843,10 @@ svg text.axis {
               </label>
             </div>
             <button class="suggest-chip" id="cre-suggest" type="button" hidden></button>
+            <p class="help-small">Whole song cuts across the entire track. Target length is usually better: Monteur picks the song&rsquo;s strongest passage and ends on a musical boundary.</p>
             <h3 class="fgroup-title">Style</h3>
             <div class="radio-cards stack compact" role="radiogroup" aria-label="Cutting style" id="cre-style-cards"></div>
+            <p class="help-small style-info" id="cre-style-info" aria-live="polite"></p>
             <h3 class="fgroup-title" id="cre-pace-label">Cut pace</h3>
             <div class="pace-row" role="group" aria-labelledby="cre-pace-label">
               <div class="seg-toggle">
@@ -2870,17 +2873,24 @@ Object.keys(AUDIO_IDS).forEach(function (key) {
 });
 
 var STYLES = [
-  ["auto", "Auto", "Follows the song's energy."],
-  ["travel", "Travel film", "Slow open, big finish."],
-  ["wedding", "Wedding", "Gentle throughout."],
-  ["music_video", "Music video", "Fast from bar one."],
-  ["trailer", "Trailer", "Tease, build, hit."]
+  ["auto", "Auto", "Follows the song's energy.",
+    "Calm sections cut every 4 beats, mid every 2, loud every beat; a drop in the song forces a cut with your strongest moment on it. Dissolves in calm sections, hard cuts elsewhere; fades to black 0.5 s in and 1 s out."],
+  ["travel", "Travel film", "Slow open, big finish.",
+    "Four acts (15/35/35/15): scenic opening every 4 beats, steady build every 2, beat-for-beat climax, calm outro. Your highlights land in the climax. Dissolves in opening and outro; fades to black 0.5 s in, up to 2 s out."],
+  ["wedding", "Wedding", "Gentle throughout.",
+    "Same four acts, but never faster than every 2 beats — faces and gestures get room to breathe. Dissolves in the calm phases; soft fades to black at both ends."],
+  ["music_video", "Music video", "Fast from bar one.",
+    "Cuts every 1–2 beats from the very first bar for constant energy, hard cuts throughout, highlights in the climax. Fades to black at both ends."],
+  ["trailer", "Trailer", "Tease, build, hit.",
+    "Five acts (20/50/20/10): long tease, accelerating build (every 2 beats, then every beat), hard climax, snap outro. Smashes to black between acts — short black gaps with a “Title slot” marker for your text — and fades to black in and out."]
 ];
 function setStyle(value) {
   cre.style = value;
   Array.prototype.forEach.call($("cre-style-cards").children, function (cardBtn) {
     cardBtn.setAttribute("aria-checked", String(cardBtn.getAttribute("data-style") === value));
   });
+  var chosen = STYLES.filter(function (spec) { return spec[0] === value; })[0];
+  $("cre-style-info").textContent = chosen ? chosen[3] : "";
 }
 STYLES.forEach(function (spec) {
   var cardBtn = el("button", "radio-card");
@@ -2898,6 +2908,7 @@ STYLES.forEach(function (spec) {
   cardBtn.addEventListener("click", function () { setStyle(spec[0]); });
   $("cre-style-cards").appendChild(cardBtn);
 });
+setStyle(cre.style);  // fill the style-info box for the initial selection
 
 var SHAPES = [
   ["wide", "Wide 16:9", "YouTube & TV — the standard frame."],

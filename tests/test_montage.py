@@ -509,14 +509,14 @@ def test_fade_fields_for_arc_style():
     assert plan.fade_in == pytest.approx(0.5)
     # last outro slot is 2.0s, capped at 2.0s
     assert plan.fade_out == pytest.approx(2.0)
-    assert any("music fade-out: 2.0s (apply in Resolve)" in n for n in plan.notes)
+    assert any("fades to black: 0.5s in, 2s out" in n for n in plan.notes)
 
 
 def test_fade_fields_for_auto_style():
     plan = plan_montage(make_reports(), make_music())
     assert plan.fade_in == pytest.approx(0.5)
     assert plan.fade_out == pytest.approx(1.0)
-    assert any("music fade-out: 1.0s (apply in Resolve)" in n for n in plan.notes)
+    assert any("fades to black: 0.5s in, 1s out" in n for n in plan.notes)
 
 
 def test_transitions_in_gentle_phases_only():

@@ -407,3 +407,39 @@ def test_write_markers_land_on_clip_and_gap():
     gap_markers = root.findall(".//gap/marker")
     assert [m.get("value") for m in gap_markers] == ["Title slot — 0.4s of black"]
     assert gap_markers[0].get("start") == "1/5s"  # frame 55 - gap start 50
+
+
+def test_write_fade_metadata_becomes_head_and_tail_transitions():
+    import xml.etree.ElementTree as ET
+
+    tl = Timeline(name="Faded", fps=25.0)
+    tl.clips.append(
+        Clip(name="A", track="V1", kind=VIDEO, source_in=0, source_out=100,
+             record_in=0, record_out=100, source_name="A", source_file="/m/a.mp4")
+    )
+    tl.metadata["fade_in_frames"] = 12
+    tl.metadata["fade_out_frames"] = 25
+    root = ET.fromstring(write_fcpxml(tl))
+    spine = root.find(".//spine")
+    transitions = spine.findall("transition")
+    assert len(transitions) == 2
+    head, tail = transitions
+    # head fade starts at 0 and runs 12 frames; with nothing before it in the
+    # spine it dissolves in from black
+    assert head.get("offset") == "0s"
+    assert head.get("duration") == "12/25s"
+    # tail fade covers the last second of the timeline
+    assert tail.get("offset") == "3s"
+    assert tail.get("duration") == "1s"
+
+
+def test_write_no_fade_transitions_without_metadata():
+    import xml.etree.ElementTree as ET
+
+    tl = Timeline(name="Plain", fps=25.0)
+    tl.clips.append(
+        Clip(name="A", track="V1", kind=VIDEO, source_in=0, source_out=50,
+             record_in=0, record_out=50, source_name="A", source_file="/m/a.mp4")
+    )
+    root = ET.fromstring(write_fcpxml(tl))
+    assert root.find(".//spine").findall("transition") == []

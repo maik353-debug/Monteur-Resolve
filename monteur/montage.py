@@ -1254,8 +1254,11 @@ def _plan_finishing(
                 f"({_DIP_SECONDS:g}s each) — title slots, exported as markers"
             )
 
-    if plan.fade_out > _EPS:
-        plan.notes.append(f"music fade-out: {plan.fade_out:.1f}s (apply in Resolve)")
+    if plan.fade_in > _EPS or plan.fade_out > _EPS:
+        plan.notes.append(
+            f"fades to black: {plan.fade_in:g}s in, {plan.fade_out:g}s out "
+            "(in the FCPXML export; fade the music itself in Resolve)"
+        )
 
 
 def montage_to_timeline(

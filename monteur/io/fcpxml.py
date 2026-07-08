@@ -50,10 +50,12 @@ Writing (:func:`write_fcpxml`):
   DaVinci Resolve imports spine transitions; :func:`read_fcpxml` ignores
   the element, leaving the clips intact.
 * Fades: ``timeline.metadata["fade_in_frames"]`` /
-  ``["fade_out_frames"]`` are NOT written — FCPXML audio fades would
-  need ``<param>``/``adjust-volume`` elements this writer does not
-  emit. The plan notes the fade so the editor applies the music fade in
-  Resolve.
+  ``["fade_out_frames"]`` become spine ``<transition>`` elements at the
+  head (when the first clip starts at record 0) and tail of the video
+  track — with nothing on the far side, they dissolve from/to BLACK on
+  import. Audio fades are NOT written (they would need
+  ``<param>``/``adjust-volume`` elements); the plan notes the music
+  fade so the editor applies it in Resolve.
 * Markers: ``timeline.markers`` are written as ``<marker>`` children of
   the spine element containing them (asset-clip or gap), in that
   element's local timebase; a marker's ``note`` is folded into the
@@ -529,6 +531,8 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
                     value=value,
                 )
 
+    fade_in = int(timeline.metadata.get("fade_in_frames", 0) or 0)
+    fade_out = int(timeline.metadata.get("fade_out_frames", 0) or 0)
     playhead = 0
     first_clip_el: ET.Element | None = None
     first_clip_start = 0
@@ -549,6 +553,15 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
                 start="0s",
             )
             attach_markers(gap_el, playhead, clip.record_in, 0)
+        if first_clip_el is None and clip.record_in == 0 and fade_in > 0:
+            # Head transition: nothing before it, so it fades in from black.
+            ET.SubElement(
+                spine,
+                "transition",
+                name="Cross Dissolve",
+                offset="0s",
+                duration=_fmt_time(min(fade_in, clip.duration), frame_dur),
+            )
         dissolve = _transition_frames(clip)
         if dissolve > 0 and clip.record_in > 0:
             # Cross dissolve INTO this clip, starting at the cut point.
@@ -578,6 +591,17 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
             first_clip_el = clip_el
             first_clip_start = source_start
         playhead = clip.record_out
+    if video and fade_out > 0:
+        # Tail transition: nothing after it, so it fades out to black.
+        last = video[-1]
+        length = min(fade_out, last.duration)
+        ET.SubElement(
+            spine,
+            "transition",
+            name="Cross Dissolve",
+            offset=_fmt_time(last.record_out - length, frame_dur),
+            duration=_fmt_time(length, frame_dur),
+        )
 
     # Attach unpaired audio (music bed) as a connected clip on the first video
     # clip. Its offset is expressed in the parent's local time, so offset ==
