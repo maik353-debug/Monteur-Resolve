@@ -355,6 +355,8 @@ def _run_build_job(job: dict, payload: dict) -> None:
             plan_kwargs["allow_repeats"] = bool(payload["allow_repeats"])
         if "cut_lead" in payload:
             plan_kwargs["cut_lead"] = float(payload["cut_lead"])
+        if payload.get("pace"):
+            plan_kwargs["pace"] = float(payload["pace"])
         plan = plan_montage(reports, music, **plan_kwargs)
         if not plan.entries:
             raise ValueError("no usable material found — check the scan results")

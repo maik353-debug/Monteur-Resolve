@@ -325,7 +325,7 @@ def cmd_create(args: argparse.Namespace) -> None:
         plan = plan_montage(
             reports, music, order=args.order, max_duration=args.max_duration,
             style=args.style, allow_repeats=args.allow_repeats,
-            cut_lead=args.cut_lead,
+            cut_lead=args.cut_lead, pace=args.pace,
         )
     except ValueError as exc:
         _fail(str(exc))
@@ -550,6 +550,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--cut-lead", type=float, default=0.04,
         help="place each cut this many seconds BEFORE the beat so the "
              "incoming shot lands on it (default 0.04, 0 disables)",
+    )
+    p.add_argument(
+        "--pace", type=float, default=None,
+        help="approximate seconds per clip in the fastest phase, e.g. 1 for "
+             "snappy cuts or 4 for long calm shots; slower phases scale with "
+             "it (default: the style's own pacing)",
     )
     p.add_argument(
         "--brief", default="",

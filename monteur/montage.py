@@ -135,7 +135,7 @@ from __future__ import annotations
 
 import bisect
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import PurePath
 
 from monteur.model import AUDIO, VIDEO, Clip, Marker, Timeline, seconds_to_frames
@@ -154,6 +154,8 @@ FALLBACK_INTERVAL = 2.0
 
 # A phase cutting every >= this many beats is "slow": its cuts go on downbeats.
 _SLOW_PHASE_STEP = 4
+# Downbeat detection assumes 4/4; slow phases cut every (step / this) downbeats.
+_BEATS_PER_BAR = 4
 # Repetition guard: a montage longer than (unique material x this factor)
 # repeats footage too visibly and is capped (unless allow_repeats=True).
 _REPEAT_TOLERANCE = 1.5
@@ -363,8 +365,16 @@ def _nth_beat_after(beats: list[float], t: float, n: int) -> float | None:
     return beats[j] if j < len(beats) else None
 
 
-def _build_grid(music: MusicAnalysis, length: float) -> tuple[list[float], list[str]]:
-    """Cut times ``[0, ..., length]`` walked on the beat grid."""
+def _build_grid(
+    music: MusicAnalysis,
+    length: float,
+    steps: dict[str, int] | None = None,
+) -> tuple[list[float], list[str]]:
+    """Cut times ``[0, ..., length]`` walked on the beat grid.
+
+    ``steps`` overrides :data:`BEATS_PER_CUT` (used by the pace control).
+    """
+    lookup = steps or BEATS_PER_CUT
     notes: list[str] = []
     cuts = [0.0]
     beats = sorted(b for b in music.beats if b > _EPS or abs(b) <= _EPS)
@@ -379,7 +389,7 @@ def _build_grid(music: MusicAnalysis, length: float) -> tuple[list[float], list[
     else:
         cur = 0.0
         while True:
-            step = BEATS_PER_CUT.get(_label_at(music.sections, cur), 2)
+            step = lookup.get(_label_at(music.sections, cur), 2)
             nxt = _nth_beat_after(beats, cur, step)
             # Anti-strobe: double the beat step until the interval is sane.
             while nxt is not None and nxt - cur < MIN_CUT_INTERVAL:
@@ -552,8 +562,8 @@ def _build_style_grid(
             cur = cuts[-1]
             slow = step >= _SLOW_PHASE_STEP and bool(downs)
             while True:
-                if slow:  # slow phase: one cut per downbeat
-                    n = 1
+                if slow:  # slow phase: cut on downbeats (every bar-multiple)
+                    n = max(1, round(step / _BEATS_PER_BAR))
                     nxt = _nth_beat_after(downs, cur, n)
                     while nxt is not None and nxt - cur < MIN_CUT_INTERVAL:
                         n += 1  # anti-strobe: skip to a later downbeat
@@ -582,7 +592,9 @@ def _build_style_grid(
 
 
 def _build_pseudo_grid(
-    length: float, style: MontageStyle
+    length: float,
+    style: MontageStyle,
+    auto_steps: dict[str, int] | None = None,
 ) -> tuple[list[float], list[tuple[float, float, str]], list[str]]:
     """Cut grid and phase spans for a NO-MUSIC plan (fixed intervals).
 
@@ -591,7 +603,8 @@ def _build_pseudo_grid(
     slow phases (4 beats per cut) every ~3 s, fast phases every ~0.75 s.
     Phase boundaries are the raw arc shares mapped onto ``length`` (nothing
     musical to snap to). "auto" has no arc; it cuts on a flat "mid" interval
-    (2 x _PSEUDO_BEAT = 1.5 s).
+    (2 x _PSEUDO_BEAT = 1.5 s), or on the paced "high" step when
+    ``auto_steps`` is given (see :func:`_apply_pace`).
     """
     notes = [f"no music: fixed intervals from a {_PSEUDO_BEAT:g}s pseudo-beat"]
     cuts = [0.0]
@@ -615,13 +628,58 @@ def _build_pseudo_grid(
             if p_end < length - _EPS and p_end > cuts[-1] + _EPS:
                 cuts.append(p_end)  # the phase boundary itself is a cut
     else:
-        interval = BEATS_PER_CUT["mid"] * _PSEUDO_BEAT
+        # "auto" cuts on one flat interval: the "mid" default, but the paced
+        # "high" step when a pace is set — with a single interval, the pace
+        # IS the interval (rounded to whole pseudo-beats).
+        step = auto_steps["high"] if auto_steps else BEATS_PER_CUT["mid"]
+        interval = max(step * _PSEUDO_BEAT, MIN_CUT_INTERVAL)
         t = interval
         while t < length - _EPS:
             cuts.append(t)
             t += interval
     cuts.append(length)
     return cuts, phases, notes
+
+
+def _pulse_interval(music: MusicAnalysis) -> float:
+    """Seconds per beat: median beat spacing, else 60/tempo, else the pseudo-beat."""
+    beats = sorted(b for b in music.beats if b > -_EPS)
+    if len(beats) >= 2:
+        gaps = sorted(b - a for a, b in zip(beats, beats[1:]) if b - a > _EPS)
+        if gaps:
+            return gaps[len(gaps) // 2]
+    if music.tempo > _EPS:
+        return 60.0 / music.tempo
+    return _PSEUDO_BEAT
+
+
+def _apply_pace(
+    style: MontageStyle, pace: float, beat: float
+) -> tuple[MontageStyle, dict[str, int], str]:
+    """Scale a style's cutting speed to ``pace`` seconds per clip.
+
+    ``pace`` is the approximate clip length the FASTEST phase should cut at;
+    slower phases keep their proportion to it. Returns the adjusted style,
+    the adjusted "auto" step table (for arc-less styles) and a plan note.
+    The requested pace is rounded to whole beats (minimum one), so the
+    realized interval follows the music, not the literal number.
+    """
+    desired = max(1, round(pace / beat))
+    steps = {k: max(1, round(v * desired)) for k, v in BEATS_PER_CUT.items()}
+    if style.beats_per_cut:
+        base = min(style.beats_per_cut.values())
+        factor = desired / max(1, base)
+        style = replace(
+            style,
+            beats_per_cut={
+                k: max(1, round(v * factor)) for k, v in style.beats_per_cut.items()
+            },
+        )
+    note = (
+        f"cut pace ~{pace:g}s: fastest cuts every {desired} "
+        f"beat{'s' if desired != 1 else ''} (~{desired * beat:.1f}s)"
+    )
+    return style, steps, note
 
 
 def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -881,6 +939,7 @@ def plan_montage(
     end_on_phrase: bool = True,
     allow_repeats: bool = False,
     cut_lead: float = _DEFAULT_CUT_LEAD,
+    pace: float | None = None,
 ) -> MontagePlan:
     """Distribute the best moments across the song, in a cutting style.
 
@@ -902,6 +961,13 @@ def plan_montage(
     strongest-window choice, never lengthens the montage, and never applies
     when the request is already below it.
 
+    ``pace`` (seconds, optional) sets how fast the montage cuts: it is the
+    approximate clip length of the FASTEST phase, rounded to whole beats;
+    slower phases scale proportionally, so the style's arc dynamics are
+    kept. ``None`` (the default) keeps each style's own pacing. Values
+    that are not positive raise ValueError. The anti-strobe floor
+    (:data:`MIN_CUT_INTERVAL`) still applies to very small paces.
+
     ``cut_lead`` (default 0.04 s, ~1 frame at 25 fps; 0 disables) shifts
     every interior cut earlier so the incoming shot lands ON the beat
     instead of starting there — cuts exactly on the beat read late (see
@@ -922,6 +988,8 @@ def plan_montage(
     chosen = STYLES[style]
     if music is None and max_duration is None:
         raise ValueError("without music, pass max_duration")
+    if pace is not None and pace <= 0:
+        raise ValueError("pace must be positive (approximate seconds per clip)")
 
     if music is None:
         requested = max_duration
@@ -987,18 +1055,26 @@ def plan_montage(
         plan.notes.append("montage length is zero; nothing planned")
         return plan
 
+    # Cut pace: scale every phase's beat step so the fastest phase cuts at
+    # ~`pace` seconds per clip (the style's own pacing when pace is None).
+    auto_steps: dict[str, int] | None = None
+    if pace is not None:
+        beat = _pulse_interval(grid_music) if music is not None else _PSEUDO_BEAT
+        chosen, auto_steps, pace_note = _apply_pace(chosen, pace, beat)
+        plan.notes.append(pace_note)
+
     phases: list[tuple[float, float, str]] = []
     highlight_phase: str | None = None
     drop_starts: list[float] = []
     if music is None:
-        cuts, phases, grid_notes = _build_pseudo_grid(length, chosen)
+        cuts, phases, grid_notes = _build_pseudo_grid(length, chosen, auto_steps)
         if chosen.arc:
             highlight_phase = chosen.prefer_highlights_in
     elif chosen.arc:
         cuts, phases, grid_notes = _build_style_grid(grid_music, length, chosen)
         highlight_phase = chosen.prefer_highlights_in
     else:
-        cuts, grid_notes = _build_grid(grid_music, length)
+        cuts, grid_notes = _build_grid(grid_music, length, auto_steps)
         # Auto style: every in-range drop forces a cut exactly on the drop;
         # the slot starting there is reserved for the strongest moment.
         for d in sorted({d for d in grid_music.drops if _EPS < d < length - _EPS}):

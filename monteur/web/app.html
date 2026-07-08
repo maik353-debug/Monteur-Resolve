@@ -340,6 +340,9 @@ svg text.axis {
   font-size: 12.5px; font-weight: 650; color: var(--ink-2); cursor: pointer;
 }
 .seg-toggle button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: inset 0 0 0 1px var(--border); }
+.pace-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pace-custom { display: inline-flex; align-items: center; gap: 5px; }
+.pace-custom input { width: 74px; padding: 7px 9px; font: inherit; font-size: 13px; color: var(--ink); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
 .take-table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 4px 0 10px; }
 .take-table th {
   text-align: left; font-size: 11.5px; font-weight: 650; color: var(--ink-2);
@@ -831,6 +834,20 @@ svg text.axis {
             <button class="suggest-chip" id="cre-suggest" type="button" hidden></button>
             <h3 class="fgroup-title">Style</h3>
             <div class="radio-cards stack compact" role="radiogroup" aria-label="Cutting style" id="cre-style-cards"></div>
+            <h3 class="fgroup-title" id="cre-pace-label">Cut pace</h3>
+            <div class="pace-row" role="group" aria-labelledby="cre-pace-label">
+              <div class="seg-toggle">
+                <button type="button" id="pace-auto" aria-pressed="true">Style default</button>
+                <button type="button" id="pace-1" aria-pressed="false">~1&thinsp;s</button>
+                <button type="button" id="pace-2" aria-pressed="false">~2&thinsp;s</button>
+                <button type="button" id="pace-4" aria-pressed="false">~4&thinsp;s</button>
+              </div>
+              <label class="pace-custom"><span class="sr-only">Custom pace in seconds</span>
+                <input type="number" id="cre-pace" min="0.5" max="20" step="0.5" inputmode="decimal" placeholder="custom">
+                <span class="len-unit">s</span>
+              </label>
+            </div>
+            <p class="help-small">How long each shot stays on screen in the fast parts — ~1&thinsp;s feels snappy, ~4&thinsp;s calm. Slow phases keep their proportion, and “Style default” lets each style set its own rhythm.</p>
             <h3 class="fgroup-title" id="cre-fps-label">Frame rate</h3>
             <label class="export-field"><span class="sr-only">Frame rate</span>
               <select id="cre-fps" aria-labelledby="cre-fps-label"></select>
@@ -2417,6 +2434,7 @@ var cre = {
   lenMode: "target",      // "whole" | "target" — target by default so a 2:30 song never sneaks in
   lenTouched: false,      // has the user made a deliberate length choice?
   style: "auto",
+  pace: null,             // seconds per clip in the fastest phase; null = style default
   order: "chronological", // "chronological" | "best_first"
   format: "fcpxml"        // download format
 };
@@ -2868,6 +2886,26 @@ function setOrder(order) {
 $("order-chrono").addEventListener("click", function () { setOrder("chronological"); });
 $("order-best").addEventListener("click", function () { setOrder("best_first"); });
 
+var PACE_PRESETS = [["pace-auto", null], ["pace-1", 1], ["pace-2", 2], ["pace-4", 4]];
+function setPace(value) {  // preset buttons: mark the choice, clear the custom field
+  cre.pace = value;
+  PACE_PRESETS.forEach(function (p) {
+    $(p[0]).setAttribute("aria-pressed", String(value === p[1]));
+  });
+  $("cre-pace").value = "";
+}
+PACE_PRESETS.forEach(function (p) {
+  $(p[0]).addEventListener("click", function () { setPace(p[1]); });
+});
+$("cre-pace").addEventListener("input", function () {
+  var v = parseFloat(this.value);
+  var valid = isFinite(v) && v > 0;
+  cre.pace = valid ? v : null;  // empty/invalid custom value falls back to the style default
+  PACE_PRESETS.forEach(function (p) {
+    $(p[0]).setAttribute("aria-pressed", String(!valid && p[1] === null));
+  });
+});
+
 function creValidateStep2() {
   if (cre.audio !== "original" && !$("cre-music").value.trim()) {
     toast("Add the path to your song — or choose “Original sound only” to cut without music.");
@@ -2909,6 +2947,7 @@ function creBuildBody() {
   if (cre.lenMode === "target" && targetLen()) body.max_duration = targetLen();
   var lead = parseFloat($("cre-cutlead").value);
   if (isFinite(lead) && lead >= 0) body.cut_lead = lead;
+  if (cre.pace) body.pace = cre.pace;
   return body;
 }
 

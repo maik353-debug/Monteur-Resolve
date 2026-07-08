@@ -758,3 +758,42 @@ def test_cut_lead_clamps_to_preserve_order_and_min_slot():
         assert nxt.record_start == pytest.approx(prev.record_end)
         assert nxt.record_start > prev.record_start
     assert all(slot_length(e) >= 0.25 - 1e-9 for e in plan.entries)
+
+
+# --- cut pace -----------------------------------------------------------------
+
+
+def test_pace_slows_the_auto_grid():
+    # 120 bpm: pace 1s = every 2 beats in "high"; pace 4s = every 8 beats.
+    snappy = plan_montage(make_reports(), make_music(), cut_lead=0.0, pace=1.0)
+    calm = plan_montage(make_reports(), make_music(), cut_lead=0.0, pace=4.0)
+    assert len(calm.entries) < len(snappy.entries)
+    # the fastest (high-energy) section cuts at ~the requested pace
+    high = [e for e in snappy.entries if e.record_start >= 8.0]
+    assert high and all(slot_length(e) == pytest.approx(1.0) for e in high)
+    assert any("cut pace ~1s" in n for n in snappy.notes)
+    assert any("cut pace ~4s" in n for n in calm.notes)
+
+
+def test_pace_scales_a_named_style_proportionally():
+    default = plan_montage(
+        make_reports(), make_music(), style="travel", cut_lead=0.0
+    )
+    calm = plan_montage(
+        make_reports(), make_music(), style="travel", cut_lead=0.0, pace=2.0
+    )
+    assert len(calm.entries) < len(default.entries)
+
+
+def test_pace_without_music_sets_the_interval():
+    plan = plan_montage(
+        make_reports(), None, max_duration=18.0, cut_lead=0.0, pace=3.0
+    )
+    # one flat interval: the pace itself (rounded to whole 0.75s pseudo-beats)
+    assert all(slot_length(e) == pytest.approx(3.0) for e in plan.entries)
+    assert len(plan.entries) == 6
+
+
+def test_pace_rejects_nonpositive():
+    with pytest.raises(ValueError, match="pace must be positive"):
+        plan_montage(make_reports(), make_music(), pace=0.0)

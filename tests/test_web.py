@@ -232,6 +232,16 @@ class TestCreateApi:
         assert result["content"].startswith("TITLE:")
         assert any("travel" in n for n in result["plan"]["notes"])
 
+    def test_build_forwards_pace(self, server):
+        data = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "pace": 3, "format": "edl"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert any("cut pace ~3s" in n for n in job["result"]["plan"]["notes"])
+
     def test_build_unknown_style_is_error_job(self, server):
         data = _post(
             f"{server}/api/create/build",
