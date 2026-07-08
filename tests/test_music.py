@@ -11,7 +11,15 @@ import importlib.util
 import numpy as np
 import pytest
 
-from monteur.music import MusicSection, analyze_music, detect_beats, detect_sections
+from monteur.music import (
+    MusicSection,
+    analyze_music,
+    detect_beats,
+    detect_downbeats,
+    detect_drops,
+    detect_phrases,
+    detect_sections,
+)
 
 RATE = 22050
 
@@ -37,6 +45,45 @@ def _click_track(
     if peak > 0:
         samples /= peak
     return samples, click_times
+
+
+def _click_track_with_thumps(
+    bpm: float, duration: float, rate: int = RATE, seed: int = 0
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Click track where every 4th click carries a 60 Hz decaying-sine thump.
+
+    Returns (samples, click_times, bar_start_times).
+    """
+    samples, click_times = _click_track(bpm, duration, rate=rate, seed=seed)
+    bar_starts = click_times[::4]
+    thump_len = int(0.25 * rate)
+    t = np.arange(thump_len) / rate
+    thump = (np.sin(2 * np.pi * 60.0 * t) * np.exp(-t / 0.08)).astype(np.float32)
+    for start_t in bar_starts:
+        start = int(start_t * rate)
+        end = min(start + thump_len, samples.size)
+        samples[start:end] += 0.8 * thump[: end - start]
+    peak = np.abs(samples).max()
+    if peak > 0:
+        samples = samples / peak
+    return samples, click_times, bar_starts
+
+
+def _quiet_then_loud(
+    quiet_s: float = 20.0,
+    loud_s: float = 20.0,
+    quiet_amp: float = 0.15,
+    loud_amp: float = 0.9,
+    rate: int = RATE,
+    seed: int = 5,
+) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    n_quiet = int(quiet_s * rate)
+    n_loud = int(loud_s * rate)
+    samples = rng.standard_normal(n_quiet + n_loud).astype(np.float32)
+    samples[:n_quiet] *= quiet_amp
+    samples[n_quiet:] *= loud_amp
+    return samples
 
 
 def _assert_tiles(sections: list[MusicSection], duration: float) -> None:
@@ -113,6 +160,106 @@ class TestDetectSections:
 
     def test_empty_input(self):
         assert detect_sections(np.zeros(0, dtype=np.float32), RATE) == []
+
+
+class TestDetectDownbeats:
+    def test_thump_beats_become_downbeats(self):
+        samples, _, bar_starts = _click_track_with_thumps(120.0, 60.0)
+        _, beats = detect_beats(samples, RATE)
+        downbeats = detect_downbeats(samples, RATE, beats)
+
+        assert len(downbeats) >= 25  # ~30 bars in 60 s at 120 BPM
+        # Spacing: 4 beats at 120 BPM = 2.0 s.
+        assert np.median(np.diff(downbeats)) == pytest.approx(2.0, abs=0.05)
+        # >= 80% of detected downbeats land within 40 ms of true bar starts.
+        hits = sum(
+            1
+            for db in downbeats
+            if abs(db - bar_starts[np.argmin(np.abs(bar_starts - db))]) < 0.04
+        )
+        assert hits / len(downbeats) >= 0.8
+
+    def test_fewer_than_8_beats_returns_empty(self):
+        samples, _, _ = _click_track_with_thumps(120.0, 60.0)
+        beats = [0.5 * i for i in range(7)]
+        assert detect_downbeats(samples, RATE, beats) == []
+
+    def test_silence_returns_empty(self):
+        silence = np.zeros(10 * RATE, dtype=np.float32)
+        _, beats = detect_beats(silence, RATE)
+        assert detect_downbeats(silence, RATE, beats) == []
+
+    def test_short_input_returns_empty(self):
+        short = np.random.default_rng(4).standard_normal(RATE // 2).astype(np.float32)
+        _, beats = detect_beats(short, RATE)
+        assert detect_downbeats(short, RATE, beats) == []
+
+
+class TestDetectPhrases:
+    def test_30_bars_gives_8_bar_phrases(self):
+        downbeats = [2.0 * i for i in range(30)]
+        phrases = detect_phrases(downbeats)
+        assert phrases == [0.0, 16.0, 32.0, 48.0]
+        assert np.diff(phrases) == pytest.approx(16.0)  # 8 bars * 2 s
+
+    def test_8_bars_gives_4_bar_phrases(self):
+        downbeats = [2.0 * i for i in range(8)]
+        phrases = detect_phrases(downbeats)
+        assert phrases == [0.0, 8.0]  # 4 bars * 2 s apart
+
+    def test_first_phrase_starts_at_first_downbeat(self):
+        downbeats = [1.5 + 2.0 * i for i in range(20)]
+        phrases = detect_phrases(downbeats)
+        assert phrases[0] == 1.5
+        assert set(phrases) <= set(downbeats)
+
+    def test_fewer_than_4_downbeats_returns_empty(self):
+        assert detect_phrases([]) == []
+        assert detect_phrases([0.0, 2.0, 4.0]) == []
+
+
+class TestDetectDrops:
+    def test_quiet_then_loud_has_one_drop_near_20s(self):
+        samples = _quiet_then_loud(quiet_s=20.0, loud_s=20.0)
+        drops = detect_drops(samples, RATE)
+        assert len(drops) == 1
+        assert abs(drops[0] - 20.0) <= 1.0
+
+    def test_constant_loudness_has_no_drops(self):
+        rng = np.random.default_rng(6)
+        samples = 0.9 * rng.standard_normal(40 * RATE).astype(np.float32)
+        assert detect_drops(samples, RATE) == []
+
+    def test_drop_snaps_to_downbeat(self):
+        samples = _quiet_then_loud(quiet_s=20.0, loud_s=20.0)
+        downbeats = [2.0 * i for i in range(20)]  # one lands exactly at 20.0
+        beats = [0.5 * i for i in range(80)]
+        drops = detect_drops(samples, RATE, downbeats=downbeats, beats=beats)
+        assert drops == [20.0]
+
+    def test_snap_only_within_one_beat(self):
+        samples = _quiet_then_loud(quiet_s=20.0, loud_s=20.0)
+        downbeats = [3.0, 40.0]  # nearest downbeat is far from the drop
+        beats = [0.5 * i for i in range(80)]
+        unsnapped = detect_drops(samples, RATE)
+        drops = detect_drops(samples, RATE, downbeats=downbeats, beats=beats)
+        assert drops == unsnapped  # too far to snap: time unchanged
+
+    def test_silence_and_short_input(self):
+        silence = np.zeros(10 * RATE, dtype=np.float32)
+        assert detect_drops(silence, RATE) == []
+        short = np.random.default_rng(7).standard_normal(RATE // 2).astype(np.float32)
+        assert detect_drops(short, RATE) == []
+        assert detect_drops(np.zeros(0, dtype=np.float32), RATE) == []
+
+
+class TestStructureGracefulDegradation:
+    def test_all_three_empty_on_silence(self):
+        silence = np.zeros(10 * RATE, dtype=np.float32)
+        _, beats = detect_beats(silence, RATE)
+        assert detect_downbeats(silence, RATE, beats) == []
+        assert detect_phrases([]) == []
+        assert detect_drops(silence, RATE) == []
 
 
 @pytest.mark.skipif(

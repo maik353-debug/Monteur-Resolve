@@ -17,12 +17,30 @@ How it works
 * Sections: RMS energy in ~0.5 s windows, smoothed with a ~4 s moving
   average and normalised to the track's 95th percentile, then thresholded
   into "low" / "mid" / "high" stretches that tile the whole duration.
+* Downbeats: 4/4 is assumed. Beats are grouped into bars by trying the four
+  possible phase offsets and keeping the one whose beats carry the most
+  low-frequency (< ~150 Hz) onset energy — kick/bass emphasis on "the one".
+* Phrases: pop-structure heuristic — phrases are 8 bars when the track has
+  at least 16 bars, otherwise 4 bars, always aligned to the first downbeat.
+* Drops: a strong jump of the smoothed RMS envelope into a sustained loud
+  stretch preceded by a quieter build, optionally snapped to the nearest
+  downbeat.
 
-Caveat: this works best on percussive/pulsed music — anything with clear
-transients (drums, clicks, plucked instruments). Ambient pads, drones or
-beatless textures produce no usable onsets, so they won't yield a reliable
-tempo or beat grid (expect a 0 BPM estimate or a jittery grid); the energy
-sections remain meaningful for such material.
+Caveats
+-------
+* This works best on percussive/pulsed music — anything with clear
+  transients (drums, clicks, plucked instruments). Ambient pads, drones or
+  beatless textures produce no usable onsets, so they won't yield a reliable
+  tempo or beat grid (expect a 0 BPM estimate or a jittery grid); the energy
+  sections remain meaningful for such material.
+* Downbeats assume 4/4 time. Waltzes (3/4), shuffles counted in 6/8 and
+  odd meters will get a wrong-but-regular bar grid.
+* Phrases are a pure 4/8-bar counting heuristic anchored at the first
+  downbeat; music with pickup bars, truncated phrases or non-square forms
+  will drift from the real phrase boundaries.
+* Drops need a real dynamic arc (quiet build -> sustained loud payoff). A
+  track that is constantly loud — or constantly quiet — has no drops by
+  this definition, and none are reported.
 """
 
 from __future__ import annotations
@@ -49,6 +67,9 @@ class MusicAnalysis:
     tempo: float  # BPM estimate
     beats: list[float] = field(default_factory=list)  # beat times, seconds
     sections: list[MusicSection] = field(default_factory=list)
+    downbeats: list[float] = field(default_factory=list)  # bar starts ("the one")
+    phrases: list[float] = field(default_factory=list)  # phrase starts (4/8 bars)
+    drops: list[float] = field(default_factory=list)  # drop/chorus impact points
 
 
 # ----------------------------------------------------------------------------
@@ -299,6 +320,30 @@ def _absorb_short_sections(sections: list[MusicSection]) -> list[MusicSection]:
     return sections
 
 
+def _smoothed_energy(x: np.ndarray, rate: int) -> np.ndarray:
+    """Normalised smoothed RMS envelope, one value per ~0.5 s window.
+
+    RMS in ~0.5 s windows, ~4 s moving average (edge-corrected so borders
+    aren't dragged down), normalised to the track's 95th percentile and
+    clipped to 0..1. energy[i] describes window [i*0.5s, (i+1)*0.5s).
+    """
+    win = max(int(_SECTION_WINDOW_S * rate), 1)
+    n_windows = int(np.ceil(x.size / win))
+    padded = np.zeros(n_windows * win, dtype=np.float64)
+    padded[: x.size] = x.astype(np.float64)
+    rms = np.sqrt((padded.reshape(n_windows, win) ** 2).mean(axis=1))
+
+    smooth_n = max(int(round(_SECTION_SMOOTH_S / _SECTION_WINDOW_S)), 1)
+    kernel = np.ones(smooth_n)
+    counts = np.convolve(np.ones(n_windows), kernel, mode="same")
+    smoothed = np.convolve(rms, kernel, mode="same") / counts
+
+    p95 = float(np.percentile(smoothed, 95))
+    if p95 > 1e-9:
+        return np.clip(smoothed / p95, 0.0, 1.0)
+    return np.zeros(n_windows)
+
+
 def detect_sections(samples, rate: int) -> list[MusicSection]:
     """Split the waveform into low/mid/high energy sections."""
     x = np.asarray(samples, dtype=np.float32)
@@ -306,24 +351,8 @@ def detect_sections(samples, rate: int) -> list[MusicSection]:
     if x.size == 0:
         return []
 
-    win = max(int(_SECTION_WINDOW_S * rate), 1)
-    n_windows = int(np.ceil(x.size / win))
-    padded = np.zeros(n_windows * win, dtype=np.float64)
-    padded[: x.size] = x.astype(np.float64)
-    rms = np.sqrt((padded.reshape(n_windows, win) ** 2).mean(axis=1))
-
-    # ~4 s moving average (edge-corrected so borders aren't dragged down).
-    smooth_n = max(int(round(_SECTION_SMOOTH_S / _SECTION_WINDOW_S)), 1)
-    kernel = np.ones(smooth_n)
-    counts = np.convolve(np.ones(n_windows), kernel, mode="same")
-    smoothed = np.convolve(rms, kernel, mode="same") / counts
-
-    # Normalise to the track's 95th percentile.
-    p95 = float(np.percentile(smoothed, 95))
-    if p95 > 1e-9:
-        energy = np.clip(smoothed / p95, 0.0, 1.0)
-    else:
-        energy = np.zeros(n_windows)
+    energy = _smoothed_energy(x, rate)
+    n_windows = energy.size
 
     # One section per window, then merge.
     sections = []
@@ -345,12 +374,184 @@ def detect_sections(samples, rate: int) -> list[MusicSection]:
 
 
 # ----------------------------------------------------------------------------
+# Downbeats, phrases and drops
+# ----------------------------------------------------------------------------
+
+_BEATS_PER_BAR = 4  # 4/4 assumed throughout
+_LOW_BAND_HZ = 150.0  # "kick/bass" band used to find "the one"
+_DOWNBEAT_WIN_S = 0.12  # window around each beat for low-band energy
+_MIN_BEATS_FOR_BARS = 8  # under two bars of beats there is no phase evidence
+
+_PHRASE_BARS_LONG = 8  # preferred phrase length when the track is long enough
+_PHRASE_BARS_SHORT = 4
+_PHRASE_LONG_MIN_BARS = 16  # need >= 16 downbeats to trust 8-bar phrases
+
+_DROP_RISE = 0.3  # required energy rise (normalised units)
+_DROP_RISE_WINDOW_S = 2.0  # ...within at most this long
+_DROP_SUSTAIN_S = 4.0  # the payoff must stay loud this long
+_DROP_SUSTAIN_LEVEL = 0.65
+_DROP_BUILD_S = 4.0  # the preceding stretch must be quieter on average
+_DROP_BUILD_MAX = 0.55
+_DROP_MERGE_S = 8.0  # candidates closer than this are one drop
+
+
+def detect_downbeats(samples, rate: int, beats: list[float]) -> list[float]:
+    """Pick the bar starts ("the one") from a beat grid. Assumes 4/4.
+
+    Beats are grouped into bars of four by testing the four possible phase
+    offsets; the winner is the offset whose beats carry the highest mean
+    low-frequency onset energy (RMS of the < ~150 Hz band just after each
+    beat, minus the RMS just before it, half-wave rectified) — kick and bass
+    tend to land hardest on the downbeat. Returns every 4th beat starting at
+    the best offset. Fewer than 8 beats (two bars) -> [].
+    """
+    if len(beats) < _MIN_BEATS_FOR_BARS:
+        return []
+    x = np.asarray(samples, dtype=np.float32)
+    if x.size == 0:
+        return []
+
+    # Low-pass below _LOW_BAND_HZ via FFT masking (fine for song-length audio).
+    spectrum = np.fft.rfft(x.astype(np.float64))
+    freqs = np.fft.rfftfreq(x.size, 1.0 / rate)
+    spectrum[freqs > _LOW_BAND_HZ] = 0.0
+    low = np.fft.irfft(spectrum, n=x.size)
+
+    win = max(int(_DOWNBEAT_WIN_S * rate), 1)
+
+    def rms(lo: int, hi: int) -> float:
+        seg = low[max(lo, 0) : max(hi, 0)]
+        return float(np.sqrt(np.mean(seg**2))) if seg.size else 0.0
+
+    scores = np.empty(len(beats))
+    for i, t in enumerate(beats):
+        centre = int(round(t * rate))
+        after = rms(centre, centre + win)
+        before = rms(centre - win, centre)
+        scores[i] = max(after - before, 0.0)
+
+    best = max(
+        range(_BEATS_PER_BAR),
+        key=lambda o: float(scores[o::_BEATS_PER_BAR].mean()),
+    )
+    return [float(t) for t in beats[best::_BEATS_PER_BAR]]
+
+
+def detect_phrases(downbeats: list[float]) -> list[float]:
+    """Phrase-start times: a 4/8-bar counting heuristic over the downbeats.
+
+    Pop phrases are 4 or 8 bars; 8-bar phrases are preferred when there are
+    at least 16 downbeats, else 4-bar. Phrases are anchored so the first
+    phrase starts at the first downbeat; the result is a subset of
+    ``downbeats``. Fewer than 4 downbeats -> [].
+    """
+    if len(downbeats) < _PHRASE_BARS_SHORT:
+        return []
+    bars = (
+        _PHRASE_BARS_LONG
+        if len(downbeats) >= _PHRASE_LONG_MIN_BARS
+        else _PHRASE_BARS_SHORT
+    )
+    return [float(t) for t in downbeats[::bars]]
+
+
+def detect_drops(
+    samples,
+    rate: int,
+    sections: list[MusicSection] | None = None,
+    downbeats: list[float] | None = None,
+    beats: list[float] | None = None,
+) -> list[float]:
+    """Find drop moments: a sharp energy jump into a sustained loud stretch.
+
+    Uses the same smoothed RMS envelope as :func:`detect_sections` (0.5 s
+    windows, ~4 s smoothing, normalised to the 95th percentile). A candidate
+    is a window whose energy rose by >= 0.3 within the last 2 s, where the
+    following 4 s stay >= 0.65 and the preceding 4 s averaged <= 0.55 (the
+    quieter build). Candidates closer than 8 s are merged, keeping the
+    strongest rise (ties resolved to the earliest, so a long smeared ramp
+    reports its onset). If ``downbeats`` are given, each drop is snapped to
+    the nearest downbeat when it lies within one beat period (taken from
+    ``beats`` if given, else a quarter of the downbeat spacing).
+
+    ``sections`` is accepted so callers holding a finished analysis can pass
+    it along, but it is not needed: drops recompute the fine-grained
+    envelope that the merged sections no longer carry. Returns sorted times;
+    no qualifying jump -> [].
+    """
+    del sections  # accepted for API symmetry; see docstring
+    x = np.asarray(samples, dtype=np.float32)
+    if x.size == 0:
+        return []
+
+    energy = _smoothed_energy(x, rate)
+    n = energy.size
+    rise_k = max(int(round(_DROP_RISE_WINDOW_S / _SECTION_WINDOW_S)), 1)
+    sustain_k = max(int(round(_DROP_SUSTAIN_S / _SECTION_WINDOW_S)), 1)
+    build_k = max(int(round(_DROP_BUILD_S / _SECTION_WINDOW_S)), 1)
+
+    candidates: list[tuple[float, float]] = []  # (time, rise)
+    for i in range(1, n):
+        rise = float(energy[i] - energy[max(i - rise_k, 0) : i].min())
+        if rise < _DROP_RISE:
+            continue
+        following = energy[i + 1 : i + 1 + sustain_k]
+        # Require at least half the sustain window to still exist (track end).
+        if following.size < sustain_k // 2 or float(following.min()) < _DROP_SUSTAIN_LEVEL:
+            continue
+        preceding = energy[max(i - build_k, 0) : i]
+        if preceding.size < build_k // 2 or float(preceding.mean()) > _DROP_BUILD_MAX:
+            continue
+        candidates.append(((i + 0.5) * _SECTION_WINDOW_S, rise))
+
+    if not candidates:
+        return []
+
+    # Merge candidates closer than _DROP_MERGE_S: group, keep strongest rise
+    # (earliest of near-equal rises, so smeared ramps report their onset).
+    drops: list[float] = []
+    group: list[tuple[float, float]] = []
+
+    def flush() -> None:
+        strongest = max(r for _, r in group)
+        for t, r in group:  # in time order
+            if r >= 0.95 * strongest:
+                drops.append(t)
+                return
+
+    for cand in candidates:
+        if group and cand[0] - group[-1][0] >= _DROP_MERGE_S:
+            flush()
+            group = []
+        group.append(cand)
+    flush()
+
+    # Snap to the nearest downbeat within +/- one beat.
+    if downbeats:
+        if beats and len(beats) > 1:
+            beat_period = float(np.median(np.diff(beats)))
+        elif len(downbeats) > 1:
+            beat_period = float(np.median(np.diff(downbeats))) / _BEATS_PER_BAR
+        else:
+            beat_period = 0.0
+        if beat_period > 0:
+            grid = np.asarray(downbeats, dtype=np.float64)
+            snapped = []
+            for t in drops:
+                nearest = float(grid[int(np.argmin(np.abs(grid - t)))])
+                snapped.append(nearest if abs(nearest - t) <= beat_period else t)
+            drops = snapped
+
+    return sorted(drops)
+
+
+# ----------------------------------------------------------------------------
 # Entry point
 # ----------------------------------------------------------------------------
 
 
 def analyze_music(path: str, rate: int = 22050) -> MusicAnalysis:
-    """Decode a song and return tempo, beat grid and energy sections."""
+    """Decode a song; return tempo, beats, sections, downbeats, phrases, drops."""
     from monteur.media import MonteurMediaError, read_audio
 
     try:
@@ -360,10 +561,18 @@ def analyze_music(path: str, rate: int = 22050) -> MusicAnalysis:
 
     tempo, beats = detect_beats(samples, rate)
     sections = detect_sections(samples, rate)
+    downbeats = detect_downbeats(samples, rate, beats)
+    phrases = detect_phrases(downbeats)
+    drops = detect_drops(
+        samples, rate, sections=sections, downbeats=downbeats, beats=beats
+    )
     return MusicAnalysis(
         path=str(path),
         duration=len(samples) / rate,
         tempo=tempo,
         beats=beats,
         sections=sections,
+        downbeats=downbeats,
+        phrases=phrases,
+        drops=drops,
     )
