@@ -706,6 +706,15 @@ svg text.axis {
           </button>
         </div>
         <div class="field-row">
+          <label class="export-field">Style
+            <select id="cre-style">
+              <option value="auto" selected>Auto — follow the song's energy</option>
+              <option value="travel">Travel film — slow open, big finish</option>
+              <option value="wedding">Wedding — gentle throughout</option>
+              <option value="music_video">Music video — fast from bar one</option>
+              <option value="trailer">Trailer — tease, build, hit</option>
+            </select>
+          </label>
           <label class="export-field">Frame rate
             <select id="cre-fps"></select>
           </label>
@@ -2398,6 +2407,7 @@ function creBuildBody() {
     folder: $("cre-folder").value.trim(),
     music: $("cre-music").value.trim(),
     order: cre.order,
+    style: $("cre-style").value,
     fps: fpsFrom($("cre-fps")),
     format: cre.format
   };

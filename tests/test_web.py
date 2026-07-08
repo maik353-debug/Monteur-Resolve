@@ -152,3 +152,42 @@ class TestAssemblyApi:
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             _post(f"{server}/api/assembly/plan", payload)
         assert exc_info.value.code == 400
+
+
+class TestCreateApi:
+    DEMO = "/tmp/claude-0/-home-user-Fable-tool/90401078-872b-52b4-9d55-214193ea4ea5/scratchpad/demo-footage"
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+
+    def test_scan(self, server):
+        data = _post(f"{server}/api/create/scan", {"folder": self.DEMO})
+        assert len(data["clips"]) == 4
+        by_name = {Path(c["path"]).name: c for c in data["clips"]}
+        assert by_name["clip_B.mp4"]["usable_ratio"] < 1.0
+
+    def test_build_with_style(self, server):
+        data = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "style": "travel", "fps": 25, "format": "edl"},
+        )
+        assert data["plan"]["cuts"] > 0
+        assert data["content"].startswith("TITLE:")
+        assert any("travel" in n for n in data["plan"]["notes"])
+
+    def test_build_unknown_style_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/create/build",
+                {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+                 "style": "vaporwave"},
+            )
+        assert exc_info.value.code == 400
+
+    def test_scan_missing_folder_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/scan", {})
+        assert exc_info.value.code == 400

@@ -33,11 +33,53 @@ Slotting algorithm
    slot it is padded by extending toward the clip's end; if even that is
    not enough, the short piece is kept (record stays on the grid) and a
    gap is noted.
+
+Styles
+------
+``plan_montage(..., style=...)`` picks a :data:`STYLES` entry. "auto"
+(the default) keeps the section-energy grid described above. A named style
+instead maps a story arc — (share_of_duration, phase) pairs over
+opening/build/climax/outro — onto the montage duration and cuts each phase
+at its own beat density. Grid points still snap to musical positions:
+phase boundaries snap to the nearest phrase start (falling back to
+downbeats, then beats, when phrases are unknown), slow phases
+(>= 4 beats per cut) place their cuts on downbeats, fast phases walk the
+beat grid; with neither beats nor downbeats the fixed 2 s grid is used,
+exactly as in "auto".
+
+Drops
+-----
+With a named style that has a climax phase, the climax start is aligned to
+the FIRST drop: boundaries before it are scaled by ``drop / original``,
+boundaries after it are scaled toward the end by
+``(length - drop) / (length - original)``. Limits: only the first drop is
+used, and only when it lies within 5%..95% of the montage — otherwise a
+note explains why alignment was skipped. In "auto", every in-range drop
+forces a cut exactly on the drop and the slot starting there is reserved
+for the unused moment with the highest (highlight, score), so the impact
+lands on the strongest material.
+
+Highlights and motion matching
+------------------------------
+In the phase named by ``style.prefer_highlights_in`` (usually "climax")
+the candidate window is re-sorted by (highlight, score) instead of the
+plain pool order, so audible peaks (cheers, laughter, action) land on the
+musical peak. The ordering mode (CHRONOLOGICAL / BEST_FIRST) still decides
+WHICH moments are in play; these refinements — and motion matching — only
+break near-ties among the next few candidates: for each slot the next
+K = 4 unconsumed pool items are scored with
+``0.7 * order_preference + 0.3 * motion_continuity`` where order
+preference is ``1 - position / K`` (earlier in the pool = higher) and
+motion continuity is the cosine similarity between the previous slot's
+exit motion and the candidate's entry motion (neutral 0 unless both
+vectors exceed 0.5 px). With neutral motion the earliest candidate always
+wins, so behavior without motion data is unchanged.
 """
 
 from __future__ import annotations
 
 import bisect
+import math
 from dataclasses import dataclass, field
 from pathlib import PurePath
 
@@ -55,7 +97,92 @@ MIN_CUT_INTERVAL = 0.4
 # Grid interval used when the song has no detected beats.
 FALLBACK_INTERVAL = 2.0
 
+# A phase cutting every >= this many beats is "slow": its cuts go on downbeats.
+_SLOW_PHASE_STEP = 4
+# Drop alignment only when the drop falls inside this share of the montage.
+_DROP_ALIGN_MARGIN = 0.05
+# Candidate window (K): unconsumed pool items considered per slot.
+_CANDIDATE_WINDOW = 4
+# Blend weights for near-tie breaking among the candidate window.
+_ORDER_WEIGHT = 0.7
+_MOTION_WEIGHT = 0.3
+# Below this magnitude (px) a motion vector counts as "no motion" (neutral).
+_MOTION_MIN_MAGNITUDE = 0.5
+
 _EPS = 1e-6
+
+
+@dataclass(frozen=True)
+class MontageStyle:
+    """An editorial cutting style: a story arc mapped onto the song."""
+
+    key: str
+    name: str
+    description: str  # one line an editor understands
+    # (share_of_duration, phase label "opening"/"build"/"climax"/"outro").
+    # Empty arc = section-energy-driven ("auto"). A label may repeat in
+    # consecutive entries; the beat step then ramps toward the next phase's
+    # step ("trailer" uses this to accelerate through its split build).
+    arc: list[tuple[float, str]]
+    beats_per_cut: dict[str, int]  # phase label -> beats between cuts
+    prefer_highlights_in: str = "climax"  # phase where highlights win slots
+
+
+_ARC_STANDARD = [(0.15, "opening"), (0.35, "build"), (0.35, "climax"), (0.15, "outro")]
+
+STYLES: dict[str, MontageStyle] = {
+    "auto": MontageStyle(
+        key="auto",
+        name="Auto (section energy)",
+        description=(
+            "Follows the song's own energy: calm sections cut every 4 beats, mid "
+            "every 2, loud every beat; a drop forces a cut with the strongest moment."
+        ),
+        arc=[],
+        beats_per_cut={},
+    ),
+    "travel": MontageStyle(
+        key="travel",
+        name="Travel film",
+        description=(
+            "Scenic slow opening, steady build, beat-for-beat climax, calm outro "
+            "(4/2/1/4 beats per cut over a 15/35/35/15 arc)."
+        ),
+        arc=list(_ARC_STANDARD),
+        beats_per_cut={"opening": 4, "build": 2, "climax": 1, "outro": 4},
+    ),
+    "wedding": MontageStyle(
+        key="wedding",
+        name="Wedding film",
+        description=(
+            "Gentle throughout — never faster than every 2 beats, so faces and "
+            "gestures get room to breathe (4/2/2/4)."
+        ),
+        arc=list(_ARC_STANDARD),
+        beats_per_cut={"opening": 4, "build": 2, "climax": 2, "outro": 4},
+    ),
+    "music_video": MontageStyle(
+        key="music_video",
+        name="Music video",
+        description=(
+            "Fast throughout — cuts every 1-2 beats from the first bar for "
+            "constant energy (2/1/1/2)."
+        ),
+        arc=list(_ARC_STANDARD),
+        beats_per_cut={"opening": 2, "build": 1, "climax": 1, "outro": 2},
+    ),
+    "trailer": MontageStyle(
+        key="trailer",
+        name="Trailer",
+        description=(
+            "Long tease, accelerating build (every 2 beats, then every beat), "
+            "hard climax, snap outro (20/50/20/10 arc)."
+        ),
+        # The build is split in half so the beat step can ramp 2 -> 1.
+        arc=[(0.2, "opening"), (0.25, "build"), (0.25, "build"), (0.2, "climax"), (0.1, "outro")],
+        beats_per_cut={"opening": 4, "build": 2, "climax": 1, "outro": 4},
+    ),
+}
 
 
 @dataclass
@@ -138,6 +265,161 @@ def _build_grid(music: MusicAnalysis, length: float) -> tuple[list[float], list[
     return cuts, notes
 
 
+def _nearest(points: list[float], t: float) -> float:
+    """Nearest value in a sorted, non-empty list (ties go to the earlier one)."""
+    i = bisect.bisect_left(points, t)
+    if i <= 0:
+        return points[0]
+    if i >= len(points):
+        return points[-1]
+    before, after = points[i - 1], points[i]
+    return before if t - before <= after - t else after
+
+
+def _phase_steps(style: MontageStyle) -> list[int]:
+    """Beats-per-cut for every arc entry.
+
+    A run of consecutive arc entries with the same label ramps linearly from
+    that label's own step to the FOLLOWING phase's step — "trailer" uses this
+    to accelerate through its split build (every 2 beats, then every beat).
+    """
+    labels = [lab for _, lab in style.arc]
+    steps: list[int] = []
+    i = 0
+    while i < len(labels):
+        j = i
+        while j + 1 < len(labels) and labels[j + 1] == labels[i]:
+            j += 1
+        own = style.beats_per_cut.get(labels[i], 2)
+        if j > i:
+            nxt = style.beats_per_cut.get(labels[j + 1], own) if j + 1 < len(labels) else own
+            span = j - i
+            for r in range(span + 1):
+                steps.append(max(1, round(own + (nxt - own) * r / span)))
+        else:
+            steps.append(own)
+        i = j + 1
+    return steps
+
+
+def _build_style_grid(
+    music: MusicAnalysis, length: float, style: MontageStyle
+) -> tuple[list[float], list[tuple[float, float, str]], list[str]]:
+    """Cut grid and phase spans ``(start, end, label)`` for a named style.
+
+    Phase boundaries are the arc shares mapped onto ``length``, snapped to
+    the nearest phrase start (falling back to downbeats, then beats). If the
+    song has drops and the arc has a climax, the climax start is pinned to
+    the first drop and the neighbouring boundaries are scaled proportionally
+    (limits: first drop only, and only when it lies within 5%..95% of the
+    montage — otherwise a note explains the skip). Slow phases
+    (>= ``_SLOW_PHASE_STEP`` beats per cut) cut on downbeats, fast phases
+    walk the beat grid with the phase's step; with neither beats nor
+    downbeats the fixed 2 s fallback grid is used, exactly as in "auto".
+    """
+    notes: list[str] = []
+    labels = [lab for _, lab in style.arc]
+    total_share = sum(share for share, _ in style.arc) or 1.0
+    bounds = [0.0]
+    acc = 0.0
+    for share, _ in style.arc:
+        acc += share
+        bounds.append(length * acc / total_share)
+    bounds[-1] = length
+
+    # Drop = climax: pin the climax start to the first drop.
+    pinned: set[int] = set()
+    drops = sorted(d for d in music.drops)
+    if drops and "climax" in labels:
+        drop = drops[0]
+        climax_i = labels.index("climax")
+        orig = bounds[climax_i]
+        if not (_DROP_ALIGN_MARGIN * length <= drop <= (1 - _DROP_ALIGN_MARGIN) * length):
+            notes.append(
+                f"drop at {drop:.1f}s outside 5-95% of the montage; climax not aligned"
+            )
+        elif climax_i == 0 or orig <= _EPS or orig >= length - _EPS:
+            notes.append("climax phase starts at the montage edge; drop alignment skipped")
+        else:
+            for i in range(1, climax_i):
+                bounds[i] *= drop / orig
+            bounds[climax_i] = drop
+            for i in range(climax_i + 1, len(bounds) - 1):
+                bounds[i] = length - (length - bounds[i]) * (length - drop) / (length - orig)
+            pinned.add(climax_i)
+            notes.append(f"climax aligned to drop at {drop:.1f}s")
+
+    # Snap the remaining interior boundaries to musical positions:
+    # phrases, else downbeats, else beats.
+    snap_points: list[float] = []
+    snapped_to = ""
+    for cand, kind in (
+        (music.phrases, "phrase starts"),
+        (music.downbeats, "downbeats"),
+        (music.beats, "beats"),
+    ):
+        pts = sorted(p for p in cand if _EPS < p < length - _EPS)
+        if pts:
+            snap_points, snapped_to = pts, kind
+            break
+    snapped = 0
+    for i in range(1, len(bounds) - 1):
+        if i in pinned or not snap_points:
+            continue
+        bounds[i] = _nearest(snap_points, bounds[i])
+        snapped += 1
+    for i in range(1, len(bounds)):  # keep boundaries monotonic
+        bounds[i] = min(max(bounds[i], bounds[i - 1]), length)
+
+    phases = [(bounds[i], bounds[i + 1], labels[i]) for i in range(len(labels))]
+
+    beats = sorted(b for b in music.beats if b > -_EPS)
+    downs = sorted(d for d in music.downbeats if d > -_EPS)
+    pulse = beats or downs  # graceful: no beats -> walk downbeats instead
+    cuts = [0.0]
+    downbeat_cuts = 0
+    if not pulse:
+        notes.append(
+            f"no beats detected; falling back to a fixed {FALLBACK_INTERVAL:g}s grid"
+        )
+        t = FALLBACK_INTERVAL
+        while t < length - _EPS:
+            cuts.append(t)
+            t += FALLBACK_INTERVAL
+    else:
+        for (p_start, p_end, _label), step in zip(phases, _phase_steps(style)):
+            cur = cuts[-1]
+            slow = step >= _SLOW_PHASE_STEP and bool(downs)
+            while True:
+                if slow:  # slow phase: one cut per downbeat
+                    n = 1
+                    nxt = _nth_beat_after(downs, cur, n)
+                    while nxt is not None and nxt - cur < MIN_CUT_INTERVAL:
+                        n += 1  # anti-strobe: skip to a later downbeat
+                        nxt = _nth_beat_after(downs, cur, n)
+                else:  # fast phase: walk the beat grid
+                    s = step
+                    nxt = _nth_beat_after(pulse, cur, s)
+                    while nxt is not None and nxt - cur < MIN_CUT_INTERVAL:
+                        s *= 2
+                        nxt = _nth_beat_after(pulse, cur, s)
+                if nxt is None or nxt >= p_end - _EPS:
+                    break
+                cuts.append(nxt)
+                if slow:
+                    downbeat_cuts += 1
+                cur = nxt
+            if p_end < length - _EPS and p_end > cuts[-1] + _EPS:
+                cuts.append(p_end)  # the phase boundary itself is a cut
+    cuts.append(length)
+
+    if snapped and snapped_to:
+        notes.append(f"{snapped} phase boundaries snapped to {snapped_to}")
+    if downbeat_cuts:
+        notes.append(f"{downbeat_cuts} cuts on downbeats")
+    return cuts, phases, notes
+
+
 # --- slot filling -------------------------------------------------------------
 
 
@@ -154,13 +436,51 @@ class _PoolItem:
         return self.moment.end - (self.moment.start + self.consumed)
 
 
-def _pick_reuse(pool: list[_PoolItem], start: int) -> _PoolItem | None:
-    """First pool item (cyclic scan from ``start``) with unconsumed material."""
+def _pick_reuse(
+    pool: list[_PoolItem], start: int, held: set[int] | frozenset[int] = frozenset()
+) -> _PoolItem | None:
+    """First pool item (cyclic scan from ``start``) with unconsumed material.
+
+    Indices in ``held`` (reserved for a not-yet-served drop slot) are skipped
+    so their material stays fresh for the drop.
+    """
     n = len(pool)
     for k in range(n):
-        item = pool[(start + k) % n]
+        idx = (start + k) % n
+        if idx in held:
+            continue
+        item = pool[idx]
         if item.remaining > _EPS:
             return item
+    return None
+
+
+def _motion_continuity(
+    prev_exit: tuple[float, float] | None, entry: tuple[float, float]
+) -> float:
+    """Cosine similarity between exit and entry motion, in [-1, 1].
+
+    Neutral 0 when there is no previous entry or either vector's magnitude
+    is at or below ``_MOTION_MIN_MAGNITUDE`` px (i.e. effectively static).
+    """
+    if prev_exit is None:
+        return 0.0
+    ax, ay = prev_exit
+    bx, by = entry
+    mag_a = math.hypot(ax, ay)
+    mag_b = math.hypot(bx, by)
+    if mag_a <= _MOTION_MIN_MAGNITUDE or mag_b <= _MOTION_MIN_MAGNITUDE:
+        return 0.0
+    return (ax * bx + ay * by) / (mag_a * mag_b)
+
+
+def _phase_label_at(phases: list[tuple[float, float, str]], t: float) -> str | None:
+    """Phase label of the arc phase containing ``t`` (None if no phases)."""
+    for start, end, label in phases:
+        if start - _EPS <= t < end - _EPS:
+            return label
+    if phases and t >= phases[-1][1] - _EPS:
+        return phases[-1][2]
     return None
 
 
@@ -168,22 +488,102 @@ def _fill(
     slots: list[tuple[float, float]],
     slot_order: list[int],
     pool: list[_PoolItem],
+    phases: list[tuple[float, float, str]] | None = None,
+    highlight_phase: str | None = None,
+    drop_slots: set[int] | frozenset[int] = frozenset(),
 ) -> tuple[list[MontageEntry], list[str]]:
+    """Assign pool moments to slots.
+
+    The first pass still consumes every pool moment exactly once, in pool
+    order — the ordering mode decides WHICH moments are in play — with two
+    craft refinements that only reorder the next few candidates:
+
+    * Drop slots are reserved up front for the unused moment with the
+      highest (highlight, score), so the drop hits the strongest material.
+    * For every other slot the next ``_CANDIDATE_WINDOW`` (K = 4) unconsumed
+      pool items compete. Inside ``highlight_phase`` they are first re-sorted
+      by (highlight, score) so audible peaks win the musical peak. The pick
+      maximises ``0.7 * order_preference + 0.3 * motion_continuity`` where
+      order preference is ``1 - position / K`` (earlier = higher) and motion
+      continuity is the cosine similarity between the previous slot's exit
+      motion and the candidate's entry motion (see
+      :func:`_motion_continuity`). With neutral motion the earliest
+      candidate always wins, so behavior without motion data is unchanged.
+
+    Reuse (pool exhausted) is unchanged — cyclic scan for unconsumed tails,
+    then rewind — except a drop slot still grabs the best remaining material.
+    """
     entries: list[MontageEntry] = []
     notes: list[str] = []
     n = len(pool)
     rewound = False
+    unused = list(range(n))  # pool indices not yet placed, in pool order
+    reserved: dict[int, int] = {}  # slot index -> pool index held for a drop
+    for drop_slot in sorted(drop_slots):
+        if not unused:
+            break
+        pos = max(
+            range(len(unused)),
+            key=lambda p: (
+                pool[unused[p]].moment.highlight,
+                pool[unused[p]].moment.score,
+                -unused[p],  # ties: earliest in pool order
+            ),
+        )
+        reserved[drop_slot] = unused.pop(pos)
+    held = set(reserved.values())  # kept out of reuse until their drop is served
+
+    by_slot: dict[int, _PoolItem] = {}
     for visit, slot_idx in enumerate(slot_order):
         rec_start, rec_end = slots[slot_idx]
         slot_len = rec_end - rec_start
-        if visit < n:
-            item = pool[visit]  # first pass: every moment used once
+        if slot_idx in reserved:
+            item = pool[reserved[slot_idx]]  # drop slot: strongest moment
+            held.discard(reserved[slot_idx])
+        elif unused:
+            # First pass: choose among the next K unconsumed pool items.
+            window = unused[:_CANDIDATE_WINDOW]
+            if (
+                highlight_phase
+                and phases
+                and _phase_label_at(phases, rec_start) == highlight_phase
+            ):
+                window = sorted(
+                    window,
+                    key=lambda i: (-pool[i].moment.highlight, -pool[i].moment.score, i),
+                )
+            prev = by_slot.get(slot_idx - 1)
+            prev_exit = prev.moment.exit_motion if prev is not None else None
+            best = max(
+                enumerate(window),
+                key=lambda pi: _ORDER_WEIGHT * (1.0 - pi[0] / _CANDIDATE_WINDOW)
+                + _MOTION_WEIGHT
+                * _motion_continuity(prev_exit, pool[pi[1]].moment.entry_motion),
+            )[1]
+            unused.remove(best)
+            item = pool[best]
         else:
-            item = _pick_reuse(pool, visit % n)
+            item = None
+            if slot_idx in drop_slots:  # late drop slot: best remaining tail
+                leftovers = [
+                    it for i, it in enumerate(pool) if i not in held and it.remaining > _EPS
+                ]
+                if leftovers:
+                    item = max(
+                        leftovers, key=lambda it: (it.moment.highlight, it.moment.score)
+                    )
+            if item is None:
+                item = _pick_reuse(pool, visit % n, held)
             if item is None:  # everything consumed: rewind and repeat footage
-                item = pool[visit % n]
+                idx = visit % n
+                for k in range(n):  # don't rewind a held (drop-reserved) moment
+                    if (idx + k) % n not in held:
+                        idx = (idx + k) % n
+                        break
+                item = pool[idx]
                 item.consumed = 0.0
                 rewound = True
+        by_slot[slot_idx] = item
         moment = item.moment
         src_start = moment.start + item.consumed
         src_end = min(src_start + slot_len, moment.end)
@@ -223,17 +623,49 @@ def plan_montage(
     music: MusicAnalysis,
     order: str = CHRONOLOGICAL,
     max_duration: float | None = None,
+    style: str = "auto",
 ) -> MontagePlan:
-    """Distribute the best moments across the song's beat grid."""
+    """Distribute the best moments across the song, in a cutting style.
+
+    ``style`` selects a :data:`STYLES` entry. "auto" (the default) keeps the
+    section-energy beat grid; a named style cuts on its story arc instead
+    (see the module docstring for the grid, drop, highlight and motion
+    rules). Unknown styles raise ValueError listing the valid ones.
+    """
+    if style not in STYLES:
+        valid = ", ".join(sorted(STYLES))
+        raise ValueError(f"unknown style {style!r}; valid styles: {valid}")
+    chosen = STYLES[style]
+
     length = music.duration if max_duration is None else min(music.duration, max_duration)
     plan = MontagePlan(music_path=music.path, duration=max(length, 0.0))
+    plan.notes.append(f'style "{chosen.key}": {chosen.name}')
     if length <= _EPS:
         plan.notes.append("montage length is zero; nothing planned")
         return plan
 
-    cuts, grid_notes = _build_grid(music, length)
+    phases: list[tuple[float, float, str]] = []
+    highlight_phase: str | None = None
+    drop_starts: list[float] = []
+    if chosen.arc:
+        cuts, phases, grid_notes = _build_style_grid(music, length, chosen)
+        highlight_phase = chosen.prefer_highlights_in
+    else:
+        cuts, grid_notes = _build_grid(music, length)
+        # Auto style: every in-range drop forces a cut exactly on the drop;
+        # the slot starting there is reserved for the strongest moment.
+        for d in sorted({d for d in music.drops if _EPS < d < length - _EPS}):
+            if not any(abs(c - d) <= _EPS for c in cuts):
+                bisect.insort(cuts, d)
+            drop_starts.append(d)
+            grid_notes.append(f"cut forced at drop {d:.1f}s; strongest moment assigned")
     plan.notes.extend(grid_notes)
     slots = list(zip(cuts, cuts[1:]))
+    drop_slots = {
+        i
+        for i, (s, _) in enumerate(slots)
+        if any(abs(s - d) <= _EPS for d in drop_starts)
+    }
     pool = [_PoolItem(r.path, r.duration, m) for r in reports for m in r.moments]
     if not slots or not pool:
         plan.notes.append("no slots or no moments; nothing planned")
@@ -251,7 +683,7 @@ def plan_montage(
     else:
         raise ValueError(f"unknown order: {order!r}")
 
-    entries, fill_notes = _fill(slots, slot_order, pool)
+    entries, fill_notes = _fill(slots, slot_order, pool, phases, highlight_phase, drop_slots)
     entries.sort(key=lambda e: e.record_start)
     plan.entries = entries
     plan.notes.extend(fill_notes)
