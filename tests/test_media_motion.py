@@ -13,7 +13,12 @@ import subprocess
 import numpy as np
 import pytest
 
-from monteur.media import _phase_shift, audio_metrics, frame_metrics
+from monteur.media import (
+    _parse_keyframe_pts,
+    _phase_shift,
+    audio_metrics,
+    frame_metrics,
+)
 
 try:
     import imageio_ffmpeg

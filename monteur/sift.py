@@ -60,8 +60,11 @@ Audio heuristics (also approximate, thresholds are module constants):
 
 from __future__ import annotations
 
+import os
 import statistics
+import threading
 from bisect import bisect_left, bisect_right
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -581,10 +584,16 @@ def _call_progress(progress, index, total, name, stage, report):
 
 
 def sift_directory(directory: str, progress=None) -> list[ClipReport]:
-    """Reports for every video file in a directory.
+    """Reports for every video file in a directory (analysed concurrently).
 
-    Individual clip failures become a note in that clip's report; only a
-    missing ffmpeg (which dooms every clip) aborts the run.
+    Clips are analysed on a small thread pool (up to 4 workers) —
+    :func:`analyze_clip` is dominated by its ffmpeg subprocess, so threads
+    parallelize cleanly. The RETURNED list is always in the sorted file order,
+    regardless of which clip finishes first.
+
+    Individual clip failures become a note in that clip's report without
+    cancelling the others; only a missing ffmpeg (which dooms every clip)
+    aborts the run.
 
     ``progress`` is an optional callback invoked around each clip so callers
     (e.g. the CLI) can show per-clip feedback while the slow frame/audio
@@ -593,25 +602,35 @@ def sift_directory(directory: str, progress=None) -> list[ClipReport]:
         progress(index: int, total: int, name: str, stage: str,
                  report: ClipReport | None)
 
-    * ``index`` — 1-based position of the clip being analysed (1..total).
+    * ``index`` — 1-based position of the clip in the sorted file order.
     * ``total`` — number of clips in the directory.
     * ``name`` — the clip's file name (no directory).
-    * ``stage`` — ``"start"`` just BEFORE the clip is analysed (``report`` is
-      ``None``), then ``"done"`` just AFTER (``report`` is the finished
-      :class:`ClipReport`).
+    * ``stage`` — ``"start"`` when the clip's analysis actually begins
+      (``report`` is ``None``), then ``"done"`` when it finishes (``report``
+      is the finished :class:`ClipReport`).
 
     The callback is called exactly twice per clip: once with
-    ``stage="start"`` and once with ``stage="done"``. Any exception the
-    callback raises is swallowed so a broken callback cannot abort the sift.
-    ``progress=None`` (the default) disables all feedback and keeps the
+    ``stage="start"`` and once with ``stage="done"``. Because clips run
+    concurrently, calls for DIFFERENT clips may interleave; each clip's
+    "start" still precedes its own "done", and a lock serialises the calls
+    themselves so callback output never interleaves mid-line. Any exception
+    the callback raises is swallowed so a broken callback cannot abort the
+    sift. ``progress=None`` (the default) disables all feedback and keeps the
     function fully backwards compatible.
     """
     media = list_media(directory)
     total = len(media)
-    reports: list[ClipReport] = []
-    for i, media_path in enumerate(media, start=1):
+    if not media:
+        return []
+    progress_lock = threading.Lock()
+
+    def _locked_progress(index, name, stage, report):
+        with progress_lock:
+            _call_progress(progress, index, total, name, stage, report)
+
+    def _analyze_one(index: int, media_path) -> ClipReport:
         name = Path(media_path).name
-        _call_progress(progress, i, total, name, "start", None)
+        _locked_progress(index, name, "start", None)
         try:
             report = analyze_clip(str(media_path))
         except MonteurMediaError as exc:
@@ -619,6 +638,16 @@ def sift_directory(directory: str, progress=None) -> list[ClipReport]:
             report = ClipReport(
                 path=str(media_path), duration=0.0, notes=[f"skipped: {exc}"]
             )
-        reports.append(report)
-        _call_progress(progress, i, total, name, "done", report)
-    return reports
+        _locked_progress(index, name, "done", report)
+        return report
+
+    workers = min(4, os.cpu_count() or 1, total)
+    if workers <= 1:
+        return [_analyze_one(i, p) for i, p in enumerate(media, start=1)]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(_analyze_one, i, p) for i, p in enumerate(media, start=1)
+        ]
+        # futures[] is in sorted file order, so gathering by index keeps the
+        # returned report order identical to the sequential implementation.
+        return [f.result() for f in futures]

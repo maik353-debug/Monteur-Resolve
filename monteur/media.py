@@ -181,13 +181,66 @@ def _phase_shift(prev, cur) -> tuple[float, float]:
     return float(-px), float(-py)
 
 
-def frame_metrics(
+# Keyframe fast path (see frame_metrics): clips at/above this duration are
+# sampled by decoding ONLY keyframes, which skips the (very expensive) full
+# decode of long 4K/H.265 material. Short clips keep the uniform full-decode
+# path — they are fast anyway and their tests rely on uniform spacing.
+_KEYFRAME_MIN_DURATION = 45.0  # seconds
+# All-intra codecs mark every frame a keyframe; above this multiple of the
+# requested sample rate the decoded keyframes are thinned back down so the
+# metric list stays bounded (the decode cost is already paid at that point).
+_KEYFRAME_THIN_FACTOR = 1.5
+# showinfo logs one line per frame containing "pts_time:<float>".
+_PTS_TIME_RE = re.compile(r"pts_time:\s*(-?\d+(?:\.\d+)?)")
+
+
+def _parse_keyframe_pts(stderr_text: str) -> list[float]:
+    """Extract per-frame pts_time floats from showinfo's stderr log.
+
+    Tolerates \\r\\n line endings (Windows consoles) — the regex scans the raw
+    text, so line-ending flavour does not matter.
+    """
+    return [float(m) for m in _PTS_TIME_RE.findall(stderr_text)]
+
+
+def _metrics_from_frames(frames, times) -> list[FrameMetric]:
+    """Per-frame quality metrics for decoded grayscale frames at ``times``.
+
+    Shared by the full-decode and keyframe paths so the brightness/sharpness/
+    motion/phase-correlation math exists exactly once. ``motion``/``dx``/``dy``
+    are measured between consecutive entries of ``frames``, whatever their
+    temporal spacing.
+    """
+    np = _numpy()
+    metrics: list[FrameMetric] = []
+    previous = None
+    for i, t in enumerate(times):
+        frame = frames[i].astype(np.float32)
+        gy, gx = np.gradient(frame)
+        sharpness = float((gx**2 + gy**2).mean())
+        motion = float(np.abs(frame - previous).mean()) if previous is not None else 0.0
+        dx, dy = _phase_shift(previous, frame) if previous is not None else (0.0, 0.0)
+        metrics.append(
+            FrameMetric(
+                t=float(t),
+                brightness=float(frame.mean()),
+                sharpness=sharpness,
+                motion=motion,
+                dx=dx,
+                dy=dy,
+            )
+        )
+        previous = frame
+    return metrics
+
+
+def _full_decode_metrics(
     path: str | Path,
-    samples_per_second: float = 2.0,
-    size: tuple[int, int] = (160, 90),
+    samples_per_second: float,
+    size: tuple[int, int],
     runner=None,
 ) -> list[FrameMetric]:
-    """Decode downscaled grayscale frames and compute quality metrics."""
+    """The original uniform-sampling path: decode every frame, fps-filter down."""
     np = _numpy()
     width, height = size
     result = _run(
@@ -206,27 +259,97 @@ def frame_metrics(
     frames = np.frombuffer(
         result.stdout[: count * frame_bytes], dtype=np.uint8
     ).reshape(count, height, width)
+    return _metrics_from_frames(frames, [i / samples_per_second for i in range(count)])
 
-    metrics: list[FrameMetric] = []
-    previous = None
-    for i in range(count):
-        frame = frames[i].astype(np.float32)
-        gy, gx = np.gradient(frame)
-        sharpness = float((gx**2 + gy**2).mean())
-        motion = float(np.abs(frame - previous).mean()) if previous is not None else 0.0
-        dx, dy = _phase_shift(previous, frame) if previous is not None else (0.0, 0.0)
-        metrics.append(
-            FrameMetric(
-                t=i / samples_per_second,
-                brightness=float(frame.mean()),
-                sharpness=sharpness,
-                motion=motion,
-                dx=dx,
-                dy=dy,
-            )
-        )
-        previous = frame
-    return metrics
+
+def _keyframe_metrics(
+    path: str | Path,
+    samples_per_second: float,
+    size: tuple[int, int],
+    duration: float,
+    runner=None,
+) -> list[FrameMetric] | None:
+    """Keyframe-only sampling; returns None whenever the fast path can't be trusted.
+
+    ``-skip_frame nokey`` makes the decoder skip every non-keyframe (cheap:
+    inter frames are never reconstructed); showinfo logs each emitted frame's
+    exact ``pts_time`` to stderr, so real timestamps come for free. showinfo
+    logs at info level, so no ``-loglevel error`` here. Any of the following
+    silently defers to the full-decode path (correctness never depends on the
+    fast path):
+
+    * ffmpeg failed or produced no complete frame;
+    * emitted frame count and parsed pts count disagree;
+    * fewer than max(6, duration / 6) keyframes — sparse-GOP codecs would
+      leave the clip badly undersampled.
+    """
+    np = _numpy()
+    width, height = size
+    result = _run(
+        [
+            find_ffmpeg(), "-hide_banner", "-skip_frame", "nokey", "-i", str(path),
+            "-vf", f"showinfo,scale={width}:{height},format=gray",
+            "-fps_mode", "passthrough", "-f", "rawvideo", "-",
+        ],
+        runner,
+    )
+    frame_bytes = width * height
+    if result.returncode != 0 or len(result.stdout) < frame_bytes:
+        return None
+    count = len(result.stdout) // frame_bytes
+    pts = _parse_keyframe_pts(result.stderr.decode("utf-8", "replace"))
+    if len(pts) != count:
+        return None
+    if count < max(6.0, duration / 6.0):
+        return None
+    frames = np.frombuffer(
+        result.stdout[: count * frame_bytes], dtype=np.uint8
+    ).reshape(count, height, width)
+
+    # All-intra material (every frame a keyframe): thin back to roughly the
+    # requested rate. The decode cost is already paid; this only bounds the
+    # size of the metric list for downstream consumers.
+    rate = count / duration if duration > 0 else 0.0
+    if rate > _KEYFRAME_THIN_FACTOR * samples_per_second:
+        stride = max(1, round(rate / samples_per_second))
+        frames = frames[::stride]
+        pts = pts[::stride]
+    return _metrics_from_frames(frames, pts)
+
+
+def frame_metrics(
+    path: str | Path,
+    samples_per_second: float = 2.0,
+    size: tuple[int, int] = (160, 90),
+    runner=None,
+) -> list[FrameMetric]:
+    """Decode downscaled grayscale frames and compute quality metrics.
+
+    Clips shorter than _KEYFRAME_MIN_DURATION (45 s) are sampled uniformly at
+    ``samples_per_second`` by decoding every frame (the original path). Longer
+    clips use a keyframe-only fast path: only keyframes are decoded (orders of
+    magnitude cheaper on long-GOP 4K/H.265 material), so sample spacing
+    follows the codec's GOP — typically ~0.5–2 s — while each sample's
+    timestamp is the frame's EXACT pts. On that path motion/dx/dy are measured
+    between consecutive KEPT samples rather than fixed 0.5 s steps, which is
+    fine because every consumer compares them relative to the clip's own
+    median. All-intra codecs (every frame a keyframe) are thinned back to
+    roughly ``samples_per_second``. If the keyframe stream looks untrustworthy
+    (decode failure, frame/pts count mismatch, or sparse GOPs yielding fewer
+    than max(6, duration/6) keyframes) the full-decode path runs instead, so
+    results never depend on the fast path. ``runner`` is injected into every
+    ffmpeg invocation (probe, keyframe and full decode alike) for tests.
+    """
+    duration = 0.0
+    try:
+        duration = probe(path, runner).duration
+    except MonteurMediaError:
+        pass  # let the full-decode path produce the canonical error
+    if duration >= _KEYFRAME_MIN_DURATION:
+        metrics = _keyframe_metrics(path, samples_per_second, size, duration, runner)
+        if metrics is not None:
+            return metrics
+    return _full_decode_metrics(path, samples_per_second, size, runner)
 
 
 # Audio-metric tuning (approximate; see AudioMetric).

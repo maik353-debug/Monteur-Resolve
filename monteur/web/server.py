@@ -160,6 +160,36 @@ def _analyze_payload(payload: dict):
     return analyze_timeline(timeline)
 
 
+def _scan_progress():
+    """Per-clip sift progress printed to the server terminal.
+
+    The browser gets no streaming feedback during a scan, so the terminal that
+    launched ``monteur ui`` is where a long scan shows life. Reuses the CLI's
+    ``_sift_progress`` line format ("[i/N] name ..." then "[i/N] name — X%
+    usable"); imported lazily (monteur.cli only imports monteur.web inside its
+    ``ui`` command, so there is no import cycle), with a minimal local copy as
+    a fallback if the import ever fails.
+    """
+    try:
+        from monteur.cli import _sift_progress
+
+        return _sift_progress
+    except ImportError:
+        pass
+
+    def fallback(index, total, name, stage, report):
+        if stage == "start":
+            print(f"[{index}/{total}] {name} ...", flush=True)
+        elif stage == "done":
+            print(
+                f"[{index}/{total}] {name} — "
+                f"{report.usable_ratio * 100:.0f}% usable",
+                flush=True,
+            )
+
+    return fallback
+
+
 class MonteurHandler(BaseHTTPRequestHandler):
     server_version = f"MonteurStudio/{__version__}"
     project: Project  # set by serve()
@@ -423,7 +453,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
         if not folder:
             raise ApiError(400, "missing 'folder' (path to your footage)")
         try:
-            reports = sift_directory(folder)
+            reports = sift_directory(folder, progress=_scan_progress())
         except MonteurMediaError as exc:
             raise ApiError(422, str(exc))
         if not reports:
@@ -443,7 +473,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
         if not folder or not music_path:
             raise ApiError(400, "need 'folder' (footage) and 'music' (song file)")
         try:
-            reports = sift_directory(folder)
+            reports = sift_directory(folder, progress=_scan_progress())
             music = analyze_music(music_path)
         except MonteurMediaError as exc:
             raise ApiError(422, str(exc))
