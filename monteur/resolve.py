@@ -177,17 +177,31 @@ def connect(app: Any | None = None) -> "ResolveBridge":
 # what lets Monteur Studio / the MCP server / the CLI probe Resolve without any
 # risk of taking down the host process.
 
-_WORKER_MODULE = "monteur._resolve_worker"
+import pathlib as _pathlib
 
-# On a native crash the child exits nonzero: on POSIX with a negative
-# signal-derived code, on Windows with the access-violation code 0xC0000005
-# (shown by subprocess as the large unsigned 3221225477 or the signed
-# -1073741819). We treat ANY nonzero return code as an uncatchable crash.
+# The worker is launched BY PATH (not ``-m monteur._resolve_worker``) so it runs
+# under an interpreter that doesn't have Monteur pip-installed — a bare Python
+# 3.11 pointed at via MONTEUR_RESOLVE_PYTHON. The worker bootstraps its own
+# sys.path to find the package.
+_WORKER_PATH = str(_pathlib.Path(__file__).resolve().with_name("_resolve_worker.py"))
+
+# A true native crash exits with an access-violation-style code, NOT a normal
+# Python exit code. POSIX: a signal gives a negative return code (SIGSEGV -> -11).
+# Windows: 0xC0000005 (access violation) surfaces as the signed -1073741819 or the
+# unsigned 3221225477; 0xC00000FD (stack overflow) as -1073741571 / 3221225725.
+# A clean Python failure (bad import, argparse) exits 1 or 2 — that is NOT a crash.
+_NATIVE_CRASH_CODES = {-1073741819, 3221225477, -1073741571, 3221225725}
+
+
+def _looks_like_native_crash(code: int) -> bool:
+    return code < 0 or code >= 2 ** 30 or code in _NATIVE_CRASH_CODES
+
+
 _CRASH_MESSAGE = (
     "DaVinci Resolve's scripting module crashed while loading — this usually "
-    "means the Python version isn't compatible with your Resolve version "
-    "(Resolve supports roughly Python 3.6–3.11). Set MONTEUR_RESOLVE_PYTHON to "
-    "a compatible interpreter, or run Monteur under one."
+    "means the interpreter isn't compatible with your Resolve version (Resolve "
+    "needs a 64-bit Python, roughly 3.6–3.11). Set MONTEUR_RESOLVE_PYTHON to a "
+    "compatible interpreter, or run Monteur under one."
 )
 
 
@@ -221,7 +235,7 @@ def _run_worker(
     point of isolating Resolve here.
     """
     interpreter = _worker_python()
-    cmd = [interpreter, "-m", _WORKER_MODULE, command]
+    cmd = [interpreter, _WORKER_PATH, command]
     try:
         result = subprocess.run(
             cmd,
@@ -249,7 +263,24 @@ def _run_worker(
             "reason": "no-interpreter",
         }
     if result.returncode != 0:
-        return False, {"error": _CRASH_MESSAGE, "reason": "crash"}
+        if _looks_like_native_crash(result.returncode):
+            return False, {"error": _CRASH_MESSAGE, "reason": "crash"}
+        # A clean nonzero exit means the WORKER ITSELF failed (couldn't import
+        # Monteur, missing dependency, argparse error) — NOT a Resolve native
+        # crash. Surface the real reason instead of the misleading crash text.
+        stderr = (result.stderr or "")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", "replace")
+        tail = stderr.strip().splitlines()[-1] if stderr.strip() else ""
+        detail = tail or f"exit code {result.returncode}"
+        return False, {
+            "error": (
+                f"The Resolve helper failed to run under {interpreter!r}: "
+                f"{detail}. Make sure that interpreter is a working Python 3 "
+                "(the helper needs only the standard library)."
+            ),
+            "reason": "worker-error",
+        }
     stdout = result.stdout
     if isinstance(stdout, bytes):
         stdout = stdout.decode("utf-8", "replace")

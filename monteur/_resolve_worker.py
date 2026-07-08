@@ -49,7 +49,17 @@ is exactly the signal the parent keys on.
 from __future__ import annotations
 
 import json
+import os.path
 import sys
+
+# The parent launches this file BY PATH (not ``-m``), so it runs fine under an
+# interpreter that does not have Monteur pip-installed — e.g. a bare Python 3.11
+# pointed at via MONTEUR_RESOLVE_PYTHON while Monteur itself runs on 3.14. Put
+# the directory that contains the ``monteur`` package on sys.path so
+# ``import monteur.resolve`` (pure-Python, stdlib-only) works regardless.
+_PKG_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PKG_PARENT not in sys.path:
+    sys.path.insert(0, _PKG_PARENT)
 
 
 def _read_request() -> dict:

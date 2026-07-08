@@ -708,12 +708,14 @@ def test_timeline_dict_roundtrip_exact() -> None:
 # --- Isolated (crash-safe) layer ------------------------------------------------
 
 
-def _completed(returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess:
+def _completed(
+    returncode: int = 0, stdout: str = "", stderr: str = ""
+) -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(
-        args=["python", "-m", "monteur._resolve_worker"],
+        args=["python", "_resolve_worker.py"],
         returncode=returncode,
         stdout=stdout,
-        stderr="",
+        stderr=stderr,
     )
 
 
@@ -737,9 +739,11 @@ def test_worker_python_honors_env(monkeypatch) -> None:
 
 def test_status_isolated_success(monkeypatch) -> None:
     def fake_run(cmd, **kwargs):
-        assert cmd == [
-            resolve._worker_python(), "-m", "monteur._resolve_worker", "status"
-        ]
+        # Launched by FILE PATH (not -m) so a bare interpreter without Monteur
+        # installed still works: [interpreter, <path>/_resolve_worker.py, "status"]
+        assert cmd[0] == resolve._worker_python()
+        assert cmd[1].endswith("_resolve_worker.py")
+        assert cmd[2] == "status"
         return _completed(0, json.dumps(STATUS_PAYLOAD))
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -748,6 +752,19 @@ def test_status_isolated_success(monkeypatch) -> None:
     assert result["project"] == "Monteur Feature"
     assert result["timelines"] == ["Cut 1", "Cut 2"]
     assert result["current"] == "Cut 2"
+
+
+def test_status_isolated_clean_nonzero_is_worker_error(monkeypatch) -> None:
+    # A clean nonzero exit (e.g. the worker interpreter couldn't run the helper)
+    # must NOT be mislabelled as a Resolve native crash.
+    def fake_run(cmd, **kwargs):
+        return _completed(1, "", stderr="ModuleNotFoundError: No module named 'x'")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = resolve.resolve_status_isolated()
+    assert result["connected"] is False
+    assert result["reason"] == "worker-error"
+    assert "ModuleNotFoundError" in result["error"]
 
 
 def test_status_isolated_native_crash_does_not_raise(monkeypatch) -> None:
@@ -822,7 +839,7 @@ def test_read_timeline_isolated_success(monkeypatch) -> None:
     payload = {"ok": True, "timeline": resolve._timeline_to_dict(original)}
 
     def fake_run(cmd, **kwargs):
-        assert cmd[3] == "read_timeline"
+        assert cmd[2] == "read_timeline"
         return _completed(0, json.dumps(payload))
 
     monkeypatch.setattr(subprocess, "run", fake_run)
