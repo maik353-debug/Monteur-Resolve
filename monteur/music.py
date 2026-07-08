@@ -8,12 +8,23 @@ How it works
 ------------
 * Beats: an onset envelope is built from spectral flux (STFT with ~46 ms
   windows, ~11.6 ms hop; half-wave-rectified positive difference of
-  log-magnitude spectra summed over frequency). Tempo comes from the
-  autocorrelation of that envelope over lags corresponding to 60..200 BPM,
-  with a mild preference for the 90..150 BPM octave. The beat grid is the
-  phase that maximises onset energy at grid points, then beats are tracked
-  sequentially, snapping each predicted beat to the local onset peak within
-  ±15% of the period so the grid stays locked to real hits under tempo drift.
+  log-magnitude spectra, summed over frequency with the low band — the
+  kick/bass register below ~200 Hz — weighted up, because the PULSE lives
+  there while snares/hats/vocals carry the syncopation). Tempo comes from
+  the autocorrelation of that envelope over lags corresponding to 60..200
+  BPM with HARMONIC scoring — a lag's score includes its double and half
+  lag, so a track whose bar structure autocorrelates stronger than its
+  beat no longer halves the tempo — and a mild preference for the 90..150
+  BPM octave. Beats are then tracked by dynamic programming (Ellis 2007):
+  each frame's score is its onset strength plus the best predecessor score
+  minus a log-squared penalty for deviating from the beat period, and the
+  best final beat is backtracked. Unlike greedy peak-snapping, the DP
+  path is globally optimal: one loud off-beat (a syncopated snare) cannot
+  pull the grid off the pulse, weak beats are carried through by the
+  regularity term, and gradual tempo drift is followed. Each beat is then
+  refined to sub-frame precision by parabolic interpolation of the onset
+  envelope (~3 ms instead of the 11.6 ms frame grid), and the reported
+  tempo is re-estimated from the median inter-beat interval.
 * Sections: RMS energy in ~0.5 s windows, smoothed with a ~4 s moving
   average and normalised to the track's 95th percentile, then thresholded
   into "low" / "mid" / "high" stretches that tile the whole duration.
@@ -82,7 +93,29 @@ _MIN_BPM = 60.0
 _MAX_BPM = 200.0
 _PREF_LOW = 90.0  # preferred tempo octave: 90..150 BPM
 _PREF_HIGH = 150.0
-_SNAP_FRACTION = 0.15  # snap window around each predicted beat, ±15% of period
+# The pulse lives in the kick/bass register: a SEPARATE low-band onset
+# envelope (bins below this frequency, normalised to its own peak) is added
+# to the full-band flux. A kick concentrates its whole energy in a handful
+# of low bins, so it dominates that envelope; a broadband snare/hat/vocal
+# spreads thin there. This locks the beat phase to the kick even when the
+# off-beat hits are louder overall.
+_LOW_FLUX_HZ = 150.0
+_LOW_FLUX_WEIGHT = 1.0
+# Harmonic tempo scoring: score(lag) credits the 2x and 3x lags — a true
+# beat period is reinforced by its bar structure ABOVE it. Crediting the
+# half lag would be wrong: that would let bar-level lags borrow the beat's
+# own strength and halve the tempo.
+_HARMONIC_WEIGHTS = ((2, 0.5), (3, 0.33))
+# Log-Gaussian tempo prior (Ellis): candidates are weighted by how far (in
+# octaves) their BPM sits from the centre. Resolves octave ambiguity toward
+# danceable tempi without hard cutoffs.
+_TEMPO_PRIOR_BPM = 120.0
+_TEMPO_PRIOR_OCTAVES = 1.0
+# DP beat tracking (Ellis 2007): transition penalty weight. Higher = stiffer
+# grid (trusts the tempo), lower = looser (follows onsets). The penalty is
+# tightness * log2(interval/period)^2 against an envelope normalised to unit
+# standard deviation.
+_DP_TIGHTNESS = 3.0
 
 
 def _stft_params(rate: int) -> tuple[int, int]:
@@ -108,8 +141,21 @@ def _onset_envelope(samples: np.ndarray, rate: int) -> tuple[np.ndarray, float, 
     mags = np.abs(np.fft.rfft(frames * window, axis=1))
     log_mags = np.log1p(1000.0 * mags)
 
-    # Half-wave-rectified positive difference, summed over frequency.
-    flux = np.maximum(log_mags[1:] - log_mags[:-1], 0.0).sum(axis=1)
+    # Half-wave-rectified positive difference. Full-band LOG flux carries
+    # the timing precision; the low-band flux is computed on LINEAR
+    # magnitudes — log compression would flatten the difference between a
+    # kick (its whole energy in a few low bins) and broadband noise leaking
+    # into the band — and self-normalised, then added so kicks outvote loud
+    # off-beat snares/hats when the beat phase is decided.
+    diff = np.maximum(log_mags[1:] - log_mags[:-1], 0.0)
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / rate)
+    full = diff.sum(axis=1)
+    low_lin = mags[:, freqs <= _LOW_FLUX_HZ]
+    low = np.maximum(low_lin[1:] - low_lin[:-1], 0.0).sum(axis=1)
+    full_peak, low_peak = full.max(), low.max()
+    flux = (full / full_peak) if full_peak > 0 else full
+    if low_peak > 0:
+        flux = flux + _LOW_FLUX_WEIGHT * (low / low_peak)
 
     # Light smoothing (~3 frames) and max-normalisation.
     kernel = np.hanning(5)[1:-1]
@@ -140,100 +186,122 @@ def _autocorrelate(env: np.ndarray, max_lag: int) -> np.ndarray:
 def _pick_tempo_lag(env: np.ndarray, frame_period: float) -> float:
     """Beat period in frames from the onset-envelope autocorrelation.
 
-    Searches 60..200 BPM; if the strongest peak sits outside 90..150 BPM but
-    its double or half tempo lands inside that octave with comparable
-    autocorrelation support, prefer the in-octave tempo. Returns 0.0 when no
-    periodicity is found.
+    Searches 60..200 BPM with HARMONIC scoring: a candidate lag is scored by
+    its own autocorrelation plus _HARMONIC_WEIGHT x the autocorrelation at
+    its double and half lag (a true beat period is supported by its bar and
+    half-beat structure; a spurious bar-level peak is not supported below).
+    Candidates inside the 90..150 BPM octave get a mild _OCTAVE_BONUS.
+    Returns 0.0 when no periodicity is found.
     """
     lag_min = max(int(np.floor(60.0 / _MAX_BPM / frame_period)), 1)
     lag_max = int(np.ceil(60.0 / _MIN_BPM / frame_period))
     if env.size < 2 * lag_min + 2 or lag_max <= lag_min:
         return 0.0
 
-    # Compute out to 2*lag_max so the half-tempo octave candidate is scored.
+    # Compute out to 2*lag_max so every candidate's double lag is scored.
     acf = _autocorrelate(env, min(2 * lag_max, env.size - 1))
     if acf.size <= lag_min:
         return 0.0
 
     hi = min(lag_max, acf.size - 1)
-    search = acf[lag_min : hi + 1]
-    if search.size == 0 or search.max() <= 0:
+    base = np.maximum(acf, 0.0)
+
+    def harmonic_score(lag: int) -> float:
+        score = float(base[lag])
+        for mult, weight in _HARMONIC_WEIGHTS:
+            m = mult * lag
+            if m < base.size:
+                # The multiple may sit a frame off exact; take the local best.
+                lo = max(m - 1, 1)
+                score += weight * float(base[lo : min(m + 2, base.size)].max())
+        bpm = 60.0 / (lag * frame_period)
+        octaves_off = np.log2(bpm / _TEMPO_PRIOR_BPM)
+        prior = float(np.exp(-0.5 * (octaves_off / _TEMPO_PRIOR_OCTAVES) ** 2))
+        return score * prior
+
+    scores = [harmonic_score(lag) for lag in range(lag_min, hi + 1)]
+    if not scores or max(scores) <= 0:
         return 0.0
-    best_lag = lag_min + int(np.argmax(search))
-    best_val = acf[best_lag]
+    best_lag = lag_min + int(np.argmax(scores))
 
-    def refined(lag: int) -> float:
-        """Parabolic interpolation around an integer ACF peak."""
-        if 1 <= lag < acf.size - 1:
-            a, b, c = acf[lag - 1], acf[lag], acf[lag + 1]
-            denom = a - 2 * b + c
-            if denom < 0:
-                shift = 0.5 * (a - c) / denom
-                if abs(shift) <= 1:
-                    return lag + shift
-        return float(lag)
-
-    def bpm_of(lag: float) -> float:
-        return 60.0 / (lag * frame_period)
-
-    chosen = float(best_lag)
-    if not (_PREF_LOW <= bpm_of(chosen) <= _PREF_HIGH):
-        # Mild octave preference: try double and half tempo.
-        for factor in (0.5, 2.0):
-            cand = int(round(best_lag * factor))
-            if cand < 1 or cand >= acf.size:
-                continue
-            # Allow the candidate peak to sit a frame off the exact octave.
-            lo = max(cand - 1, 1)
-            local = lo + int(np.argmax(acf[lo : cand + 2]))
-            if (
-                _PREF_LOW <= bpm_of(float(local)) <= _PREF_HIGH
-                and acf[local] >= 0.4 * best_val
-            ):
-                chosen = float(local)
-                break
-
-    return refined(int(round(chosen)))
+    # Parabolic interpolation around the integer ACF peak.
+    if 1 <= best_lag < acf.size - 1:
+        a, b, c = acf[best_lag - 1], acf[best_lag], acf[best_lag + 1]
+        denom = a - 2 * b + c
+        if denom < 0:
+            shift = 0.5 * (a - c) / denom
+            if abs(shift) <= 1:
+                return best_lag + shift
+    return float(best_lag)
 
 
 def _track_beats(
     env: np.ndarray, period: float, frame_period: float, first_time: float
 ) -> list[float]:
-    """Phase-lock a beat grid to the onset envelope, then track sequentially."""
+    """Track beats by dynamic programming (Ellis 2007).
+
+    Every frame t gets the score ``env[t] + max over predecessors tau of
+    (score[tau] - tightness * log2((t - tau) / period)^2)`` with tau in
+    [t - 2*period, t - period/2]; the beat sequence is backtracked from the
+    best late frame. The result is the globally optimal trade-off between
+    landing on onsets and keeping a steady pulse — one loud syncopated hit
+    cannot pull the grid off the beat, silent beats are carried through,
+    and gradual tempo drift is followed. Beats are refined to sub-frame
+    precision by parabolic interpolation of the envelope.
+    """
     n = env.size
     if n == 0 or period <= 0:
         return []
 
-    # Best phase: offset in [0, period) maximising summed onset energy.
-    best_phase, best_score = 0.0, -1.0
-    for phase in np.arange(0.0, period, 1.0):
-        idx = np.arange(phase, n, period).astype(int)
-        score = float(env[idx].sum())
-        if score > best_score:
-            best_score, best_phase = score, float(phase)
+    # Normalise so the tightness constant is independent of track loudness.
+    std = float(env.std())
+    e = env / std if std > 0 else env
 
-    half_window = max(int(round(_SNAP_FRACTION * period)), 1)
+    lo = max(int(round(period / 2)), 1)
+    hi = min(int(round(period * 2)), n - 1)
+    if hi < lo:
+        return []
 
-    def snap(predicted: float) -> int:
-        centre = int(round(predicted))
-        lo = max(centre - half_window, 0)
-        hi = min(centre + half_window + 1, n)
-        if lo >= hi:
-            return min(max(centre, 0), n - 1)
-        return lo + int(np.argmax(env[lo:hi]))
+    score = e.copy()
+    backlink = np.full(n, -1, dtype=np.int64)
+    offsets = np.arange(lo, hi + 1)
+    # log-squared deviation of each candidate interval from the period
+    penalty = _DP_TIGHTNESS * np.log2(offsets / period) ** 2
+    for t in range(lo, n):
+        prev = t - offsets
+        valid = prev >= 0
+        if not np.any(valid):
+            continue
+        cand = score[prev[valid]] - penalty[valid]
+        best = int(np.argmax(cand))
+        best_val = float(cand[best])
+        if best_val > 0:  # starting fresh at t (score e[t]) beats a bad chain
+            score[t] += best_val
+            backlink[t] = int(prev[valid][best])
 
+    # Backtrack from the best-scoring frame in the final period's window.
+    tail_start = max(n - int(round(period)) - 1, 0)
+    t = tail_start + int(np.argmax(score[tail_start:]))
     beats_frames: list[int] = []
-    current = float(snap(best_phase))
-    while current < n:
-        beats_frames.append(int(current))
-        predicted = current + period
-        if predicted >= n:
-            break
-        current = float(snap(predicted))
-        if current <= beats_frames[-1]:  # never move backwards
-            current = beats_frames[-1] + period
+    while t >= 0:
+        beats_frames.append(t)
+        t = int(backlink[t])
+    beats_frames.reverse()
+    if len(beats_frames) < 2:
+        return []
 
-    return [first_time + f * frame_period for f in beats_frames]
+    def refine(frame: int) -> float:
+        """Sub-frame peak position via parabolic interpolation."""
+        if 1 <= frame < n - 1:
+            a, b, c = env[frame - 1], env[frame], env[frame + 1]
+            denom = a - 2 * b + c
+            if denom < 0:
+                shift = 0.5 * (a - c) / denom
+                if abs(shift) <= 1:
+                    return frame + float(shift)
+        return float(frame)
+
+    return [first_time + refine(f) * frame_period for f in beats_frames]
 
 
 def detect_beats(samples, rate: int) -> tuple[float, list[float]]:
@@ -251,8 +319,37 @@ def detect_beats(samples, rate: int) -> tuple[float, list[float]]:
     lag = _pick_tempo_lag(env, frame_period)
     if lag <= 0:
         return 0.0, []
-    tempo = 60.0 / (lag * frame_period)
     beats = _track_beats(env, lag, frame_period, first_time)
+
+    # Half-tempo trap: alternating accents (hat/snare every OTHER beat) make
+    # the 2-beat lag autocorrelate stronger than the beat itself. Detect it
+    # from the tracked grid: when the onsets BETWEEN tracked beats are about
+    # as strong as the beats themselves, the real pulse is twice as fast —
+    # re-track at half the period.
+    if len(beats) >= 8 and 60.0 / (lag / 2 * frame_period) <= _MAX_BPM * 1.1:
+        def strength(times: list[float]) -> float:
+            frames = np.clip(
+                np.round((np.asarray(times) - first_time) / frame_period).astype(int),
+                1, env.size - 2,
+            )
+            # max over ±1 frame: tolerate half-frame placement error
+            return float(np.median(np.maximum.reduce(
+                [env[frames - 1], env[frames], env[frames + 1]]
+            )))
+
+        mids = [(a + b) / 2 for a, b in zip(beats, beats[1:])]
+        if strength(mids) >= 0.5 * strength(beats):
+            doubled = _track_beats(env, lag / 2, frame_period, first_time)
+            if len(doubled) > len(beats):
+                beats = doubled
+
+    if len(beats) >= 4:
+        # The tracked grid is the better tempo witness than the ACF lag:
+        # median inter-beat interval, robust against edge irregularities.
+        intervals = np.diff(beats)
+        tempo = 60.0 / float(np.median(intervals))
+    else:
+        tempo = 60.0 / (lag * frame_period)
     return float(tempo), beats
 
 
