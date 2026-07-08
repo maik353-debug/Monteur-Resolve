@@ -20,6 +20,12 @@ API (all JSON):
 * ``POST /api/create/pick``   {"folder", "music_dir",
   "max_duration"?}                                              -> {"job": id}
 * ``POST /api/create/kit``    {build payload + "kit_dir"}       -> {"job": id}
+* ``POST /api/create/revise`` {"plan_json", "folder", "brief",
+  "pins"?, "fps"?, "audio"?, "canvas"?, "format"?}              -> {"job": id}
+* ``POST /api/create/distill`` {"timeline": {"filename",
+  "content", "fps"?}, "music"?, "target"?, "style"?,
+  "canvas"?, "audio"?, "format"?}                               -> {"job": id}
+* ``POST /api/find``      {"folder", "query", "limit"?}         -> {"shots"} | {"error"}
 * ``POST /api/movie/load``    {"project_dir"}                   -> {"project", "progress"}
 * ``POST /api/movie/new``     {"project_dir", "brief",
   "genre"?}                                                     -> {"job": id}
@@ -53,6 +59,32 @@ base64 so the browser can show them.
 label the good moments after the sift. Vision is an upgrade, not a gate: a
 missing anthropic package or API key (``MonteurVisionError``) never fails the
 job — the result simply carries ``"vision_error"`` instead of annotations.
+
+``/api/create/revise`` is the Studio's revision loop
+(:mod:`monteur.revise`): the build result carries the full plan as
+``"plan_json"``; the browser sends it back with a one-sentence instruction
+("zweite Hälfte ruhiger") and optional ``"pins"`` (record-time stamps of
+shots that must stay). The job re-sifts the folder through the same scan
+cache, re-analyzes the plan's own music, and re-plans exactly like ``monteur
+revise`` does (style recovered from the plan's notes, length from the plan
+itself, ``allow_repeats=True``, SFX from whether cues were planned). The
+result looks like a build result PLUS the revised ``"plan_json"`` (so
+revisions chain) and the parser's ``"rationale"`` line.
+
+``/api/find`` answers instantly (no job) from the ``.monteur-vision.json``
+sidecar that a "Let Claude watch" scan leaves next to the footage
+(:mod:`monteur.find`): offline word matching, no API call. An empty query is
+a 400; a folder without a cache is a SOFT ``{"error": ...}`` (HTTP 200) so
+the UI can explain how to get annotations instead of failing.
+
+``/api/create/distill`` turns a finished cut into a short trailer
+(:mod:`monteur.distill`) as a ``"distill"`` job: the uploaded timeline text
+is parsed like ``/api/analyze`` (EDL needs fps), the cut's own shots become
+the material (``probe_media=True`` — sources missing on this machine are
+noted honestly, never fatal), optional music is analyzed with the usual
+``"music"`` progress entry, and the trailer comes back serialized exactly
+like a build result (audio auto-falls back to "original" when no music is
+given).
 
 The ``/api/movie/*`` endpoints drive the Studio's Movie view on top of
 :mod:`monteur.movie`. ``load`` and ``assign`` are instant (no job; both
@@ -193,7 +225,13 @@ class ApiError(Exception):
         self.message = message
 
 
-def _analyze_payload(payload: dict):
+def _timeline_from_payload(payload: dict):
+    """Parse an uploaded ``{"filename", "content", "fps"?}`` timeline text.
+
+    The one reader every upload endpoint shares (analyze, compare, versions,
+    distill): EDLs need ``fps``, FCPXMLs carry their own. Bad input raises
+    ApiError(400) with a user-ready message.
+    """
     from monteur.io import edl, fcpxml
 
     filename = payload.get("filename", "")
@@ -212,7 +250,11 @@ def _analyze_payload(payload: dict):
             timeline.name = Path(filename).stem
     else:
         raise ApiError(400, f"unsupported file type: {filename!r} (use .edl or .fcpxml)")
-    return analyze_timeline(timeline)
+    return timeline
+
+
+def _analyze_payload(payload: dict):
+    return analyze_timeline(_timeline_from_payload(payload))
 
 
 # --- background jobs (scan/build) ---------------------------------------------
@@ -239,7 +281,7 @@ _PICK_LOCK = threading.Lock()
 def _new_job(kind: str) -> dict:
     job = {
         "id": secrets.token_hex(4),
-        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "movie" | "scene-check" | "movie-assemble"
+        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "distill" | "movie" | "scene-check" | "movie-assemble"
         "state": "running",  # -> "done" | "error" | "cancelled"
         "progress": [],  # dicts: {"index","total","name","stage"[,"usable_ratio"]}
         "message": "",  # human-readable reason when state == "error"
@@ -461,9 +503,9 @@ def _plan_from_payload(job: dict, payload: dict):
     if job["cancel"].is_set():
         raise SiftCancelled("cancelled")
 
-    # allow_repeats / cut_lead / audio are forwarded ONLY when the client
-    # sent them: a montage engine without those parameters then raises a
-    # loud TypeError (surfaced as a job error) instead of silently
+    # allow_repeats / cut_lead / sfx / audio are forwarded ONLY when the
+    # client sent them: a montage engine without those parameters then
+    # raises a loud TypeError (surfaced as a job error) instead of silently
     # dropping the user's choice.
     plan_kwargs: dict = {
         "order": payload.get("order") or CHRONOLOGICAL,
@@ -475,6 +517,8 @@ def _plan_from_payload(job: dict, payload: dict):
         plan_kwargs["allow_repeats"] = bool(payload["allow_repeats"])
     if "cut_lead" in payload:
         plan_kwargs["cut_lead"] = float(payload["cut_lead"])
+    if "sfx" in payload:
+        plan_kwargs["sfx"] = bool(payload["sfx"])
     if payload.get("pace"):
         plan_kwargs["pace"] = float(payload["pace"])
     if payload.get("transitions"):
@@ -488,7 +532,7 @@ def _plan_from_payload(job: dict, payload: dict):
 def _run_build_job(job: dict, payload: dict) -> None:
     """Daemon-thread body for POST /api/create/build."""
     from monteur.media import MonteurMediaError
-    from monteur.montage import montage_to_timeline
+    from monteur.montage import montage_to_timeline, plan_to_dict
     from monteur.sift import SiftCancelled
     from monteur.io import write_edl, write_fcpxml
 
@@ -516,6 +560,9 @@ def _run_build_job(job: dict, payload: dict) -> None:
                 "tempo": music.tempo if music is not None else 0,
                 "notes": plan.notes,
             },
+            # The FULL plan, in the save-plan format — the browser hands it
+            # back to /api/create/revise so the cut can be iterated on.
+            "plan_json": plan_to_dict(plan),
         }
         if vision["error"]:
             result["vision_error"] = vision["error"]
@@ -648,6 +695,172 @@ def _run_kit_job(job: dict, payload: dict) -> None:
         elif vision["ran"]:
             result["vision_notes"] = vision["notes"]
         job["result"] = result
+        job["state"] = "done"
+    except SiftCancelled:
+        job["state"] = "cancelled"
+    except (MonteurMediaError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
+def _run_revise_job(job: dict, payload: dict) -> None:
+    """Daemon-thread body for POST /api/create/revise (the revision loop).
+
+    Mirrors ``monteur revise`` (cli.cmd_revise) exactly: the plan file/dict
+    stores the cut, not the run flags, so the re-plan recovers what it can —
+    the style from the plan's own notes (:func:`monteur.revise.
+    style_from_plan`), the length from the plan itself (authoritative;
+    ``allow_repeats=True`` keeps the repetition guard from re-capping it),
+    and the SFX layer from whether cues were planned. The footage is
+    re-sifted through the same scan cache as build/pick/kit, and the plan's
+    OWN music is re-analyzed when it has one.
+    """
+    from monteur.media import MonteurMediaError
+    from monteur.montage import montage_to_timeline, plan_from_dict, plan_to_dict
+    from monteur.revise import parse_revision, revise_plan, style_from_plan
+    from monteur.sift import SiftCancelled
+    from monteur.io import write_edl, write_fcpxml
+
+    try:
+        plan = plan_from_dict(payload.get("plan_json") or {})  # bad -> ValueError
+        if not plan.entries:
+            raise ValueError("the plan has no entries — nothing to revise")
+        try:
+            pins = [float(t) for t in payload.get("pins") or []]
+        except (TypeError, ValueError):
+            raise ValueError("'pins' must be a list of record times in seconds")
+        audio = payload.get("audio") or ("music" if plan.music_path else "original")
+        if not plan.music_path and audio != "original":
+            raise ValueError(f"the plan has no music; audio mode {audio!r} needs a song")
+
+        revision = parse_revision(str(payload.get("brief") or ""))
+
+        reports, _cached = _sift_or_cached(job, payload.get("folder", ""))
+        if job["cancel"].is_set():
+            raise SiftCancelled("cancelled")
+
+        music = None
+        if plan.music_path:
+            from monteur.music import analyze_music
+
+            with _JOBS_LOCK:
+                job["progress"].append(
+                    {"stage": "music", "name": Path(plan.music_path).name}
+                )
+            music = analyze_music(plan.music_path)
+        if job["cancel"].is_set():
+            raise SiftCancelled("cancelled")
+
+        revised = revise_plan(
+            plan, reports, music, revision, pinned=pins,
+            style=style_from_plan(plan),
+            max_duration=plan.duration,
+            allow_repeats=True,
+            sfx=bool(plan.sfx),
+        )
+        if not revised.entries:
+            raise ValueError(
+                "the revision left no entries — check the scan results"
+            )
+
+        fps = float(payload.get("fps") or 25)
+        timeline_kwargs: dict = {"audio": audio}
+        if payload.get("canvas"):
+            timeline_kwargs["canvas"] = payload["canvas"]
+        timeline = montage_to_timeline(revised, fps=fps, **timeline_kwargs)
+        fmt = (payload.get("format") or "fcpxml").lower()
+        if fmt == "edl":
+            content, filename = write_edl(timeline), "monteur_montage.edl"
+        else:
+            content, filename = write_fcpxml(timeline), "monteur_montage.fcpxml"
+        job["result"] = {
+            "filename": filename,
+            "content": content,
+            "plan": {
+                "duration": revised.duration,
+                "cuts": len(revised.entries),
+                "tempo": music.tempo if music is not None else 0,
+                "notes": revised.notes,
+            },
+            # The revised plan in the same save format, so revisions chain.
+            "plan_json": plan_to_dict(revised),
+            # One line saying how the instruction was read — honesty first.
+            "rationale": revision.rationale,
+        }
+        job["state"] = "done"
+    except SiftCancelled:
+        job["state"] = "cancelled"
+    except (MonteurMediaError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
+def _run_distill_job(job: dict, payload: dict, timeline) -> None:
+    """Daemon-thread body for POST /api/create/distill (cut -> trailer).
+
+    ``timeline`` was already parsed by the request handler (bad uploads are
+    a 400, not a job error). ``probe_media`` stays True: sources that exist
+    on this machine get their real durations, missing ones are noted
+    honestly by :func:`monteur.distill.timeline_to_reports` — never fatal.
+    """
+    from monteur.distill import distill
+    from monteur.media import MonteurMediaError
+    from monteur.montage import montage_to_timeline
+    from monteur.sift import SiftCancelled
+    from monteur.io import write_edl, write_fcpxml
+
+    try:
+        music = None
+        music_path = payload.get("music") or ""
+        if music_path:
+            from monteur.music import analyze_music
+
+            with _JOBS_LOCK:
+                job["progress"].append(
+                    {"stage": "music", "name": Path(music_path).name}
+                )
+            music = analyze_music(music_path)
+        if job["cancel"].is_set():
+            raise SiftCancelled("cancelled")
+
+        target = float(payload.get("target") or 60.0)
+        plan = distill(
+            timeline, music, target=target,
+            style=payload.get("style") or "trailer",
+        )
+        if not plan.entries:
+            raise ValueError("no usable material found in the cut — nothing to distill")
+
+        # Like the CLI: no music means the trailer keeps the clips' own sound.
+        audio = payload.get("audio") or ("music" if music_path else "original")
+        if music is None and audio != "original":
+            audio = "original"
+        fps = timeline.fps if timeline.fps > 0 else 25.0
+        timeline_kwargs: dict = {"audio": audio}
+        if payload.get("canvas"):
+            timeline_kwargs["canvas"] = payload["canvas"]
+        out = montage_to_timeline(plan, fps=fps, **timeline_kwargs)
+        fmt = (payload.get("format") or "fcpxml").lower()
+        if fmt == "edl":
+            content, filename = write_edl(out), "monteur_trailer.edl"
+        else:
+            content, filename = write_fcpxml(out), "monteur_trailer.fcpxml"
+        job["result"] = {
+            "filename": filename,
+            "content": content,
+            "plan": {
+                "duration": plan.duration,
+                "cuts": len(plan.entries),
+                "tempo": music.tempo if music is not None else 0,
+                "notes": plan.notes,
+            },
+        }
         job["state"] = "done"
     except SiftCancelled:
         job["state"] = "cancelled"
@@ -993,6 +1206,9 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/create/build"): self._create_build,
             ("POST", "/api/create/pick"): self._create_pick,
             ("POST", "/api/create/kit"): self._create_kit,
+            ("POST", "/api/create/revise"): self._create_revise,
+            ("POST", "/api/create/distill"): self._create_distill,
+            ("POST", "/api/find"): self._find,
             ("POST", "/api/movie/load"): self._movie_load,
             ("POST", "/api/movie/new"): self._movie_new,
             ("POST", "/api/movie/assign"): self._movie_assign,
@@ -1250,6 +1466,69 @@ class MonteurHandler(BaseHTTPRequestHandler):
             daemon=True,
         ).start()
         self._send_json({"job": job["id"]})
+
+    def _create_revise(self) -> None:
+        payload = self._read_json()
+        if not payload.get("folder"):
+            raise ApiError(400, "missing 'folder' (path to your footage)")
+        if not isinstance(payload.get("plan_json"), dict):
+            raise ApiError(
+                400, "missing 'plan_json' (the plan a build result carries)"
+            )
+        if not str(payload.get("brief") or "").strip():
+            raise ApiError(
+                400, "missing 'brief' (say what should change, in one sentence)"
+            )
+        job = _new_job("revise")
+        threading.Thread(
+            target=_run_revise_job,
+            args=(job, payload),
+            name=f"monteur-revise-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _create_distill(self) -> None:
+        payload = self._read_json()
+        timeline_payload = payload.get("timeline")
+        if not isinstance(timeline_payload, dict):
+            raise ApiError(
+                400, "missing 'timeline' (the finished cut as {filename, content, fps?})"
+            )
+        # Parse here so bad uploads are a 400 with a clear message, exactly
+        # like /api/analyze — only real work runs in the job thread.
+        timeline = _timeline_from_payload(timeline_payload)
+        job = _new_job("distill")
+        threading.Thread(
+            target=_run_distill_job,
+            args=(job, payload, timeline),
+            name=f"monteur-distill-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _find(self) -> None:
+        """Search the vision cache — instant and offline, so no job."""
+        from monteur.find import search_footage
+
+        payload = self._read_json()
+        folder = payload.get("folder", "")
+        if not folder:
+            raise ApiError(400, "missing 'folder' (path to your footage)")
+        try:
+            limit = int(payload.get("limit") or 20)
+        except (TypeError, ValueError):
+            raise ApiError(400, "'limit' must be a number")
+        try:
+            shots = search_footage(folder, str(payload.get("query") or ""), limit=limit)
+        except ValueError as exc:  # empty/unusable query
+            raise ApiError(400, str(exc))
+        except FileNotFoundError as exc:
+            # No vision cache yet — a soft error (HTTP 200): the UI turns it
+            # into "turn on Let Claude watch", not into a failure.
+            self._send_json({"error": str(exc)})
+            return
+        self._send_json({"shots": [asdict(shot) for shot in shots]})
 
     # -- movie endpoints (the Studio's Movie view) --------------------------
 

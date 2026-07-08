@@ -569,6 +569,15 @@ svg text.axis {
 .job-log li { padding: 2px 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 
 .result-stats { display: flex; gap: 28px; flex-wrap: wrap; margin: 6px 0 12px; }
+/* revision loop: how the instruction was read + pinnable entry rows */
+.rev-rationale {
+  border-left: 3px solid var(--series-1); background: var(--row-wash);
+  border-radius: 6px; padding: 8px 12px; margin: 8px 0 10px; font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.rev-entries { max-height: 260px; overflow-y: auto; }
+.seg-item .seg-label { color: var(--ink-2); flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.find-hero { margin-left: 0; }
 .rs-num { font-size: 30px; font-weight: 680; line-height: 1.15; }
 .rs-label { font-size: 12px; color: var(--ink-2); }
 .howto { margin: 6px 0 4px; padding-left: 20px; font-size: 13px; color: var(--ink-2); }
@@ -891,6 +900,19 @@ svg text.axis {
           <span class="key"><span class="swatch" style="background:var(--seg-blurry)"></span>Blurry</span>
           <span class="key"><span class="swatch" style="background:var(--seg-shaky)"></span>Shaky</span>
         </div>
+        <details class="fine-tune rank-details" id="cre-find" style="margin-top: 14px;">
+          <summary>Search your footage — what did Claude see?</summary>
+          <div class="rank-body">
+            <label class="sr-only" for="cre-find-query">Search query</label>
+            <div class="path-row">
+              <input type="text" id="cre-find-query" placeholder="kurven, sonnenuntergang, hero&hellip;" spellcheck="false" autocomplete="off">
+              <button class="btn" id="cre-find-btn" type="button">Search<span class="spin" aria-hidden="true"></span></button>
+            </div>
+            <p class="help-small">Searches the labels Claude wrote during a &ldquo;Let Claude watch&rdquo; scan — offline and instant, no API call. Try &ldquo;hero&rdquo; for the money shots.</p>
+            <p class="scan-note" id="cre-find-msg" role="status" hidden></p>
+            <div id="cre-find-results"></div>
+          </div>
+        </details>
         <div class="wiz-nav">
           <button class="btn primary" id="cre-next-1" type="button" hidden>Continue to music →</button>
         </div>
@@ -1022,6 +1044,10 @@ svg text.axis {
               <label class="ft-check"><input type="checkbox" id="cre-repeats">Allow repeats</label>
               <p class="help-small">Lets the same footage appear more than once when the cut runs longer than your good moments. Off, Monteur keeps every shot fresh.</p>
             </div>
+            <div class="ft-field">
+              <label class="ft-check"><input type="checkbox" id="cre-sfx">Plan an SFX layer</label>
+              <p class="help-small">Ambience, risers and impacts planned as green markers on the timeline — each with a search query for your sound library.</p>
+            </div>
           </div>
         </details>
         <div class="wiz-nav">
@@ -1046,6 +1072,7 @@ svg text.axis {
         <p class="scan-note" id="cre-build-msg" role="status" hidden></p>
         <div class="card" id="cre-result" hidden>
           <h2 id="cre-result-title" tabindex="-1">Your cut is ready</h2>
+          <p class="rev-rationale" id="cre-rev-rationale" role="status" hidden></p>
           <div class="result-stats" id="cre-summary"></div>
           <ul class="plan-notes" id="cre-notes"></ul>
           <div class="export-bar">
@@ -1064,6 +1091,19 @@ svg text.axis {
             <li>When Resolve asks where the media lives, point it at your footage folder.</li>
             <li>Press play — then fine-tune from there. FCPXML relinks most easily.</li>
           </ol>
+          <div class="kit-block" id="cre-revise" hidden>
+            <p class="seg-heading">Revise this cut</p>
+            <p class="help-small">Watch the cut, then say what bothers you in one sentence — German or English. Pin the shots you love first: they stay exactly where they are.</p>
+            <ul class="seg-list" id="cre-rev-entries"></ul>
+            <label class="sr-only" for="cre-rev-brief">Revision instruction</label>
+            <div class="path-row" style="margin-top: 10px;">
+              <input type="text" id="cre-rev-brief" placeholder="zweite Hälfte ruhiger" spellcheck="false" autocomplete="off">
+              <button class="btn" id="cre-rev-btn" type="button">Revise<span class="spin" aria-hidden="true"></span></button>
+            </div>
+            <p class="help-small">Monteur reads regions (&ldquo;zweite Hälfte&rdquo;, &ldquo;ab 1:30&rdquo;), pace (&ldquo;ruhiger&rdquo;, &ldquo;schneller&rdquo;), transitions (&ldquo;harte Schnitte&rdquo;, &ldquo;Blenden&rdquo;) and styles — and tells you exactly how it read your sentence. The result below is replaced by the revised cut.</p>
+            <div id="cre-rev-panel"></div>
+            <p class="scan-note" id="cre-rev-msg" role="status" hidden></p>
+          </div>
           <div class="kit-block" id="cre-kit">
             <p class="seg-heading">Publish kit</p>
             <p class="help-small">Everything the upload needs, drafted from this cut: title ideas, a description with YouTube chapters, tags, and thumbnail stills — written as publish.md plus a thumbs/ folder.</p>
@@ -1086,6 +1126,48 @@ svg text.axis {
           </div>
         </div>
       </section>
+
+      <details class="fine-tune" id="cre-distill" style="margin-top: 22px;">
+        <summary>Distill a trailer from a finished cut</summary>
+        <div class="rank-body">
+          <p class="help-small">Your finished film already IS the curation — every shot in it was hand-picked. Drop its timeline export (EDL or FCPXML) and Monteur cuts a short trailer from exactly those shots. Sources that aren&rsquo;t on this machine still work; the export carries their paths through.</p>
+          <div class="path-row">
+            <button class="btn ghost" id="cre-dst-file-btn" type="button">Choose cut file&hellip;</button>
+            <ul class="chiplist" id="cre-dst-chip"></ul>
+          </div>
+          <label class="sr-only" for="cre-dst-music">Trailer music file path (optional)</label>
+          <div class="path-row">
+            <input type="text" id="cre-dst-music" placeholder="Music for the trailer (optional) — /Users/you/Music/song.mp3" spellcheck="false" autocomplete="off">
+            <button class="btn ghost" id="cre-dst-browse-music" type="button">Browse&hellip;</button>
+          </div>
+          <p class="help-small">No music? The trailer keeps the clips&rsquo; own sound.</p>
+          <div class="export-bar" style="border-top: 0; margin-top: 4px; padding-top: 0;">
+            <label class="export-field">Target length (s)
+              <input type="number" id="cre-dst-target" min="5" step="5" value="60" inputmode="numeric">
+            </label>
+            <label class="export-field">Canvas
+              <select id="cre-dst-canvas"></select>
+            </label>
+            <div class="export-field">
+              <span id="cre-dst-fmt-label">File format</span>
+              <div class="seg-toggle" role="group" aria-labelledby="cre-dst-fmt-label">
+                <button type="button" id="cre-dst-fmt-edl" aria-pressed="false">EDL</button>
+                <button type="button" id="cre-dst-fmt-fcpxml" aria-pressed="true">FCPXML</button>
+              </div>
+            </div>
+            <button class="btn primary" id="cre-dst-btn" type="button">Distill trailer<span class="spin" aria-hidden="true"></span></button>
+          </div>
+          <div id="cre-dst-panel"></div>
+          <p class="scan-note" id="cre-dst-msg" role="status" hidden></p>
+          <div class="card" id="cre-dst-result" style="margin: 14px 0 0;" hidden>
+            <h3 id="cre-dst-result-title" tabindex="-1">Your trailer is ready</h3>
+            <div class="result-stats" id="cre-dst-summary"></div>
+            <ul class="plan-notes" id="cre-dst-notes"></ul>
+            <button class="btn primary" id="cre-dst-download" type="button" style="margin-top: 12px;">Download timeline</button>
+            <p class="help-small">Import it in Resolve via File → Import → Timeline&hellip; — the trailer references the same media as your film.</p>
+          </div>
+        </div>
+      </details>
     </section>
 
     <section id="movie" hidden>
@@ -1190,6 +1272,7 @@ svg text.axis {
 <input type="file" id="compare-input" accept=".edl,.fcpxml,.xml" hidden>
 <input type="file" id="script-input" accept=".fountain,.txt" hidden>
 <input type="file" id="takes-input" accept=".srt,.json" multiple hidden>
+<input type="file" id="cre-dst-input" accept=".edl,.fcpxml,.xml" hidden>
 
 <div id="drop-veil" hidden aria-hidden="true"><div class="veil-card">Drop to analyze</div></div>
 
@@ -2880,6 +2963,8 @@ var scanPanel = makeJobPanel("cre-scan-panel", { starting: "Starting the scan…
 var buildPanel = makeJobPanel("cre-build-panel", { starting: "Starting the build…", working: "Building your cut…" });
 var rankPanel = makeJobPanel("cre-rank-panel", { starting: "Starting the ranking…", working: "Ranking your songs…" });
 var kitPanel = makeJobPanel("cre-kit-panel", { starting: "Starting the publish kit…", working: "Writing the publish kit…" });
+var revisePanel = makeJobPanel("cre-rev-panel", { starting: "Starting the revision…", working: "Revising your cut…" });
+var distillPanel = makeJobPanel("cre-dst-panel", { starting: "Starting the distillation…", working: "Distilling your trailer…" });
 
 function setScanBusy(on) {
   var btn = $("cre-scan-btn");
@@ -2908,6 +2993,20 @@ function setKitBusy(on) {
   $("cre-kit-dir").disabled = on;
   $("cre-browse-kit").disabled = on;
 }
+function setReviseBusy(on) {
+  var btn = $("cre-rev-btn");
+  btn.classList.toggle("busy", on);
+  btn.disabled = on;
+  $("cre-rev-brief").disabled = on;
+}
+function setDistillBusy(on) {
+  var btn = $("cre-dst-btn");
+  btn.classList.toggle("busy", on);
+  btn.disabled = on;
+  $("cre-dst-file-btn").disabled = on;
+  $("cre-dst-music").disabled = on;
+  $("cre-dst-browse-music").disabled = on;
+}
 
 /* called when the user leaves the Create view — poll loops must not outlive it */
 function creStopJobs() {
@@ -2915,6 +3014,8 @@ function creStopJobs() {
   if (buildPanel.running()) { buildPanel.stop(); setBuildBusy(false); }
   if (rankPanel.running()) { rankPanel.stop(); setRankBusy(false); }
   if (kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
+  if (revisePanel.running()) { revisePanel.stop(); setReviseBusy(false); }
+  if (distillPanel.running()) { distillPanel.stop(); setDistillBusy(false); }
 }
 
 function creNote(id, message, isError) {
@@ -2929,6 +3030,7 @@ function creShowStep(n, focusHeading) {
   if (n !== 2 && rankPanel.running()) { rankPanel.stop(); setRankBusy(false); }
   if (n !== 3 && buildPanel.running()) { buildPanel.stop(); setBuildBusy(false); }
   if (n !== 3 && kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
+  if (n !== 3 && revisePanel.running()) { revisePanel.stop(); setReviseBusy(false); }
   cre.step = n;
   var names = { 1: "Your footage", 2: "Music & options", 3: "Your cut" };
   $("wiz-progress").textContent = "Step " + n + " of 3 — " + names[n];
@@ -2948,6 +3050,7 @@ function hideBrowseButtons() {
   $("cre-browse-music").hidden = true;
   $("cre-browse-musicdir").hidden = true;
   $("cre-browse-kit").hidden = true;
+  $("cre-dst-browse-music").hidden = true;
   // the movie view's Browse buttons (incl. the per-scene ones) share the fate
   Array.prototype.forEach.call(document.querySelectorAll(".mov-browse"), function (b) {
     b.hidden = true;
@@ -3009,7 +3112,10 @@ function scanFolder() {
   $("cre-vision-notes").hidden = true;
   cre.clips = null;
   cre.result = null; // footage changed — any previous build is stale
+  creResetRevise(); // ...and so is any plan the revision loop still holds
   $("cre-result").hidden = true;
+  $("cre-find-msg").hidden = true;
+  clear($("cre-find-results"));
   clear($("cre-clips"));
   clear($("cre-vision-notes"));
   $("cre-legend").hidden = true;
@@ -3464,7 +3570,8 @@ function creBuildBody() {
     transitions: cre.transitions,
     fps: fpsFrom($("cre-fps")),
     format: cre.format,
-    allow_repeats: $("cre-repeats").checked
+    allow_repeats: $("cre-repeats").checked,
+    sfx: $("cre-sfx").checked
   };
   if (seeEnabled()) body.see = true;
   var music = $("cre-music").value.trim();
@@ -3518,7 +3625,14 @@ function startBuild(andThen) {
     buildPanel.start(data.job, {
       onDone: function (result) {
         setBuildBusy(false);
-        cre.result = { data: result, format: body.format, body: body };
+        cre.result = { data: result, format: body.format, body: body, kind: "build" };
+        // a fresh build seeds the revision loop with its full plan
+        rev.planJson = (result && result.plan_json) || null;
+        rev.pins = [];
+        rev.lastBody = null;
+        $("cre-rev-rationale").hidden = true;
+        $("cre-rev-msg").hidden = true;
+        renderReviseEntries();
         renderCreResult(result);
         $("cre-result-title").focus();
         if (andThen) andThen(result);
@@ -3552,17 +3666,26 @@ $("cre-fmt-edl").addEventListener("click", function () { setCreFormat("edl"); })
 $("cre-fmt-fcpxml").addEventListener("click", function () { setCreFormat("fcpxml"); });
 
 $("cre-download").addEventListener("click", function () {
-  if (!cre.result || buildPanel.running()) return;
-  if (cre.result.format === cre.format) {
-    downloadText(cre.result.data.filename || ("monteur_montage." + cre.format), cre.result.data.content || "");
-    toast("Downloaded " + (cre.result.data.filename || "timeline") + ".", "success");
-    return;
-  }
-  // format changed since the build — rebuild as a job, then download
-  startBuild(function (result) {
+  if (!cre.result || buildPanel.running() || revisePanel.running()) return;
+  function deliver(result) {
     downloadText(result.filename || ("monteur_montage." + cre.format), result.content || "");
     toast("Downloaded " + (result.filename || "timeline") + ".", "success");
-  });
+  }
+  if (cre.result.format === cre.format) {
+    deliver(cre.result.data);
+    return;
+  }
+  // format changed since the last job — re-run it, then download. A revised
+  // cut re-runs the SAME revision (same plan, pins and instruction), so the
+  // revision is never silently lost to a format switch.
+  if (cre.result.kind === "revise" && rev.lastBody) {
+    var again = {};
+    Object.keys(rev.lastBody).forEach(function (key) { again[key] = rev.lastBody[key]; });
+    again.format = cre.format;
+    startRevise(again, deliver);
+    return;
+  }
+  startBuild(deliver);
 });
 
 /* ---- step 3: publish kit (monteur.publish) ---- */
@@ -3633,6 +3756,342 @@ function writeKit() {
 $("cre-kit-btn").addEventListener("click", writeKit);
 $("cre-kit-dir").addEventListener("keydown", function (e) {
   if (e.key === "Enter") { e.preventDefault(); writeKit(); }
+});
+
+/* ---- step 1: search your footage (monteur.find — the vision cache) ----
+   Instant and offline: the server only reads the .monteur-vision.json
+   sidecar a "Let Claude watch" scan left next to the clips. A folder
+   without a cache is a SOFT error — a calm hint, not a failure. */
+
+function renderFindShots(shots) {
+  var host = $("cre-find-results");
+  clear(host);
+  if (!shots.length) {
+    creNote("cre-find-msg", "No shots match — try broader words, or scan again with “Let Claude watch” after adding footage.");
+    return;
+  }
+  var list = el("ul", "seg-list");
+  shots.forEach(function (shot) {
+    var li = el("li", "seg-item");
+    li.appendChild(el("span", "seg-take", baseName(shot.clip_path)));
+    li.appendChild(el("span", "seg-time", fmtClock(shot.start || 0) + "–" + fmtClock(shot.end || 0)));
+    var words = String(shot.label || "");
+    var tags = Array.isArray(shot.tags) ? shot.tags : [];
+    if (tags.length) words += (words ? " · " : "") + tags.map(String).join(", ");
+    li.appendChild(el("span", "seg-label", words || "(no label)"));
+    if (typeof shot.hero === "number" && shot.hero >= 0.5) {
+      li.appendChild(el("span", "sem-pill hero find-hero", "hero " + shot.hero.toFixed(1)));
+    }
+    list.appendChild(li);
+  });
+  host.appendChild(list);
+}
+
+function findShots() {
+  var btn = $("cre-find-btn");
+  if (btn.classList.contains("busy")) return;
+  var folder = $("cre-folder").value.trim();
+  if (!folder) {
+    creNote("cre-find-msg", "Add your footage folder above first — the search reads its annotations.", true);
+    $("cre-folder").focus();
+    return;
+  }
+  var query = $("cre-find-query").value.trim();
+  if (!query) {
+    creNote("cre-find-msg", "Type what you're looking for — e.g. “kurven”, “sonnenuntergang” or “hero”.", true);
+    $("cre-find-query").focus();
+    return;
+  }
+  $("cre-find-msg").hidden = true;
+  clear($("cre-find-results"));
+  btn.classList.add("busy");
+  btn.disabled = true;
+  api("/api/find", { method: "POST", body: { folder: folder, query: query } }).then(function (data) {
+    if (data && data.error) {
+      // soft: no vision cache yet — explain the way there, calmly
+      creNote("cre-find-msg", "No annotations for this folder yet. Turn on “Let Claude watch your clips” and scan once — after that the search works offline, forever.");
+      return;
+    }
+    renderFindShots((data && data.shots) || []);
+  }).catch(function (err) {
+    creNote("cre-find-msg", err && err.message ? err.message : String(err), true);
+  }).then(function () {
+    btn.classList.remove("busy");
+    btn.disabled = false;
+  });
+}
+$("cre-find-btn").addEventListener("click", findShots);
+$("cre-find-query").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); findShots(); }
+});
+
+/* ---- step 3: the revision loop (monteur.revise) ----------------------
+   The build result carries the FULL plan as plan_json; one sentence plus
+   optional pins goes back to /api/create/revise, and the revised result
+   REPLACES the current one (plan_json included, so revisions chain). */
+
+var rev = {
+  planJson: null, // the current cut's full plan (from build or last revise)
+  pins: [],       // record-time stamps (entry midpoints) of pinned shots
+  lastBody: null  // the last successful revise request (format re-runs)
+};
+
+function creResetRevise() {
+  rev.planJson = null;
+  rev.pins = [];
+  rev.lastBody = null;
+  clear($("cre-rev-entries"));
+  $("cre-revise").hidden = true;
+  $("cre-rev-rationale").hidden = true;
+  $("cre-rev-msg").hidden = true;
+}
+
+/* a pin stamp must land INSIDE [record_start, record_end) — the midpoint is
+   safely inside for any non-degenerate slot */
+function revPinStamp(entry) { return (entry.record_start + entry.record_end) / 2; }
+
+function renderReviseEntries() {
+  var host = $("cre-rev-entries");
+  clear(host);
+  host.classList.add("rev-entries");
+  var entries = (rev.planJson && rev.planJson.entries) || [];
+  entries.forEach(function (entry, i) {
+    var li = el("li", "seg-item");
+    li.appendChild(el("span", "seg-time", (i + 1) + "."));
+    li.appendChild(el("span", "seg-time", fmtClock(entry.record_start || 0) + "–" + fmtClock(entry.record_end || 0)));
+    li.appendChild(el("span", "seg-take", baseName(entry.clip_path)));
+    li.appendChild(el("span", "seg-label", String(entry.label || "")));
+    var stamp = revPinStamp(entry);
+    var pinned = rev.pins.indexOf(stamp) !== -1;
+    var pin = el("button", "pin-btn", pinned ? "Pinned" : "Pin");
+    pin.type = "button";
+    pin.setAttribute("aria-pressed", String(pinned));
+    pin.setAttribute("aria-label", "Pin shot " + (i + 1) + " — keep it exactly where it is");
+    pin.addEventListener("click", function () {
+      var at = rev.pins.indexOf(stamp);
+      var on = at === -1;
+      if (on) rev.pins.push(stamp); else rev.pins.splice(at, 1);
+      pin.setAttribute("aria-pressed", String(on));
+      pin.textContent = on ? "Pinned" : "Pin";
+    });
+    li.appendChild(pin);
+    host.appendChild(li);
+  });
+  $("cre-revise").hidden = entries.length === 0;
+}
+
+function startRevise(body, andThen) {
+  if (revisePanel.running() || buildPanel.running()) return;
+  $("cre-rev-msg").hidden = true;
+  setReviseBusy(true);
+  api("/api/create/revise", { method: "POST", body: body }).then(function (data) {
+    revisePanel.start(data.job, {
+      onDone: function (result) {
+        setReviseBusy(false);
+        rev.lastBody = body;
+        rev.planJson = (result && result.plan_json) || rev.planJson;
+        rev.pins = []; // the kept shots live in the new plan now
+        cre.result = {
+          data: result, format: body.format,
+          body: (cre.result && cre.result.body) || null, kind: "revise"
+        };
+        renderCreResult(result);
+        renderReviseEntries();
+        if (result && result.rationale) {
+          $("cre-rev-rationale").textContent = "How your instruction was read — " + String(result.rationale);
+          $("cre-rev-rationale").hidden = false;
+        }
+        $("cre-rev-brief").value = "";
+        $("cre-result-title").focus();
+        toast("Cut revised — the result replaced the previous one.", "success");
+        if (andThen) andThen(result);
+      },
+      onCancelled: function () {
+        setReviseBusy(false);
+        creNote("cre-rev-msg", "Revision cancelled — your current cut is untouched.");
+      },
+      onError: function (message) {
+        setReviseBusy(false);
+        creNote("cre-rev-msg", message, true);
+      }
+    });
+  }).catch(function (err) {
+    setReviseBusy(false);
+    creNote("cre-rev-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+
+$("cre-rev-btn").addEventListener("click", function () {
+  if (!rev.planJson) return;
+  var brief = $("cre-rev-brief").value.trim();
+  if (!brief) {
+    creNote("cre-rev-msg", "Say what should change — e.g. “zweite Hälfte ruhiger” or “ab 0:30 schneller”.", true);
+    $("cre-rev-brief").focus();
+    return;
+  }
+  var built = (cre.result && cre.result.body) || {};
+  var body = {
+    plan_json: rev.planJson,
+    folder: built.folder || $("cre-folder").value.trim(),
+    brief: brief,
+    pins: rev.pins.slice(),
+    fps: built.fps || fpsFrom($("cre-fps")),
+    format: cre.format
+  };
+  if (built.audio) body.audio = built.audio;
+  if (built.canvas) body.canvas = built.canvas;
+  startRevise(body, null);
+});
+$("cre-rev-brief").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); $("cre-rev-btn").click(); }
+});
+
+/* ---- distill a trailer from a finished cut (monteur.distill) ---------- */
+
+var dst = {
+  timeline: null,   // {filename, content, fps?} — the uploaded finished cut
+  format: "fcpxml", // download format
+  result: null      // {data, format} from the last finished distill job
+};
+
+[
+  ["uhd", "Wide 16:9 · 4K"],
+  ["hd", "Wide 16:9 · HD"],
+  ["vertical-uhd", "Vertical 9:16 · 4K"],
+  ["vertical", "Vertical 9:16 · HD"],
+  ["cine-uhd", "Cinemascope 2.39:1 · 4K"],
+  ["cine", "Cinemascope 2.39:1 · HD"]
+].forEach(function (spec) {
+  var option = document.createElement("option");
+  option.value = spec[0];
+  option.textContent = spec[1];
+  if (spec[0] === "uhd") option.selected = true;
+  $("cre-dst-canvas").appendChild(option);
+});
+
+function renderDstChip() {
+  var list = $("cre-dst-chip");
+  clear(list);
+  if (!dst.timeline) return;
+  var chip = el("li", "chip");
+  chip.appendChild(el("span", "name", dst.timeline.filename));
+  var x = el("button", "x", "×");
+  x.type = "button";
+  x.setAttribute("aria-label", "Remove " + dst.timeline.filename);
+  x.addEventListener("click", function () {
+    dst.timeline = null;
+    renderDstChip();
+  });
+  chip.appendChild(x);
+  list.appendChild(chip);
+}
+
+$("cre-dst-file-btn").addEventListener("click", function () { $("cre-dst-input").click(); });
+$("cre-dst-input").addEventListener("change", function () {
+  var file = $("cre-dst-input").files[0];
+  $("cre-dst-input").value = "";
+  if (!file) return;
+  if (!isTimelineFile(file.name)) {
+    toast("That doesn’t look like a timeline export — Monteur reads .edl, .fcpxml and .xml files.", "error");
+    return;
+  }
+  readFileText(file).then(function (text) {
+    if (extOf(file.name) === "edl") {
+      return askFps([file.name]).then(function (fps) {
+        if (fps === null) return; // cancelled
+        dst.timeline = { filename: file.name, content: text, fps: fps };
+        renderDstChip();
+      });
+    }
+    dst.timeline = { filename: file.name, content: text };
+    renderDstChip();
+  }).catch(function (err) {
+    toast(err && err.message ? err.message : String(err), "error");
+  });
+});
+$("cre-dst-browse-music").addEventListener("click", function () {
+  browsePath("music", "cre-dst-music", "cre-dst-browse-music");
+});
+
+function setDstFormat(fmt) {
+  dst.format = fmt;
+  $("cre-dst-fmt-edl").setAttribute("aria-pressed", String(fmt === "edl"));
+  $("cre-dst-fmt-fcpxml").setAttribute("aria-pressed", String(fmt === "fcpxml"));
+}
+$("cre-dst-fmt-edl").addEventListener("click", function () { setDstFormat("edl"); });
+$("cre-dst-fmt-fcpxml").addEventListener("click", function () { setDstFormat("fcpxml"); });
+
+function renderDstResult(result) {
+  var summary = $("cre-dst-summary");
+  clear(summary);
+  var plan = (result && result.plan) || {};
+  var stats = [
+    [String(plan.cuts || 0), plan.cuts === 1 ? "cut" : "cuts"],
+    [fmtClock(plan.duration || 0), "long"]
+  ];
+  if (plan.tempo) stats.push([String(Math.round(plan.tempo)), "BPM tempo"]);
+  stats.forEach(function (pair) {
+    var stat = el("div", "result-stat");
+    stat.appendChild(el("div", "rs-num", pair[0]));
+    stat.appendChild(el("div", "rs-label", pair[1]));
+    summary.appendChild(stat);
+  });
+  var notes = $("cre-dst-notes");
+  clear(notes);
+  (plan.notes || []).forEach(function (note) { notes.appendChild(el("li", null, String(note))); });
+  $("cre-dst-result").hidden = false;
+}
+
+function startDistill(andThen) {
+  if (distillPanel.running()) return;
+  if (!dst.timeline) {
+    creNote("cre-dst-msg", "Choose your finished cut first — an EDL or FCPXML export of the film.", true);
+    return;
+  }
+  var body = { timeline: dst.timeline, format: dst.format, canvas: $("cre-dst-canvas").value };
+  var music = $("cre-dst-music").value.trim();
+  if (music) body.music = music;
+  var target = parseFloat($("cre-dst-target").value);
+  if (isFinite(target) && target > 0) body.target = target;
+  $("cre-dst-msg").hidden = true;
+  if (!andThen) { $("cre-dst-result").hidden = true; dst.result = null; }
+  setDistillBusy(true);
+  api("/api/create/distill", { method: "POST", body: body }).then(function (data) {
+    distillPanel.start(data.job, {
+      onDone: function (result) {
+        setDistillBusy(false);
+        dst.result = { data: result || {}, format: body.format };
+        renderDstResult(result || {});
+        $("cre-dst-result-title").focus();
+        if (andThen) andThen(result || {});
+      },
+      onCancelled: function () {
+        setDistillBusy(false);
+        creNote("cre-dst-msg", "Distillation cancelled — nothing was written. Distill again whenever you're ready.");
+      },
+      onError: function (message) {
+        setDistillBusy(false);
+        creNote("cre-dst-msg", message, true);
+      }
+    });
+  }).catch(function (err) {
+    setDistillBusy(false);
+    creNote("cre-dst-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+$("cre-dst-btn").addEventListener("click", function () { startDistill(null); });
+
+$("cre-dst-download").addEventListener("click", function () {
+  if (!dst.result || distillPanel.running()) return;
+  function deliver(result) {
+    downloadText(result.filename || ("monteur_trailer." + dst.format), result.content || "");
+    toast("Downloaded " + (result.filename || "timeline") + ".", "success");
+  }
+  if (dst.result.format === dst.format) {
+    deliver(dst.result.data);
+    return;
+  }
+  startDistill(deliver); // format changed since the distill — re-run, then download
 });
 
 populateFpsSelect($("cre-fps"));

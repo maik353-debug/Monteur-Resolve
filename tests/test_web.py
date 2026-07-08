@@ -1129,3 +1129,321 @@ class TestMovieAssembleApi:
         assert len([p for p in job["progress"] if p["stage"] == "scene"]) == 2
         assert job["result"]["scenes_used"] == 2
         assert job["result"]["duration_seconds"] > 0
+
+
+# --- SFX toggle, revision loop, find and distill (the CLI-only quartet) --------
+
+
+class TestSfxApi:
+    """The build payload's "sfx" flag is forwarded to plan_montage."""
+
+    DEMO = TestCreateApi.DEMO
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+        _clear_scan_cache()
+
+    def _build(self, server, **extra):
+        data = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "format": "edl", **extra},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        return job["result"]
+
+    def test_build_forwards_sfx(self, server):
+        result = self._build(server, sfx=True)
+        assert any("sfx layer" in n for n in result["plan"]["notes"])
+        assert result["plan_json"]["sfx"]  # the cues ride in the full plan too
+
+    def test_build_without_sfx_plans_no_layer(self, server):
+        result = self._build(server)
+        assert not any("sfx layer" in n for n in result["plan"]["notes"])
+        assert result["plan_json"]["sfx"] == []
+
+
+class TestReviseApi:
+    """POST /api/create/revise — the Studio's revision loop."""
+
+    DEMO = TestCreateApi.DEMO
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+        _clear_scan_cache()
+
+    def _build(self, server, **extra):
+        data = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "format": "edl", **extra},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        return job["result"]
+
+    def _revise(self, server, plan_json, brief, **extra):
+        data = _post(
+            f"{server}/api/create/revise",
+            {"plan_json": plan_json, "folder": self.DEMO, "brief": brief,
+             "format": "edl", **extra},
+        )
+        assert isinstance(data["job"], str) and data["job"]
+        return _wait_for_job(server, data["job"])
+
+    def test_build_result_carries_plan_json(self, server):
+        result = self._build(server)
+        plan_json = result["plan_json"]
+        assert plan_json["monteur_plan"] == 1
+        assert plan_json["entries"]
+        assert plan_json["duration"] == result["plan"]["duration"]
+        # ...and it round-trips through the real loader
+        from monteur.montage import plan_from_dict
+
+        plan = plan_from_dict(plan_json)
+        assert len(plan.entries) == result["plan"]["cuts"]
+
+    def test_revise_end_to_end(self, server):
+        built = self._build(server)
+        job = self._revise(server, built["plan_json"], "ruhiger")
+        assert job["state"] == "done"
+        assert job["kind"] == "revise"
+
+        # the plan has music, so it was re-analyzed with a progress entry
+        assert any(p["stage"] == "music" for p in job["progress"])
+
+        result = job["result"]
+        assert result["rationale"].startswith("recognized:")
+        assert "calmer" in result["rationale"]
+        assert result["filename"].endswith(".edl")
+        assert result["content"].startswith("TITLE:")
+        assert result["plan"]["cuts"] > 0
+        # the revised plan differs and says what happened
+        assert result["plan_json"] != built["plan_json"]
+        assert any(n.startswith("revision:") for n in result["plan_json"]["notes"])
+        assert any(n.startswith("revision:") for n in result["plan"]["notes"])
+
+    def test_revise_keeps_pinned_shot(self, server):
+        built = self._build(server)
+        entry = built["plan_json"]["entries"][0]
+        pin = (entry["record_start"] + entry["record_end"]) / 2.0
+        job = self._revise(server, built["plan_json"], "ruhiger", pins=[pin])
+        assert job["state"] == "done"
+        result = job["result"]
+        assert any("1 pinned shot kept" in n for n in result["plan_json"]["notes"])
+        revised_first = result["plan_json"]["entries"][0]
+        assert revised_first["record_start"] == entry["record_start"]
+        assert revised_first["record_end"] == entry["record_end"]
+        assert revised_first["clip_path"] == entry["clip_path"]
+
+    def test_revise_chains(self, server):
+        """A revised plan_json can be revised again (the loop loops)."""
+        built = self._build(server)
+        first = self._revise(server, built["plan_json"], "ruhiger")
+        assert first["state"] == "done"
+        second = self._revise(
+            server, first["result"]["plan_json"], "harte schnitte"
+        )
+        assert second["state"] == "done"
+        assert "transitions" in second["result"]["rationale"]
+
+    def test_revise_bad_plan_json_is_job_error(self, server):
+        job = self._revise(server, {"bogus": 1}, "ruhiger")
+        assert job["state"] == "error"
+        assert "not a Monteur plan" in job["message"]
+        assert job["result"] is None
+
+    def test_revise_bad_pins_is_job_error(self, server):
+        built = self._build(server)
+        job = self._revise(server, built["plan_json"], "ruhiger", pins=["soon"])
+        assert job["state"] == "error"
+        assert "pins" in job["message"]
+
+    def test_revise_missing_folder_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/create/revise",
+                {"plan_json": {"monteur_plan": 1}, "brief": "ruhiger"},
+            )
+        assert exc_info.value.code == 400
+
+    def test_revise_missing_plan_json_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/create/revise",
+                {"folder": self.DEMO, "brief": "ruhiger"},
+            )
+        assert exc_info.value.code == 400
+        assert "plan_json" in json.loads(exc_info.value.read())["error"]
+
+    def test_revise_missing_brief_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/create/revise",
+                {"folder": self.DEMO, "plan_json": {"monteur_plan": 1}},
+            )
+        assert exc_info.value.code == 400
+        assert "brief" in json.loads(exc_info.value.read())["error"]
+
+
+def _write_vision_cache(folder, entries):
+    """Write a real .monteur-vision.json next to dummy clips.
+
+    Mirrors the helper pattern in test_find/test_mcp: the keys ARE
+    vision._moment_key's format (abspath|mtime|start-end (2dp)|model), so
+    monteur.find reads the cache exactly like a production one.
+    """
+    from monteur.vision import CACHE_FILENAME
+
+    cache = {}
+    for name, start, end, value in entries:
+        clip = Path(folder) / name
+        if not clip.exists():
+            clip.write_bytes(b"not really a video")
+        key = (
+            f"{os.path.abspath(clip)}|{os.path.getmtime(clip)}"
+            f"|{start:.2f}-{end:.2f}|claude-test-model"
+        )
+        cache[key] = value
+    (Path(folder) / CACHE_FILENAME).write_text(
+        json.dumps(cache), encoding="utf-8"
+    )
+
+
+class TestFindApi:
+    """POST /api/find — instant, offline search of the vision cache."""
+
+    def _seed(self, tmp_path):
+        _write_vision_cache(tmp_path, [
+            ("ride.mp4", 0.0, 4.0,
+             {"label": "Kurve links am Hang", "tags": ["kurven", "wald"],
+              "role": "action", "hero": 0.9, "group": "trail"}),
+            ("ride.mp4", 10.0, 12.0,
+             {"label": "Geradeaus im Flachen", "tags": ["gerade"],
+              "role": "", "hero": 0.1, "group": "trail"}),
+            ("camp.mp4", 2.0, 5.0,
+             {"label": "Sonnenuntergang am See", "tags": ["abend"],
+              "role": "closer", "hero": 0.6, "group": "camp"}),
+        ])
+
+    def test_find_happy_path(self, server, tmp_path):
+        self._seed(tmp_path)
+        data = _post(
+            f"{server}/api/find", {"folder": str(tmp_path), "query": "kurve"}
+        )
+        assert "error" not in data
+        shots = data["shots"]
+        assert len(shots) == 1
+        shot = shots[0]
+        assert shot["clip_path"].endswith("ride.mp4")
+        assert (shot["start"], shot["end"]) == (0.0, 4.0)
+        assert shot["label"] == "Kurve links am Hang"
+        assert shot["tags"] == ["kurven", "wald"]
+        assert shot["hero"] == 0.9
+        assert 0.0 < shot["relevance"] <= 1.0
+
+    def test_find_hero_query(self, server, tmp_path):
+        self._seed(tmp_path)
+        data = _post(
+            f"{server}/api/find", {"folder": str(tmp_path), "query": "hero"}
+        )
+        assert [s["hero"] for s in data["shots"]] == [0.9, 0.6]
+
+    def test_find_respects_limit(self, server, tmp_path):
+        self._seed(tmp_path)
+        data = _post(
+            f"{server}/api/find",
+            {"folder": str(tmp_path), "query": "hero", "limit": 1},
+        )
+        assert len(data["shots"]) == 1
+
+    def test_find_missing_cache_is_soft_error(self, server, tmp_path):
+        data = _post(
+            f"{server}/api/find", {"folder": str(tmp_path), "query": "kurve"}
+        )
+        assert "shots" not in data
+        assert "monteur see" in data["error"]  # explains how to get annotations
+
+    def test_find_empty_query_is_400(self, server, tmp_path):
+        self._seed(tmp_path)
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/find", {"folder": str(tmp_path), "query": "  "})
+        assert exc_info.value.code == 400
+
+    def test_find_missing_folder_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/find", {"query": "kurve"})
+        assert exc_info.value.code == 400
+        assert "folder" in json.loads(exc_info.value.read())["error"]
+
+
+class TestDistillApi:
+    """POST /api/create/distill — a finished cut becomes a short trailer."""
+
+    def _timeline(self, **extra):
+        return {
+            "filename": "sample.edl",
+            "content": (FIXTURES / "sample.edl").read_text(),
+            "fps": 25,
+            **extra,
+        }
+
+    def _distill(self, server, **extra):
+        data = _post(
+            f"{server}/api/create/distill",
+            {"timeline": self._timeline(), **extra},
+        )
+        assert isinstance(data["job"], str) and data["job"]
+        return _wait_for_job(server, data["job"])
+
+    def test_distill_end_to_end(self, server):
+        job = self._distill(server, target=8, format="edl")
+        assert job["state"] == "done"
+        assert job["kind"] == "distill"
+
+        result = job["result"]
+        assert result["filename"] == "monteur_trailer.edl"
+        assert result["content"].startswith("TITLE:")
+        assert result["plan"]["cuts"] > 0
+        assert 0 < result["plan"]["duration"] <= 10  # ~the 8s target
+        assert result["plan"]["tempo"] == 0  # no music given
+        notes = result["plan"]["notes"]
+        assert any("distilled from" in n for n in notes)
+        # the fixture's sources are bare reels — the notes say so honestly
+        assert any("not files on disk" in n for n in notes)
+
+    def test_distill_fcpxml_output_and_canvas(self, server):
+        job = self._distill(server, target=8, canvas="vertical")
+        assert job["state"] == "done"
+        result = job["result"]
+        assert result["filename"] == "monteur_trailer.fcpxml"
+        assert result["content"].startswith("<?xml")
+        assert 'width="1080"' in result["content"]
+        assert 'height="1920"' in result["content"]
+
+    def test_distill_missing_timeline_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/distill", {"target": 8})
+        assert exc_info.value.code == 400
+        assert "timeline" in json.loads(exc_info.value.read())["error"]
+
+    def test_distill_missing_content_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/create/distill",
+                {"timeline": {"filename": "cut.edl", "fps": 25}},
+            )
+        assert exc_info.value.code == 400
+
+    def test_distill_edl_without_fps_is_400(self, server):
+        timeline = self._timeline()
+        del timeline["fps"]
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/distill", {"timeline": timeline})
+        assert exc_info.value.code == 400
+        assert "fps" in json.loads(exc_info.value.read())["error"]
