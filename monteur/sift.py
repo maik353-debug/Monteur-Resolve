@@ -37,7 +37,7 @@ one-frame flickers and cut transitions do not fragment segments.
 
 Audio heuristics (also approximate, thresholds are module constants):
 
-* UNRELIABLE — constant-level camera/drone audio (a steady motor tone)
+* UNRELIABLE — constant-level camera-mic audio (steady wind, engine or hiss)
   carries no editorial signal, yet it defeats the naive checks below (it
   reads as wind, or as clipping in nearly every window). A clip's audio is
   judged unreliable when it is not genuinely silent AND either its rms
@@ -105,7 +105,7 @@ _MAX_MOMENTS = 12  # cap per clip
 _AUDIO_CLIP_WINDOW_MIN = 0.001  # a window "clips" above this clipping fraction
 _AUDIO_WIND_LOW_RATIO = 0.6  # median low_ratio above this = rumble-dominated
 _AUDIO_SILENCE_RMS = 0.01  # median rms below this = mostly silent (~-40 dBFS)
-# Unreliable (constant-level camera/drone) audio detection:
+# Unreliable (constant-level camera-mic: wind/engine/hiss) audio detection:
 _AUDIO_UNRELIABLE_CLIP_FRACTION = 0.30  # clipping in more than this share of windows = not real clipping
 _AUDIO_LOW_DYNAMIC_CV = 0.08  # rms coefficient of variation below this = constant-level tone
 _AUDIO_MIN_RELIABLE_WINDOWS = 4  # need at least this many windows to judge dynamic range
@@ -392,7 +392,7 @@ def find_moments(
 def _audio_dynamic_range(audio: list[AudioMetric]) -> float:
     """rms coefficient of variation (stdev / mean) across the windows.
 
-    Near 0 for a constant-level tone (drone motor, camera hiss); well above
+    Near 0 for a constant-level tone (engine, wind, camera hiss); well above
     _AUDIO_LOW_DYNAMIC_CV for real scenes where level rises and falls.
     """
     rms = [a.rms for a in audio]
@@ -403,7 +403,7 @@ def _audio_dynamic_range(audio: list[AudioMetric]) -> float:
 
 
 def _audio_unreliable(audio: list[AudioMetric], median_rms: float) -> bool:
-    """True for constant-level camera/drone audio (see module docstring).
+    """True for constant-level camera-mic audio (see module docstring).
 
     Genuine silence is handled elsewhere and is NOT treated as unreliable, so
     a truly quiet clip is still reported as silent rather than as a tone.
@@ -412,13 +412,13 @@ def _audio_unreliable(audio: list[AudioMetric], median_rms: float) -> bool:
         return False
     if len(audio) < _AUDIO_MIN_RELIABLE_WINDOWS:
         return False
-    # The signature of camera/drone noise is a CONSTANT level (low dynamic
+    # The signature of camera-mic noise (wind/engine/hiss) is a CONSTANT level (low dynamic
     # range) — NOT merely "lots of clipping". A genuinely loud, DYNAMIC event
     # (fireworks, applause) can clip heavily yet varies over time; that is real
     # audio worth flagging and worth scoring for highlights, so it must stay
     # "reliable". Heavy clipping only counts as unreliable when it comes with a
     # near-constant level.
-    # Reaching here means near-constant level (low CV): camera/drone tone,
+    # Reaching here means near-constant level (low CV): steady camera-mic tone,
     # whether or not it also clips. That is the unreliable case.
     return _audio_dynamic_range(audio) < _AUDIO_LOW_DYNAMIC_CV
 
@@ -426,7 +426,7 @@ def _audio_unreliable(audio: list[AudioMetric], median_rms: float) -> bool:
 def audio_flags(audio: list[AudioMetric]) -> tuple[list[str], list[float]]:
     """(notes, per-window burst flags) for a clip's audio metrics.
 
-    If the audio is UNRELIABLE (constant-level camera/drone tone — very low
+    If the audio is UNRELIABLE (constant-level camera-mic tone — very low
     dynamic range, or clipping in most windows; see :func:`_audio_unreliable`)
     the clipping/wind/silent notes are suppressed in favour of one calm note,
     and every burst flag is 0 so audio does not drive highlight scoring.
@@ -448,7 +448,7 @@ def audio_flags(audio: list[AudioMetric]) -> tuple[list[str], list[float]]:
         return [], []
     median_rms = statistics.median(a.rms for a in audio)
     if _audio_unreliable(audio, median_rms):
-        note = "audio: constant/low-quality audio (camera or drone?) — audio signals ignored"
+        note = "audio: constant camera-mic audio (wind, engine or hiss) — audio signals ignored"
         return [note], [0.0] * len(audio)
 
     notes: list[str] = []

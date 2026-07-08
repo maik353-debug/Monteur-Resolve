@@ -254,7 +254,7 @@ def test_audio_flags_silence_note_and_no_wind_when_silent():
     audio = make_audio(rms=[0.002] * 8, low_ratio=[0.9] * 8)
     notes, bursts = audio_flags(audio)
     assert "audio: mostly silent" in notes
-    assert not any("wind" in n for n in notes)
+    assert not any("likely wind noise" in n for n in notes)
     assert bursts == [0.0] * 8  # noise-floor wobble is not a highlight
 
 
@@ -481,7 +481,7 @@ def test_audio_low_dynamic_range_constant_tone_is_unreliable():
     audio = make_audio(rms=[0.2] * 8, low_ratio=[0.7] * 8)
     notes, bursts = audio_flags(audio)
     assert any("constant" in n for n in notes)
-    assert not any("wind" in n for n in notes)
+    assert not any("likely wind noise" in n for n in notes)
     assert bursts == [0.0] * 8
 
 
