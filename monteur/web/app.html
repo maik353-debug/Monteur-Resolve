@@ -2482,7 +2482,7 @@ function makeJobPanel(hostId, texts) {
         if (p.stage === "cache") cached += 1;
         var text = String(p.name || "clip");
         if (typeof p.usable_ratio === "number") text += " — " + Math.round(p.usable_ratio * 100) + "% usable";
-        else if (p.stage === "cache") text += " — from your previous scan";
+        else if (p.stage === "cache" && !/previous scan/i.test(text)) text += " — from your previous scan";
         lines.push(text);
       } else if (p.stage === "music") {
         lines.push("♪ " + String(p.name || "music") + " — reading the beat");
@@ -2491,7 +2491,7 @@ function makeJobPanel(hostId, texts) {
     var last = progress.length ? progress[progress.length - 1] : null;
     if (last && last.stage === "start") status.textContent = "Watching " + String(last.name || "clip") + "…";
     else if (last && last.stage === "music") status.textContent = "Listening to the song…";
-    else if (cached > 0 && total > 0 && done >= total) status.textContent = "Using your previous scan — nothing to re-watch.";
+    else if (cached > 0 && (total === 0 || done >= total)) status.textContent = "Using your previous scan — nothing to re-watch.";
     else status.textContent = texts.working;
     if (total > 0) {
       count.textContent = done + " / " + total + " clips";
