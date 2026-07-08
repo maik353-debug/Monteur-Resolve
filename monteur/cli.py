@@ -170,6 +170,25 @@ def cmd_resolve(args: argparse.Namespace) -> None:
         )
         return
 
+    if args.action == "doctor":
+        from monteur.resolve import diagnose
+
+        d = diagnose()
+        env = d["monteur_resolve_python"]
+        print("MONTEUR_RESOLVE_PYTHON: " + (env or "(not set — using Monteur's own Python)"))
+        print(f"Resolve worker interpreter: {d['worker_interpreter']}")
+        info = d.get("info")
+        if info:
+            print(
+                f"  -> Python {info['python_version']} ({info['bits']}-bit)"
+            )
+            print(
+                "  -> Resolve module: "
+                + (info["module_dir"] or "NOT FOUND on the standard paths")
+            )
+        print(f"\nVerdict: {d['verdict']}")
+        return
+
     # Read-only inspection runs in a child process so an incompatible-Python
     # native crash in Resolve's module can't take the CLI down.
     if args.action == "status":
@@ -471,7 +490,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_convert)
 
     p = sub.add_parser("resolve", help="talk to a running DaVinci Resolve")
-    p.add_argument("action", choices=["status", "import", "analyze", "install-scripts"])
+    p.add_argument(
+        "action",
+        choices=["status", "doctor", "import", "analyze", "install-scripts"],
+    )
     p.add_argument("file", nargs="?", help="file for 'import'")
     p.set_defaults(func=cmd_resolve)
 

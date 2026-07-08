@@ -325,6 +325,88 @@ def resolve_status_isolated(timeout: float = 25.0) -> dict:
     return payload
 
 
+def diagnose(timeout: float = 25.0) -> dict:
+    """Full self-check of the Resolve bridge, for ``monteur resolve doctor``.
+
+    Reports which interpreter the isolated worker uses (and whether it came
+    from MONTEUR_RESOLVE_PYTHON), that interpreter's version and bitness, where
+    Resolve's scripting module was found, the live status probe, and a
+    plain-language verdict. Never raises.
+    """
+    override = os.environ.get("MONTEUR_RESOLVE_PYTHON")
+    report: dict = {
+        "monteur_resolve_python": override or None,
+        "worker_interpreter": _worker_python(),
+    }
+    info_ok, info = _run_worker("info", timeout)
+    if info_ok:
+        report["info"] = info
+    else:
+        report["info"] = None
+        report["info_error"] = info
+    status = resolve_status_isolated(timeout=timeout)
+    report["status"] = status
+    report["verdict"] = _diagnosis_verdict(override, info if info_ok else None, status)
+    return report
+
+
+def _diagnosis_verdict(override, info, status) -> str:
+    if status.get("connected"):
+        return (
+            f"Connected to Resolve (project {status.get('project')!r}). "
+            "The live integration is working."
+        )
+    reason = status.get("reason")
+    version = (info or {}).get("python_version", "?")
+    bits = (info or {}).get("bits")
+    if reason == "crash":
+        major_minor = version.rsplit(".", 1)[0] if version != "?" else "?"
+        too_new = version != "?" and tuple(
+            int(x) for x in version.split(".")[:2]
+        ) >= (3, 12)
+        who = "MONTEUR_RESOLVE_PYTHON" if override else "the interpreter running Monteur"
+        base = (
+            f"Resolve's module crashed loading under Python {version}"
+            + (f" ({bits}-bit)" if bits else "")
+            + f", used via {who}. "
+        )
+        if too_new:
+            return base + (
+                f"Python {major_minor} is too new for Resolve (needs ~3.6–3.11). "
+                "Point MONTEUR_RESOLVE_PYTHON at a 64-bit Python 3.11."
+            )
+        if bits == 32:
+            return base + "That Python is 32-bit; Resolve needs a 64-bit Python."
+        return base + (
+            "Even a compatible Python can crash if Resolve isn't the expected "
+            "version — check that DaVinci Resolve is installed and up to date."
+        )
+    if reason == "worker-error":
+        return (
+            "The isolated helper could not run: "
+            f"{status.get('error')}. Check that MONTEUR_RESOLVE_PYTHON points at "
+            "a working Python 3 executable."
+        )
+    if reason == "no-interpreter":
+        return (
+            f"Monteur could not launch {report_interp(override)}. Check the "
+            "MONTEUR_RESOLVE_PYTHON path."
+        )
+    if reason == "timeout":
+        return "Resolve did not respond in time — it may be busy or mid-render."
+    # Clean 'not connected' — module loaded fine, Resolve just isn't reachable.
+    return (
+        f"The interpreter (Python {version}"
+        + (f", {bits}-bit" if bits else "")
+        + ") loaded Resolve's module fine, but no running Resolve was reached: "
+        + str(status.get("error", "is Resolve running with scripting set to Local?"))
+    )
+
+
+def report_interp(override) -> str:
+    return repr(override) if override else "the default interpreter"
+
+
 def read_timeline_isolated(name: str | None = None, timeout: float = 40.0) -> Timeline:
     """Read a Resolve timeline in a child process and rebuild it as a Timeline.
 

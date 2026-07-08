@@ -984,3 +984,42 @@ def test_worker_main_normal_exception_is_not_a_crash(monkeypatch, capsys) -> Non
     data = json.loads(capsys.readouterr().out)
     assert "error" in data
     assert "kaboom" in data["error"]
+
+
+def test_diagnose_verdict_connected(monkeypatch) -> None:
+    monkeypatch.setattr(
+        resolve, "_run_worker",
+        lambda cmd, timeout=25.0, request=None: (
+            (True, {"python_version": "3.11.9", "bits": 64, "module_dir": "/x"})
+            if cmd == "info"
+            else (True, {"connected": True, "project": "Film", "timelines": [], "current": None})
+        ),
+    )
+    d = resolve.diagnose()
+    assert "working" in d["verdict"].lower()
+    assert d["info"]["bits"] == 64
+
+
+def test_diagnose_verdict_crash_too_new(monkeypatch) -> None:
+    def fake_worker(cmd, timeout=25.0, request=None):
+        if cmd == "info":
+            return True, {"python_version": "3.14.0", "bits": 64, "module_dir": "/x"}
+        return False, {"error": resolve._CRASH_MESSAGE, "reason": "crash"}
+
+    monkeypatch.setattr(resolve, "_run_worker", fake_worker)
+    monkeypatch.setenv("MONTEUR_RESOLVE_PYTHON", "/py314")
+    d = resolve.diagnose()
+    assert "too new" in d["verdict"].lower()
+    assert "3.11" in d["verdict"]
+
+
+def test_diagnose_verdict_clean_not_connected(monkeypatch) -> None:
+    def fake_worker(cmd, timeout=25.0, request=None):
+        if cmd == "info":
+            return True, {"python_version": "3.11.9", "bits": 64, "module_dir": "/x"}
+        return True, {"connected": False, "error": "Resolve is not running."}
+
+    monkeypatch.setattr(resolve, "_run_worker", fake_worker)
+    d = resolve.diagnose()
+    assert "loaded Resolve's module fine" in d["verdict"]
+    assert "not running" in d["verdict"].lower()

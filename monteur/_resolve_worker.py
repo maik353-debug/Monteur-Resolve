@@ -84,6 +84,31 @@ def handle(command: str, request: dict) -> dict:
     any native crash happens here, in the child, rather than at module import.
     ``MonteurResolveError`` is converted to a clean ``false`` payload.
     """
+    if command == "info":
+        # Safe diagnostic: report this interpreter and whether Resolve's module
+        # FILE exists — WITHOUT importing the native part (so this never crashes).
+        import os.path
+        import struct
+
+        from monteur.resolve import _MODULE_NAME, _candidate_module_dirs
+
+        dirs = _candidate_module_dirs()
+        found = next(
+            (
+                d
+                for d in dirs
+                if os.path.isfile(os.path.join(d, _MODULE_NAME + ".py"))
+            ),
+            None,
+        )
+        return {
+            "python_version": "%d.%d.%d" % sys.version_info[:3],
+            "bits": struct.calcsize("P") * 8,
+            "executable": sys.executable,
+            "module_dir": found,
+            "searched": dirs,
+        }
+
     from monteur.resolve import (
         MonteurResolveError,
         _timeline_to_dict,
