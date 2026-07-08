@@ -1,20 +1,24 @@
 # Fable 🎬
 
-**The pacing assistant for film editors.**
+**Your footage. A song. A first cut — automatically.**
 
-Fable gives editors objective feedback on the rhythm of a cut — and tracks
-how it evolves, version by version. Built for narrative film, works with
-DaVinci Resolve.
+Fable takes the tedious parts off a filmmaker's plate: it sifts your
+footage, finds the good moments, and cuts them to your music — then hands
+the result to DaVinci Resolve where you make it yours. Built for filmmakers
+who'd rather tell stories than scrub through clips.
 
-- **Auto-assembly** — from screenplay to first cut. Fable transcribes your
-  takes, matches every dialogue line of your script against them, scores
-  each take (coverage, accuracy, restarts/fluffs), picks the best material
-  and builds the scene assembly as a timeline for Resolve. You start from
-  a cut, not from zero.
-- **Fable Studio** — a local app in your browser. Drop a timeline export
-  (EDL/FCPXML) or pull the current timeline from a running Resolve, and see
-  your cut's pacing: shot-length stats, a pacing curve, fast/medium/slow
-  sections, histogram.
+- **Create a first cut** — point Fable at a folder of clips and a song.
+  It scans every clip (flags what's too dark, blurry or shaky), ranks the
+  best moments, detects the music's tempo and beats, and builds a rough cut
+  on the beat grid — faster cutting where the song gets loud. Out comes a
+  timeline for Resolve.
+- **Footage sifting** — `fable sift` alone tells you what's usable in a
+  shoot before you watch a single clip.
+- **Auto-assembly (dialogue scenes)** — from screenplay to first cut:
+  Fable matches take transcripts against your script, scores takes
+  (coverage, accuracy, restarts), picks the best material per scene.
+- **Fable Studio** — a local app in your browser with guided, step-by-step
+  workflows. No timeline jargon required to get started.
 - **Version history** — save every cut as a version and watch your film's
   tempo evolve across weeks of editing. Compare any two versions and get a
   plain-language verdict ("v5 is cut faster, with a more even rhythm, and
@@ -44,7 +48,20 @@ Everything below is also available from the command line.
 
 ## Quick start (CLI)
 
-### 0. Auto-assembly: screenplay + takes → first cut
+### 0. Automatic first cut: footage + music
+
+```bash
+pip install -e '.[media]'      # brings numpy + a bundled ffmpeg
+fable sift  ~/footage/day01    # what's usable? what's too dark/blurry/shaky?
+fable create ~/footage/day01 ~/music/track.mp3 -o first_cut.fcpxml
+# -> import in Resolve: your best moments, cut to the beat
+```
+
+`--order best_first` puts the strongest material on the loudest sections;
+`--max-duration 60` caps the cut. Works best with music that has a clear
+pulse.
+
+### 0b. Auto-assembly: screenplay + takes → first cut (dialogue)
 
 ```bash
 fable transcribe footage/scene12/          # whisper, writes .json per clip
