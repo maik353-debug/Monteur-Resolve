@@ -193,7 +193,9 @@ def _pick_tempo_lag(env: np.ndarray, frame_period: float) -> float:
     Candidates inside the 90..150 BPM octave get a mild _OCTAVE_BONUS.
     Returns 0.0 when no periodicity is found.
     """
-    lag_min = max(int(np.floor(60.0 / _MAX_BPM / frame_period)), 1)
+    # ceil, not floor: a lag one frame short of the 200 BPM period is a
+    # 206+ BPM grid — eighth-note territory — and must stay out of range.
+    lag_min = max(int(np.ceil(60.0 / _MAX_BPM / frame_period)), 1)
     lag_max = int(np.ceil(60.0 / _MIN_BPM / frame_period))
     if env.size < 2 * lag_min + 2 or lag_max <= lag_min:
         return 0.0
@@ -257,8 +259,11 @@ def _track_beats(
     std = float(env.std())
     e = env / std if std > 0 else env
 
-    lo = max(int(round(period / 2)), 1)
-    hi = min(int(round(period * 2)), n - 1)
+    # Transition window [0.65P, 1.5P]: wide enough to follow real tempo
+    # drift, too narrow to ride eighth notes at P/2 — with strong onsets on
+    # every eighth, consistent halving would otherwise outscore the penalty.
+    lo = max(int(round(period * 0.65)), 1)
+    hi = min(int(round(period * 1.5)), n - 1)
     if hi < lo:
         return []
 
@@ -326,7 +331,12 @@ def detect_beats(samples, rate: int) -> tuple[float, list[float]]:
     # from the tracked grid: when the onsets BETWEEN tracked beats are about
     # as strong as the beats themselves, the real pulse is twice as fast —
     # re-track at half the period.
-    if len(beats) >= 8 and 60.0 / (lag / 2 * frame_period) <= _MAX_BPM * 1.1:
+    # The doubled tempo must stay inside the search range (a hard cap — a
+    # 205 BPM grid is subdivision, not a beat), and the mid-beat onsets must
+    # be nearly as strong as the beats themselves (0.7): melodic eighth
+    # notes riding between beats must not double the tempo, full alternate
+    # kicks must.
+    if len(beats) >= 8 and 60.0 / (lag / 2 * frame_period) <= _MAX_BPM:
         def strength(times: list[float]) -> float:
             frames = np.clip(
                 np.round((np.asarray(times) - first_time) / frame_period).astype(int),
@@ -338,7 +348,7 @@ def detect_beats(samples, rate: int) -> tuple[float, list[float]]:
             )))
 
         mids = [(a + b) / 2 for a, b in zip(beats, beats[1:])]
-        if strength(mids) >= 0.5 * strength(beats):
+        if strength(mids) >= 0.7 * strength(beats):
             doubled = _track_beats(env, lag / 2, frame_period, first_time)
             if len(doubled) > len(beats):
                 beats = doubled

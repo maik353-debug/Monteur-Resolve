@@ -14,6 +14,8 @@ scenario encodes a real-world failure mode that once broke the tracker:
                     beats (F = 0.0 before the DP rebuild).
 * ``weak_intro``  — pad-only intros gave the phase estimate nothing to hold
                     on to.
+* ``eighths``     — strong melodic eighth notes between the beats once let
+                    the tracker subdivide to a 200+ BPM grid.
 """
 
 from __future__ import annotations
@@ -75,6 +77,11 @@ def make_track(kind, duration=30.0, bpm=120.0):
             beats.append(t)
             t += 60.0 / bpm
 
+    def _pluck(length=0.06, freq=440.0):
+        t = np.arange(int(length * RATE)) / RATE
+        return (np.sin(2 * np.pi * freq * t) * np.exp(-t * 40)).astype(np.float32)
+
+    pluck = _pluck()
     downbeats = beats[::4]
     for k, b in enumerate(beats):
         if kind == "weak_intro" and b < 8.0:
@@ -83,6 +90,10 @@ def make_track(kind, duration=30.0, bpm=120.0):
         if kind == "syncopated":
             period = beats[k + 1] - b if k + 1 < len(beats) else 0.5
             _place(track, snare, b + period / 2, gain=1.6)  # LOUD off-beats
+        if kind == "eighths":
+            period = beats[k + 1] - b if k + 1 < len(beats) else 0.5
+            _place(track, pluck, b, gain=1.0)  # melody on EVERY eighth
+            _place(track, pluck, b + period / 2, gain=1.0)
         if k % 2 == 1:
             _place(track, hat, b)
 
@@ -123,6 +134,7 @@ _FLOORS = {
     "drift": (0.95, 0.90),
     "syncopated": (0.95, 0.90),
     "weak_intro": (0.75, 0.75),
+    "eighths": (0.90, 0.80),
 }
 
 
