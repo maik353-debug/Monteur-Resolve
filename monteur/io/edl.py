@@ -19,11 +19,32 @@ Supported subset
   under ``"transition"`` and ``"transition_duration"``. Zero-length
   outgoing events of a dissolve pair are skipped.
 
+Dissolves on write
+------------------
+``write_edl`` re-emits dissolves: a clip whose ``metadata["transition"]``
+is ``"dissolve"`` (or ``"D"``) with a positive ``"transition_frames"``
+(or ``"transition_duration"``) and a same-track, same-kind predecessor
+ending exactly at its record-in becomes a standard CMX3600 dissolve pair
+sharing one event number::
+
+    005  TAPE002  V     C        02:00:10:00 02:00:10:00 00:00:08:00 00:00:08:00
+    005  TAPE004  V     D    012 04:00:00:00 04:00:05:00 00:00:08:00 00:00:13:00
+    * FROM CLIP NAME: B-Roll Street
+    * TO CLIP NAME: Sunset Drone
+
+The first source line is the outgoing clip's zero-duration tail (cut
+transition), the second the incoming clip with ``D`` and the dissolve
+length in frames — exactly the form :func:`read_edl` parses back
+(the zero-duration tail yields no clip; the incoming clip keeps the
+transition in its metadata), so dissolves roundtrip.
+
 Limitations
 -----------
 * Motion-effect (``M2``), split-edit and audio-level lines are ignored.
-* ``write_edl`` emits one event per clip (no channel grouping) and always
-  writes cut (``C``) transitions; transition metadata is not re-emitted.
+* ``write_edl`` emits one event per clip (no channel grouping); only
+  dissolve metadata is re-emitted — wipes/keys imported by ``read_edl``
+  are written back as plain cuts, as is a dissolve clip without a
+  predecessor butting against its record-in.
 * Key (``K``) transitions are imported as cuts like dissolves/wipes.
 """
 
@@ -184,8 +205,28 @@ def _channel_for(clip: Clip) -> str:
     return "A"
 
 
+def _transition_frames(clip: Clip) -> int:
+    """Dissolve length in frames from a clip's transition metadata (0 = cut)."""
+    if str(clip.metadata.get("transition", "")).upper() not in ("D", "DISSOLVE"):
+        return 0
+    raw = clip.metadata.get(
+        "transition_frames", clip.metadata.get("transition_duration", 0)
+    )
+    try:
+        frames = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(frames, 0)
+
+
 def write_edl(timeline: Timeline, title: str = "") -> str:
-    """Serialize ``timeline`` as a CMX3600 EDL string."""
+    """Serialize ``timeline`` as a CMX3600 EDL string.
+
+    Clips carrying dissolve metadata are written as CMX dissolve pairs
+    (outgoing zero-duration tail with ``C``, incoming clip with ``D`` and
+    the length in frames, plus ``FROM``/``TO CLIP NAME`` comments — see
+    the module docstring); everything else is a plain cut.
+    """
     drop = is_drop_frame_rate(timeline.fps)
     lines = [
         f"TITLE: {title or timeline.name or 'UNTITLED'}",
@@ -195,16 +236,58 @@ def write_edl(timeline: Timeline, title: str = "") -> str:
     ordered = sorted(
         timeline.clips, key=lambda c: (c.record_in, c.kind != VIDEO, c.track)
     )
+
+    def tc(frames: int) -> str:
+        return format_timecode(frames, timeline.fps, drop_frame=drop)
+
     for num, clip in enumerate(ordered, start=1):
         tcs = " ".join(
-            format_timecode(f, timeline.fps, drop_frame=drop)
+            tc(f)
             for f in (clip.source_in, clip.source_out, clip.record_in, clip.record_out)
         )
-        lines.append(
-            f"{num:03d}  {_reel_for(clip):<8} {_channel_for(clip):<5} C        {tcs}"
-        )
+        dissolve = _transition_frames(clip)
+        outgoing = None
+        if dissolve > 0:
+            outgoing = next(
+                (
+                    c
+                    for c in ordered
+                    if c is not clip
+                    and c.kind == clip.kind
+                    and c.track == clip.track
+                    and c.record_out == clip.record_in
+                ),
+                None,
+            )
         full_name = clip.name or clip.source_name
-        if full_name:
-            lines.append(f"* FROM CLIP NAME: {full_name}")
+        if outgoing is not None:
+            # CMX dissolve pair: zero-duration outgoing tail, then the
+            # incoming clip with the dissolve duration in frames.
+            tail = " ".join(
+                tc(f)
+                for f in (
+                    outgoing.source_out,
+                    outgoing.source_out,
+                    clip.record_in,
+                    clip.record_in,
+                )
+            )
+            lines.append(
+                f"{num:03d}  {_reel_for(outgoing):<8} {_channel_for(clip):<5} C        {tail}"
+            )
+            lines.append(
+                f"{num:03d}  {_reel_for(clip):<8} {_channel_for(clip):<5} D    {dissolve:03d} {tcs}"
+            )
+            from_name = outgoing.name or outgoing.source_name
+            if from_name:
+                lines.append(f"* FROM CLIP NAME: {from_name}")
+            if full_name:
+                lines.append(f"* TO CLIP NAME: {full_name}")
+        else:
+            lines.append(
+                f"{num:03d}  {_reel_for(clip):<8} {_channel_for(clip):<5} C        {tcs}"
+            )
+            if full_name:
+                lines.append(f"* FROM CLIP NAME: {full_name}")
     lines.append("")
     return "\n".join(lines)

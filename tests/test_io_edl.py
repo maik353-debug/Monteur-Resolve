@@ -106,6 +106,64 @@ def test_write_read_roundtrip() -> None:
     assert reread == original
 
 
+def test_write_dissolve_pair_roundtrips() -> None:
+    timeline = Timeline(name="Dissolve", fps=25.0)
+    timeline.clips = [
+        Clip("Opening Wide", "V1", VIDEO, 0, 100, 0, 100, source_name="TAPE1"),
+        Clip(
+            "Sunset",
+            "V1",
+            VIDEO,
+            250,
+            350,
+            100,
+            200,
+            source_name="TAPE2",
+            metadata={"transition": "dissolve", "transition_frames": 12},
+        ),
+    ]
+    text = write_edl(timeline, title="Dissolve")
+    # CMX dissolve pair: zero-duration outgoing tail, then D with frames
+    assert "D    012" in text
+    assert "* FROM CLIP NAME: Opening Wide" in text
+    assert "* TO CLIP NAME: Sunset" in text
+    pair = [l for l in text.splitlines() if l.startswith("002")]
+    assert len(pair) == 2  # both source lines share the event number
+    assert " C " in f" {pair[0]} " and "00:00:04:00 00:00:04:00" in pair[0]
+
+    back = read_edl(text, fps=25.0)
+    assert len(back.clips) == 2  # the zero-duration tail yields no clip
+    sunset = next(c for c in back.clips if c.name == "Sunset")
+    assert sunset.metadata["transition"] == "D"
+    assert sunset.metadata["transition_duration"] == 12
+    assert (sunset.record_in, sunset.record_out) == (100, 200)
+    assert (sunset.source_in, sunset.source_out) == (250, 350)
+    wide = next(c for c in back.clips if c.name == "Opening Wide")
+    assert (wide.record_in, wide.record_out) == (0, 100)
+    assert "transition" not in wide.metadata
+
+
+def test_write_dissolve_without_predecessor_falls_back_to_cut() -> None:
+    timeline = Timeline(name="Solo", fps=25.0)
+    timeline.clips = [
+        Clip(
+            "Only",
+            "V1",
+            VIDEO,
+            0,
+            50,
+            100,
+            150,
+            metadata={"transition": "dissolve", "transition_frames": 10},
+        ),
+    ]
+    text = write_edl(timeline)
+    events = [l for l in text.splitlines() if l.startswith("001")]
+    assert len(events) == 1
+    assert " C " in f" {events[0]} "
+    assert "TO CLIP NAME" not in text
+
+
 def test_write_reel_sanitized_and_fallback() -> None:
     timeline = Timeline(name="Reels", fps=25.0)
     timeline.clips = [

@@ -29,6 +29,18 @@ Writing (:func:`write_fcpxml`):
 * A video clip and an audio clip sharing the same source and record
   range are merged into a single asset-clip whose asset advertises audio
   channels.
+* Dissolves: a video clip whose ``metadata["transition"]`` is
+  ``"dissolve"`` (or ``"D"``) with a positive ``"transition_frames"``
+  (or ``"transition_duration"``) gets a ``<transition name="Cross
+  Dissolve" offset="..." duration="...">`` element in the spine directly
+  before its asset-clip (offset = the cut point, both in rational time).
+  DaVinci Resolve imports spine transitions; :func:`read_fcpxml` ignores
+  the element, leaving the clips intact.
+* Fades: ``timeline.metadata["fade_in_frames"]`` /
+  ``["fade_out_frames"]`` are NOT written — FCPXML audio fades would
+  need ``<param>``/``adjust-volume`` elements this writer does not
+  emit. The plan notes the fade so the editor applies the music fade in
+  Resolve.
 
 Limitations
 -----------
@@ -254,6 +266,20 @@ def _fmt_time(frames: int, frame_dur: Fraction) -> str:
     return f"{t.numerator}/{t.denominator}s"
 
 
+def _transition_frames(clip: Clip) -> int:
+    """Dissolve length in frames from a clip's transition metadata (0 = cut)."""
+    if str(clip.metadata.get("transition", "")).upper() not in ("D", "DISSOLVE"):
+        return 0
+    raw = clip.metadata.get(
+        "transition_frames", clip.metadata.get("transition_duration", 0)
+    )
+    try:
+        frames = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(frames, 0)
+
+
 def write_fcpxml(timeline: Timeline, name: str = "") -> str:
     """Serialize ``timeline`` as a minimal FCPXML 1.9 document string.
 
@@ -262,6 +288,11 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
     video clip is folded into that clip's asset-clip via the asset's
     audio channels. Audio clips without such a video partner are not
     representable by this writer and are skipped.
+
+    A video clip with dissolve metadata gets a ``<transition
+    name="Cross Dissolve">`` element in the spine before its asset-clip
+    (see the module docstring). Timeline fade metadata is not emitted —
+    apply the music fade in Resolve.
     """
     if timeline.fps <= 0:
         raise ValueError(f"timeline fps must be positive, got {timeline.fps}")
@@ -354,6 +385,16 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
                 offset=_fmt_time(playhead, frame_dur),
                 duration=_fmt_time(clip.record_in - playhead, frame_dur),
                 start="0s",
+            )
+        dissolve = _transition_frames(clip)
+        if dissolve > 0 and clip.record_in > 0:
+            # Cross dissolve INTO this clip, starting at the cut point.
+            ET.SubElement(
+                spine,
+                "transition",
+                name="Cross Dissolve",
+                offset=_fmt_time(clip.record_in, frame_dur),
+                duration=_fmt_time(dissolve, frame_dur),
             )
         ET.SubElement(
             spine,

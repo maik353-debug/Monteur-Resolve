@@ -89,6 +89,60 @@ def test_write_read_roundtrip() -> None:
     assert reread == original
 
 
+def test_write_transition_element_present_and_reread() -> None:
+    timeline = Timeline(name="Dissolve", fps=25.0)
+    timeline.clips = [
+        Clip("Alpha", "V1", VIDEO, 0, 100, 0, 100, source_name="AlphaSrc"),
+        Clip(
+            "Beta",
+            "V1",
+            VIDEO,
+            0,
+            100,
+            100,
+            200,
+            source_name="BetaSrc",
+            metadata={"transition": "dissolve", "transition_frames": 12},
+        ),
+    ]
+    timeline.metadata["fade_out_frames"] = 50  # noted only; no audio fade params
+    text = write_fcpxml(timeline)
+    assert "<transition" in text
+    assert 'name="Cross Dissolve"' in text
+    assert 'offset="4s"' in text  # dissolve starts at the cut (frame 100 @ 25fps)
+    assert 'duration="12/25s"' in text
+    # the transition sits in the spine before the incoming asset-clip
+    assert text.index("<transition") < text.index('name="Beta"')
+
+    # our reader ignores the transition element; clips come back intact
+    back = read_fcpxml(text)
+    assert len(back.video_clips()) == 2
+    ranges = sorted((c.record_in, c.record_out) for c in back.video_clips())
+    assert ranges == [(0, 100), (100, 200)]
+
+
+def test_write_first_clip_transition_metadata_ignored() -> None:
+    # a dissolve INTO the very first clip has nothing to dissolve from
+    timeline = Timeline(name="First", fps=25.0)
+    timeline.clips = [
+        Clip(
+            "Only",
+            "V1",
+            VIDEO,
+            0,
+            50,
+            0,
+            50,
+            source_name="S",
+            metadata={"transition": "dissolve", "transition_frames": 10},
+        ),
+    ]
+    text = write_fcpxml(timeline)
+    assert "<transition" not in text
+    back = read_fcpxml(text)
+    assert len(back.video_clips()) == 1
+
+
 def test_write_inserts_gap_for_hole() -> None:
     timeline = Timeline(name="Gappy", fps=25.0)
     timeline.clips = [Clip("Late", "V1", VIDEO, 0, 50, 100, 150, source_name="S")]

@@ -365,6 +365,124 @@ def test_style_plan_renders_timeline_unchanged():
     assert (audio[0].record_in, audio[0].record_out) == (0, 1000)
 
 
+# --- musical ending -------------------------------------------------------------
+
+
+def make_ending_music(**overrides) -> MusicAnalysis:
+    """100s track: beats every 0.5s, downbeats every 2s, phrases every 8s."""
+    kwargs = dict(
+        path="/music/track.wav",
+        duration=100.0,
+        tempo=120.0,
+        beats=[i * 0.5 for i in range(200)],
+        sections=[MusicSection(0.0, 100.0, 0.5, "mid")],
+        downbeats=[i * 2.0 for i in range(50)],
+        phrases=[i * 8.0 for i in range(13)],
+    )
+    kwargs.update(overrides)
+    return MusicAnalysis(**kwargs)
+
+
+def test_end_on_phrase_snaps_to_nearest_phrase():
+    music = make_ending_music(phrases=[0.0, 56.0, 72.0])
+    plan = plan_montage(make_long_reports(), music, max_duration=60.0)
+    assert plan.duration == pytest.approx(56.0)
+    assert plan.entries[-1].record_end == pytest.approx(56.0)
+    assert any("length snapped to phrase at 56.0s" in n for n in plan.notes)
+
+
+def test_end_on_phrase_refuses_snap_beyond_tolerance():
+    # nearest phrase is 84s = 40% longer than requested; downbeats/beats
+    # already sit exactly on 60s, so the length stays untouched
+    music = make_ending_music(phrases=[0.0, 84.0])
+    plan = plan_montage(make_long_reports(), music, max_duration=60.0)
+    assert plan.duration == pytest.approx(60.0)
+    assert not any("length snapped" in n for n in plan.notes)
+
+
+def test_end_on_phrase_prefers_shorter_on_tie():
+    # phrases every 8s: 56s and 64s are equidistant from the 60s request
+    plan = plan_montage(make_long_reports(), make_ending_music(), max_duration=60.0)
+    assert plan.duration == pytest.approx(56.0)
+
+
+def test_end_snap_falls_back_to_downbeats():
+    music = make_ending_music(phrases=[])
+    plan = plan_montage(make_long_reports(), music, max_duration=60.9)
+    assert plan.duration == pytest.approx(60.0)
+    assert any("length snapped to downbeat at 60.0s" in n for n in plan.notes)
+
+
+def test_end_on_phrase_disabled():
+    music = make_ending_music(phrases=[0.0, 56.0])
+    plan = plan_montage(make_long_reports(), music, max_duration=60.0, end_on_phrase=False)
+    assert plan.duration == pytest.approx(60.0)
+    assert not any("length snapped" in n for n in plan.notes)
+
+
+def test_full_song_montage_length_not_snapped():
+    music = make_ending_music(phrases=[0.0, 96.0])  # 96s is within 12% of 100s
+    plan = plan_montage(make_long_reports(), music)  # no max_duration: full song
+    assert plan.duration == pytest.approx(100.0)
+    assert not any("length snapped" in n for n in plan.notes)
+
+
+# --- fades and dissolves ----------------------------------------------------------
+
+
+def test_fade_fields_for_arc_style():
+    plan = plan_montage(make_long_reports(), make_arc_music(), style="travel")
+    assert plan.fade_in == pytest.approx(0.5)
+    # last outro slot is 2.0s, capped at 2.0s
+    assert plan.fade_out == pytest.approx(2.0)
+    assert any("music fade-out: 2.0s (apply in Resolve)" in n for n in plan.notes)
+
+
+def test_fade_fields_for_auto_style():
+    plan = plan_montage(make_reports(), make_music())
+    assert plan.fade_in == pytest.approx(0.5)
+    assert plan.fade_out == pytest.approx(1.0)
+    assert any("music fade-out: 1.0s (apply in Resolve)" in n for n in plan.notes)
+
+
+def test_transitions_in_gentle_phases_only():
+    plan = plan_montage(make_long_reports(), make_arc_music(), style="travel")
+    # phases: opening 0-8 (2s slots), build 8-16, climax 16-32, outro 32-40 (2s)
+    assert plan.entries[0].transition == 0.0  # first entry: its fade is fade_in
+    for e in plan.entries[1:]:
+        if e.record_start < 8.0 or e.record_start >= 32.0:  # opening / outro
+            assert e.transition == pytest.approx(0.5)  # min(0.5, half of 2.0s)
+        else:  # build / climax cut hard
+            assert e.transition == 0.0
+    dissolves = sum(1 for e in plan.entries if e.transition > 0)
+    assert dissolves == 7  # 3 opening (minus the first) + 4 outro
+    assert any(f"{dissolves} dissolves in gentle phases" in n for n in plan.notes)
+
+
+def test_auto_low_sections_get_transitions():
+    plan = plan_montage(make_reports(), make_music())
+    assert plan.entries[0].transition == 0.0
+    low = [e for e in plan.entries[1:] if e.record_start < 4.0]
+    assert low and all(e.transition == pytest.approx(0.5) for e in low)
+    assert all(e.transition == 0.0 for e in plan.entries if e.record_start >= 4.0)
+
+
+def test_timeline_carries_transitions_and_fades():
+    plan = plan_montage(make_long_reports(), make_arc_music(), style="travel")
+    timeline = montage_to_timeline(plan, fps=25.0)
+    video = timeline.video_clips()
+    assert "transition" not in video[0].metadata  # first clip: no dissolve
+    second = video[1]  # opening entry at 2.0s carries the dissolve into it
+    assert second.metadata["transition"] == "dissolve"
+    assert second.metadata["transition_frames"] == round(0.5 * 25.0)
+    climax = [c for c in video if 16 * 25 <= c.record_in < 32 * 25]
+    assert climax and all("transition" not in c.metadata for c in climax)
+    assert timeline.metadata["fade_in_frames"] == 12  # 0.5s at 25fps
+    assert timeline.metadata["fade_out_frames"] == 50  # 2.0s at 25fps
+    music_clip = timeline.audio_clips()[0]
+    assert "transition" not in music_clip.metadata
+
+
 # --- timeline rendering (existing behavior) -------------------------------------
 
 

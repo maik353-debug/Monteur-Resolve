@@ -74,6 +74,26 @@ motion continuity is the cosine similarity between the previous slot's
 exit motion and the candidate's entry motion (neutral 0 unless both
 vectors exceed 0.5 px). With neutral motion the earliest candidate always
 wins, so behavior without motion data is unchanged.
+
+Finishing
+---------
+A montage shorter than the song ends on a musical boundary:
+``end_on_phrase=True`` (the default) snaps the requested length to the
+nearest phrase start within ±12% (ties prefer the shorter cut; downbeats,
+then beats, serve as fallbacks; the change is never allowed to exceed
+12%, and a full-song montage is left alone). Styles with an outro phase
+plan a 0.5 s fade-in and a fade-out of min(2 s, last outro slot) on
+:class:`MontagePlan` (``fade_in`` / ``fade_out``); "auto" plans 0.5 s /
+1 s. Entries in gentle phases — >= 4 beats per cut, i.e. opening/outro,
+or "low" sections in "auto" — carry a dissolve INTO them:
+``MontageEntry.transition`` = min(0.5 s, half the slot length), always 0
+for the montage's first entry (its fade is ``fade_in``).
+:func:`montage_to_timeline` publishes dissolves as clip metadata
+(``"transition"`` / ``"transition_frames"``) and the fades as timeline
+metadata (``"fade_in_frames"`` / ``"fade_out_frames"``) so the EDL/FCPXML
+writers can carry the dissolves into Resolve. Audio fades cannot ride
+along in either export format; a plan note reminds the editor to apply
+the music fade in Resolve.
 """
 
 from __future__ import annotations
@@ -108,6 +128,14 @@ _ORDER_WEIGHT = 0.7
 _MOTION_WEIGHT = 0.3
 # Below this magnitude (px) a motion vector counts as "no motion" (neutral).
 _MOTION_MIN_MAGNITUDE = 0.5
+# Musical ending: max relative change when snapping the length to a phrase.
+_END_SNAP_TOLERANCE = 0.12
+# Dissolve INTO a gentle-phase entry: min(this, half the slot length).
+_MAX_DISSOLVE = 0.5
+# Planned fades (seconds) for styles with an outro phase / for "auto".
+_FADE_IN = 0.5
+_MAX_FADE_OUT = 2.0
+_AUTO_FADE_OUT = 1.0
 
 _EPS = 1e-6
 
@@ -191,6 +219,8 @@ class MontagePlan:
 
     music_path: str
     duration: float  # seconds, montage length (may be shorter than the song)
+    fade_in: float = 0.0  # seconds, intended music/video fade-in
+    fade_out: float = 0.0  # seconds, intended music/video fade-out
     entries: list["MontageEntry"] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
@@ -203,6 +233,7 @@ class MontageEntry:
     record_start: float  # seconds in the montage
     record_end: float
     score: float
+    transition: float = 0.0  # seconds of dissolve INTO this entry (0 = cut)
 
 
 # --- grid -------------------------------------------------------------------
@@ -274,6 +305,39 @@ def _nearest(points: list[float], t: float) -> float:
         return points[-1]
     before, after = points[i - 1], points[i]
     return before if t - before <= after - t else after
+
+
+def _snap_ending_length(music: MusicAnalysis, length: float) -> tuple[float | None, str]:
+    """Musical boundary to end a truncated montage on, or (None, "").
+
+    Looks for the boundary nearest to ``length`` — phrase starts first,
+    falling back to downbeats, then beats — but only within
+    ±``_END_SNAP_TOLERANCE`` (12%) of the requested length; equidistant
+    candidates prefer the shorter montage. Returns (None, "") when no
+    boundary qualifies or the nearest one IS the requested length (no
+    change needed). The returned time never exceeds the song duration.
+    """
+    tolerance = _END_SNAP_TOLERANCE * length
+    for cand, kind in (
+        (music.phrases, "phrase"),
+        (music.downbeats, "downbeat"),
+        (music.beats, "beat"),
+    ):
+        pts = sorted(p for p in cand if _EPS < p <= music.duration + _EPS)
+        if not pts:
+            continue
+        i = bisect.bisect_left(pts, length)
+        neighbours = ([pts[i - 1]] if i > 0 else []) + ([pts[i]] if i < len(pts) else [])
+        best: float | None = None
+        for p in neighbours:  # shorter first: a tie keeps the shorter cut
+            d = abs(p - length)
+            if d <= tolerance + _EPS and (best is None or d < abs(best - length) - _EPS):
+                best = p
+        if best is not None:
+            if abs(best - length) <= _EPS:
+                return None, ""  # already on a boundary
+            return best, kind
+    return None, ""
 
 
 def _phase_steps(style: MontageStyle) -> list[int]:
@@ -624,6 +688,7 @@ def plan_montage(
     order: str = CHRONOLOGICAL,
     max_duration: float | None = None,
     style: str = "auto",
+    end_on_phrase: bool = True,
 ) -> MontagePlan:
     """Distribute the best moments across the song, in a cutting style.
 
@@ -631,6 +696,15 @@ def plan_montage(
     section-energy beat grid; a named style cuts on its story arc instead
     (see the module docstring for the grid, drop, highlight and motion
     rules). Unknown styles raise ValueError listing the valid ones.
+
+    ``end_on_phrase`` (default True) gives a truncated montage a musical
+    ending: when ``max_duration`` makes it shorter than the song, the length
+    is snapped to the nearest phrase start (fallback: downbeats, then beats)
+    within ±12% of the request — ties prefer the shorter cut, larger changes
+    are never made, and a full-song montage is left alone. The plan also
+    carries the intended fades (``fade_in`` / ``fade_out``) and per-entry
+    dissolves for gentle phases (see the module docstring's Finishing
+    section).
     """
     if style not in STYLES:
         valid = ", ".join(sorted(STYLES))
@@ -638,8 +712,16 @@ def plan_montage(
     chosen = STYLES[style]
 
     length = music.duration if max_duration is None else min(music.duration, max_duration)
+    end_note: str | None = None
+    if end_on_phrase and max_duration is not None and length < music.duration - _EPS and length > _EPS:
+        snapped_length, boundary_kind = _snap_ending_length(music, length)
+        if snapped_length is not None:
+            end_note = f"length snapped to {boundary_kind} at {snapped_length:.1f}s"
+            length = snapped_length
     plan = MontagePlan(music_path=music.path, duration=max(length, 0.0))
     plan.notes.append(f'style "{chosen.key}": {chosen.name}')
+    if end_note:
+        plan.notes.append(end_note)
     if length <= _EPS:
         plan.notes.append("montage length is zero; nothing planned")
         return plan
@@ -689,11 +771,64 @@ def plan_montage(
     plan.notes.extend(fill_notes)
     used = sum(1 for it in pool if it.uses)
     plan.notes.append(f"{len(slots)} slots filled, {used} of {len(pool)} moments used")
+    _plan_finishing(plan, entries, music, chosen, phases)
     return plan
 
 
+def _plan_finishing(
+    plan: MontagePlan,
+    entries: list[MontageEntry],
+    music: MusicAnalysis,
+    style: MontageStyle,
+    phases: list[tuple[float, float, str]],
+) -> None:
+    """Set the plan's fades and gentle-phase dissolves (in place).
+
+    Styles with an outro phase get ``fade_in`` = 0.5 s and ``fade_out`` =
+    min(2 s, last outro slot length); "auto" gets 0.5 s / 1 s. Every entry
+    in a gentle phase (>= ``_SLOW_PHASE_STEP`` beats per cut; "low"
+    sections in "auto") except the montage's very first entry gets
+    ``transition`` = min(0.5 s, half its slot length) — a dissolve INTO
+    that entry. Notes the dissolve count and reminds that the music
+    fade-out must be applied in Resolve (the export formats can't carry it).
+    """
+    if not entries:
+        return
+    arc_labels = [lab for _, lab in style.arc]
+    if "outro" in arc_labels:
+        plan.fade_in = _FADE_IN
+        last = entries[-1]
+        plan.fade_out = min(_MAX_FADE_OUT, last.record_end - last.record_start)
+    elif not style.arc:  # "auto"
+        plan.fade_in = _FADE_IN
+        plan.fade_out = _AUTO_FADE_OUT
+
+    dissolves = 0
+    for entry in entries[1:]:  # the first entry's fade is fade_in, not a dissolve
+        if style.arc:
+            label = _phase_label_at(phases, entry.record_start)
+            gentle = label is not None and style.beats_per_cut.get(label, 2) >= _SLOW_PHASE_STEP
+        else:
+            gentle = _label_at(music.sections, entry.record_start) == "low"
+        if gentle:
+            entry.transition = min(_MAX_DISSOLVE, (entry.record_end - entry.record_start) / 2.0)
+            if entry.transition > _EPS:
+                dissolves += 1
+    if dissolves:
+        plan.notes.append(f"{dissolves} dissolves in gentle phases")
+    if plan.fade_out > _EPS:
+        plan.notes.append(f"music fade-out: {plan.fade_out:.1f}s (apply in Resolve)")
+
+
 def montage_to_timeline(plan: MontagePlan, fps: float, name: str = "Monteur Montage") -> Timeline:
-    """Render a MontagePlan as a Timeline (footage on V1, music on A1)."""
+    """Render a MontagePlan as a Timeline (footage on V1, music on A1).
+
+    Entries with a dissolve (``transition`` > 0) carry it in the video
+    clip's metadata (``"transition"`` = ``"dissolve"``,
+    ``"transition_frames"`` = the length in frames) so the EDL/FCPXML
+    writers can emit it; the plan's fades land in ``timeline.metadata``
+    as ``"fade_in_frames"`` / ``"fade_out_frames"``.
+    """
     timeline = Timeline(name=name, fps=fps)
     for entry in plan.entries:
         stem = PurePath(entry.clip_path).stem
@@ -707,18 +842,25 @@ def montage_to_timeline(plan: MontagePlan, fps: float, name: str = "Monteur Mont
             src_out = src_in + (rec_out - rec_in)
         else:
             src_out = seconds_to_frames(entry.source_end, fps)
-        timeline.clips.append(
-            Clip(
-                name=stem,
-                track="V1",
-                kind=VIDEO,
-                source_in=src_in,
-                source_out=src_out,
-                record_in=rec_in,
-                record_out=rec_out,
-                source_name=stem,
-            )
+        clip = Clip(
+            name=stem,
+            track="V1",
+            kind=VIDEO,
+            source_in=src_in,
+            source_out=src_out,
+            record_in=rec_in,
+            record_out=rec_out,
+            source_name=stem,
         )
+        transition_frames = round(entry.transition * fps)
+        if transition_frames > 0:
+            clip.metadata["transition"] = "dissolve"
+            clip.metadata["transition_frames"] = transition_frames
+        timeline.clips.append(clip)
+    if plan.fade_in > _EPS:
+        timeline.metadata["fade_in_frames"] = seconds_to_frames(plan.fade_in, fps)
+    if plan.fade_out > _EPS:
+        timeline.metadata["fade_out_frames"] = seconds_to_frames(plan.fade_out, fps)
     music_stem = PurePath(plan.music_path).stem
     duration_frames = seconds_to_frames(plan.duration, fps)
     timeline.clips.append(
