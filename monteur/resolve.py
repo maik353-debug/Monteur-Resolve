@@ -254,6 +254,174 @@ class ResolveBridge:
             )
         return len(items)
 
+    def add_markers(
+        self, markers: list[Marker], timeline_name: str | None = None
+    ) -> int:
+        """Add markers to the current (or named) timeline; return the count added.
+
+        Resolve's ``Timeline.AddMarker(frameId, ...)`` takes frames RELATIVE
+        to the timeline start (even when the timeline starts at e.g.
+        01:00:00:00), which matches our 0-based ``Marker.frame`` — so frames
+        are passed through unchanged. Marker colors are mapped to the nearest
+        Resolve marker color name ("Blue" when unknown). Markers Resolve
+        rejects (e.g. duplicate frame) are skipped, not fatal.
+        """
+        if timeline_name is None:
+            timeline = self._current_timeline()
+        else:
+            timeline = self._timeline_by_name(timeline_name)
+            self._project().SetCurrentTimeline(timeline)
+        added = 0
+        for marker in markers:
+            ok = timeline.AddMarker(
+                int(marker.frame),
+                _marker_color(marker.color),
+                marker.name,
+                marker.note,
+                1,
+                "",
+            )
+            if ok:
+                added += 1
+        return added
+
+    def build_timeline_from_plan(
+        self, plan, fps: float, name: str = "Monteur Montage"
+    ) -> str:
+        """Build a montage timeline in Resolve from a MontagePlan.
+
+        Steps: import the distinct clip paths (plus the music) into the media
+        pool, create an empty timeline (name uniquified with " 2", " 3", ...
+        on a clash), append one video clip per plan entry in record order
+        (Resolve appends back-to-back, matching the plan's gapless record
+        ranges), then append the music as one audio clip. Returns the created
+        timeline's name.
+
+        Imported media-pool items are mapped back to file paths by, in order:
+        ``GetClipProperty("File Path")``; positional order when Resolve
+        returned exactly one item per requested path; and finally basename
+        matching via ``GetName()``. An unmapped path raises
+        MonteurResolveError.
+        """
+        entries = sorted(plan.entries, key=lambda e: e.record_start)
+        paths: list[str] = []
+        for entry in entries:
+            if entry.clip_path not in paths:
+                paths.append(entry.clip_path)
+        if plan.music_path not in paths:
+            paths.append(plan.music_path)
+
+        pool = self._media_pool()
+        items = pool.ImportMedia(paths)
+        if not items:
+            raise MonteurResolveError(
+                f"Resolve imported no media into project "
+                f"{self.project_name()!r} from: {paths}. Check that the files "
+                "exist and are readable by Resolve."
+            )
+        by_path = _map_items_to_paths(paths, items)
+        missing = [p for p in paths if by_path.get(p) is None]
+        if missing:
+            raise MonteurResolveError(
+                f"Resolve did not return media pool items for: {missing}. "
+                "The files may be missing, offline or unsupported."
+            )
+
+        existing = set(self.list_timelines())
+        timeline_name = name
+        suffix = 2
+        while timeline_name in existing:
+            timeline_name = f"{name} {suffix}"
+            suffix += 1
+        timeline = pool.CreateEmptyTimeline(timeline_name)
+        if timeline is None:
+            raise MonteurResolveError(
+                f"Resolve failed to create timeline {timeline_name!r} in "
+                f"project {self.project_name()!r}."
+            )
+
+        for entry in entries:
+            clip_info = {
+                "mediaPoolItem": by_path[entry.clip_path],
+                "startFrame": int(round(entry.source_start * fps)),
+                "endFrame": int(round(entry.source_end * fps)) - 1,
+                "mediaType": 1,
+            }
+            if not pool.AppendToTimeline([clip_info]):
+                raise MonteurResolveError(
+                    f"Resolve failed to append {entry.clip_path!r} "
+                    f"({entry.source_start:.2f}-{entry.source_end:.2f}s) to "
+                    f"timeline {timeline_name!r}."
+                )
+        music_info = {
+            "mediaPoolItem": by_path[plan.music_path],
+            "startFrame": 0,
+            "endFrame": int(round(plan.duration * fps)) - 1,
+            "mediaType": 2,
+        }
+        if not pool.AppendToTimeline([music_info]):
+            raise MonteurResolveError(
+                f"Resolve failed to append the music {plan.music_path!r} to "
+                f"timeline {timeline_name!r}."
+            )
+        return timeline_name
+
+
+# Resolve's fixed marker color palette.
+RESOLVE_MARKER_COLORS = (
+    "Blue", "Cyan", "Green", "Yellow", "Red", "Pink", "Purple", "Fuchsia",
+    "Rose", "Lavender", "Sky", "Mint", "Lemon", "Sand", "Cocoa", "Cream",
+)
+
+
+def _marker_color(color: str) -> str:
+    """Nearest Resolve marker color name for a model marker color.
+
+    A color that already is a Resolve color name passes through verbatim
+    (case-insensitively normalized); anything else becomes "Blue".
+    """
+    wanted = (color or "").strip().lower()
+    for name in RESOLVE_MARKER_COLORS:
+        if name.lower() == wanted:
+            return name
+    return "Blue"
+
+
+def _map_items_to_paths(paths: list[str], items: list[Any]) -> dict[str, Any]:
+    """Map requested file paths to imported media pool items.
+
+    Strategy (documented on build_timeline_from_plan): exact
+    GetClipProperty("File Path") matches first, then positional order when
+    the counts line up, then basename matching via GetName(). Unmatched
+    paths map to None.
+    """
+    by_path: dict[str, Any] = {path: None for path in paths}
+    for item in items:
+        getter = getattr(item, "GetClipProperty", None)
+        if not callable(getter):
+            continue
+        try:
+            file_path = getter("File Path")
+        except Exception:
+            continue
+        if file_path in by_path and by_path[file_path] is None:
+            by_path[file_path] = item
+    if any(v is None for v in by_path.values()) and len(items) == len(paths):
+        for path, item in zip(paths, items):
+            if by_path[path] is None:
+                by_path[path] = item
+    remaining = [p for p, v in by_path.items() if v is None]
+    if remaining:
+        by_name: dict[str, Any] = {}
+        for item in items:
+            try:
+                by_name.setdefault(item.GetName(), item)
+            except Exception:
+                continue
+        for path in remaining:
+            by_path[path] = by_name.get(os.path.basename(path))
+    return by_path
+
 
 def _parse_fps(raw_timeline: Any) -> float:
     setting = raw_timeline.GetSetting("timelineFrameRate")
@@ -314,3 +482,195 @@ def _convert_markers(raw_timeline: Any) -> list[Marker]:
     ]
     markers.sort(key=lambda m: m.frame)
     return markers
+
+
+# --- Resolve menu scripts ------------------------------------------------------
+
+_ANALYZE_TIMELINE_SCRIPT = '''\
+"""Monteur - Analyze Timeline.
+
+Runs inside DaVinci Resolve (Workspace > Scripts > Utility, installed by
+`monteur resolve install-scripts`). Reads the current timeline, prints its
+pacing stats to the console and adds a red "Monteur: slow section" marker
+at the start of every slow section.
+"""
+
+
+def _get_resolve():
+    """Return the Resolve app object from whatever host runs this script."""
+    try:
+        return resolve  # provided as a global by Resolve's script host
+    except NameError:
+        pass
+    try:
+        return app.GetResolve()  # Fusion-style host
+    except (NameError, AttributeError):
+        pass
+    try:
+        return bmd.scriptapp("Resolve")
+    except (NameError, AttributeError):
+        return None
+
+
+def main():
+    try:
+        from monteur.analysis import analyze_timeline
+        from monteur.model import Marker, seconds_to_frames
+        from monteur.resolve import MonteurResolveError, ResolveBridge
+    except ImportError:
+        print(
+            "Monteur is not installed in Resolve's Python interpreter.\\n"
+            "Install it for the Python 3 that Resolve uses, e.g.:\\n"
+            "    python3 -m pip install monteur\\n"
+            "then re-run this script."
+        )
+        return
+
+    resolve_app = _get_resolve()
+    if resolve_app is None:
+        print("Could not reach the Resolve scripting API from this host.")
+        return
+
+    bridge = ResolveBridge(resolve_app)
+    try:
+        timeline = bridge.read_timeline()
+        stats = analyze_timeline(timeline)
+        print("Timeline : " + (stats.timeline_name or "-"))
+        print(
+            "Duration : {0:.1f}s at {1:g} fps".format(
+                stats.duration_seconds, stats.fps
+            )
+        )
+        print(
+            "Shots    : {0}   Cuts: {1}".format(stats.shot_count, stats.cut_count)
+        )
+        print(
+            "Shot len : avg {0:.2f}s  median {1:.2f}s  "
+            "min {2:.2f}s  max {3:.2f}s".format(
+                stats.avg_shot_seconds,
+                stats.median_shot_seconds,
+                stats.min_shot_seconds,
+                stats.max_shot_seconds,
+            )
+        )
+        markers = [
+            Marker(
+                frame=seconds_to_frames(section.start, timeline.fps),
+                name="Monteur: slow section",
+                note="avg shot {0:.1f}s".format(section.avg_shot_length),
+                color="Red",
+            )
+            for section in stats.sections
+            if section.label == "slow"
+        ]
+        added = bridge.add_markers(markers)
+        print("Added {0} 'Monteur: slow section' marker(s).".format(added))
+    except MonteurResolveError as exc:
+        print("Monteur: {0}".format(exc))
+
+
+main()
+'''
+
+_OPEN_STUDIO_SCRIPT = '''\
+"""Monteur - Open Studio.
+
+Runs inside DaVinci Resolve (Workspace > Scripts > Utility, installed by
+`monteur resolve install-scripts`). Launches the Monteur Studio web app
+(`monteur ui`) detached in the background and prints its URL.
+"""
+
+import os
+import subprocess
+import sys
+
+URL = "http://127.0.0.1:8765"
+
+
+def main():
+    try:
+        import monteur  # noqa: F401
+    except ImportError:
+        print(
+            "Monteur is not installed in Resolve's Python interpreter.\\n"
+            "Install it for the Python 3 that Resolve uses, e.g.:\\n"
+            "    python3 -m pip install monteur\\n"
+            "then re-run this script."
+        )
+        return
+    kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "posix":
+        kwargs["start_new_session"] = True
+    else:
+        kwargs["creationflags"] = 0x00000008  # DETACHED_PROCESS
+    subprocess.Popen([sys.executable, "-m", "monteur.cli", "ui"], **kwargs)
+    print("Monteur Studio starting at " + URL)
+
+
+main()
+'''
+
+_SCRIPT_FILES = {
+    "Monteur - Analyze Timeline.py": _ANALYZE_TIMELINE_SCRIPT,
+    "Monteur - Open Studio.py": _OPEN_STUDIO_SCRIPT,
+}
+
+_LINUX_SYSTEM_SCRIPT_DIR = "/opt/resolve/Fusion/Scripts/Utility"
+
+
+def _script_install_dirs() -> list[str]:
+    """Resolve's Fusion Scripts/Utility folder(s) for this platform."""
+    if sys.platform == "darwin":
+        return [
+            os.path.expanduser(
+                "~/Library/Application Support/Blackmagic Design"
+                "/DaVinci Resolve/Fusion/Scripts/Utility"
+            )
+        ]
+    if sys.platform.startswith("win"):
+        appdata = os.environ.get(
+            "APPDATA", os.path.expanduser(os.path.join("~", "AppData", "Roaming"))
+        )
+        return [
+            os.path.join(
+                appdata,
+                "Blackmagic Design",
+                "DaVinci Resolve",
+                "Support",
+                "Fusion",
+                "Scripts",
+                "Utility",
+            )
+        ]
+    dirs = [os.path.expanduser("~/.local/share/DaVinciResolve/Fusion/Scripts/Utility")]
+    if os.path.isdir(_LINUX_SYSTEM_SCRIPT_DIR) and os.access(
+        _LINUX_SYSTEM_SCRIPT_DIR, os.W_OK
+    ):
+        dirs.append(_LINUX_SYSTEM_SCRIPT_DIR)
+    return dirs
+
+
+def install_scripts(dry_run: bool = False) -> list[str]:
+    """Install Monteur's launcher scripts into Resolve's scripts menu.
+
+    Writes "Monteur - Analyze Timeline.py" and "Monteur - Open Studio.py"
+    into Resolve's Fusion ``Scripts/Utility`` folder (created if needed);
+    they appear under Workspace > Scripts > Utility after a Resolve restart.
+    With ``dry_run=True`` nothing is written and the target paths are
+    returned as-is. Returns the list of written (or would-be-written) paths.
+    """
+    written: list[str] = []
+    for directory in _script_install_dirs():
+        for filename, content in _SCRIPT_FILES.items():
+            target = os.path.join(directory, filename)
+            written.append(target)
+            if dry_run:
+                continue
+            os.makedirs(directory, exist_ok=True)
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(content)
+    return written

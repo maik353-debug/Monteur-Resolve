@@ -117,6 +117,40 @@ monteur ai notes my_cut.edl --fps 25    # editorial notes on your pacing
 monteur ai log interview.srt           # footage log: topics, quotes, timestamps
 ```
 
+## Claude integration (MCP)
+
+Monteur ships an MCP server, so you can talk to DaVinci Resolve through
+Claude: ask Claude to analyze your current timeline's pacing, mark the slow
+sections with timeline markers, sift a footage folder, build a music-cut
+montage straight into Resolve, or compare two versions of a cut — all
+conversationally. Install the extra and register the server:
+
+```bash
+pip install 'monteur[mcp]'
+```
+
+**Claude Desktop / claude.ai**: add this to your MCP configuration
+(on macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{"mcpServers": {"monteur": {"command": "monteur", "args": ["mcp"]}}}
+```
+
+**Claude Code**: one line —
+
+```bash
+claude mcp add monteur -- monteur mcp
+```
+
+Then just ask Claude, for example:
+
+- "Analyze my current timeline and mark the slow sections"
+- "Build a 60-second montage from /footage/day01 to /music/track.mp3 straight into Resolve"
+- "Compare v4 and v5 of my cut"
+
+Resolve-dependent tools need DaVinci Resolve running with scripting enabled
+(Preferences → System → General → External scripting: Local).
+
 ## Python API
 
 ```python

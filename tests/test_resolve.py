@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import os
+import sys
+
 import pytest
 
 import monteur.resolve as resolve
-from monteur.model import AUDIO, VIDEO
+from monteur.model import AUDIO, VIDEO, Marker
+from monteur.montage import MontageEntry, MontagePlan
 from monteur.resolve import MonteurResolveError, ResolveBridge, connect
 
 
@@ -69,6 +73,22 @@ class FakeTimeline:
             "audio": audio_tracks or [],
         }
         self._markers = markers or {}
+        self.added_markers: list[tuple] = []
+        self.fail_marker_frames: set[int] = set()
+
+    def AddMarker(
+        self,
+        frame: int,
+        color: str,
+        name: str,
+        note: str,
+        duration: int,
+        custom_data: str = "",
+    ) -> bool:
+        if frame in self.fail_marker_frames:
+            return False
+        self.added_markers.append((frame, color, name, note, duration, custom_data))
+        return True
 
     def GetName(self) -> str:
         return self._name
@@ -90,11 +110,33 @@ class FakeTimeline:
         return self._markers
 
 
+class FakePoolClip:
+    """A media pool item as returned by ImportMedia."""
+
+    def __init__(self, path: str, with_file_path: bool = True) -> None:
+        self.path = path
+        self._with_file_path = with_file_path
+
+    def GetName(self) -> str:
+        return os.path.basename(self.path)
+
+    def GetClipProperty(self, key: str) -> str:
+        if key == "File Path" and self._with_file_path:
+            return self.path
+        return ""
+
+
 class FakeMediaPool:
-    def __init__(self) -> None:
+    def __init__(self, project: "FakeProject | None" = None) -> None:
+        self._project = project
         self.imported_timelines: list[str] = []
         self.imported_media: list[str] = []
+        self.import_calls: list[list[str]] = []
         self.fail_timeline_import = False
+        self.import_media_result: list | None | str = "default"
+        self.fail_append = False
+        self.appended: list[dict] = []
+        self.created_timeline_names: list[str] = []
 
     def ImportTimelineFromFile(self, path: str):
         if self.fail_timeline_import:
@@ -103,8 +145,25 @@ class FakeMediaPool:
         return FakeTimeline(name="Imported")
 
     def ImportMedia(self, paths: list[str]):
+        self.import_calls.append(list(paths))
         self.imported_media.extend(paths)
-        return [object() for _ in paths]
+        if self.import_media_result != "default":
+            return self.import_media_result
+        return [FakePoolClip(path) for path in paths]
+
+    def CreateEmptyTimeline(self, name: str):
+        self.created_timeline_names.append(name)
+        timeline = FakeTimeline(name=name, start_frame=0)
+        if self._project is not None:
+            self._project._timelines.append(timeline)
+            self._project._current = timeline
+        return timeline
+
+    def AppendToTimeline(self, clip_infos: list[dict]):
+        if self.fail_append:
+            return None
+        self.appended.extend(clip_infos)
+        return list(clip_infos)
 
 
 class FakeProject:
@@ -119,7 +178,8 @@ class FakeProject:
         self._current = current if current is not None else (
             self._timelines[0] if self._timelines else None
         )
-        self.media_pool = FakeMediaPool()
+        self.media_pool = FakeMediaPool(self)
+        self.set_current_calls: list[FakeTimeline] = []
 
     def GetName(self) -> str:
         return self._name
@@ -132,6 +192,11 @@ class FakeProject:
 
     def GetCurrentTimeline(self) -> FakeTimeline | None:
         return self._current
+
+    def SetCurrentTimeline(self, timeline: FakeTimeline) -> bool:
+        self._current = timeline
+        self.set_current_calls.append(timeline)
+        return True
 
     def GetMediaPool(self) -> FakeMediaPool:
         return self.media_pool
@@ -318,3 +383,267 @@ def test_import_media_returns_count() -> None:
     count = bridge.import_media(["/media/a.mov", "/media/b.wav"])
     assert count == 2
     assert project.media_pool.imported_media == ["/media/a.mov", "/media/b.wav"]
+
+
+# --- add_markers --------------------------------------------------------------
+
+
+def test_add_markers_passes_relative_frames_and_maps_colors() -> None:
+    timeline = standard_timeline()  # starts at 86400: frames must NOT shift
+    bridge, _ = make_bridge([timeline])
+    added = bridge.add_markers(
+        [
+            Marker(frame=12, name="Start", note="n1", color="Red"),
+            Marker(frame=240, name="Later", note="", color=""),
+            Marker(frame=300, name="Odd", note="", color="Orange"),
+            Marker(frame=360, name="Lower", note="", color="cyan"),
+        ]
+    )
+    assert added == 4
+    assert timeline.added_markers == [
+        (12, "Red", "Start", "n1", 1, ""),
+        (240, "Blue", "Later", "", 1, ""),
+        (300, "Blue", "Odd", "", 1, ""),
+        (360, "Cyan", "Lower", "", 1, ""),
+    ]
+
+
+def test_add_markers_counts_only_successes() -> None:
+    timeline = standard_timeline()
+    timeline.fail_marker_frames = {50}
+    bridge, _ = make_bridge([timeline])
+    added = bridge.add_markers(
+        [Marker(frame=10), Marker(frame=50), Marker(frame=90)]
+    )
+    assert added == 2
+    assert [m[0] for m in timeline.added_markers] == [10, 90]
+
+
+def test_add_markers_switches_to_named_timeline() -> None:
+    first = standard_timeline()
+    second = FakeTimeline(name="Cut 2", start_frame=0)
+    bridge, project = make_bridge([first, second], current=second)
+    added = bridge.add_markers([Marker(frame=7, color="Green")], timeline_name="Cut 1")
+    assert added == 1
+    assert first.added_markers == [(7, "Green", "", "", 1, "")]
+    assert second.added_markers == []
+    assert project.set_current_calls == [first]
+    assert project.GetCurrentTimeline() is first
+
+
+def test_add_markers_unknown_timeline_raises() -> None:
+    bridge, _ = make_bridge([standard_timeline()])
+    with pytest.raises(MonteurResolveError):
+        bridge.add_markers([Marker(frame=1)], timeline_name="Nope")
+
+
+# --- build_timeline_from_plan ---------------------------------------------------
+
+
+def make_plan() -> MontagePlan:
+    return MontagePlan(
+        music_path="/music/song.wav",
+        duration=4.0,
+        entries=[
+            MontageEntry(
+                clip_path="/media/a.mov", source_start=1.0, source_end=3.0,
+                record_start=0.0, record_end=2.0, score=1.0,
+            ),
+            MontageEntry(
+                clip_path="/media/b.mov", source_start=0.6, source_end=1.6,
+                record_start=2.0, record_end=3.0, score=0.5,
+            ),
+            MontageEntry(  # a.mov again: must be imported only once
+                clip_path="/media/a.mov", source_start=5.0, source_end=6.0,
+                record_start=3.0, record_end=4.0, score=0.8,
+            ),
+        ],
+    )
+
+
+def test_build_timeline_from_plan_at_24fps() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    pool = project.media_pool
+    name = bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+    assert name == "Monteur Montage"
+    assert pool.created_timeline_names == ["Monteur Montage"]
+
+    # Distinct paths, one ImportMedia call, music last.
+    assert pool.import_calls == [["/media/a.mov", "/media/b.mov", "/music/song.wav"]]
+
+    assert len(pool.appended) == 4
+    video, music = pool.appended[:3], pool.appended[3]
+    assert [(c["startFrame"], c["endFrame"], c["mediaType"]) for c in video] == [
+        (24, 71, 1),   # 1.0-3.0 s
+        (14, 37, 1),   # 0.6-1.6 s (round(0.6*24)=14, round(1.6*24)-1=37)
+        (120, 143, 1),  # 5.0-6.0 s
+    ]
+    # Entries reference the pool item of their own clip path.
+    assert video[0]["mediaPoolItem"].path == "/media/a.mov"
+    assert video[1]["mediaPoolItem"].path == "/media/b.mov"
+    assert video[2]["mediaPoolItem"].path == "/media/a.mov"
+    assert video[0]["mediaPoolItem"] is video[2]["mediaPoolItem"]
+    # The music append comes last: whole montage length as audio.
+    assert music["mediaPoolItem"].path == "/music/song.wav"
+    assert (music["startFrame"], music["endFrame"], music["mediaType"]) == (0, 95, 2)
+
+
+def test_build_timeline_from_plan_at_25fps() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    pool = project.media_pool
+    bridge.build_timeline_from_plan(make_plan(), fps=25.0)
+    frames = [(c["startFrame"], c["endFrame"]) for c in pool.appended]
+    assert frames == [(25, 74), (15, 39), (125, 149), (0, 99)]
+
+
+def test_build_timeline_from_plan_uniquifies_name() -> None:
+    taken = FakeTimeline(name="Monteur Montage", start_frame=0)
+    taken2 = FakeTimeline(name="Monteur Montage 2", start_frame=0)
+    bridge, project = make_bridge([taken, taken2])
+    name = bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+    assert name == "Monteur Montage 3"
+    assert project.media_pool.created_timeline_names == ["Monteur Montage 3"]
+    assert bridge.list_timelines() == [
+        "Monteur Montage", "Monteur Montage 2", "Monteur Montage 3",
+    ]
+
+
+def test_build_timeline_from_plan_custom_name() -> None:
+    bridge, _ = make_bridge([standard_timeline()])
+    assert bridge.build_timeline_from_plan(make_plan(), 24.0, name="Holiday") == "Holiday"
+
+
+def test_build_timeline_falls_back_to_name_matching() -> None:
+    # Items without a usable "File Path" property and one extra item, so
+    # neither the property nor the positional strategy applies.
+    bridge, project = make_bridge([standard_timeline()])
+    pool = project.media_pool
+    pool.import_media_result = [
+        FakePoolClip("/elsewhere/a.mov", with_file_path=False),
+        FakePoolClip("/elsewhere/b.mov", with_file_path=False),
+        FakePoolClip("/elsewhere/song.wav", with_file_path=False),
+        FakePoolClip("/elsewhere/extra.mov", with_file_path=False),
+    ]
+    name = bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+    assert name == "Monteur Montage"
+    assert pool.appended[0]["mediaPoolItem"].path == "/elsewhere/a.mov"
+    assert pool.appended[3]["mediaPoolItem"].path == "/elsewhere/song.wav"
+
+
+def test_build_timeline_import_none_raises() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    project.media_pool.import_media_result = None
+    with pytest.raises(MonteurResolveError) as excinfo:
+        bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+    assert "/media/a.mov" in str(excinfo.value)
+
+
+def test_build_timeline_import_empty_raises() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    project.media_pool.import_media_result = []
+    with pytest.raises(MonteurResolveError):
+        bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+
+
+def test_build_timeline_unmatched_path_raises() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    project.media_pool.import_media_result = [
+        FakePoolClip("/media/a.mov"),
+        FakePoolClip("/media/b.mov"),
+        # music missing and counts differ -> no positional or name match
+        FakePoolClip("/media/unrelated.mov"),
+        FakePoolClip("/media/unrelated2.mov"),
+    ]
+    with pytest.raises(MonteurResolveError) as excinfo:
+        bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+    assert "/music/song.wav" in str(excinfo.value)
+
+
+def test_build_timeline_append_failure_raises() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    project.media_pool.fail_append = True
+    with pytest.raises(MonteurResolveError) as excinfo:
+        bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+    assert "append" in str(excinfo.value)
+
+
+# --- install_scripts ------------------------------------------------------------
+
+
+SCRIPT_NAMES = ("Monteur - Analyze Timeline.py", "Monteur - Open Studio.py")
+
+
+def test_install_scripts_dry_run_macos(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    paths = resolve.install_scripts(dry_run=True)
+    assert len(paths) == 2
+    for path in paths:
+        assert path.startswith(
+            str(tmp_path / "Library" / "Application Support" / "Blackmagic Design")
+        )
+        assert os.path.join("Fusion", "Scripts", "Utility") in path
+        assert not os.path.exists(path)
+    assert sorted(os.path.basename(p) for p in paths) == sorted(SCRIPT_NAMES)
+
+
+def test_install_scripts_dry_run_windows(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    appdata = str(tmp_path / "AppData" / "Roaming")
+    monkeypatch.setenv("APPDATA", appdata)
+    paths = resolve.install_scripts(dry_run=True)
+    assert len(paths) == 2
+    for path in paths:
+        assert path.startswith(
+            os.path.join(appdata, "Blackmagic Design", "DaVinci Resolve", "Support")
+        )
+        assert os.path.join("Fusion", "Scripts", "Utility") in path
+        assert not os.path.exists(path)
+
+
+def test_install_scripts_dry_run_linux(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    paths = resolve.install_scripts(dry_run=True)
+    home_dir = str(
+        tmp_path / ".local" / "share" / "DaVinciResolve" / "Fusion" / "Scripts" / "Utility"
+    )
+    assert [p for p in paths if p.startswith(home_dir)] == [
+        os.path.join(home_dir, name) for name in SCRIPT_NAMES
+    ]
+    # /opt/resolve is only targeted when it already exists and is writable.
+    for path in paths:
+        if not path.startswith(home_dir):
+            assert path.startswith("/opt/resolve/")
+
+
+def test_install_scripts_writes_valid_python(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    paths = [p for p in resolve.install_scripts() if str(tmp_path) in p]
+    assert len(paths) == 2
+    for path in paths:
+        assert os.path.isfile(path)
+        content = open(path, encoding="utf-8").read()
+        compile(content, path, "exec")  # must be valid Python
+        assert "pip install monteur" in content  # ImportError guidance
+    analyze = open(
+        os.path.join(os.path.dirname(paths[0]), "Monteur - Analyze Timeline.py"),
+        encoding="utf-8",
+    ).read()
+    assert "add_markers" in analyze
+    assert "Monteur: slow section" in analyze
+    assert '"Red"' in analyze
+    studio = open(
+        os.path.join(os.path.dirname(paths[0]), "Monteur - Open Studio.py"),
+        encoding="utf-8",
+    ).read()
+    assert "subprocess.Popen" in studio
+    assert "monteur.cli" in studio
+
+
+def test_install_scripts_dry_run_writes_nothing(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    resolve.install_scripts(dry_run=True)
+    assert list(tmp_path.rglob("*.py")) == []

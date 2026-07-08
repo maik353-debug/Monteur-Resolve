@@ -153,8 +153,16 @@ def cmd_convert(args: argparse.Namespace) -> None:
 
 
 def cmd_resolve(args: argparse.Namespace) -> None:
-    from monteur.resolve import MonteurResolveError, connect
+    from monteur.resolve import MonteurResolveError, connect, install_scripts
 
+    if args.action == "install-scripts":
+        for path in install_scripts():
+            print(f"Installed {path}")
+        print(
+            "Restart DaVinci Resolve, then find the scripts under "
+            "Workspace > Scripts > Utility."
+        )
+        return
     try:
         bridge = connect()
         if args.action == "status":
@@ -201,6 +209,8 @@ def cmd_create(args: argparse.Namespace) -> None:
     from monteur.music import analyze_music
     from monteur.sift import sift_directory
 
+    if not args.output and not args.into_resolve:
+        _fail("create needs -o/--output and/or --into-resolve")
     try:
         print("Scanning footage ...")
         reports = sift_directory(args.folder)
@@ -217,10 +227,20 @@ def cmd_create(args: argparse.Namespace) -> None:
     )
     if not plan.entries:
         _fail("no usable material found — run 'monteur sift' to see why")
-    timeline = montage_to_timeline(plan, fps=args.fps)
-    io.save_timeline(timeline, args.output)
-    print(f"\n{len(plan.entries)} cuts -> {args.output} "
-          f"({plan.duration:.1f}s at {args.fps:g} fps)")
+    if args.output:
+        timeline = montage_to_timeline(plan, fps=args.fps)
+        io.save_timeline(timeline, args.output)
+        print(f"\n{len(plan.entries)} cuts -> {args.output} "
+              f"({plan.duration:.1f}s at {args.fps:g} fps)")
+    if args.into_resolve:
+        from monteur.resolve import MonteurResolveError, connect
+
+        try:
+            name = connect().build_timeline_from_plan(plan, fps=args.fps)
+        except MonteurResolveError as exc:
+            _fail(str(exc))
+        print(f"\n{len(plan.entries)} cuts -> Resolve timeline {name!r} "
+              f"({plan.duration:.1f}s at {args.fps:g} fps)")
     for note in plan.notes:
         print(f"  {note}")
 
@@ -308,6 +328,17 @@ def cmd_ui(args: argparse.Namespace) -> None:
         _fail(f"could not start Monteur Studio on port {args.port}: {exc}")
 
 
+def cmd_mcp(args: argparse.Namespace) -> None:
+    try:
+        from monteur import mcp_server
+    except ImportError:
+        _fail(
+            "the MCP server needs the 'mcp' package — install it with: "
+            "pip install 'monteur[mcp]'"
+        )
+    mcp_server.main()
+
+
 def cmd_ai(args: argparse.Namespace) -> None:
     from monteur.ai import MonteurAIError, pacing_notes, suggest_selects, summarize_footage
 
@@ -368,14 +399,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_convert)
 
     p = sub.add_parser("resolve", help="talk to a running DaVinci Resolve")
-    p.add_argument("action", choices=["status", "import", "analyze"])
+    p.add_argument("action", choices=["status", "import", "analyze", "install-scripts"])
     p.add_argument("file", nargs="?", help="file for 'import'")
     p.set_defaults(func=cmd_resolve)
 
     p = sub.add_parser("create", help="automatic first cut: footage folder + song")
     p.add_argument("folder", help="directory with your video clips")
     p.add_argument("music", help="song file (mp3/wav/m4a/...)")
-    p.add_argument("-o", "--output", required=True, help="output .fcpxml/.edl")
+    p.add_argument("-o", "--output", help="output .fcpxml/.edl")
+    p.add_argument(
+        "--into-resolve",
+        action="store_true",
+        help="build the timeline directly in a running DaVinci Resolve",
+    )
     p.add_argument("--fps", type=float, default=25.0)
     p.add_argument("--order", choices=["chronological", "best_first"], default="chronological")
     p.add_argument("--max-duration", type=float, default=None, help="cap the cut length (seconds)")
@@ -405,6 +441,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project", default=".", help="project directory for version history")
     p.add_argument("--no-browser", action="store_true", help="don't open a browser")
     p.set_defaults(func=cmd_ui)
+
+    p = sub.add_parser("mcp", help="run the MCP server for Claude Desktop/claude.ai")
+    p.set_defaults(func=cmd_mcp)
 
     p = sub.add_parser("ai", help="Claude-powered editorial assistance")
     p.add_argument("action", choices=["selects", "notes", "log"])
