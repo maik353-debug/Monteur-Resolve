@@ -1397,3 +1397,387 @@ def test_diagnose_verdict_clean_not_connected(monkeypatch) -> None:
     d = resolve.diagnose()
     assert "loaded Resolve's module fine" in d["verdict"]
     assert "not running" in d["verdict"].lower()
+
+
+# --- build_plan: isolated (crash-safe) timeline building -------------------------
+
+
+class _FakeBuildBridge:
+    """A connect() stand-in that records build_timeline_from_plan calls.
+
+    Emits the preset ``warn`` messages into the caller's ``warnings`` list —
+    exactly what the real bridge does for non-fatal title placement problems.
+    """
+
+    def __init__(
+        self, result: str = "Monteur Montage", warn: list[str] | None = None
+    ) -> None:
+        self.result = result
+        self.warn = list(warn or [])
+        self.calls: list[dict] = []
+
+    def build_timeline_from_plan(
+        self, plan, fps, name="Monteur Montage", titles=None, warnings=None
+    ):
+        self.calls.append(
+            {"plan": plan, "fps": fps, "name": name, "titles": titles}
+        )
+        if warnings is not None:
+            warnings.extend(self.warn)
+        return self.result
+
+
+def build_plan_request(plan=None, **overrides) -> dict:
+    from monteur.montage import plan_to_dict
+
+    request = {
+        "plan": plan_to_dict(plan if plan is not None else make_plan()),
+        "fps": 24.0,
+        "name": "Monteur Montage",
+        "titles": None,
+    }
+    request.update(overrides)
+    return request
+
+
+def test_worker_handle_build_plan_round_trip_real_bridge(monkeypatch) -> None:
+    # Full chain: JSON payload -> plan_from_dict -> ResolveBridge (fakes).
+    from monteur import _resolve_worker
+
+    bridge, project = make_bridge([standard_timeline()])
+    monkeypatch.setattr(resolve, "connect", lambda app=None: bridge)
+    response = _resolve_worker.handle(
+        "build_plan", build_plan_request(name="Holiday")
+    )
+    assert response == {"ok": True, "timeline": "Holiday", "warnings": []}
+    pool = project.media_pool
+    assert pool.created_timeline_names == ["Holiday"]
+    # The deserialized plan built the same appends as the in-process path.
+    assert pool.import_calls == [["/media/a.mov", "/media/b.mov", "/music/song.wav"]]
+    assert [(c["startFrame"], c["endFrame"]) for c in pool.appended] == [
+        (24, 71), (14, 37), (120, 143), (0, 95),
+    ]
+
+
+def test_worker_handle_build_plan_titles_and_warnings_real_bridge(monkeypatch) -> None:
+    # Titles reach the created timeline; add_titles' warnings travel back in
+    # the payload. The created timeline refuses inserts, so every title warns.
+    from monteur import _resolve_worker
+
+    bridge, project = make_bridge([standard_timeline()])
+
+    class RefusingPool(FakeMediaPool):
+        def CreateEmptyTimeline(self, name):
+            timeline = super().CreateEmptyTimeline(name)
+            timeline.insert_title_result_override = None  # soft insert failure
+            return timeline
+
+    project.media_pool = RefusingPool(project)
+    monkeypatch.setattr(resolve, "connect", lambda app=None: bridge)
+    plan = trailer_plan()
+    titles = resolve.titles_from_plan(plan, texts=["ONE", "TWO"])
+    response = _resolve_worker.handle(
+        "build_plan", build_plan_request(plan=plan, fps=25.0, titles=titles)
+    )
+    assert response["ok"] is True
+    assert len(response["warnings"]) == 2
+    assert "'ONE'" in response["warnings"][0]
+    assert "'TWO'" in response["warnings"][1]
+
+
+def test_worker_handle_build_plan_inserts_titles(monkeypatch) -> None:
+    from monteur import _resolve_worker
+
+    bridge, project = make_bridge([standard_timeline()])
+    monkeypatch.setattr(resolve, "connect", lambda app=None: bridge)
+    plan = trailer_plan()
+    titles = resolve.titles_from_plan(plan, texts=["ONE", "TWO"])
+    response = _resolve_worker.handle(
+        "build_plan", build_plan_request(plan=plan, fps=25.0, titles=titles)
+    )
+    assert response["ok"] is True
+    assert response["warnings"] == []
+    created = project._timelines[-1]
+    assert created.inserted_fusion_titles == ["Text+", "Text+"]
+    texts = [i._comp._tools[0].inputs["StyledText"] for i in created.created_title_items]
+    assert texts == ["ONE", "TWO"]
+
+
+def test_worker_handle_build_plan_records_titles_arg(monkeypatch) -> None:
+    from monteur import _resolve_worker
+
+    fake = _FakeBuildBridge(result="Cut Together", warn=["title 1: check it"])
+    monkeypatch.setattr(resolve, "connect", lambda app=None: fake)
+    titles = [{"start": 2.6, "duration": 2.0, "text": "ACT ONE"}]
+    response = _resolve_worker.handle(
+        "build_plan",
+        build_plan_request(fps=30.0, name="Trailer", titles=titles),
+    )
+    assert response == {
+        "ok": True, "timeline": "Cut Together", "warnings": ["title 1: check it"],
+    }
+    call = fake.calls[0]
+    assert call["fps"] == 30.0
+    assert call["name"] == "Trailer"
+    assert call["titles"] == titles
+    assert [e.clip_path for e in call["plan"].entries] == [
+        "/media/a.mov", "/media/b.mov", "/media/a.mov",
+    ]
+
+
+def test_worker_handle_build_plan_bad_plan_is_clean(monkeypatch) -> None:
+    from monteur import _resolve_worker
+
+    fake = _FakeBuildBridge()
+    monkeypatch.setattr(resolve, "connect", lambda app=None: fake)
+    response = _resolve_worker.handle(
+        "build_plan", {"plan": {"not": "a plan"}, "fps": 24.0}
+    )
+    assert response["ok"] is False
+    assert "monteur_plan" in response["error"]  # plan_from_dict's message
+    assert fake.calls == []  # never reached Resolve
+
+
+def test_worker_handle_build_plan_missing_fps_is_clean(monkeypatch) -> None:
+    from monteur import _resolve_worker
+
+    fake = _FakeBuildBridge()
+    monkeypatch.setattr(resolve, "connect", lambda app=None: fake)
+    request = build_plan_request()
+    del request["fps"]
+    response = _resolve_worker.handle("build_plan", request)
+    assert response["ok"] is False
+    assert "fps" in response["error"]
+    assert fake.calls == []
+
+
+def test_worker_handle_build_plan_resolve_error_is_clean(monkeypatch) -> None:
+    from monteur import _resolve_worker
+
+    def boom(app=None):
+        raise MonteurResolveError("Resolve is not running.")
+
+    monkeypatch.setattr(resolve, "connect", boom)
+    response = _resolve_worker.handle("build_plan", build_plan_request())
+    assert response == {"ok": False, "error": "Resolve is not running."}
+
+
+def test_worker_main_build_plan_wire_round_trip(monkeypatch, capsys) -> None:
+    # The real wire: JSON on stdin, one JSON object on stdout, exit 0.
+    from monteur import _resolve_worker
+
+    bridge, project = make_bridge([standard_timeline()])
+    monkeypatch.setattr(resolve, "connect", lambda app=None: bridge)
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(json.dumps(build_plan_request()))
+    )
+    code = _resolve_worker.main(["build_plan"])
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data == {"ok": True, "timeline": "Monteur Montage", "warnings": []}
+    assert project.media_pool.created_timeline_names == ["Monteur Montage"]
+
+
+# --- build_plan_isolated ----------------------------------------------------------
+
+
+def test_build_plan_isolated_success(monkeypatch) -> None:
+    from monteur.montage import plan_from_dict
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["input"] = kwargs.get("input")
+        return _completed(
+            0,
+            json.dumps(
+                {"ok": True, "timeline": "Monteur Montage 2", "warnings": ["w1"]}
+            ),
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = resolve.build_plan_isolated(make_plan(), fps=24.0)
+    assert result == {"ok": True, "timeline": "Monteur Montage 2", "warnings": ["w1"]}
+    # Launched by FILE PATH like every other isolated command.
+    assert captured["cmd"][0] == resolve._worker_python()
+    assert captured["cmd"][1].endswith("_resolve_worker.py")
+    assert captured["cmd"][2] == "build_plan"
+    sent = json.loads(captured["input"])
+    assert sent["fps"] == 24.0
+    assert sent["name"] == "Monteur Montage"
+    assert sent["titles"] is None
+    # The serialized plan is a faithful plan_to_dict payload.
+    rebuilt = plan_from_dict(sent["plan"])
+    assert [e.clip_path for e in rebuilt.entries] == [
+        "/media/a.mov", "/media/b.mov", "/media/a.mov",
+    ]
+    assert rebuilt.duration == 4.0
+
+
+def test_build_plan_isolated_honors_worker_python(monkeypatch) -> None:
+    monkeypatch.setenv("MONTEUR_RESOLVE_PYTHON", "/opt/py311/bin/python3.11")
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _completed(0, json.dumps({"ok": True, "timeline": "T", "warnings": []}))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    resolve.build_plan_isolated(make_plan(), fps=25.0)
+    assert captured["cmd"][0] == "/opt/py311/bin/python3.11"
+
+
+def test_build_plan_isolated_sends_titles(monkeypatch) -> None:
+    plan = trailer_plan()
+    titles = resolve.titles_from_plan(plan)
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["input"] = kwargs.get("input")
+        return _completed(0, json.dumps({"ok": True, "timeline": "T", "warnings": []}))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    resolve.build_plan_isolated(plan, fps=25.0, name="Trailer", titles=titles)
+    sent = json.loads(captured["input"])
+    assert sent["name"] == "Trailer"
+    assert sent["titles"] == [
+        {"start": 2.6, "duration": 2.0, "text": "the mountain pass"},
+        {"start": 5.0, "duration": 2.0, "text": "Title"},
+    ]
+
+
+def test_build_plan_isolated_worker_clean_error(monkeypatch) -> None:
+    payload = {"ok": False, "error": "No project is open in Resolve."}
+
+    def fake_run(cmd, **kwargs):
+        return _completed(0, json.dumps(payload))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = resolve.build_plan_isolated(make_plan(), fps=24.0)
+    assert result["ok"] is False
+    assert result["error"] == "No project is open in Resolve."
+    assert "reason" not in result  # a handled Resolve error, not a crash
+
+
+def test_build_plan_isolated_native_crash_never_raises(monkeypatch) -> None:
+    def fake_run(cmd, **kwargs):
+        return _completed(-1073741819, "")  # 0xC0000005 access violation
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = resolve.build_plan_isolated(make_plan(), fps=24.0)  # must NOT raise
+    assert result["ok"] is False
+    assert result["reason"] == "native-crash"
+    assert "MONTEUR_RESOLVE_PYTHON" in result["error"]
+    assert "3.6" in result["error"] and "3.11" in result["error"]
+
+
+def test_build_plan_isolated_windows_unsigned_crash_code(monkeypatch) -> None:
+    def fake_run(cmd, **kwargs):
+        return _completed(3221225477, "")  # 0xC0000005 as unsigned
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = resolve.build_plan_isolated(make_plan(), fps=24.0)
+    assert result["ok"] is False
+    assert result["reason"] == "native-crash"
+
+
+def test_build_plan_isolated_timeout_passes_through(monkeypatch) -> None:
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 1.0))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = resolve.build_plan_isolated(make_plan(), fps=24.0, timeout=5.0)
+    assert result["ok"] is False
+    assert result["reason"] == "timeout"
+
+
+def test_build_plan_isolated_bad_output(monkeypatch) -> None:
+    def fake_run(cmd, **kwargs):
+        return _completed(0, "not json at all")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = resolve.build_plan_isolated(make_plan(), fps=24.0)
+    assert result["ok"] is False
+    assert result["reason"] == "bad-output"
+
+
+# --- CLI: create --into-resolve uses the isolated path ----------------------------
+
+
+def _run_cmd_create_into_resolve(monkeypatch, plan, build_result):
+    """Run ``monteur create <folder> song.mp3 --into-resolve`` with the whole
+    pipeline faked out; returns the recorded build_plan_isolated calls."""
+    import types
+
+    import monteur.montage
+    import monteur.music
+    import monteur.sift
+    from monteur.cli import build_parser, cmd_create
+
+    monkeypatch.setattr(monteur.sift, "list_media", lambda folder: ["a.mov"])
+    monkeypatch.setattr(
+        monteur.sift, "sift_directory", lambda folder, progress=None: []
+    )
+    monkeypatch.setattr(
+        monteur.music,
+        "analyze_music",
+        lambda path: types.SimpleNamespace(tempo=100.0, beats=[], duration=8.0),
+    )
+    monkeypatch.setattr(
+        monteur.montage, "plan_montage", lambda reports, music, **kwargs: plan
+    )
+    calls: list[dict] = []
+
+    def fake_build(plan, fps, name="Monteur Montage", titles=None, timeout=180.0):
+        calls.append({"plan": plan, "fps": fps, "name": name, "titles": titles})
+        return build_result
+
+    monkeypatch.setattr(resolve, "build_plan_isolated", fake_build)
+    args = build_parser().parse_args(["create", "clips", "song.mp3", "--into-resolve"])
+    cmd_create(args)
+    return calls
+
+
+def test_cli_into_resolve_uses_isolated_build_with_titles(monkeypatch, capsys) -> None:
+    plan = trailer_plan()
+    calls = _run_cmd_create_into_resolve(
+        monkeypatch,
+        plan,
+        {
+            "ok": True,
+            "timeline": "Monteur Montage",
+            "warnings": ["title 2 ('Title'): drag it onto the black gap at 4.6s."],
+        },
+    )
+    assert len(calls) == 1
+    assert calls[0]["plan"] is plan
+    assert calls[0]["fps"] == 25.0  # the create default
+    # The plan has dips, so titles are derived via titles_from_plan.
+    assert calls[0]["titles"] == resolve.titles_from_plan(plan)
+    out = capsys.readouterr().out
+    assert "3 cuts -> Resolve timeline 'Monteur Montage' (8.0s at 25 fps)" in out
+    assert "drag it onto the black gap at 4.6s." in out  # warnings are printed
+
+
+def test_cli_into_resolve_no_dips_passes_no_titles(monkeypatch, capsys) -> None:
+    calls = _run_cmd_create_into_resolve(
+        monkeypatch,
+        make_plan(),
+        {"ok": True, "timeline": "Monteur Montage", "warnings": []},
+    )
+    assert calls[0]["titles"] is None
+    out = capsys.readouterr().out
+    assert "Resolve timeline 'Monteur Montage'" in out
+
+
+def test_cli_into_resolve_failure_exits_with_error(monkeypatch, capsys) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        _run_cmd_create_into_resolve(
+            monkeypatch,
+            make_plan(),
+            {"ok": False, "error": resolve._CRASH_MESSAGE, "reason": "native-crash"},
+        )
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "MONTEUR_RESOLVE_PYTHON" in err  # the crash hint reaches the user

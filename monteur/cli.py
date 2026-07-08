@@ -608,14 +608,20 @@ def cmd_create(args: argparse.Namespace) -> None:
         print(f"\n{len(plan.entries)} cuts -> {args.output} "
               f"({plan.duration:.1f}s at {args.fps:g} fps)")
     if args.into_resolve:
-        from monteur.resolve import MonteurResolveError, connect
+        # Built in an ISOLATED child process (build_plan_isolated): Resolve's
+        # native module can hard-crash an incompatible interpreter, and the
+        # subprocess honors MONTEUR_RESOLVE_PYTHON.
+        from monteur.resolve import build_plan_isolated, titles_from_plan
 
-        try:
-            name = connect().build_timeline_from_plan(plan, fps=args.fps)
-        except MonteurResolveError as exc:
-            _fail(str(exc))
+        titles = titles_from_plan(plan) if plan.dips else None
+        result = build_plan_isolated(plan, fps=args.fps, titles=titles)
+        if not result.get("ok"):
+            _fail(result.get("error", "Resolve build failed."))
+        name = result["timeline"]
         print(f"\n{len(plan.entries)} cuts -> Resolve timeline {name!r} "
               f"({plan.duration:.1f}s at {args.fps:g} fps)")
+        for warning in result.get("warnings") or []:
+            print(f"  Resolve: {warning}")
     if args.save_plan:
         _save_plan(plan, args.save_plan)
     if args.kit:

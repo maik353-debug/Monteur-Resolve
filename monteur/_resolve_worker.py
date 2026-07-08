@@ -38,6 +38,26 @@ stdin.
 
         {"ok": false, "error": <str>}
 
+``build_plan``
+    stdin (plans are large, so everything travels on stdin, never argv)::
+
+        {"plan": {<monteur.montage.plan_to_dict payload>},
+         "fps": <float>,
+         "name": <str>,                                   # timeline name
+         "titles": [{"start": <s>, "duration": <s>, "text": <str>}, ...]
+                   | null}                                # optional Fusion titles
+
+    Rebuilds the MontagePlan (``plan_from_dict``) and runs
+    ``connect().build_timeline_from_plan(plan, fps=fps, name=name,
+    titles=titles)``. Response on success::
+
+        {"ok": true, "timeline": <created timeline name>,
+         "warnings": [<str>, ...]}                        # add_titles' messages
+
+    On a handled failure (malformed plan, MonteurResolveError)::
+
+        {"ok": false, "error": <str>}
+
 A handled ``MonteurResolveError`` is a *clean, catchable* failure: the worker
 still exits 0 with a ``connected``/``ok`` ``false`` payload. Likewise any
 ordinary Python exception is caught at the top level and reported as
@@ -138,6 +158,45 @@ def handle(command: str, request: dict) -> dict:
             bridge = connect()
             timeline = bridge.read_timeline(request.get("name"))
             return {"ok": True, "timeline": _timeline_to_dict(timeline)}
+        except MonteurResolveError as exc:
+            return {"ok": False, "error": str(exc)}
+
+    if command == "build_plan":
+        # monteur.montage is imported HERE, not at module top: it pulls in
+        # numpy (via monteur.music), and every other command must keep working
+        # under a bare, stdlib-only MONTEUR_RESOLVE_PYTHON interpreter.
+        try:
+            from monteur.montage import plan_from_dict
+        except ImportError as exc:
+            return {
+                "ok": False,
+                "error": (
+                    "The Resolve worker interpreter cannot rebuild the "
+                    f"montage plan: {exc}. Install Monteur's dependencies "
+                    "for that interpreter (the one MONTEUR_RESOLVE_PYTHON "
+                    "points at), e.g. 'python -m pip install numpy'."
+                ),
+            }
+        try:
+            plan = plan_from_dict(request.get("plan") or {})
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        try:
+            fps = float(request["fps"])
+        except (KeyError, TypeError, ValueError):
+            return {
+                "ok": False,
+                "error": "build_plan request is missing a numeric 'fps'.",
+            }
+        name = str(request.get("name") or "Monteur Montage")
+        titles = request.get("titles") or None
+        warnings: list[str] = []
+        try:
+            bridge = connect()
+            timeline_name = bridge.build_timeline_from_plan(
+                plan, fps=fps, name=name, titles=titles, warnings=warnings
+            )
+            return {"ok": True, "timeline": timeline_name, "warnings": warnings}
         except MonteurResolveError as exc:
             return {"ok": False, "error": str(exc)}
 

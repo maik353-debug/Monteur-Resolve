@@ -591,12 +591,21 @@ def create_montage(
     if brief_rationale:
         result["brief_rationale"] = brief_rationale
     if into_resolve:
-        try:
-            bridge = connect()
-            name = bridge.build_timeline_from_plan(plan, fps=fps)
-        except MonteurResolveError as exc:
-            return _resolve_error(exc)
-        result["resolve_timeline"] = name
+        # Isolated child process: a Resolve scripting crash (incompatible
+        # interpreter loading the native module) must not kill this
+        # long-running server.
+        from monteur.resolve import build_plan_isolated, titles_from_plan
+
+        titles = titles_from_plan(plan) if plan.dips else None
+        built = build_plan_isolated(plan, fps=fps, titles=titles)
+        if not built.get("ok"):
+            return {
+                "error": built.get("error", "Resolve build failed"),
+                "hint": RESOLVE_HINT,
+            }
+        result["resolve_timeline"] = built.get("timeline")
+        if built.get("warnings"):
+            result["resolve_warnings"] = built["warnings"]
     else:
         try:
             timeline = montage_to_timeline(plan, fps=fps, audio=audio, canvas=canvas)

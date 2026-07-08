@@ -49,11 +49,22 @@ only kills that child; the parent detects the nonzero exit and returns a
 graceful "Resolve unavailable" result instead of dying. Prefer these from any
 long-lived process:
 
-    from monteur.resolve import resolve_status_isolated, read_timeline_isolated
+    from monteur.resolve import (
+        build_plan_isolated,
+        read_timeline_isolated,
+        resolve_status_isolated,
+    )
 
     status = resolve_status_isolated()        # never raises; dict result
     if status["connected"]:
         timeline = read_timeline_isolated()   # Timeline, or MonteurResolveError
+        result = build_plan_isolated(plan, fps=25.0)  # build a montage; dict,
+                                                      # never raises
+
+The worker commands are ``status``, ``info``, ``read_timeline`` and
+``build_plan`` (build a montage timeline from a serialized MontagePlan,
+optionally with Fusion titles) — see ``monteur._resolve_worker`` for the wire
+protocol.
 
 ``MONTEUR_RESOLVE_PYTHON``
     Set this environment variable to a Resolve-compatible Python interpreter
@@ -462,6 +473,67 @@ def read_timeline_isolated(name: str | None = None, timeout: float = 40.0) -> Ti
     return _timeline_from_dict(timeline_data)
 
 
+def build_plan_isolated(
+    plan,
+    fps: float,
+    name: str = "Monteur Montage",
+    titles: list[dict] | None = None,
+    timeout: float = 180.0,
+) -> dict:
+    """Build a montage timeline in Resolve from a child process; never raises.
+
+    THE recommended path for any long-running host (Monteur Studio, the MCP
+    server): the plan is serialized with :func:`monteur.montage.plan_to_dict`,
+    handed to the isolated worker's ``build_plan`` command on stdin, and every
+    Resolve scripting call — including the native module load that can
+    hard-crash an incompatible interpreter — happens in a disposable child
+    process (honoring ``MONTEUR_RESOLVE_PYTHON``, see :func:`_worker_python`).
+    A native crash only kills the child; the caller gets a graceful failure
+    dict instead of dying. The in-process
+    :meth:`ResolveBridge.build_timeline_from_plan` remains for direct library
+    use (e.g. scripts already running inside Resolve's own interpreter).
+
+    ``titles`` (optional, ``[{"start": s, "duration": s, "text": ...}]`` in
+    plan-time seconds, e.g. from :func:`titles_from_plan`) are inserted after
+    the build, exactly as ``build_timeline_from_plan`` does.
+
+    Returns ``{"ok": True, "timeline": <created name>, "warnings": [...]}``
+    — ``warnings`` are :meth:`ResolveBridge.add_titles`' non-fatal title
+    placement messages — or ``{"ok": False, "error": <message>}``. When the
+    worker died of an uncatchable native crash the failure additionally
+    carries ``"reason": "native-crash"`` and the error explains the fix: set
+    MONTEUR_RESOLVE_PYTHON to a Resolve-compatible interpreter (roughly
+    Python 3.6–3.11). Other worker-launch failures pass their
+    :func:`_run_worker` reason through ("timeout", "no-interpreter",
+    "worker-error", "bad-output"); a clean, handled Resolve error carries the
+    worker's own message and no reason.
+    """
+    from monteur.montage import plan_to_dict  # lazy: keeps this module
+    # importable by the stdlib-only worker bootstrap (montage needs numpy)
+
+    request = {
+        "plan": plan_to_dict(plan),
+        "fps": float(fps),
+        "name": name,
+        "titles": titles,
+    }
+    ok, payload = _run_worker("build_plan", timeout, request=request)
+    if not ok:
+        result = {"ok": False, **payload}
+        if result.get("reason") == "crash":
+            result["reason"] = "native-crash"
+        return result
+    if not payload.get("ok"):
+        return {
+            "ok": False,
+            "error": payload.get(
+                "error", "The Resolve worker could not build the timeline."
+            ),
+        }
+    payload.setdefault("warnings", [])
+    return payload
+
+
 # --- Timeline (de)serialization ------------------------------------------------
 #
 # Plain-dict, JSON-safe representation of a Timeline so it can cross the
@@ -823,6 +895,7 @@ class ResolveBridge:
         fps: float,
         name: str = "Monteur Montage",
         titles: list[dict] | None = None,
+        warnings: list[str] | None = None,
     ) -> str:
         """Build a montage timeline in Resolve from a MontagePlan.
 
@@ -841,7 +914,8 @@ class ResolveBridge:
         exist on the Resolve timeline; title starts are shifted earlier by
         the summed lengths of the dips before them so each title still lands
         exactly on its act change. Title placement problems are non-fatal
-        (see add_titles); call add_titles yourself to collect its warnings.
+        (see add_titles); pass a ``warnings`` list to collect add_titles'
+        human-readable messages (it is only ever appended to).
 
         Limitation: plans with ``dips`` (the trailer's smash-to-black title
         slots) are appended back-to-back too — the black gaps themselves only
@@ -919,7 +993,7 @@ class ResolveBridge:
             shifted = _shift_titles_for_gapless_append(
                 titles, list(getattr(plan, "dips", []) or [])
             )
-            self.add_titles(shifted, fps)
+            self.add_titles(shifted, fps, warnings=warnings)
         return timeline_name
 
 
