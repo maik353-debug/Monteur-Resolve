@@ -425,23 +425,37 @@ def serve(
             f"is another Monteur Studio still running?"
         )
     if server.server_address[1] != port:
-        print(f"Port {port} is busy — using {server.server_address[1]} instead.")
+        print(f"Port {port} is busy — using {server.server_address[1]} instead.", flush=True)
     url = f"http://127.0.0.1:{server.server_address[1]}/"
-    print(f"Monteur Studio running at {url}  (Ctrl+C to stop)")
+    print(f"Monteur Studio running at {url}", flush=True)
+    print("Leave this window open. Press Ctrl+C here to stop.", flush=True)
     if ready is not None:
         ready.set()
     if open_browser:
-        threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
+        _open_browser_safely(url)
     try:
         server.serve_forever()
-        print("\nMonteur Studio exited unexpectedly (serve loop returned).")
+        print("\nMonteur Studio exited unexpectedly (the serve loop returned "
+              "on its own).", flush=True)
     except KeyboardInterrupt:
-        print("\nMonteur Studio stopped (Ctrl+C).")
-    except Exception:
+        print("\nMonteur Studio stopped (Ctrl+C).", flush=True)
+    except BaseException as exc:  # noqa: BLE001 - surface EVERY exit reason
         import traceback
 
-        print("\nMonteur Studio crashed:")
+        print(f"\nMonteur Studio stopped via {type(exc).__name__}: {exc}", flush=True)
         traceback.print_exc()
         raise
     finally:
         server.server_close()
+
+
+def _open_browser_safely(url: str) -> None:
+    """Open the browser without ever taking the server down with it."""
+    def _open() -> None:
+        try:
+            webbrowser.open(url)
+        except Exception:  # noqa: BLE001 - a browser failure must not matter
+            print(f"(Could not open a browser automatically — visit {url} yourself.)",
+                  flush=True)
+
+    threading.Thread(target=_open, daemon=True).start()
