@@ -914,6 +914,7 @@ def montage_to_timeline(plan: MontagePlan, fps: float, name: str = "Monteur Mont
             record_in=rec_in,
             record_out=rec_out,
             source_name=stem,
+            source_file=entry.clip_path,
         )
         transition_frames = round(entry.transition * fps)
         if transition_frames > 0:
@@ -946,6 +947,7 @@ def montage_to_timeline(plan: MontagePlan, fps: float, name: str = "Monteur Mont
             record_in=0,
             record_out=duration_frames,
             source_name=music_stem,
+            source_file=plan.music_path,
         )
     )
     timeline.markers.append(Marker(frame=0, name=f"Cut to {music_stem}"))

@@ -108,6 +108,7 @@ class Clip:
     record_in: int = 0
     record_out: int = 0
     source_name: str = ""
+    source_file: str = ""  # absolute path to the media file, for relinking on export
     metadata: dict = field(default_factory=dict)
 
     @property

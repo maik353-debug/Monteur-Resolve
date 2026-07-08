@@ -223,3 +223,53 @@ def test_load_timeline_unsupported_extension(tmp_path: Path) -> None:
     p.write_text("binary-ish")
     with pytest.raises(ValueError, match="unsupported"):
         load_timeline(p)
+
+
+def test_write_fcpxml_emits_media_paths_and_music():
+    """Regression: montage FCPXML must reference real media (else Resolve
+    imports an EMPTY timeline) and must carry the music bed."""
+    from monteur.model import Clip, Timeline
+    from monteur.io.fcpxml import write_fcpxml, read_fcpxml
+
+    tl = Timeline(name="Montage", fps=25)
+    tl.clips.append(Clip(
+        name="A", track="V1", kind="video",
+        source_in=50, source_out=125, record_in=0, record_out=75,
+        source_name="A", source_file=r"C:\footage\A.MP4",
+    ))
+    tl.clips.append(Clip(
+        name="B", track="V1", kind="video",
+        source_in=25, source_out=100, record_in=75, record_out=150,
+        source_name="B", source_file=r"C:\footage\B.MP4",
+    ))
+    tl.clips.append(Clip(
+        name="song", track="A1", kind="audio",
+        source_in=1500, source_out=1650, record_in=0, record_out=150,
+        source_name="song", source_file=r"C:\music\song.mp3",
+    ))
+    xml = write_fcpxml(tl)
+    # Every source file is referenced via a linkable file:// media-rep.
+    assert xml.count("<media-rep") == 3
+    assert "file:///C:/footage/A.MP4" in xml
+    assert "file:///C:/music/song.mp3" in xml
+    assert 'audioRole="music"' in xml
+    # And it all reads back at the right positions.
+    back = read_fcpxml(xml)
+    assert len(back.video_clips()) == 2
+    assert len(back.audio_clips()) == 1
+    music = back.audio_clips()[0]
+    assert (music.record_in, music.record_out, music.source_in) == (0, 150, 1500)
+
+
+def test_write_fcpxml_without_paths_still_valid():
+    """A hand-built timeline with no source_file still exports (no media-rep,
+    but valid) — keeps older callers and tests working."""
+    from monteur.model import Clip, Timeline
+    from monteur.io.fcpxml import write_fcpxml, read_fcpxml
+
+    tl = Timeline(name="T", fps=25)
+    tl.clips.append(Clip(name="A", kind="video", source_in=0, source_out=50,
+                         record_in=0, record_out=50, source_name="A"))
+    xml = write_fcpxml(tl)
+    assert "<media-rep" not in xml
+    assert len(read_fcpxml(xml).video_clips()) == 1

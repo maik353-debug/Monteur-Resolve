@@ -54,10 +54,30 @@ Limitations
 
 from __future__ import annotations
 
+import urllib.parse
 import xml.etree.ElementTree as ET
 from fractions import Fraction
 
 from monteur.model import AUDIO, VIDEO, Clip, Timeline
+
+
+def _file_uri(path: str) -> str:
+    """``file://`` URI for a media path, correct for Windows OR POSIX.
+
+    Formatted explicitly (not via ``Path.as_uri()``) so it produces the right
+    Windows URI (``file:///C:/dir/clip.mp4``) even when Monteur is generating
+    the FCPXML on a different OS, and percent-encodes spaces and other unsafe
+    characters. Resolve links its media against this.
+    """
+    # Windows drive path, e.g. C:\dir\clip.mp4 or C:/dir/clip.mp4
+    if len(path) >= 2 and path[1] == ":" and path[0].isalpha():
+        return "file:///" + urllib.parse.quote(path.replace("\\", "/"), safe="/:")
+    # UNC share, e.g. \\server\share\clip.mp4
+    if path.startswith("\\\\") or path.startswith("//"):
+        unc = path.replace("\\", "/").lstrip("/")
+        return "file://" + urllib.parse.quote(unc, safe="/:")
+    # POSIX absolute, or best-effort for anything else
+    return "file://" + urllib.parse.quote(path.replace("\\", "/"), safe="/:")
 
 _NTSC_FRAME_DURATIONS = {
     24: Fraction(1001, 24000),
@@ -323,11 +343,27 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
 
     asset_ids: dict[str, str] = {}
     asset_audio: dict[str, bool] = {}
+    asset_src: dict[str, str] = {}
     for clip in video:
         key = source_key(clip)
         asset_ids.setdefault(key, f"r{len(asset_ids) + 2}")
         if id(clip) in paired_audio:
             asset_audio[key] = True
+        # Carry the real media path so Resolve can link the clip; without it
+        # the import produces an empty timeline (offline media is dropped).
+        path = clip.source_file or clip.metadata.get("src", "")
+        if path and key not in asset_src:
+            asset_src[key] = _file_uri(path)
+
+    # Audio clips not folded into a video asset-clip (e.g. a montage's music
+    # bed) become connected audio clips with their own asset, so the montage
+    # actually carries its soundtrack instead of dropping it.
+    connected_audio: list[tuple[Clip, str]] = []
+    for aclip in audio:
+        if id(aclip) in used:
+            continue
+        aid = f"r{len(asset_ids) + len(connected_audio) + 2}"
+        connected_audio.append((aclip, aid))
 
     root = ET.Element("fcpxml", version="1.9")
     resources = ET.SubElement(root, "resources")
@@ -352,7 +388,32 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
         }
         if asset_audio.get(key):
             attrs.update(hasAudio="1", audioSources="1", audioChannels="2")
-        ET.SubElement(resources, "asset", attrs)
+        src = asset_src.get(key)
+        if src:
+            attrs["src"] = src  # older-style attribute (our own reader uses it)
+        asset_el = ET.SubElement(resources, "asset", attrs)
+        if src:
+            # FCPXML 1.9 media reference — this is what Resolve links against.
+            ET.SubElement(
+                asset_el, "media-rep", kind="original-media", src=src
+            )
+
+    for aclip, aid in connected_audio:
+        a_attrs = {
+            "id": aid,
+            "name": aclip.source_name or aclip.name or "Audio",
+            "start": "0s",
+            "duration": total,
+            "hasAudio": "1",
+            "audioSources": "1",
+            "audioChannels": "2",
+        }
+        a_src = _file_uri(aclip.source_file) if aclip.source_file else ""
+        if a_src:
+            a_attrs["src"] = a_src
+        a_el = ET.SubElement(resources, "asset", a_attrs)
+        if a_src:
+            ET.SubElement(a_el, "media-rep", kind="original-media", src=a_src)
 
     library = ET.SubElement(root, "library")
     event = ET.SubElement(library, "event", name=title)
@@ -370,6 +431,8 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
     spine = ET.SubElement(sequence, "spine")
 
     playhead = 0
+    first_clip_el: ET.Element | None = None
+    first_clip_start = 0
     for clip in video:
         if clip.record_in < playhead:
             raise ValueError(
@@ -396,7 +459,7 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
                 offset=_fmt_time(clip.record_in, frame_dur),
                 duration=_fmt_time(dissolve, frame_dur),
             )
-        ET.SubElement(
+        clip_el = ET.SubElement(
             spine,
             "asset-clip",
             ref=asset_ids[source_key(clip)],
@@ -407,7 +470,30 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
             format="r1",
             tcFormat="NDF",
         )
+        if first_clip_el is None:
+            first_clip_el = clip_el
+            first_clip_start = clip.source_in
         playhead = clip.record_out
+
+    # Attach unpaired audio (music bed) as a connected clip on the first video
+    # clip. Its offset is expressed in the parent's local time, so offset ==
+    # the parent's start places it at the montage's record 0 (this is exactly
+    # what read_fcpxml reverses: record = p_offset + (offset - p_start)).
+    for aclip, aid in connected_audio:
+        attrs = {
+            "ref": aid,
+            "lane": "-1",
+            "name": aclip.source_name or aclip.name or "Music",
+            "duration": _fmt_time(aclip.duration, frame_dur),
+            "start": _fmt_time(aclip.source_in, frame_dur),
+            "audioRole": "music",
+        }
+        if first_clip_el is not None:
+            attrs["offset"] = _fmt_time(first_clip_start + aclip.record_in, frame_dur)
+            ET.SubElement(first_clip_el, "asset-clip", attrs)
+        else:
+            attrs["offset"] = _fmt_time(aclip.record_in, frame_dur)
+            ET.SubElement(spine, "asset-clip", attrs)
 
     ET.indent(root, space="  ")
     body = ET.tostring(root, encoding="unicode")
