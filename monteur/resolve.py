@@ -694,6 +694,10 @@ class ResolveBridge:
         ranges), then append the music as one audio clip. Returns the created
         timeline's name.
 
+        Limitation: plans with ``dips`` (the trailer's smash-to-black title
+        slots) are appended back-to-back too — the black gaps currently only
+        exist in the FCPXML/EDL exports, so import the file for trailers.
+
         Imported media-pool items are mapped back to file paths by, in order:
         ``GetClipProperty("File Path")``; positional order when Resolve
         returned exactly one item per requested path; and finally basename

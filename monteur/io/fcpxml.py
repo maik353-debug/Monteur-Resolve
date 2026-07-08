@@ -54,6 +54,13 @@ Writing (:func:`write_fcpxml`):
   need ``<param>``/``adjust-volume`` elements this writer does not
   emit. The plan notes the fade so the editor applies the music fade in
   Resolve.
+* Markers: ``timeline.markers`` are written as ``<marker>`` children of
+  the spine element containing them (asset-clip or gap), in that
+  element's local timebase; a marker's ``note`` is folded into the
+  value. Resolve imports them; :func:`read_fcpxml` ignores markers.
+* Canvas: the ``<format>`` element carries ``timeline.width`` x
+  ``timeline.height`` (1920x1080 default; vertical and 2.39:1 canvases
+  are just different numbers) and :func:`read_fcpxml` reads them back.
 
 Limitations
 -----------
@@ -136,12 +143,18 @@ class _Reader:
     def __init__(self, root: ET.Element) -> None:
         self.root = root
         self.formats: dict[str, Fraction] = {}
+        self.sizes: dict[str, tuple[int, int]] = {}
         self.assets: dict[str, dict] = {}
         for fmt in root.iter("format"):
             fid = fmt.get("id")
             fd = fmt.get("frameDuration")
             if fid and fd:
                 self.formats[fid] = _parse_rational(fd, what="frameDuration")
+            if fid and fmt.get("width") and fmt.get("height"):
+                try:
+                    self.sizes[fid] = (int(fmt.get("width")), int(fmt.get("height")))
+                except ValueError:
+                    pass
         for asset in root.iter("asset"):
             aid = asset.get("id")
             if not aid:
@@ -177,6 +190,11 @@ class _Reader:
         project = self.root.find(".//project")
         name = (project.get("name", "") if project is not None else "") or ""
         timeline = Timeline(name=name, fps=fps)
+        size = self.sizes.get(fmt_id) or (
+            next(iter(self.sizes.values())) if len(self.sizes) == 1 else None
+        )
+        if size:
+            timeline.width, timeline.height = size
         spine = sequence.find("spine")
         if spine is None:
             raise ValueError("sequence has no <spine> element")
@@ -421,10 +439,13 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
         resources,
         "format",
         id="r1",
-        name=f"FFVideoFormat1080p{round(timeline.fps * 100) / 100:g}".replace(".", ""),
+        name=(
+            f"FFVideoFormat{timeline.height}p"
+            f"{round(timeline.fps * 100) / 100:g}".replace(".", "")
+        ),
         frameDuration=_fmt_time(1, frame_dur),
-        width="1920",
-        height="1080",
+        width=str(timeline.width),
+        height=str(timeline.height),
     )
     total = _fmt_time(timeline.duration, frame_dur)
     for key, rid in asset_ids.items():
@@ -491,6 +512,23 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
     )
     spine = ET.SubElement(sequence, "spine")
 
+    # Timeline markers are attached to the spine element whose record range
+    # contains them (gap or asset-clip), in that element's local timebase —
+    # Resolve imports these as markers on the timeline.
+    def attach_markers(el: ET.Element, rec_in: int, rec_out: int, local_start: int) -> None:
+        for marker in timeline.markers:
+            if rec_in <= marker.frame < rec_out:
+                value = marker.name or "Marker"
+                if marker.note:
+                    value = f"{value} — {marker.note}"
+                ET.SubElement(
+                    el,
+                    "marker",
+                    start=_fmt_time(local_start + (marker.frame - rec_in), frame_dur),
+                    duration=_fmt_time(1, frame_dur),
+                    value=value,
+                )
+
     playhead = 0
     first_clip_el: ET.Element | None = None
     first_clip_start = 0
@@ -502,7 +540,7 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
                 f"non-overlapping video track"
             )
         if clip.record_in > playhead:
-            ET.SubElement(
+            gap_el = ET.SubElement(
                 spine,
                 "gap",
                 name="Gap",
@@ -510,6 +548,7 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
                 duration=_fmt_time(clip.record_in - playhead, frame_dur),
                 start="0s",
             )
+            attach_markers(gap_el, playhead, clip.record_in, 0)
         dissolve = _transition_frames(clip)
         if dissolve > 0 and clip.record_in > 0:
             # Cross dissolve INTO this clip, starting at the cut point.
@@ -534,6 +573,7 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
             format="r1",
             tcFormat="NDF",
         )
+        attach_markers(clip_el, clip.record_in, clip.record_out, source_start)
         if first_clip_el is None:
             first_clip_el = clip_el
             first_clip_start = source_start

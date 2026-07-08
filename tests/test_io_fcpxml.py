@@ -365,3 +365,45 @@ def test_roundtrip_preserves_file_relative_source_ranges():
     assert a.metadata["media_start_seconds"] == pytest.approx(6472.32)
     b = next(c for c in back.clips if c.name == "B")
     assert "media_start_seconds" not in b.metadata
+
+
+def test_write_canvas_size_and_roundtrip():
+    tl = Timeline(name="Vertical", fps=25.0, width=1080, height=1920)
+    tl.clips.append(
+        Clip(name="A", track="V1", kind=VIDEO, source_in=0, source_out=50,
+             record_in=0, record_out=50, source_name="A", source_file="/m/a.mp4")
+    )
+    text = write_fcpxml(tl)
+    assert 'width="1080"' in text and 'height="1920"' in text
+    back = read_fcpxml(text)
+    assert (back.width, back.height) == (1080, 1920)
+
+
+def test_write_markers_land_on_clip_and_gap():
+    import xml.etree.ElementTree as ET
+
+    from monteur.model import Marker
+
+    tl = Timeline(name="Marked", fps=25.0)
+    tl.clips.append(
+        Clip(name="A", track="V1", kind=VIDEO, source_in=0, source_out=50,
+             record_in=0, record_out=50, source_name="A", source_file="/m/a.mp4")
+    )
+    tl.clips.append(
+        Clip(name="B", track="V1", kind=VIDEO, source_in=0, source_out=50,
+             record_in=60, record_out=110, source_name="B", source_file="/m/b.mp4")
+    )
+    tl.markers.append(Marker(frame=10, name="In clip"))
+    tl.markers.append(Marker(frame=55, name="Title slot", note="0.4s of black"))
+    root = ET.fromstring(write_fcpxml(tl))
+
+    # The in-clip marker sits on clip A, in the clip's local source timebase.
+    clip_markers = root.findall(".//asset-clip/marker")
+    assert [m.get("value") for m in clip_markers] == ["In clip"]
+    assert clip_markers[0].get("start") == "2/5s"  # frame 10 at 25 fps
+
+    # The title-slot marker sits on the black gap, local to the gap's start,
+    # with the note folded into the value.
+    gap_markers = root.findall(".//gap/marker")
+    assert [m.get("value") for m in gap_markers] == ["Title slot — 0.4s of black"]
+    assert gap_markers[0].get("start") == "1/5s"  # frame 55 - gap start 50

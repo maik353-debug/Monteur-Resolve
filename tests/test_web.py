@@ -242,6 +242,18 @@ class TestCreateApi:
         assert job["state"] == "done"
         assert any("cut pace ~3s" in n for n in job["result"]["plan"]["notes"])
 
+    def test_build_forwards_canvas_and_transitions(self, server):
+        data = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "canvas": "vertical", "transitions": "cuts", "format": "fcpxml"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert 'width="1080"' in job["result"]["content"]
+        assert 'height="1920"' in job["result"]["content"]
+        assert any("hard cuts only" in n for n in job["result"]["plan"]["notes"])
+
     def test_build_unknown_style_is_error_job(self, server):
         data = _post(
             f"{server}/api/create/build",

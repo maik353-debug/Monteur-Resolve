@@ -334,7 +334,7 @@ svg text.axis {
   padding: 6px 8px; border: 1px solid var(--border); border-radius: 7px;
   background: var(--page); color: var(--ink); width: 110px;
 }
-.seg-toggle { display: inline-flex; gap: 4px; padding: 3px; background: var(--surface-2); border-radius: 8px; }
+.seg-toggle { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 3px; background: var(--surface-2); border-radius: 8px; }
 .seg-toggle button {
   border: 0; background: none; padding: 5px 10px; border-radius: 6px;
   font-size: 12.5px; font-weight: 650; color: var(--ink-2); cursor: pointer;
@@ -816,6 +816,9 @@ svg text.axis {
                 <span class="rc-desc">No song at all; the cut keeps each clip&rsquo;s own sound. Needs a target length.</span>
               </button>
             </div>
+            <h3 class="fgroup-title">Shape</h3>
+            <div class="radio-cards stack compact" role="radiogroup" aria-label="Timeline shape" id="cre-canvas-cards"></div>
+            <p class="help-small">Your footage keeps its own aspect ratio — reframe vertical or cinemascope shots in Resolve after import.</p>
           </div>
           <div>
             <h3 class="fgroup-title">Length</h3>
@@ -847,7 +850,15 @@ svg text.axis {
                 <span class="len-unit">s</span>
               </label>
             </div>
-            <p class="help-small">How long each shot stays on screen in the fast parts — ~1&thinsp;s feels snappy, ~4&thinsp;s calm. Slow phases keep their proportion, and “Style default” lets each style set its own rhythm.</p>
+            <p class="help-small">How long each shot stays on screen in the fast parts — ~1&thinsp;s feels snappy, ~4&thinsp;s calm. The seconds are a target: Monteur rounds to whole beats, so cuts always stay on the music. Slow phases keep their proportion, and “Style default” lets each style set its own rhythm.</p>
+            <h3 class="fgroup-title" id="cre-trans-label">Transitions</h3>
+            <div class="seg-toggle" role="group" aria-labelledby="cre-trans-label">
+              <button type="button" id="trans-auto" aria-pressed="true">Style default</button>
+              <button type="button" id="trans-cuts" aria-pressed="false">Cuts only</button>
+              <button type="button" id="trans-dissolves" aria-pressed="false">Dissolves</button>
+              <button type="button" id="trans-smash" aria-pressed="false">Smash to black</button>
+            </div>
+            <p class="help-small">Style default follows each style&rsquo;s habits — calm phases dissolve, the Trailer smashes to black between acts (short black gaps with a “Title slot” marker for your text).</p>
             <h3 class="fgroup-title" id="cre-fps-label">Frame rate</h3>
             <label class="export-field"><span class="sr-only">Frame rate</span>
               <select id="cre-fps" aria-labelledby="cre-fps-label"></select>
@@ -2434,7 +2445,9 @@ var cre = {
   lenMode: "target",      // "whole" | "target" — target by default so a 2:30 song never sneaks in
   lenTouched: false,      // has the user made a deliberate length choice?
   style: "auto",
+  canvas: "hd",           // "hd" | "uhd" | "vertical" | "cine"
   pace: null,             // seconds per clip in the fastest phase; null = style default
+  transitions: "auto",    // "auto" | "cuts" | "dissolves" | "smash"
   order: "chronological", // "chronological" | "best_first"
   format: "fcpxml"        // download format
 };
@@ -2878,6 +2891,35 @@ STYLES.forEach(function (spec) {
   $("cre-style-cards").appendChild(cardBtn);
 });
 
+var CANVASES = [
+  ["hd", "YouTube 16:9", "1920×1080 — the standard wide format."],
+  ["uhd", "4K 16:9", "3840×2160 — same shape, four times the pixels."],
+  ["vertical", "Vertical 9:16", "1080×1920 for Shorts, Reels & TikTok."],
+  ["cine", "Cinemascope 2.39:1", "1920×804 — the wide film look."]
+];
+function setCanvas(value) {
+  cre.canvas = value;
+  Array.prototype.forEach.call($("cre-canvas-cards").children, function (cardBtn) {
+    cardBtn.setAttribute("aria-checked", String(cardBtn.getAttribute("data-canvas") === value));
+  });
+}
+CANVASES.forEach(function (spec) {
+  var cardBtn = el("button", "radio-card");
+  cardBtn.type = "button";
+  cardBtn.setAttribute("role", "radio");
+  cardBtn.setAttribute("data-canvas", spec[0]);
+  cardBtn.setAttribute("aria-checked", String(spec[0] === cre.canvas));
+  var title = el("span", "rc-title");
+  var dot = el("span", "radio-dot");
+  dot.setAttribute("aria-hidden", "true");
+  title.appendChild(dot);
+  title.appendChild(document.createTextNode(spec[1]));
+  cardBtn.appendChild(title);
+  cardBtn.appendChild(el("span", "rc-desc", spec[2]));
+  cardBtn.addEventListener("click", function () { setCanvas(spec[0]); });
+  $("cre-canvas-cards").appendChild(cardBtn);
+});
+
 function setOrder(order) {
   cre.order = order;
   $("order-chrono").setAttribute("aria-pressed", String(order === "chronological"));
@@ -2904,6 +2946,17 @@ $("cre-pace").addEventListener("input", function () {
   PACE_PRESETS.forEach(function (p) {
     $(p[0]).setAttribute("aria-pressed", String(!valid && p[1] === null));
   });
+});
+
+var TRANSITION_IDS = { auto: "trans-auto", cuts: "trans-cuts", dissolves: "trans-dissolves", smash: "trans-smash" };
+function setTransitions(mode) {
+  cre.transitions = mode;
+  Object.keys(TRANSITION_IDS).forEach(function (key) {
+    $(TRANSITION_IDS[key]).setAttribute("aria-pressed", String(key === mode));
+  });
+}
+Object.keys(TRANSITION_IDS).forEach(function (key) {
+  $(TRANSITION_IDS[key]).addEventListener("click", function () { setTransitions(key); });
 });
 
 function creValidateStep2() {
@@ -2938,6 +2991,8 @@ function creBuildBody() {
     audio: cre.audio,
     order: cre.order,
     style: cre.style,
+    canvas: cre.canvas,
+    transitions: cre.transitions,
     fps: fpsFrom($("cre-fps")),
     format: cre.format,
     allow_repeats: $("cre-repeats").checked

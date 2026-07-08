@@ -357,6 +357,8 @@ def _run_build_job(job: dict, payload: dict) -> None:
             plan_kwargs["cut_lead"] = float(payload["cut_lead"])
         if payload.get("pace"):
             plan_kwargs["pace"] = float(payload["pace"])
+        if payload.get("transitions"):
+            plan_kwargs["transitions"] = payload["transitions"]
         plan = plan_montage(reports, music, **plan_kwargs)
         if not plan.entries:
             raise ValueError("no usable material found — check the scan results")
@@ -365,6 +367,8 @@ def _run_build_job(job: dict, payload: dict) -> None:
         timeline_kwargs: dict = {}
         if payload.get("audio"):
             timeline_kwargs["audio"] = payload["audio"]
+        if payload.get("canvas"):
+            timeline_kwargs["canvas"] = payload["canvas"]
         timeline = montage_to_timeline(plan, fps=fps, **timeline_kwargs)
         fmt = (payload.get("format") or "fcpxml").lower()
         if fmt == "edl":

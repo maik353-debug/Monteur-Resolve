@@ -170,6 +170,18 @@ _DEFAULT_CUT_LEAD = 0.04
 _LEAD_MIN_SLOT = 0.25
 # Audio modes for montage_to_timeline.
 _AUDIO_MODES = ("music", "mix", "original")
+# Transition modes for plan_montage: how clips hand over to each other.
+# "auto" = the style's own habits (gentle-phase dissolves; the trailer
+# smashes to black), "cuts" = hard cuts only, "dissolves" = dissolve on
+# every cut, "smash" = black title-slot gaps at act/section changes.
+TRANSITION_MODES = ("auto", "cuts", "dissolves", "smash")
+# Canvas presets for montage_to_timeline: what shape the video is.
+CANVASES: dict[str, tuple[int, int]] = {
+    "hd": (1920, 1080),  # YouTube / TV 16:9
+    "uhd": (3840, 2160),  # 16:9 in 4K
+    "vertical": (1080, 1920),  # Shorts / Reels / TikTok 9:16
+    "cine": (1920, 804),  # 2.39:1 cinemascope
+}
 # Drop alignment only when the drop falls inside this share of the montage.
 _DROP_ALIGN_MARGIN = 0.05
 # Candidate window (K): unconsumed pool items considered per slot.
@@ -187,6 +199,10 @@ _MAX_DISSOLVE = 0.5
 _FADE_IN = 0.5
 _MAX_FADE_OUT = 2.0
 _AUTO_FADE_OUT = 1.0
+# Smash to black: black-gap length at act changes, and the minimum slot
+# length the shortened outgoing clip must keep.
+_DIP_SECONDS = 0.4
+_DIP_MIN_REMAINDER = 0.25
 
 _EPS = 1e-6
 
@@ -205,6 +221,9 @@ class MontageStyle:
     arc: list[tuple[float, str]]
     beats_per_cut: dict[str, int]  # phase label -> beats between cuts
     prefer_highlights_in: str = "climax"  # phase where highlights win slots
+    # Smash to black: act changes cut to a short black gap (a title slot)
+    # instead of running clip-to-clip — the classic trailer breath.
+    smash_to_black: bool = False
 
 
 _ARC_STANDARD = [(0.15, "opening"), (0.35, "build"), (0.35, "climax"), (0.15, "outro")]
@@ -260,6 +279,7 @@ STYLES: dict[str, MontageStyle] = {
         # The build is split in half so the beat step can ramp 2 -> 1.
         arc=[(0.2, "opening"), (0.25, "build"), (0.25, "build"), (0.2, "climax"), (0.1, "outro")],
         beats_per_cut={"opening": 4, "build": 2, "climax": 1, "outro": 4},
+        smash_to_black=True,
     ),
 }
 
@@ -276,6 +296,8 @@ class MontagePlan:
     fade_out: float = 0.0  # seconds, intended music/video fade-out
     entries: list["MontageEntry"] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # (start, length) of black gaps on V1 (smash-to-black title slots).
+    dips: list[tuple[float, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -940,6 +962,7 @@ def plan_montage(
     allow_repeats: bool = False,
     cut_lead: float = _DEFAULT_CUT_LEAD,
     pace: float | None = None,
+    transitions: str = "auto",
 ) -> MontagePlan:
     """Distribute the best moments across the song, in a cutting style.
 
@@ -968,6 +991,14 @@ def plan_montage(
     that are not positive raise ValueError. The anti-strobe floor
     (:data:`MIN_CUT_INTERVAL`) still applies to very small paces.
 
+    ``transitions`` picks how clips hand over (:data:`TRANSITION_MODES`):
+    ``"auto"`` (default) keeps each style's habits — dissolves in gentle
+    phases, and the trailer smashes to black at act changes; ``"cuts"``
+    is hard cuts only; ``"dissolves"`` dissolves on every cut;
+    ``"smash"`` forces black title-slot gaps at act changes (for "auto"
+    style: at the song's section changes). Unknown values raise
+    ValueError listing the four.
+
     ``cut_lead`` (default 0.04 s, ~1 frame at 25 fps; 0 disables) shifts
     every interior cut earlier so the incoming shot lands ON the beat
     instead of starting there — cuts exactly on the beat read late (see
@@ -990,6 +1021,11 @@ def plan_montage(
         raise ValueError("without music, pass max_duration")
     if pace is not None and pace <= 0:
         raise ValueError("pace must be positive (approximate seconds per clip)")
+    if transitions not in TRANSITION_MODES:
+        valid = ", ".join(TRANSITION_MODES)
+        raise ValueError(
+            f"unknown transitions {transitions!r}; valid modes: {valid}"
+        )
 
     if music is None:
         requested = max_duration
@@ -1120,7 +1156,7 @@ def plan_montage(
     plan.notes.extend(fill_notes)
     used = sum(1 for it in pool if it.uses)
     plan.notes.append(f"{len(slots)} slots filled, {used} of {len(pool)} moments used")
-    _plan_finishing(plan, entries, grid_music, chosen, phases)
+    _plan_finishing(plan, entries, grid_music, chosen, phases, transitions)
     return plan
 
 
@@ -1130,15 +1166,23 @@ def _plan_finishing(
     music: MusicAnalysis,
     style: MontageStyle,
     phases: list[tuple[float, float, str]],
+    transitions: str = "auto",
 ) -> None:
-    """Set the plan's fades and gentle-phase dissolves (in place).
+    """Set the plan's fades, dissolves and smash-to-black dips (in place).
 
     Styles with an outro phase get ``fade_in`` = 0.5 s and ``fade_out`` =
-    min(2 s, last outro slot length); "auto" gets 0.5 s / 1 s. Every entry
-    in a gentle phase (>= ``_SLOW_PHASE_STEP`` beats per cut; "low"
-    sections in "auto") except the montage's very first entry gets
-    ``transition`` = min(0.5 s, half its slot length) — a dissolve INTO
-    that entry. Notes the dissolve count and reminds that the music
+    min(2 s, last outro slot length); "auto" gets 0.5 s / 1 s — fades
+    apply in every transition mode.
+
+    ``transitions`` = "auto": every entry in a gentle phase (>=
+    ``_SLOW_PHASE_STEP`` beats per cut; "low" sections in "auto") except
+    the montage's very first entry gets ``transition`` = min(0.5 s, half
+    its slot length) — a dissolve INTO that entry — and a style with
+    ``smash_to_black`` (the trailer) dips to black at act changes.
+    "dissolves" dissolves into EVERY entry, "cuts" plans neither
+    dissolves nor dips, "smash" forces the dips (at act changes; for the
+    arc-less "auto" style at the song's section changes) without
+    dissolves. Notes the dissolve count and reminds that the music
     fade-out must be applied in Resolve (the export formats can't carry it).
     """
     if not entries:
@@ -1154,7 +1198,11 @@ def _plan_finishing(
 
     dissolves = 0
     for entry in entries[1:]:  # the first entry's fade is fade_in, not a dissolve
-        if style.arc:
+        if transitions == "dissolves":
+            gentle = True
+        elif transitions != "auto":
+            gentle = False  # "cuts" and "smash" plan no dissolves
+        elif style.arc:
             label = _phase_label_at(phases, entry.record_start)
             gentle = label is not None and style.beats_per_cut.get(label, 2) >= _SLOW_PHASE_STEP
         else:
@@ -1164,7 +1212,46 @@ def _plan_finishing(
             if entry.transition > _EPS:
                 dissolves += 1
     if dissolves:
-        plan.notes.append(f"{dissolves} dissolves in gentle phases")
+        plan.notes.append(
+            f"{dissolves} dissolves"
+            + (" in gentle phases" if transitions == "auto" else " on every cut")
+        )
+    if transitions == "cuts":
+        plan.notes.append("transitions: hard cuts only")
+
+    # Smash to black: at every act change, the outgoing clip gives up its
+    # last _DIP_SECONDS to a black gap — the incoming act then HITS out of
+    # black. Each gap is a natural title slot (exported as a marker).
+    smash = transitions == "smash" or (
+        transitions == "auto" and style.smash_to_black
+    )
+    if smash:
+        if phases:
+            bounds = [p_start for p_start, _, _ in phases[1:]]
+        else:  # arc-less "auto": the song's section changes are the acts
+            bounds = [s.start for s in music.sections[1:]]
+        for bound in bounds:
+            outgoing = min(
+                entries, key=lambda e: abs(e.record_end - bound), default=None
+            )
+            if outgoing is None:
+                continue
+            # Tolerate the cut-lead shift; anything further off means the
+            # boundary landed inside a slot, not on a cut — no dip there.
+            if abs(outgoing.record_end - bound) > 0.25 + _EPS:
+                continue
+            slot = outgoing.record_end - outgoing.record_start
+            if slot - _DIP_SECONDS < _DIP_MIN_REMAINDER:
+                continue
+            outgoing.record_end -= _DIP_SECONDS
+            outgoing.source_end -= _DIP_SECONDS
+            plan.dips.append((outgoing.record_end, _DIP_SECONDS))
+        if plan.dips:
+            plan.notes.append(
+                f"{len(plan.dips)} smash-cuts to black at act changes "
+                f"({_DIP_SECONDS:g}s each) — title slots, exported as markers"
+            )
+
     if plan.fade_out > _EPS:
         plan.notes.append(f"music fade-out: {plan.fade_out:.1f}s (apply in Resolve)")
 
@@ -1174,6 +1261,7 @@ def montage_to_timeline(
     fps: float,
     name: str = "Monteur Montage",
     audio: str = "music",
+    canvas: str = "hd",
 ) -> Timeline:
     """Render a MontagePlan as a Timeline (footage on V1, sound per ``audio``).
 
@@ -1189,6 +1277,15 @@ def montage_to_timeline(
     Any other value raises ValueError listing the three; ``"music"``/
     ``"mix"`` raise ValueError when the plan has no ``music_path``.
 
+    ``canvas`` picks the timeline's shape from :data:`CANVASES`: ``"hd"``
+    (default, 1920x1080 for YouTube/TV), ``"uhd"`` (3840x2160),
+    ``"vertical"`` (1080x1920 for Shorts/Reels) or ``"cine"`` (1920x804,
+    2.39:1). Unknown values raise ValueError listing the presets. Footage
+    keeps its own aspect ratio — reframe in Resolve after import.
+
+    A plan with ``dips`` (smash-to-black title slots) leaves black gaps on
+    V1 and drops a "Title slot" marker on each gap.
+
     Entries with a dissolve (``transition`` > 0) carry it in the video
     clip's metadata (``"transition"`` = ``"dissolve"``,
     ``"transition_frames"`` = the length in frames) so the EDL/FCPXML
@@ -1203,7 +1300,11 @@ def montage_to_timeline(
             f'plan has no music; audio mode {audio!r} needs a song — '
             'use audio="original"'
         )
-    timeline = Timeline(name=name, fps=fps)
+    if canvas not in CANVASES:
+        valid = ", ".join(sorted(CANVASES))
+        raise ValueError(f"unknown canvas {canvas!r}; valid canvases: {valid}")
+    width, height = CANVASES[canvas]
+    timeline = Timeline(name=name, fps=fps, width=width, height=height)
     own_audio_track = {"mix": "A2", "original": "A1"}.get(audio)
     for entry in plan.entries:
         stem = PurePath(entry.clip_path).stem
@@ -1298,4 +1399,13 @@ def montage_to_timeline(
             )
         )
         timeline.markers.append(Marker(frame=0, name=f"Cut to {music_stem}"))
+    for dip_start, dip_len in plan.dips:
+        timeline.markers.append(
+            Marker(
+                frame=seconds_to_frames(dip_start, fps),
+                name="Title slot",
+                note=f"{dip_len:g}s of black — drop a title here",
+                color="Blue",
+            )
+        )
     return timeline

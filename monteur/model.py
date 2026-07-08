@@ -138,6 +138,8 @@ class Timeline:
     clips: list[Clip] = field(default_factory=list)
     markers: list[Marker] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
+    width: int = 1920  # canvas in pixels; 1080x1920 = vertical, 1920x804 = 2.39:1
+    height: int = 1080
 
     @property
     def duration(self) -> int:

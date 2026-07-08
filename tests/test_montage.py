@@ -797,3 +797,113 @@ def test_pace_without_music_sets_the_interval():
 def test_pace_rejects_nonpositive():
     with pytest.raises(ValueError, match="pace must be positive"):
         plan_montage(make_reports(), make_music(), pace=0.0)
+
+
+# --- trailer smash-to-black & canvas ------------------------------------------
+
+
+def test_trailer_smashes_to_black_at_act_changes():
+    plan = plan_montage(
+        make_reports(), make_music(), style="trailer", cut_lead=0.0,
+        allow_repeats=True,
+    )
+    assert plan.dips, "trailer plans black title slots at act changes"
+    assert any("smash-cuts to black" in n for n in plan.notes)
+    ends = [e.record_end for e in plan.entries]
+    starts = [e.record_start for e in plan.entries]
+    for dip_start, dip_len in plan.dips:
+        # an entry gives up its tail to the dip ...
+        assert any(abs(end - dip_start) < 1e-6 for end in ends)
+        # ... the next act starts right after the black
+        assert any(abs(s - (dip_start + dip_len)) < 1e-6 for s in starts)
+        # ... and nothing covers the black itself
+        assert not any(
+            e.record_start < dip_start + dip_len - 1e-6
+            and e.record_end > dip_start + 1e-6
+            for e in plan.entries
+        )
+
+
+def test_other_styles_do_not_dip():
+    for style in ("auto", "travel", "wedding", "music_video"):
+        plan = plan_montage(
+            make_reports(), make_music(), style=style, allow_repeats=True
+        )
+        assert plan.dips == []
+
+
+def test_dips_become_gaps_and_title_markers():
+    plan = plan_montage(
+        make_reports(), make_music(), style="trailer", cut_lead=0.0,
+        allow_repeats=True,
+    )
+    timeline = montage_to_timeline(plan, fps=25.0)
+    titles = [m for m in timeline.markers if m.name == "Title slot"]
+    assert len(titles) == len(plan.dips)
+    video = timeline.video_clips()
+    gap_frames = {
+        prev.record_out
+        for prev, nxt in zip(video, video[1:])
+        if nxt.record_in > prev.record_out
+    }
+    for marker in titles:
+        assert marker.frame in gap_frames
+
+
+def test_canvas_presets_set_timeline_size():
+    plan = plan_montage(make_reports(), make_music(), allow_repeats=True)
+    vertical = montage_to_timeline(plan, fps=25.0, canvas="vertical")
+    assert (vertical.width, vertical.height) == (1080, 1920)
+    cine = montage_to_timeline(plan, fps=25.0, canvas="cine")
+    assert (cine.width, cine.height) == (1920, 804)
+    default = montage_to_timeline(plan, fps=25.0)
+    assert (default.width, default.height) == (1920, 1080)
+    with pytest.raises(ValueError, match="valid canvases"):
+        montage_to_timeline(plan, fps=25.0, canvas="imax")
+
+
+# --- transition modes ---------------------------------------------------------
+
+
+def test_transitions_cuts_only():
+    plan = plan_montage(
+        make_reports(), make_music(), style="trailer", cut_lead=0.0,
+        allow_repeats=True, transitions="cuts",
+    )
+    assert plan.dips == []
+    assert all(e.transition == 0.0 for e in plan.entries)
+    assert any("hard cuts only" in n for n in plan.notes)
+
+
+def test_transitions_dissolve_every_cut():
+    plan = plan_montage(
+        make_reports(), make_music(), style="travel", cut_lead=0.0,
+        allow_repeats=True, transitions="dissolves",
+    )
+    assert all(e.transition > 0 for e in plan.entries[1:])
+    assert plan.entries[0].transition == 0.0  # the first entry fades in instead
+    assert any("on every cut" in n for n in plan.notes)
+
+
+def test_transitions_smash_on_any_style():
+    plan = plan_montage(
+        make_reports(), make_music(), style="travel", cut_lead=0.0,
+        allow_repeats=True, transitions="smash",
+    )
+    assert plan.dips
+    assert all(e.transition == 0.0 for e in plan.entries)
+
+
+def test_transitions_smash_on_auto_uses_section_changes():
+    plan = plan_montage(
+        make_reports(), make_music(), cut_lead=0.0,
+        allow_repeats=True, transitions="smash",
+    )
+    # make_music has section changes at 4s and 8s; both land on cuts
+    dip_ends = sorted(start + length for start, length in plan.dips)
+    assert dip_ends == pytest.approx([4.0, 8.0])
+
+
+def test_transitions_rejects_unknown_mode():
+    with pytest.raises(ValueError, match="valid modes"):
+        plan_montage(make_reports(), make_music(), transitions="wipes")

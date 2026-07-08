@@ -326,6 +326,7 @@ def cmd_create(args: argparse.Namespace) -> None:
             reports, music, order=args.order, max_duration=args.max_duration,
             style=args.style, allow_repeats=args.allow_repeats,
             cut_lead=args.cut_lead, pace=args.pace,
+            transitions=args.transitions,
         )
     except ValueError as exc:
         _fail(str(exc))
@@ -338,7 +339,9 @@ def cmd_create(args: argparse.Namespace) -> None:
     }
     print(f"Audio: {args.audio} ({audio_wording[args.audio]})")
     if args.output:
-        timeline = montage_to_timeline(plan, fps=args.fps, audio=args.audio)
+        timeline = montage_to_timeline(
+            plan, fps=args.fps, audio=args.audio, canvas=args.canvas
+        )
         io.save_timeline(timeline, args.output)
         print(f"\n{len(plan.entries)} cuts -> {args.output} "
               f"({plan.duration:.1f}s at {args.fps:g} fps)")
@@ -556,6 +559,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="approximate seconds per clip in the fastest phase, e.g. 1 for "
              "snappy cuts or 4 for long calm shots; slower phases scale with "
              "it (default: the style's own pacing)",
+    )
+    p.add_argument(
+        "--canvas", choices=["hd", "uhd", "vertical", "cine"], default="hd",
+        help="timeline shape: hd 1920x1080 (YouTube), uhd 3840x2160, "
+             "vertical 1080x1920 (Shorts/Reels), cine 1920x804 (2.39:1)",
+    )
+    p.add_argument(
+        "--transitions", choices=["auto", "cuts", "dissolves", "smash"],
+        default="auto",
+        help="how clips hand over: auto = the style's own habits (the "
+             "trailer smashes to black), cuts = hard cuts only, dissolves = "
+             "dissolve on every cut, smash = black title-slot gaps at act "
+             "changes",
     )
     p.add_argument(
         "--brief", default="",
