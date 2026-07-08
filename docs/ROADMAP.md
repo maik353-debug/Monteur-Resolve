@@ -25,28 +25,36 @@ MCP/CLI, product via Monteur Studio.
 ## v0.2 — Deeper senses (specialist moat, part 1)
 
 Musical intelligence:
-- [ ] Downbeat & bar detection; cut on musical phrases (4/8 bars), not
+- [x] Downbeat & bar detection; cut on musical phrases (4/8 bars), not
       just beats
-- [ ] Drop/chorus detection — put the strongest shot on the drop
-- [ ] Named song sections (intro/verse/chorus) in the montage plan
+- [x] Drop/chorus detection — put the strongest shot on the drop
+- [x] Named song sections (intro/verse/chorus) in the montage plan
 
 Visual intelligence:
-- [ ] Motion-direction matching at cut points (exit motion ~ entry motion)
+- [x] Motion-direction matching at cut points (exit motion ~ entry motion)
 - [ ] Shot-size estimate (wide/medium/close via face size) and alternation
       rules — no two near-identical framings back to back
-- [ ] Audio-based sift signals: wind noise, clipping, on-set silence
-- [ ] Highlight detection from audio (laughter, cheers, action peaks)
+- [x] Audio-based sift signals: wind noise, clipping, on-set silence
+- [x] Highlight detection from audio (laughter, cheers, action peaks)
 
 Craft templates:
-- [ ] Montage structures per use case: travel film, wedding, event,
+- [x] Montage structures per use case: travel film, wedding,
       music video, trailer — each a pacing arc (opening/build/climax/outro),
       not just a grid
+- [x] Editorial controls on every cut: pace (seconds per shot,
+      beat-rounded), transitions (cuts/dissolves/smash to black with title
+      slots), canvas (16:9 / 9:16 / 2.39:1 in HD & 4K), audio modes
+      (music / mix / original), black fade-in/out in the export
 
 ## v0.3 — Semantic understanding (specialist moat, part 2)
 
-- [ ] Claude-vision footage search: sample frames -> "find shots of the
-      bride laughing", "every shot of the red car" — local index,
-      Resolve-native, feeds the montage builder and MCP
+- [x] Claude watches the footage (`monteur see`): one frame per good
+      moment, labeled with what it shows, hero-shot score, dramaturgical
+      role (opener/build/climax/closer) and a scene-similarity group;
+      cached next to the footage; feeds semantic casting in the montage
+      (hero on the drop, opener up front, no same-scene adjacency)
+- [ ] Claude-vision footage search: "find shots of the bride laughing",
+      "every shot of the red car" — local index, feeds MCP
 - [ ] Trailer mode: distill a finished long cut into 30/60s (scene
       detection + pacing analysis + AI shot selection)
 - [ ] Learn from the editor: diff the editor's corrections against

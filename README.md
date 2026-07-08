@@ -73,6 +73,27 @@ monteur create ~/footage/day01 ~/music/track.mp3 -o first_cut.fcpxml
 `--max-duration 60` caps the cut. Works best with music that has a clear
 pulse.
 
+The cut is yours to shape without leaving the command line:
+
+```bash
+monteur create footage/ track.mp3 -o cut.fcpxml \
+    --style trailer         # auto | travel | wedding | music_video | trailer
+    --pace 2                # ~seconds per shot in the fastest phase (beat-rounded)
+    --transitions smash     # auto | cuts | dissolves | smash (black title slots)
+    --canvas cine-uhd       # hd/uhd 16:9, vertical[-uhd] 9:16, cine[-uhd] 2.39:1
+    --audio mix             # music | mix (song + camera mic) | original (no song)
+```
+
+No song at all — a ride-POV cut that keeps the engine sound?
+
+```bash
+monteur create footage/ --audio original --max-duration 90 -o ride.fcpxml
+```
+
+Every export opens and closes on black, a trailer smashes to black
+between acts (each gap carries a "Title slot" marker), and cuts land a
+frame before the beat so the incoming shot hits ON it.
+
 ### 0b. Auto-assembly: screenplay + takes → first cut (dialogue)
 
 ```bash
@@ -128,6 +149,21 @@ monteur ai selects cut.md --brief "90-second teaser, lead with the conflict"
 monteur ai notes my_cut.edl --fps 25    # editorial notes on your pacing
 monteur ai log interview.srt           # footage log: topics, quotes, timestamps
 ```
+
+**Claude watches your footage.** `monteur see` sends one frame per good
+moment to Claude, which labels what it shows ("overtake in a left-hand
+curve"), scores hero shots, and assigns each moment a dramaturgical role
+(opener / build / climax / closer):
+
+```bash
+monteur see footage/day01              # what does Claude see in your clips?
+monteur create footage/ track.mp3 --see --style trailer -o cut.fcpxml
+# -> the real hero shot lands on the drop, the establishing shot opens
+#    the film, and no two takes of the same scene sit back to back
+```
+
+Results are cached next to your footage (`.monteur-vision.json`), so a
+re-run only pays for new material — a scan costs on the order of a cent.
 
 ## Claude integration (MCP)
 
