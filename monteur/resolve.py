@@ -32,12 +32,41 @@ Typical use::
 
     bridge = connect()
     timeline = bridge.read_timeline()
+
+Crash-safe (isolated) access
+----------------------------
+Resolve's native scripting module (``fusionscript.dll``/``.so``, loaded by
+``DaVinciResolveScript``) is built for a specific range of Python versions
+(roughly 3.6–3.11). Importing it under an *incompatible* interpreter (e.g.
+Python 3.14) triggers a C-level access violation that **cannot** be caught
+with ``try``/``except`` — it kills the whole process. That makes the direct
+``connect()`` path unsafe to call speculatively (a Studio page load, an MCP
+probe) on a mismatched interpreter.
+
+The isolated layer solves this by running every scripting-module access in a
+**separate child process** (``monteur._resolve_worker``). A native crash then
+only kills that child; the parent detects the nonzero exit and returns a
+graceful "Resolve unavailable" result instead of dying. Prefer these from any
+long-lived process:
+
+    from monteur.resolve import resolve_status_isolated, read_timeline_isolated
+
+    status = resolve_status_isolated()        # never raises; dict result
+    if status["connected"]:
+        timeline = read_timeline_isolated()   # Timeline, or MonteurResolveError
+
+``MONTEUR_RESOLVE_PYTHON``
+    Set this environment variable to a Resolve-compatible Python interpreter
+    (e.g. a 3.11 install) to run the worker with it, while Monteur itself runs
+    under any Python (even one Resolve does not support). See ``_worker_python``.
 """
 
 from __future__ import annotations
 
 import importlib
+import json
 import os
+import subprocess
 import sys
 from types import ModuleType
 from typing import Any
@@ -137,6 +166,232 @@ def connect(app: Any | None = None) -> "ResolveBridge":
             "Resolve does not appear to be running. " + _ENABLE_HINT
         )
     return ResolveBridge(app)
+
+
+# --- Crash-safe isolated layer -------------------------------------------------
+#
+# The functions below run all Resolve scripting-module access in a child
+# process (``monteur._resolve_worker``). If Resolve's native module hard-crashes
+# the interpreter (an access violation that Python cannot catch), only the child
+# dies; the parent sees the nonzero exit and reports a graceful failure. This is
+# what lets Monteur Studio / the MCP server / the CLI probe Resolve without any
+# risk of taking down the host process.
+
+_WORKER_MODULE = "monteur._resolve_worker"
+
+# On a native crash the child exits nonzero: on POSIX with a negative
+# signal-derived code, on Windows with the access-violation code 0xC0000005
+# (shown by subprocess as the large unsigned 3221225477 or the signed
+# -1073741819). We treat ANY nonzero return code as an uncatchable crash.
+_CRASH_MESSAGE = (
+    "DaVinci Resolve's scripting module crashed while loading — this usually "
+    "means the Python version isn't compatible with your Resolve version "
+    "(Resolve supports roughly Python 3.6–3.11). Set MONTEUR_RESOLVE_PYTHON to "
+    "a compatible interpreter, or run Monteur under one."
+)
+
+
+def _worker_python() -> str:
+    """Interpreter used to run the isolated Resolve worker subprocess.
+
+    Defaults to ``sys.executable`` (the interpreter running Monteur). If the
+    environment variable ``MONTEUR_RESOLVE_PYTHON`` is set and non-empty, that
+    path is used instead. This lets you run Monteur itself under any Python
+    (e.g. 3.14) while pointing every Resolve scripting-module call at a
+    Resolve-compatible interpreter (roughly Python 3.6–3.11) — necessary
+    because Resolve's native module hard-crashes under an incompatible Python.
+    """
+    override = os.environ.get("MONTEUR_RESOLVE_PYTHON")
+    if override:
+        return override
+    return sys.executable
+
+
+def _run_worker(
+    command: str, timeout: float, request: dict | None = None
+) -> tuple[bool, dict]:
+    """Run one worker command in a child process.
+
+    Returns ``(True, payload)`` when the worker exits 0 with parseable JSON on
+    stdout, or ``(False, graceful)`` otherwise, where ``graceful`` carries a
+    human-readable ``error`` and a ``reason`` of ``"crash"`` (nonzero exit —
+    an uncatchable native crash), ``"timeout"``, ``"no-interpreter"`` (the
+    worker interpreter could not be launched) or ``"bad-output"`` (unparseable
+    stdout). This function NEVER raises for a child failure — that is the whole
+    point of isolating Resolve here.
+    """
+    interpreter = _worker_python()
+    cmd = [interpreter, "-m", _WORKER_MODULE, command]
+    try:
+        result = subprocess.run(
+            cmd,
+            input=json.dumps(request or {}),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, {
+            "error": (
+                f"The Resolve worker did not respond within {timeout:g}s and was "
+                "terminated. Resolve may be busy, mid-render or unresponsive — "
+                "try again in a moment."
+            ),
+            "reason": "timeout",
+        }
+    except FileNotFoundError:
+        return False, {
+            "error": (
+                f"Could not launch the Resolve worker interpreter {interpreter!r}. "
+                "Set MONTEUR_RESOLVE_PYTHON to a valid Python 3 executable "
+                "(ideally one Resolve supports, roughly 3.6–3.11)."
+            ),
+            "reason": "no-interpreter",
+        }
+    if result.returncode != 0:
+        return False, {"error": _CRASH_MESSAGE, "reason": "crash"}
+    stdout = result.stdout
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", "replace")
+    try:
+        payload = json.loads(stdout)
+    except (ValueError, TypeError):
+        return False, {
+            "error": (
+                "The Resolve worker returned output Monteur could not parse: "
+                f"{(stdout or '')[:200]!r}"
+            ),
+            "reason": "bad-output",
+        }
+    if not isinstance(payload, dict):
+        return False, {
+            "error": (
+                "The Resolve worker returned an unexpected (non-object) "
+                f"response: {payload!r}"
+            ),
+            "reason": "bad-output",
+        }
+    return True, payload
+
+
+def resolve_status_isolated(timeout: float = 25.0) -> dict:
+    """Probe Resolve in a child process; return a status dict, never raising.
+
+    On success returns the worker's payload, e.g.
+    ``{"connected": True, "project": ..., "timelines": [...], "current": ...}``
+    (or ``{"connected": False, "error": ...}`` for a clean, handled failure
+    such as Resolve not running). On an uncatchable child crash, a timeout, a
+    missing interpreter or garbage output it returns
+    ``{"connected": False, "error": <message>, "reason":
+    "crash"|"timeout"|"no-interpreter"|"bad-output"}``. Safe to call
+    speculatively (page load, health check) — a native Resolve crash can never
+    take down the caller.
+    """
+    ok, payload = _run_worker("status", timeout)
+    if not ok:
+        return {"connected": False, **payload}
+    payload.setdefault("connected", False)
+    return payload
+
+
+def read_timeline_isolated(name: str | None = None, timeout: float = 40.0) -> Timeline:
+    """Read a Resolve timeline in a child process and rebuild it as a Timeline.
+
+    Runs the worker's ``read_timeline`` command (optionally for a named
+    timeline) and reconstructs the :class:`~monteur.model.Timeline` from the
+    JSON it emits. Raises :class:`MonteurResolveError` on any failure — a
+    handled Resolve error, or an uncatchable native crash (whose message
+    explains the Python-compatibility fix and MONTEUR_RESOLVE_PYTHON). Raising
+    is appropriate here because callers of a read expect either a Timeline or
+    an error.
+    """
+    ok, payload = _run_worker("read_timeline", timeout, request={"name": name})
+    if not ok:
+        raise MonteurResolveError(payload["error"])
+    if not payload.get("ok"):
+        raise MonteurResolveError(
+            payload.get("error", "The Resolve worker could not read the timeline.")
+        )
+    timeline_data = payload.get("timeline")
+    if not isinstance(timeline_data, dict):
+        raise MonteurResolveError(
+            "The Resolve worker did not return a timeline payload."
+        )
+    return _timeline_from_dict(timeline_data)
+
+
+# --- Timeline (de)serialization ------------------------------------------------
+#
+# Plain-dict, JSON-safe representation of a Timeline so it can cross the
+# worker/parent process boundary and be rebuilt exactly.
+
+
+def _clip_to_dict(clip: Clip) -> dict:
+    return {
+        "name": clip.name,
+        "track": clip.track,
+        "kind": clip.kind,
+        "source_in": clip.source_in,
+        "source_out": clip.source_out,
+        "record_in": clip.record_in,
+        "record_out": clip.record_out,
+        "source_name": clip.source_name,
+        "metadata": dict(clip.metadata),
+    }
+
+
+def _clip_from_dict(data: dict) -> Clip:
+    return Clip(
+        name=data["name"],
+        track=data.get("track", "V1"),
+        kind=data.get("kind", VIDEO),
+        source_in=int(data.get("source_in", 0)),
+        source_out=int(data.get("source_out", 0)),
+        record_in=int(data.get("record_in", 0)),
+        record_out=int(data.get("record_out", 0)),
+        source_name=data.get("source_name", ""),
+        metadata=dict(data.get("metadata", {})),
+    )
+
+
+def _marker_to_dict(marker: Marker) -> dict:
+    return {
+        "frame": marker.frame,
+        "name": marker.name,
+        "note": marker.note,
+        "color": marker.color,
+    }
+
+
+def _marker_from_dict(data: dict) -> Marker:
+    return Marker(
+        frame=int(data["frame"]),
+        name=data.get("name", ""),
+        note=data.get("note", ""),
+        color=data.get("color", ""),
+    )
+
+
+def _timeline_to_dict(timeline: Timeline) -> dict:
+    """Serialize a Timeline to a plain, JSON-safe dict (worker -> parent)."""
+    return {
+        "name": timeline.name,
+        "fps": timeline.fps,
+        "clips": [_clip_to_dict(c) for c in timeline.clips],
+        "markers": [_marker_to_dict(m) for m in timeline.markers],
+        "metadata": dict(timeline.metadata),
+    }
+
+
+def _timeline_from_dict(data: dict) -> Timeline:
+    """Rebuild a Timeline from :func:`_timeline_to_dict`'s output."""
+    return Timeline(
+        name=data["name"],
+        fps=float(data["fps"]),
+        clips=[_clip_from_dict(c) for c in data.get("clips", [])],
+        markers=[_marker_from_dict(m) for m in data.get("markers", [])],
+        metadata=dict(data.get("metadata", {})),
+    )
 
 
 class ResolveBridge:

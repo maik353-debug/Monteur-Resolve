@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
+import json
 import os
+import subprocess
 import sys
 
 import pytest
 
 import monteur.resolve as resolve
-from monteur.model import AUDIO, VIDEO, Marker
+from monteur.model import AUDIO, VIDEO, Clip, Marker, Timeline
 from monteur.montage import MontageEntry, MontagePlan
 from monteur.resolve import MonteurResolveError, ResolveBridge, connect
 
@@ -647,3 +650,320 @@ def test_install_scripts_dry_run_writes_nothing(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     resolve.install_scripts(dry_run=True)
     assert list(tmp_path.rglob("*.py")) == []
+
+
+# --- Timeline (de)serialization -------------------------------------------------
+
+
+def sample_timeline() -> Timeline:
+    return Timeline(
+        name="Roundtrip",
+        fps=23.976,
+        clips=[
+            Clip(
+                name="Scene 1A", track="V1", kind=VIDEO,
+                source_in=10, source_out=130, record_in=0, record_out=120,
+                source_name="A001", metadata={"note": "hero shot"},
+            ),
+            Clip(
+                name="Dialog", track="A2", kind=AUDIO,
+                source_in=5, source_out=305, record_in=10, record_out=310,
+            ),
+        ],
+        markers=[
+            Marker(frame=12, name="Start", note="", color="Red"),
+            Marker(frame=240, name="Note here", note="trim this", color="Blue"),
+        ],
+        metadata={"record_start": 86400, "misc": [1, 2, 3]},
+    )
+
+
+def test_timeline_dict_roundtrip_exact() -> None:
+    original = sample_timeline()
+    # Prove the intermediate dict is genuinely JSON-safe.
+    as_dict = json.loads(json.dumps(resolve._timeline_to_dict(original)))
+    rebuilt = resolve._timeline_from_dict(as_dict)
+
+    assert rebuilt.name == original.name
+    assert rebuilt.fps == pytest.approx(original.fps)
+    assert rebuilt.metadata == original.metadata
+
+    assert len(rebuilt.clips) == len(original.clips)
+    for got, want in zip(rebuilt.clips, original.clips):
+        assert (
+            got.name, got.track, got.kind,
+            got.source_in, got.source_out, got.record_in, got.record_out,
+            got.source_name, got.metadata,
+        ) == (
+            want.name, want.track, want.kind,
+            want.source_in, want.source_out, want.record_in, want.record_out,
+            want.source_name, want.metadata,
+        )
+
+    assert [(m.frame, m.name, m.note, m.color) for m in rebuilt.markers] == [
+        (m.frame, m.name, m.note, m.color) for m in original.markers
+    ]
+
+
+# --- Isolated (crash-safe) layer ------------------------------------------------
+
+
+def _completed(returncode: int = 0, stdout: str = "") -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(
+        args=["python", "-m", "monteur._resolve_worker"],
+        returncode=returncode,
+        stdout=stdout,
+        stderr="",
+    )
+
+
+STATUS_PAYLOAD = {
+    "connected": True,
+    "project": "Monteur Feature",
+    "timelines": ["Cut 1", "Cut 2"],
+    "current": "Cut 2",
+}
+
+
+def test_worker_python_defaults_to_sys_executable(monkeypatch) -> None:
+    monkeypatch.delenv("MONTEUR_RESOLVE_PYTHON", raising=False)
+    assert resolve._worker_python() == sys.executable
+
+
+def test_worker_python_honors_env(monkeypatch) -> None:
+    monkeypatch.setenv("MONTEUR_RESOLVE_PYTHON", "/opt/py311/bin/python3.11")
+    assert resolve._worker_python() == "/opt/py311/bin/python3.11"
+
+
+def test_status_isolated_success(monkeypatch) -> None:
+    def fake_run(cmd, **kwargs):
+        assert cmd == [
+            resolve._worker_python(), "-m", "monteur._resolve_worker", "status"
+        ]
+        return _completed(0, json.dumps(STATUS_PAYLOAD))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = resolve.resolve_status_isolated()
+    assert result["connected"] is True
+    assert result["project"] == "Monteur Feature"
+    assert result["timelines"] == ["Cut 1", "Cut 2"]
+    assert result["current"] == "Cut 2"
+
+
+def test_status_isolated_native_crash_does_not_raise(monkeypatch) -> None:
+    def fake_run(cmd, **kwargs):
+        return _completed(-1073741819, "")  # 0xC0000005 access violation
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = resolve.resolve_status_isolated()  # must NOT raise
+    assert result["connected"] is False
+    assert result["reason"] == "crash"
+    assert "MONTEUR_RESOLVE_PYTHON" in result["error"]
+    assert "3.6" in result["error"] and "3.11" in result["error"]
+
+
+def test_status_isolated_windows_unsigned_crash_code(monkeypatch) -> None:
+    def fake_run(cmd, **kwargs):
+        return _completed(3221225477, "")  # 0xC0000005 as a large unsigned int
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = resolve.resolve_status_isolated()
+    assert result["connected"] is False
+    assert result["reason"] == "crash"
+
+
+def test_status_isolated_timeout(monkeypatch) -> None:
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 1.0))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = resolve.resolve_status_isolated(timeout=3.0)
+    assert result["connected"] is False
+    assert result["reason"] == "timeout"
+
+
+def test_status_isolated_no_interpreter(monkeypatch) -> None:
+    def fake_run(cmd, **kwargs):
+        raise FileNotFoundError(2, "No such file", cmd[0])
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = resolve.resolve_status_isolated()
+    assert result["connected"] is False
+    assert result["reason"] == "no-interpreter"
+    assert "MONTEUR_RESOLVE_PYTHON" in result["error"]
+
+
+def test_status_isolated_bad_output(monkeypatch) -> None:
+    def fake_run(cmd, **kwargs):
+        return _completed(0, "this is not json {{{")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = resolve.resolve_status_isolated()
+    assert result["connected"] is False
+    assert result["reason"] == "bad-output"
+
+
+def test_status_isolated_passes_through_handled_failure(monkeypatch) -> None:
+    # Worker exits 0 with a clean handled failure (Resolve not running).
+    payload = {"connected": False, "error": "Resolve is not running."}
+
+    def fake_run(cmd, **kwargs):
+        return _completed(0, json.dumps(payload))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = resolve.resolve_status_isolated()
+    assert result["connected"] is False
+    assert result["error"] == "Resolve is not running."
+    assert "reason" not in result  # a clean failure, not a crash/timeout
+
+
+def test_read_timeline_isolated_success(monkeypatch) -> None:
+    original = sample_timeline()
+    payload = {"ok": True, "timeline": resolve._timeline_to_dict(original)}
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[3] == "read_timeline"
+        return _completed(0, json.dumps(payload))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    timeline = resolve.read_timeline_isolated()
+    assert isinstance(timeline, Timeline)
+    assert timeline.name == "Roundtrip"
+    assert timeline.fps == pytest.approx(23.976)
+    assert timeline.metadata["record_start"] == 86400
+
+    v1 = timeline.track_clips("V1")[0]
+    assert (v1.source_in, v1.source_out, v1.record_in, v1.record_out) == (
+        10, 130, 0, 120,
+    )
+    assert v1.source_name == "A001"
+    a2 = timeline.track_clips("A2")[0]
+    assert a2.kind == AUDIO
+    assert (a2.record_in, a2.record_out) == (10, 310)
+    assert [(m.frame, m.color) for m in timeline.markers] == [
+        (12, "Red"), (240, "Blue"),
+    ]
+
+
+def test_read_timeline_isolated_native_crash_raises(monkeypatch) -> None:
+    def fake_run(cmd, **kwargs):
+        return _completed(-1073741819, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(MonteurResolveError) as excinfo:
+        resolve.read_timeline_isolated()
+    message = str(excinfo.value)
+    assert "MONTEUR_RESOLVE_PYTHON" in message
+    assert "3.11" in message
+
+
+def test_read_timeline_isolated_handled_failure_raises(monkeypatch) -> None:
+    payload = {"ok": False, "error": "No current timeline."}
+
+    def fake_run(cmd, **kwargs):
+        return _completed(0, json.dumps(payload))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(MonteurResolveError) as excinfo:
+        resolve.read_timeline_isolated()
+    assert "No current timeline." in str(excinfo.value)
+
+
+# --- Worker module (monteur._resolve_worker) ------------------------------------
+
+
+def status_bridge() -> ResolveBridge:
+    first = standard_timeline()
+    second = FakeTimeline(name="Cut 2", start_frame=0)
+    project = FakeProject(timelines=[first, second], current=second)
+    return ResolveBridge(FakeResolve(project))
+
+
+def test_worker_handle_status_success(monkeypatch) -> None:
+    from monteur import _resolve_worker
+
+    monkeypatch.setattr(resolve, "connect", lambda app=None: status_bridge())
+    response = _resolve_worker.handle("status", {})
+    assert response["connected"] is True
+    assert response["project"] == "Monteur Feature"
+    assert response["timelines"] == ["Cut 1", "Cut 2"]
+    assert response["current"] == "Cut 2"
+
+
+def test_worker_handle_status_error_is_clean(monkeypatch) -> None:
+    from monteur import _resolve_worker
+
+    def boom(app=None):
+        raise MonteurResolveError("Resolve is not running.")
+
+    monkeypatch.setattr(resolve, "connect", boom)
+    response = _resolve_worker.handle("status", {})
+    assert response == {"connected": False, "error": "Resolve is not running."}
+
+
+def test_worker_handle_read_timeline_success(monkeypatch) -> None:
+    from monteur import _resolve_worker
+
+    bridge = ResolveBridge(FakeResolve(FakeProject(timelines=[standard_timeline()])))
+    monkeypatch.setattr(resolve, "connect", lambda app=None: bridge)
+    response = _resolve_worker.handle("read_timeline", {"name": None})
+    assert response["ok"] is True
+    rebuilt = resolve._timeline_from_dict(response["timeline"])
+    assert rebuilt.name == "Cut 1"
+    assert rebuilt.metadata["record_start"] == 86400
+    assert rebuilt.track_clips("V1")[0].name == "Scene 1A"
+
+
+def test_worker_handle_read_timeline_error_is_clean(monkeypatch) -> None:
+    from monteur import _resolve_worker
+
+    def boom(app=None):
+        raise MonteurResolveError("No current timeline.")
+
+    monkeypatch.setattr(resolve, "connect", boom)
+    response = _resolve_worker.handle("read_timeline", {"name": None})
+    assert response == {"ok": False, "error": "No current timeline."}
+
+
+def test_worker_main_exits_zero_and_writes_json(monkeypatch, capsys) -> None:
+    from monteur import _resolve_worker
+
+    monkeypatch.setattr(resolve, "connect", lambda app=None: status_bridge())
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    code = _resolve_worker.main(["status"])
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["connected"] is True
+    assert data["current"] == "Cut 2"
+
+
+def test_worker_main_reads_stdin_request(monkeypatch, capsys) -> None:
+    from monteur import _resolve_worker
+
+    captured: dict = {}
+
+    def fake_handle(command, request):
+        captured["command"] = command
+        captured["request"] = request
+        return {"ok": True, "timeline": {}}
+
+    monkeypatch.setattr(_resolve_worker, "handle", fake_handle)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"name": "Cut 7"})))
+    code = _resolve_worker.main(["read_timeline"])
+    assert code == 0
+    assert captured == {"command": "read_timeline", "request": {"name": "Cut 7"}}
+
+
+def test_worker_main_normal_exception_is_not_a_crash(monkeypatch, capsys) -> None:
+    from monteur import _resolve_worker
+
+    def boom(command, request):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(_resolve_worker, "handle", boom)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    code = _resolve_worker.main(["status"])
+    assert code == 0  # exit 0: a normal error must NOT look like a native crash
+    data = json.loads(capsys.readouterr().out)
+    assert "error" in data
+    assert "kaboom" in data["error"]
