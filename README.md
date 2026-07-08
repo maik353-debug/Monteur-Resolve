@@ -106,6 +106,28 @@ Every export opens and closes on black, a trailer smashes to black
 between acts (each gap carries a "Title slot" marker), and cuts land a
 frame before the beat so the incoming shot hits ON it.
 
+**Iterate in plain language.** Save the plan, then revise it — pinned
+shots stay exactly where they are, untouched regions stay bit-identical,
+and every cut stays on the beat grid:
+
+```bash
+monteur create footage/ track.mp3 -o v1.fcpxml --save-plan plan.json
+monteur revise plan.json footage/ -o v2.fcpxml \
+    --brief "zweite Hälfte ruhiger" --pin 0:12
+```
+
+**Distill the trailer from the finished film.** Your final cut is the
+best curation there is — every shot in it was hand-picked:
+
+```bash
+monteur distill final_cut.fcpxml teaser_song.mp3 -o trailer.fcpxml --target 45
+monteur distill final_cut.fcpxml -o short.fcpxml --target 30 --canvas vertical-uhd
+```
+
+**Search footage by content** (after `monteur see`): `monteur find
+footage/ "kurve"` lists every shot Claude labeled as a curve — instant,
+offline, free; `"hero"` lists your hero shots.
+
 ### 0b. Auto-assembly: screenplay + takes → first cut (dialogue)
 
 ```bash

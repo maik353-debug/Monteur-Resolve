@@ -245,6 +245,64 @@ def _sift_progress(index: int, total: int, name: str, stage: str, report) -> Non
         )
 
 
+def cmd_find(args: argparse.Namespace) -> None:
+    from monteur.find import search_footage
+
+    try:
+        shots = search_footage(args.folder, args.query, limit=args.limit)
+    except (ValueError, FileNotFoundError) as exc:
+        _fail(str(exc))
+    if not shots:
+        print(f'no shots match "{args.query}" — try broader words, or re-run '
+              f"'monteur see {args.folder}' after adding footage")
+        return
+    print(f'{len(shots)} shots for "{args.query}":')
+    for shot in shots:
+        name = Path(shot.clip_path).name
+        mm_in, ss_in = divmod(int(shot.start), 60)
+        mm_out, ss_out = divmod(int(shot.end), 60)
+        line = (f"  {name}  {mm_in}:{ss_in:02d}-{mm_out}:{ss_out:02d}  "
+                f"{shot.label or '(no label)'}")
+        if shot.hero >= 0.5:
+            line += f"  [hero {shot.hero:.1f}]"
+        print(line)
+        if shot.tags:
+            print(f"      tags: {', '.join(shot.tags)}")
+
+
+def cmd_distill(args: argparse.Namespace) -> None:
+    from monteur import io
+    from monteur.distill import distill
+    from monteur.media import MonteurMediaError
+    from monteur.montage import montage_to_timeline
+    from monteur.music import analyze_music
+
+    timeline = _load_timeline(args.timeline, args.fps)
+    music = None
+    if args.music:
+        try:
+            print("Analyzing music ...")
+            music = analyze_music(args.music)
+            print(f"  {music.tempo:.0f} BPM, {music.duration:.0f}s")
+        except MonteurMediaError as exc:
+            _fail(str(exc))
+    audio = args.audio if args.music else "original"
+    try:
+        plan = distill(
+            timeline, music, target=args.target, style=args.style, sfx=args.sfx
+        )
+    except ValueError as exc:
+        _fail(str(exc))
+    out_timeline = montage_to_timeline(
+        plan, fps=args.fps, audio=audio, canvas=args.canvas
+    )
+    io.save_timeline(out_timeline, args.output)
+    print(f"\n{len(plan.entries)} cuts -> {args.output} "
+          f"({plan.duration:.1f}s at {args.fps:g} fps)")
+    for note in plan.notes:
+        print(f"  {note}")
+
+
 def cmd_pick_music(args: argparse.Namespace) -> None:
     from monteur.media import MonteurMediaError
     from monteur.pick import list_songs, rank_songs
@@ -891,6 +949,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="save the revised plan as JSON for the next iteration",
     )
     p.set_defaults(func=cmd_revise)
+
+    p = sub.add_parser(
+        "find",
+        help='search footage by what Claude saw ("kurven", "hero") — instant, '
+             "uses the cache from 'monteur see'",
+    )
+    p.add_argument("folder", help="footage folder (must have been seen)")
+    p.add_argument("query", help='what to look for, e.g. "kurve überholen"')
+    p.add_argument("--limit", type=int, default=20)
+    p.set_defaults(func=cmd_find)
+
+    p = sub.add_parser(
+        "distill",
+        help="distill a finished cut into a short trailer (30/60s) — the "
+             "cut's own shots are the material",
+    )
+    p.add_argument("timeline", help="the finished cut (.edl/.fcpxml)")
+    p.add_argument("music", nargs="?", default="", help="song for the trailer (optional)")
+    p.add_argument("-o", "--output", required=True, help="output .fcpxml/.edl")
+    p.add_argument("--target", type=float, default=60.0, help="trailer length in seconds")
+    p.add_argument("--style", default="trailer",
+                   help="montage style (default: trailer)")
+    p.add_argument("--fps", type=float, default=25.0,
+                   help="frame rate (needed to read .edl inputs)")
+    p.add_argument("--audio", choices=["music", "mix", "original"], default="music",
+                   help="soundtrack mode; no music given -> original automatically")
+    p.add_argument("--canvas",
+                   choices=["hd", "uhd", "vertical", "vertical-uhd", "cine", "cine-uhd"],
+                   default="uhd")
+    p.add_argument("--sfx", action="store_true", help="plan an SFX cue layer too")
+    p.set_defaults(func=cmd_distill)
 
     p = sub.add_parser(
         "pick-music",
