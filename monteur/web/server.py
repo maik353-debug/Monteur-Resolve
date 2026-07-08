@@ -412,7 +412,20 @@ def serve(
 ) -> None:
     """Run Monteur Studio until interrupted."""
     handler = type("BoundHandler", (MonteurHandler,), {"project": Project(project_root)})
-    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    server = None
+    for candidate in range(port, port + 10):
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", candidate), handler)
+            break
+        except OSError as exc:
+            bind_error = exc
+    if server is None:
+        raise OSError(
+            f"ports {port}-{port + 9} are all in use ({bind_error}) — "
+            f"is another Monteur Studio still running?"
+        )
+    if server.server_address[1] != port:
+        print(f"Port {port} is busy — using {server.server_address[1]} instead.")
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"Monteur Studio running at {url}  (Ctrl+C to stop)")
     if ready is not None:
@@ -421,7 +434,14 @@ def serve(
         threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
     try:
         server.serve_forever()
+        print("\nMonteur Studio exited unexpectedly (serve loop returned).")
     except KeyboardInterrupt:
-        print("\nMonteur Studio stopped.")
+        print("\nMonteur Studio stopped (Ctrl+C).")
+    except Exception:
+        import traceback
+
+        print("\nMonteur Studio crashed:")
+        traceback.print_exc()
+        raise
     finally:
         server.server_close()
