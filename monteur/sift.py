@@ -21,6 +21,17 @@ Heuristics (all deliberately simple and documented as approximate):
 
 A single odd sample inside a run of another label is smoothed away, so
 one-frame flickers and cut transitions do not fragment segments.
+
+Audio heuristics (also approximate, thresholds are module constants):
+
+* CLIPPING — any window with a clipping fraction above 0.1% distorted; the
+  note counts affected windows.
+* WIND — median low-band (< 150 Hz) energy share above 0.6 while the clip is
+  not silent: wind/handling rumble piles energy at the bottom of the spectrum.
+* SILENT — median window rms below 0.01 (≈ -40 dBFS).
+* HIGHLIGHT — cheers, laughter and action read as loudness bursts: windows
+  louder than 1.8x the clip's median rms. A moment's highlight is
+  min(1, burst_share_in_window * 3).
 """
 
 from __future__ import annotations
@@ -31,7 +42,9 @@ from dataclasses import dataclass, field
 
 from monteur.media import (
     MonteurMediaError,
+    AudioMetric,
     FrameMetric,
+    audio_metrics,
     frame_metrics,
     list_media,
     probe,
@@ -52,6 +65,14 @@ _MODERATE_MOTION_BAND = (0.5, 2.5)  # x clip median: "something happens"
 _MOMENT_MOTION_BONUS = 0.25  # weight of the moderate-motion bonus
 _MAX_MOMENTS = 12  # cap per clip
 
+# Audio heuristics (all approximate, see module docstring).
+_AUDIO_CLIP_WINDOW_MIN = 0.001  # a window "clips" above this clipping fraction
+_AUDIO_WIND_LOW_RATIO = 0.6  # median low_ratio above this = rumble-dominated
+_AUDIO_SILENCE_RMS = 0.01  # median rms below this = mostly silent (~-40 dBFS)
+_HIGHLIGHT_BURST_FACTOR = 1.8  # burst: window rms > 1.8x clip median rms
+_HIGHLIGHT_GAIN = 3.0  # highlight = min(1, burst_share * gain)
+_MOTION_EDGE_SAMPLES = 2  # samples averaged for entry/exit motion stability
+
 
 @dataclass
 class ClipSegment:
@@ -68,6 +89,9 @@ class Moment:
     start: float
     end: float
     score: float  # 0..1
+    entry_motion: tuple[float, float] = (0.0, 0.0)  # (dx, dy) at the window start
+    exit_motion: tuple[float, float] = (0.0, 0.0)  # (dx, dy) at the window end
+    highlight: float = 0.0  # 0..1 audio-highlight strength inside the window
 
 
 @dataclass
@@ -186,6 +210,17 @@ def classify_metrics(metrics: list[FrameMetric], duration: float) -> list[ClipSe
     return segments
 
 
+def _edge_motion(
+    metrics: list[FrameMetric], idx: list[int], head: bool
+) -> tuple[float, float]:
+    """Mean (dx, dy) over the first/last _MOTION_EDGE_SAMPLES samples of idx."""
+    picked = idx[:_MOTION_EDGE_SAMPLES] if head else idx[-_MOTION_EDGE_SAMPLES:]
+    return (
+        sum(metrics[j].dx for j in picked) / len(picked),
+        sum(metrics[j].dy for j in picked) / len(picked),
+    )
+
+
 def find_moments(
     segments: list[ClipSegment], metrics: list[FrameMetric], min_length: float = 1.0
 ) -> list[Moment]:
@@ -231,7 +266,15 @@ def find_moments(
                     (1 - _MOMENT_MOTION_BONUS) * mean_rank
                     + _MOMENT_MOTION_BONUS * moderate,
                 )
-                candidates.append(Moment(start=start, end=end, score=score))
+                candidates.append(
+                    Moment(
+                        start=start,
+                        end=end,
+                        score=score,
+                        entry_motion=_edge_motion(metrics, idx, head=True),
+                        exit_motion=_edge_motion(metrics, idx, head=False),
+                    )
+                )
             start += step
 
     # Best first; dedupe overlaps greedily so the better window survives.
@@ -247,6 +290,63 @@ def find_moments(
             kept.append(cand)
     kept.sort(key=lambda m: (-m.score, m.start))
     return kept
+
+
+def audio_flags(audio: list[AudioMetric]) -> tuple[list[str], list[float]]:
+    """(notes, per-window burst flags) for a clip's audio metrics.
+
+    Notes (thresholds are the approximate module constants above):
+
+    * ``audio: clipping in N windows`` — N windows with a clipping fraction
+      above _AUDIO_CLIP_WINDOW_MIN.
+    * ``audio: likely wind noise`` — median low_ratio above
+      _AUDIO_WIND_LOW_RATIO while the median rms sits above the silence
+      floor (quiet clips have meaningless spectra).
+    * ``audio: mostly silent`` — median rms below _AUDIO_SILENCE_RMS.
+
+    Burst flags (aligned with ``audio``) mark loudness bursts: windows whose
+    rms exceeds _HIGHLIGHT_BURST_FACTOR x the clip's median rms and the
+    silence floor — cheers, laughter and action all read as such bursts.
+    """
+    if not audio:
+        return [], []
+    notes: list[str] = []
+    median_rms = statistics.median(a.rms for a in audio)
+    median_low = statistics.median(a.low_ratio for a in audio)
+    clipped = sum(1 for a in audio if a.clipping > _AUDIO_CLIP_WINDOW_MIN)
+    if clipped:
+        notes.append(f"audio: clipping in {clipped} windows")
+    if median_low > _AUDIO_WIND_LOW_RATIO and median_rms >= _AUDIO_SILENCE_RMS:
+        notes.append("audio: likely wind noise")
+    if median_rms < _AUDIO_SILENCE_RMS:
+        notes.append("audio: mostly silent")
+    bursts = [
+        1.0
+        if a.rms > _HIGHLIGHT_BURST_FACTOR * median_rms and a.rms > _AUDIO_SILENCE_RMS
+        else 0.0
+        for a in audio
+    ]
+    return notes, bursts
+
+
+def apply_audio(moments: list[Moment], audio: list[AudioMetric]) -> list[str]:
+    """Set each moment's highlight from the audio; return the audio notes.
+
+    highlight = min(1, burst_share * _HIGHLIGHT_GAIN), where burst_share is
+    the share of audio windows starting inside [start, end) that are
+    loudness bursts (see :func:`audio_flags`). Empty ``audio`` (no audio
+    stream) leaves every highlight at 0.0 and returns no notes.
+    """
+    notes, bursts = audio_flags(audio)
+    eps = 1e-9
+    for moment in moments:
+        idx = [
+            i for i, a in enumerate(audio) if moment.start - eps <= a.t < moment.end - eps
+        ]
+        if idx:
+            share = sum(bursts[i] for i in idx) / len(idx)
+            moment.highlight = min(1.0, share * _HIGHLIGHT_GAIN)
+    return notes
 
 
 def _reraise_if_ffmpeg_missing(exc: MonteurMediaError) -> None:
@@ -281,6 +381,16 @@ def analyze_clip(path: str) -> ClipReport:
 
     report.segments = classify_metrics(metrics, info.duration)
     report.moments = find_moments(report.segments, metrics)
+
+    # Audio features are best-effort: no audio stream or a failed audio
+    # decode silently skips them (highlights stay 0.0, no audio notes).
+    try:
+        audio = audio_metrics(path) if info.has_audio else []
+    except MonteurMediaError as exc:
+        _reraise_if_ffmpeg_missing(exc)
+        audio = []
+    report.notes.extend(apply_audio(report.moments, audio))
+
     usable_time = sum(
         s.end - s.start for s in report.segments if s.label == USABLE
     )

@@ -7,13 +7,16 @@ import subprocess
 
 import pytest
 
-from monteur.media import FrameMetric
+from monteur.media import AudioMetric, FrameMetric
 from monteur.sift import (
     BLURRY,
     DARK,
     SHAKY,
     USABLE,
+    Moment,
     analyze_clip,
+    apply_audio,
+    audio_flags,
     classify_metrics,
     find_moments,
 )
@@ -182,6 +185,114 @@ def test_moments_respect_min_length():
         assert m.start >= 0.0 and m.end <= 2.0 + 1e-9
 
 
+# ------------------------------------------------------------------- audio
+
+
+def make_audio(rms, clipping=None, low_ratio=None, step=0.5):
+    """Build synthetic audio windows from per-window value lists."""
+    clipping = clipping or [0.0]
+    low_ratio = low_ratio or [0.2]
+    n = max(len(rms), len(clipping), len(low_ratio))
+
+    def pick(values, i):
+        return values[i] if i < len(values) else values[-1]
+
+    return [
+        AudioMetric(
+            t=i * step,
+            rms=pick(rms, i),
+            clipping=pick(clipping, i),
+            low_ratio=pick(low_ratio, i),
+        )
+        for i in range(n)
+    ]
+
+
+def test_audio_flags_wind_note():
+    audio = make_audio(rms=[0.05] * 8, low_ratio=[0.8] * 8)
+    notes, _ = audio_flags(audio)
+    assert "audio: likely wind noise" in notes
+    assert "audio: mostly silent" not in notes
+
+
+def test_audio_flags_silence_note_and_no_wind_when_silent():
+    # Near-silence: silent note fires; the rumble-heavy spectrum of noise
+    # floor does NOT read as wind (rms below the floor).
+    audio = make_audio(rms=[0.002] * 8, low_ratio=[0.9] * 8)
+    notes, bursts = audio_flags(audio)
+    assert "audio: mostly silent" in notes
+    assert not any("wind" in n for n in notes)
+    assert bursts == [0.0] * 8  # noise-floor wobble is not a highlight
+
+
+def test_audio_flags_clipping_note_counts_windows():
+    clipping = [0.0, 0.0, 0.05, 0.02, 0.9, 0.0, 0.0, 0.0]
+    audio = make_audio(rms=[0.2] * 8, clipping=clipping)
+    notes, _ = audio_flags(audio)
+    assert "audio: clipping in 3 windows" in notes
+
+
+def test_audio_flags_clean_audio_has_no_notes():
+    audio = make_audio(rms=[0.1] * 8)
+    notes, bursts = audio_flags(audio)
+    assert notes == []
+    assert bursts == [0.0] * 8
+
+
+def test_audio_flags_empty():
+    assert audio_flags([]) == ([], [])
+
+
+def test_highlight_for_loud_burst_window():
+    # Windows 4 and 5 (t=2.0, 2.5) are loud bursts: > 1.8x median rms 0.05.
+    rms = [0.05] * 12
+    rms[4] = rms[5] = 0.3
+    audio = make_audio(rms=rms)
+    loud = Moment(start=2.0, end=3.0, score=0.5)
+    quiet = Moment(start=4.0, end=5.0, score=0.5)
+    notes = apply_audio([loud, quiet], audio)
+    assert loud.highlight == pytest.approx(1.0)  # min(1, 1.0 * 3)
+    assert quiet.highlight == 0.0
+    assert notes == []
+
+
+def test_highlight_scales_with_burst_share():
+    # A 2 s moment covering 4 windows with 1 burst: min(1, 0.25 * 3) = 0.75.
+    rms = [0.05] * 16
+    rms[4] = 0.5
+    audio = make_audio(rms=rms)
+    moment = Moment(start=2.0, end=4.0, score=0.5)
+    apply_audio([moment], audio)
+    assert moment.highlight == pytest.approx(0.75)
+
+
+def test_apply_audio_without_audio_keeps_highlight_zero():
+    moment = Moment(start=0.0, end=1.0, score=0.5)
+    assert apply_audio([moment], []) == []
+    assert moment.highlight == 0.0
+
+
+def test_moments_carry_entry_exit_motion():
+    # 24 usable samples with dx = sample index, dy = -1: each 2 s moment's
+    # entry/exit motion is the mean dx/dy of its first/last two samples.
+    metrics = make_metrics([120] * 24, [300] * 24, [2] * 24)
+    for i, m in enumerate(metrics):
+        m.dx = float(i)
+        m.dy = -1.0
+    segments = classify_metrics(metrics, 12.0)
+    moments = find_moments(segments, metrics, min_length=2.0)
+    assert moments
+    eps = 1e-9
+    for mom in moments:
+        idx = [j for j, m in enumerate(metrics) if mom.start - eps <= m.t < mom.end - eps]
+        assert len(idx) == 4
+        expected_entry = (idx[0] + idx[1]) / 2
+        expected_exit = (idx[-2] + idx[-1]) / 2
+        assert mom.entry_motion == pytest.approx((expected_entry, -1.0))
+        assert mom.exit_motion == pytest.approx((expected_exit, -1.0))
+        assert mom.entry_motion != mom.exit_motion
+
+
 # ------------------------------------------------------------- integration
 
 
@@ -227,3 +338,25 @@ def test_analyze_clip_integration(tmp_path):
 
     assert report.usable_ratio == pytest.approx(0.33, abs=0.15)
     assert report.notes  # the "% unusable" note is present
+
+    # The clip has no audio stream: no audio notes, highlights stay 0.0.
+    assert not any(n.startswith("audio:") for n in report.notes)
+    assert all(m.highlight == 0.0 for m in report.moments)
+
+
+@pytest.mark.skipif(not HAVE_FFMPEG, reason="imageio_ffmpeg not installed")
+def test_analyze_clip_flags_silent_audio(tmp_path):
+    """testsrc2 video + digital-silence audio -> 'audio: mostly silent'."""
+    exe = imageio_ffmpeg.get_ffmpeg_exe()
+    clip = tmp_path / "silent.mp4"
+    subprocess.run(
+        [exe, "-y", "-f", "lavfi", "-i", "testsrc2=duration=4:size=320x180:rate=30",
+         "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-shortest",
+         "-pix_fmt", "yuv420p", str(clip)],
+        check=True,
+        capture_output=True,
+    )
+    report = analyze_clip(str(clip))
+    assert "audio: mostly silent" in report.notes
+    assert report.moments
+    assert all(m.highlight == 0.0 for m in report.moments)  # silence: no bursts

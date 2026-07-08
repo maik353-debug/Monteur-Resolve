@@ -135,6 +135,50 @@ class FrameMetric:
     brightness: float
     sharpness: float
     motion: float
+    dx: float = 0.0  # global horizontal motion (px/sample, + = content moves right)
+    dy: float = 0.0  # global vertical motion (px/sample, + = content moves down)
+
+
+# Phase-correlation tuning (see _phase_shift): a correlation peak weaker than
+# _PC_MIN_PEAK_FACTOR x the mean correlation surface means there is too
+# little texture to trust the estimate, and no motion is reported instead.
+_PC_MIN_PEAK_FACTOR = 3.0
+_PC_EPS = 1e-9  # avoids division by zero when normalising the cross-spectrum
+
+
+def _phase_shift(prev, cur) -> tuple[float, float]:
+    """Global (dx, dy) shift between two grayscale frames (phase correlation).
+
+    Sign convention: positive ``dx`` means scene content moved RIGHT from
+    ``prev`` to ``cur``; positive ``dy`` means content moved DOWN (image y
+    grows downward). A camera panning right therefore yields negative dx.
+    Concretely, ``cur = np.roll(prev, (3, -5), axis=(0, 1))`` (content down 3
+    px, left 5 px) comes back as ``(dx=-5.0, dy=3.0)``.
+
+    Pure-numpy phase correlation: normalise the cross-power spectrum of the
+    two Hann-windowed frames (window reduces wrap-around edge artifacts) and
+    locate the inverse-FFT peak; peaks past half the frame size unwrap to
+    negative shifts. If the peak is weak (< _PC_MIN_PEAK_FACTOR x the mean of
+    the correlation surface) the shift is unreliable — flat or textureless
+    frames — and (0.0, 0.0) is returned.
+    """
+    np = _numpy()
+    height, width = prev.shape
+    hann = np.outer(np.hanning(height), np.hanning(width))
+    f1 = np.fft.fft2(prev * hann)
+    f2 = np.fft.fft2(cur * hann)
+    cross = f1 * np.conj(f2)
+    r = np.abs(np.fft.ifft2(cross / (np.abs(cross) + _PC_EPS)))
+    peak = float(r.max())
+    if peak < _PC_MIN_PEAK_FACTOR * float(r.mean()):
+        return 0.0, 0.0
+    py, px = np.unravel_index(int(r.argmax()), r.shape)
+    if py > height // 2:
+        py -= height
+    if px > width // 2:
+        px -= width
+    # The correlation peak sits at MINUS the content displacement.
+    return float(-px), float(-py)
 
 
 def frame_metrics(
@@ -170,15 +214,73 @@ def frame_metrics(
         gy, gx = np.gradient(frame)
         sharpness = float((gx**2 + gy**2).mean())
         motion = float(np.abs(frame - previous).mean()) if previous is not None else 0.0
+        dx, dy = _phase_shift(previous, frame) if previous is not None else (0.0, 0.0)
         metrics.append(
             FrameMetric(
                 t=i / samples_per_second,
                 brightness=float(frame.mean()),
                 sharpness=sharpness,
                 motion=motion,
+                dx=dx,
+                dy=dy,
             )
         )
         previous = frame
+    return metrics
+
+
+# Audio-metric tuning (approximate; see AudioMetric).
+_CLIP_LEVEL = 0.985  # |sample| at/above this counts as (near-)digital clipping
+_LOW_BAND_HZ = 150.0  # ceiling of the "low" band; wind/handling rumble lives below
+
+
+@dataclass
+class AudioMetric:
+    """Cheap per-window audio quality signals.
+
+    * rms — root-mean-square level of the window (0..~1 for sane audio)
+    * clipping — fraction of samples with |x| >= _CLIP_LEVEL (≈ full scale);
+      any noticeable amount means the recording distorted
+    * low_ratio — share of spectral energy below _LOW_BAND_HZ; near 1 with
+      audible level usually means wind or handling rumble, not speech
+    """
+
+    t: float  # window start, seconds
+    rms: float
+    clipping: float
+    low_ratio: float
+
+
+def audio_metrics(
+    path: str | Path, rate: int = 22050, window: float = 0.5, runner=None
+) -> list[AudioMetric]:
+    """Per-``window``-second audio quality metrics for a file.
+
+    Files without an audio stream return ``[]`` (probe guard, so the audio
+    decode is never attempted on video-only material). Only full windows are
+    analysed; a sub-window tail is dropped.
+    """
+    np = _numpy()
+    if not probe(path, runner).has_audio:
+        return []
+    samples = read_audio(path, rate=rate, runner=runner)
+    win = max(1, int(round(window * rate)))
+    count = len(samples) // win
+    freqs = np.fft.rfftfreq(win, d=1.0 / rate)
+    low_band = freqs < _LOW_BAND_HZ
+    metrics: list[AudioMetric] = []
+    for i in range(count):
+        chunk = samples[i * win : (i + 1) * win].astype(np.float64)
+        energy = np.abs(np.fft.rfft(chunk)) ** 2
+        total = float(energy.sum())
+        metrics.append(
+            AudioMetric(
+                t=i * window,
+                rms=float(np.sqrt(np.mean(chunk**2))),
+                clipping=float(np.mean(np.abs(chunk) >= _CLIP_LEVEL)),
+                low_ratio=float(energy[low_band].sum() / total) if total > 0 else 0.0,
+            )
+        )
     return metrics
 
 
