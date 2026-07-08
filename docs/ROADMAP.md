@@ -71,9 +71,10 @@ Craft templates:
       Claude drafts the blueprint — Fountain screenplay (assembly-ready),
       scene list with concrete shooting tips, sound notes, cut intents,
       printable shotlist with take checklists
-- [ ] Movie creator stage 2: Studio movie view — scene slots, assign
-      footage per scene, shoot progress, vision checks the match
-      ("scene 5 should be exterior dusk; this clip looks interior")
+- [x] Movie creator stage 2: Studio movie view — open/create a project
+      in the browser, scene slots with shooting tips, assign footage per
+      scene, shoot progress, footage checks (technical + vision content
+      match, INT/EXT and DAY/NIGHT consistency, dark-fits-night)
 - [ ] Movie creator stage 3: assemble the film along the screenplay
       (assembly for dialogue scenes, slot assignment for silent ones)
       with pacing from the cut intents, then the usual finishing

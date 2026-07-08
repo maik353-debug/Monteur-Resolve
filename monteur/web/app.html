@@ -579,6 +579,56 @@ svg text.axis {
   .path-row input[type="text"] { flex-basis: 100%; min-width: 0; }
 }
 
+/* ---------- movie view ---------- */
+#movie { max-width: 960px; margin: 0 auto; padding: 26px 28px 56px; }
+.mov-entry-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+@media (max-width: 900px) { .mov-entry-grid { grid-template-columns: 1fr; } }
+.mov-entry-card h2 { font-size: 16px; }
+#mov-brief {
+  display: block; width: 100%; min-height: 92px; resize: vertical; margin-bottom: 8px;
+  padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); color: var(--ink); font: inherit;
+}
+.mov-head-side { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.scene-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+.scene-num { font-weight: 680; font-size: 15px; white-space: nowrap; }
+.mov-pill {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  border-radius: 999px; padding: 2px 10px 3px; white-space: nowrap; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.mov-pill.int { background: var(--row-wash); color: var(--series-1); }
+.mov-pill.ext { background: rgba(27, 175, 122, 0.14); color: var(--series-2); }
+.mov-pill.plain { background: var(--surface-2); color: var(--ink-2); }
+.mov-status {
+  margin-left: auto; flex: none; font-size: 10.5px; font-weight: 700;
+  letter-spacing: 0.06em; text-transform: uppercase; border-radius: 999px; padding: 2px 10px 3px;
+}
+.mov-status.planned { background: var(--surface-2); color: var(--ink-muted); }
+.mov-status.assigned { background: rgba(27, 175, 122, 0.14); color: var(--series-2); }
+.scene-summary { color: var(--ink-2); font-size: 13.5px; margin-bottom: 12px; max-width: 680px; }
+.scene-card .fine-tune { margin: 0 0 14px; }
+.tip-list { list-style: none; margin: 0; padding: 0; font-size: 13px; color: var(--ink-2); }
+.tip-list li { display: flex; gap: 9px; align-items: flex-start; padding: 3px 0; }
+.tip-list input { width: 14px; height: 14px; accent-color: var(--series-1); margin-top: 2px; flex: none; }
+.scene-note { font-size: 12.5px; color: var(--ink-2); margin-top: 10px; }
+.scene-note .k { font-weight: 650; color: var(--ink); }
+.mov-check-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+.mov-score { font-size: 13.5px; font-weight: 650; margin-top: 12px; }
+.mov-findings { margin: 8px 0 0; padding-left: 18px; font-size: 13px; color: var(--ink-2); }
+.mov-findings li { margin-top: 3px; }
+.mov-clip-bars { margin-top: 10px; display: grid; gap: 6px; }
+.mov-clip-row { display: flex; align-items: center; gap: 10px; font-size: 12.5px; }
+.mov-clip-row .name {
+  flex: 0 1 200px; min-width: 0; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; color: var(--ink-2);
+}
+.mov-clip-row .meter { flex: 1 1 120px; width: auto; margin-top: 0; }
+.mov-clip-row .pct {
+  flex: none; width: 44px; text-align: right; color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 #drop-veil {
   position: fixed; inset: 0; z-index: 65; background: var(--veil);
   display: flex; align-items: center; justify-content: center; pointer-events: none;
@@ -612,6 +662,7 @@ svg text.axis {
       <nav class="view-switch" aria-label="Studio view">
         <button class="view-tab" id="tab-home" type="button" aria-pressed="true">Home</button>
         <button class="view-tab" id="tab-create" type="button" aria-pressed="false">Create</button>
+        <button class="view-tab" id="tab-movie" type="button" aria-pressed="false">Movie</button>
         <button class="view-tab" id="tab-pacing" type="button" aria-pressed="false">Pacing</button>
         <button class="view-tab" id="tab-assembly" type="button" aria-pressed="false">Assembly</button>
       </nav>
@@ -658,6 +709,12 @@ svg text.axis {
           <span class="task-icon" aria-hidden="true">📝</span>
           <span class="tc-title">Assembly from script</span>
           <span class="tc-desc">Match your recorded takes against the screenplay and get a first assembly of your scenes.</span>
+          <span class="tc-go" aria-hidden="true">Open →</span>
+        </button>
+        <button class="task-card" id="go-movie" type="button">
+          <span class="task-icon" aria-hidden="true">🎬</span>
+          <span class="tc-title">Make a movie</span>
+          <span class="tc-desc">From idea to shoot — blueprint, scene slots, footage checks.</span>
           <span class="tc-go" aria-hidden="true">Open →</span>
         </button>
       </div>
@@ -1024,6 +1081,72 @@ svg text.axis {
           </div>
         </div>
       </section>
+    </section>
+
+    <section id="movie" hidden>
+      <header class="dash-head">
+        <div class="dash-title">
+          <p class="eyebrow">Movie</p>
+          <h1>Make a movie</h1>
+          <p class="dash-meta">From idea to shoot: Claude drafts the blueprint, every scene becomes a production slot, and Monteur checks whether your footage matches the scene.</p>
+        </div>
+      </header>
+
+      <div id="mov-entry">
+        <div class="mov-entry-grid">
+          <section class="card mov-entry-card" aria-labelledby="mov-open-h">
+            <h2 id="mov-open-h">Open a project</h2>
+            <p class="card-sub">Point Monteur at a project folder holding a movie.json.</p>
+            <label class="sr-only" for="mov-open-dir">Project folder path</label>
+            <div class="path-row">
+              <input type="text" id="mov-open-dir" placeholder="/Users/you/Movies/mein-film" spellcheck="false" autocomplete="off">
+              <button class="btn ghost mov-browse" id="mov-browse-open" type="button">Browse&hellip;</button>
+              <button class="btn" id="mov-open-btn" type="button">Open<span class="spin" aria-hidden="true"></span></button>
+            </div>
+            <p class="help-small">A project folder is what <code>monteur movie new</code> writes — movie.json, script.fountain and shotlist.md.</p>
+            <p class="scan-note" id="mov-open-msg" role="status" hidden></p>
+          </section>
+          <section class="card mov-entry-card" aria-labelledby="mov-new-h">
+            <h2 id="mov-new-h">Start a new film</h2>
+            <p class="card-sub">Describe the idea and your real-world limits — Claude drafts the screenplay, scene by scene.</p>
+            <label class="sr-only" for="mov-new-dir">New project folder path</label>
+            <div class="path-row">
+              <input type="text" id="mov-new-dir" placeholder="Project folder, e.g. /Users/you/Movies/mein-film" spellcheck="false" autocomplete="off">
+              <button class="btn ghost mov-browse" id="mov-browse-new" type="button">Browse&hellip;</button>
+            </div>
+            <label class="sr-only" for="mov-brief">Film brief — idea, locations, cast, length</label>
+            <textarea id="mov-brief" rows="4" placeholder="Your idea + what you really have: 5 Minuten, 2 Personen, Wald und Auto, nachts&hellip;" spellcheck="false"></textarea>
+            <label class="sr-only" for="mov-genre">Genre</label>
+            <div class="path-row">
+              <input type="text" id="mov-genre" placeholder="Genre (optional) — thriller, doku, komödie&hellip;" spellcheck="false" autocomplete="off">
+              <button class="btn primary" id="mov-new-btn" type="button">Create the blueprint<span class="spin" aria-hidden="true"></span></button>
+            </div>
+            <p class="help-small">Drafting a screenplay needs the anthropic package and your Anthropic API key (ANTHROPIC_API_KEY) on the machine running <code>monteur ui</code> — unlike scans, there is no offline fallback for writing.</p>
+            <div id="mov-new-panel"></div>
+            <p class="scan-note" id="mov-new-msg" role="status" hidden></p>
+          </section>
+        </div>
+      </div>
+
+      <div id="mov-project" hidden>
+        <section class="card">
+          <div class="plan-head">
+            <div>
+              <h2 class="plan-title" id="mov-title"></h2>
+              <p class="card-sub" id="mov-logline"></p>
+              <p class="dash-meta" id="mov-meta"></p>
+            </div>
+            <div class="mov-head-side">
+              <div>
+                <p class="cov-label" id="mov-progress-label" role="status"></p>
+                <div class="meter"><span id="mov-progress-fill"></span></div>
+              </div>
+              <button class="btn ghost small" id="mov-switch" type="button">Open another project&hellip;</button>
+            </div>
+          </div>
+        </section>
+        <div id="mov-scenes"></div>
+      </div>
     </section>
   </main>
 </div>
@@ -1511,10 +1634,11 @@ function renderTrend() {
 
 /* ================= views (Home | Create | Pacing | Assembly) ================= */
 
-var VIEWS = ["home", "create", "pacing", "assembly"];
+var VIEWS = ["home", "create", "movie", "pacing", "assembly"];
 
 function setView(view) {
   if (state.view === "create" && view !== "create") creStopJobs(); // leaving the wizard stops its poll loops
+  if (state.view === "movie" && view !== "movie") movStopJobs(); // leaving the movie view stops its poll loops
   state.view = view;
   VIEWS.forEach(function (v) {
     $("tab-" + v).setAttribute("aria-pressed", String(view === v));
@@ -1525,6 +1649,7 @@ function updateMainVisibility() {
   var v = state.view;
   $("home").hidden = v !== "home";
   $("create").hidden = v !== "create";
+  $("movie").hidden = v !== "movie";
   $("assembly").hidden = v !== "assembly";
   var pacing = v === "pacing";
   $("welcome").hidden = !pacing || !!state.primary;
@@ -1534,6 +1659,7 @@ VIEWS.forEach(function (v) {
   $("tab-" + v).addEventListener("click", function () { setView(v); });
 });
 $("go-create").addEventListener("click", function () { setView("create"); });
+$("go-movie").addEventListener("click", function () { setView("movie"); });
 $("go-pacing").addEventListener("click", function () { setView("pacing"); });
 $("go-assembly").addEventListener("click", function () { setView("assembly"); });
 
@@ -2630,6 +2756,8 @@ function makeJobPanel(hostId, texts) {
         lines.push(stext);
       } else if (p.stage === "kit") {
         lines.push(String(p.name || "writing publish kit") + "…");
+      } else if (p.stage === "movie") {
+        lines.push("Claude · " + String(p.name || "drafting the screenplay") + "…");
       }
     });
     var last = progress.length ? progress[progress.length - 1] : null;
@@ -2638,6 +2766,7 @@ function makeJobPanel(hostId, texts) {
     else if (last && last.stage === "vision") status.textContent = "Claude is watching your clips…";
     else if (last && last.stage === "song") status.textContent = "Listening to your songs…";
     else if (last && last.stage === "kit") status.textContent = "Writing the publish kit…";
+    else if (last && last.stage === "movie") status.textContent = "Claude is writing your screenplay…";
     else if (cached > 0 && (total === 0 || done >= total)) status.textContent = "Using your previous scan — nothing to re-watch.";
     else status.textContent = texts.working;
     if (total > 0) {
@@ -2776,6 +2905,10 @@ function hideBrowseButtons() {
   $("cre-browse-music").hidden = true;
   $("cre-browse-musicdir").hidden = true;
   $("cre-browse-kit").hidden = true;
+  // the movie view's Browse buttons (incl. the per-scene ones) share the fate
+  Array.prototype.forEach.call(document.querySelectorAll(".mov-browse"), function (b) {
+    b.hidden = true;
+  });
 }
 function browsePath(kind, inputId, btnId) {
   if (!pickAvailable) return;
@@ -3463,6 +3596,431 @@ populateFpsSelect($("cre-fps"));
 setAudio("music");
 setLenMode("target");
 setOrder("chronological");
+
+/* ================= movie view (production slots per scene) ================= */
+
+var mov = {
+  dir: "",       // project folder of the open project
+  project: null, // project dict from /api/movie/*
+  progress: null,
+  scenes: {}     // scene number -> card entry {panel, input, checkBtn, ...}
+};
+
+var movNewPanel = makeJobPanel("mov-new-panel", {
+  starting: "Asking Claude for a screenplay…",
+  working: "Drafting the screenplay…"
+});
+
+function setMovNewBusy(on) {
+  var btn = $("mov-new-btn");
+  btn.classList.toggle("busy", on);
+  btn.disabled = on;
+  $("mov-new-dir").disabled = on;
+  $("mov-brief").disabled = on;
+  $("mov-genre").disabled = on;
+  $("mov-browse-new").disabled = on;
+}
+
+function setMovCheckBusy(entry, on) {
+  entry.checkBtn.classList.toggle("busy", on);
+  entry.checkBtn.disabled = on || (entry.scene.status !== "assigned");
+}
+
+/* called when the user leaves the Movie view — poll loops must not outlive it */
+function movStopJobs() {
+  if (movNewPanel.running()) { movNewPanel.stop(); setMovNewBusy(false); }
+  Object.keys(mov.scenes).forEach(function (n) {
+    var entry = mov.scenes[n];
+    if (entry.panel && entry.panel.running()) {
+      entry.panel.stop();
+      setMovCheckBusy(entry, false);
+    }
+  });
+}
+
+function movShowProject() {
+  var p = mov.project;
+  $("mov-entry").hidden = !!p;
+  $("mov-project").hidden = !p;
+  if (!p) return;
+  $("mov-title").textContent = p.title || "Untitled";
+  $("mov-logline").textContent = p.logline || "";
+  var meta = [];
+  if (p.genre) meta.push(p.genre);
+  meta.push(p.scenes.length + (p.scenes.length === 1 ? " scene" : " scenes"));
+  if (mov.dir) meta.push(mov.dir);
+  $("mov-meta").textContent = meta.join(" · ");
+  movRenderProgress();
+}
+
+function movRenderProgress() {
+  var pr = mov.progress || { scenes: 0, assigned: 0, percent: 0 };
+  $("mov-progress-label").textContent =
+    pr.assigned + "/" + pr.scenes + " scenes assigned";
+  $("mov-progress-fill").style.width = Math.max(0, Math.min(100, pr.percent)) + "%";
+}
+
+function movSlugClass(heading) {
+  var up = String(heading || "").toUpperCase();
+  if (up.indexOf("INT") === 0 && up.indexOf("EXT") > 0) return "plain"; // INT./EXT.
+  if (up.indexOf("INT") === 0) return "int";
+  if (up.indexOf("EXT") === 0) return "ext";
+  return "plain";
+}
+
+function movUpdateSceneCard(entry) {
+  var scene = entry.scene;
+  var assigned = scene.status === "assigned";
+  entry.statusPill.textContent = assigned ? "assigned" : "planned";
+  entry.statusPill.className = "mov-status " + (assigned ? "assigned" : "planned");
+  entry.input.value = scene.folder || "";
+  entry.unassignBtn.hidden = !assigned;
+  entry.checkBtn.disabled = !assigned || entry.checkBtn.classList.contains("busy");
+  entry.checkHint.hidden = assigned;
+}
+
+/* the server's response to assign — refresh state + the one changed card */
+function movApplyProject(data, sceneNumber) {
+  mov.project = data.project;
+  mov.progress = data.progress;
+  movRenderProgress();
+  var entry = mov.scenes[sceneNumber];
+  if (!entry) return;
+  for (var i = 0; i < data.project.scenes.length; i++) {
+    if (data.project.scenes[i].number === sceneNumber) {
+      entry.scene = data.project.scenes[i];
+      break;
+    }
+  }
+  movUpdateSceneCard(entry);
+}
+
+function movAssign(entry, folder, button) {
+  busy(button, function () {
+    return api("/api/movie/assign", {
+      method: "POST",
+      body: { project_dir: mov.dir, scene: entry.scene.number, folder: folder }
+    }).then(function (data) {
+      movApplyProject(data, entry.scene.number);
+      toast(folder
+        ? "Scene " + entry.scene.number + " now shoots from " + folder + "."
+        : "Scene " + entry.scene.number + " is back to planned.", "success");
+    });
+  });
+}
+
+function movRenderCheckResult(entry, result) {
+  var box = entry.resultBox;
+  clear(box);
+  var check = (result && result.check) || {};
+  if (result && result.vision_error) {
+    creNote(entry.msgId, "Claude couldn't watch the clips: " +
+      String(result.vision_error) + " The technical check still ran.");
+  }
+  var scoreText = "Match score " + Math.round((check.score || 0) * 100) + "/100";
+  if (!check.content_checked) scoreText += " — technical checks only";
+  box.appendChild(el("p", "mov-score", scoreText));
+  var list = el("ul", "mov-findings");
+  (check.findings || []).forEach(function (finding) {
+    list.appendChild(el("li", null, String(finding)));
+  });
+  box.appendChild(list);
+  var clips = (result && result.clips) || [];
+  if (clips.length) {
+    var bars = el("div", "mov-clip-bars");
+    clips.forEach(function (clip) {
+      var row = el("div", "mov-clip-row");
+      row.appendChild(el("span", "name", String(clip.name || "clip")));
+      var ratio = Math.max(0, Math.min(1, clip.usable_ratio || 0));
+      var meter = el("div", "meter");
+      var fill = el("span");
+      fill.style.width = Math.round(ratio * 100) + "%";
+      meter.appendChild(fill);
+      meter.setAttribute("role", "img");
+      meter.setAttribute("aria-label",
+        String(clip.name || "clip") + ": " + Math.round(ratio * 100) + "% usable");
+      row.appendChild(meter);
+      row.appendChild(el("span", "pct", Math.round(ratio * 100) + "%"));
+      bars.appendChild(row);
+    });
+    box.appendChild(bars);
+  }
+  box.hidden = false;
+}
+
+function movCheck(entry) {
+  if (entry.panel.running()) return;
+  $(entry.msgId).hidden = true;
+  entry.resultBox.hidden = true;
+  clear(entry.resultBox);
+  var body = { project_dir: mov.dir, scene: entry.scene.number };
+  if (storedSee()) body.see = true; // the Create view's "Let Claude watch" choice
+  setMovCheckBusy(entry, true);
+  api("/api/movie/check", { method: "POST", body: body }).then(function (data) {
+    entry.panel.start(data.job, {
+      onDone: function (result) {
+        setMovCheckBusy(entry, false);
+        movRenderCheckResult(entry, result || {});
+      },
+      onCancelled: function () {
+        setMovCheckBusy(entry, false);
+        creNote(entry.msgId, "Check cancelled — nothing was changed.");
+      },
+      onError: function (message) {
+        setMovCheckBusy(entry, false);
+        creNote(entry.msgId, message, true);
+        toast(message, "error");
+      }
+    });
+  }).catch(function (err) {
+    setMovCheckBusy(entry, false);
+    var message = err && err.message ? err.message : String(err);
+    creNote(entry.msgId, message, true);
+    toast(message, "error");
+  });
+}
+
+function movBuildSceneCard(scene) {
+  var entry = { scene: scene, msgId: "mov-check-msg-" + scene.number };
+  var card = el("section", "card scene-card");
+  card.setAttribute("aria-label", "Scene " + scene.number);
+
+  var head = el("div", "scene-head");
+  head.appendChild(el("span", "scene-num", "Scene " + scene.number));
+  head.appendChild(el("span", "mov-pill " + movSlugClass(scene.heading),
+    String(scene.heading || "")));
+  entry.statusPill = el("span", "mov-status planned", "planned");
+  head.appendChild(entry.statusPill);
+  card.appendChild(head);
+  if (scene.summary) card.appendChild(el("p", "scene-summary", scene.summary));
+
+  var tips = scene.shooting_tips || [];
+  if (tips.length || scene.sound_notes || scene.cut_intent) {
+    var details = document.createElement("details");
+    details.className = "fine-tune";
+    var summary = document.createElement("summary");
+    summary.textContent = "Shooting tips, sound & edit intent";
+    details.appendChild(summary);
+    var body = el("div", "rank-body");
+    if (tips.length) {
+      var list = el("ul", "tip-list");
+      tips.forEach(function (tip, i) {
+        var item = el("li");
+        var check = document.createElement("input");
+        check.type = "checkbox";
+        check.id = "mov-tip-" + scene.number + "-" + i;
+        var label = document.createElement("label");
+        label.htmlFor = check.id;
+        label.textContent = String(tip);
+        item.appendChild(check);
+        item.appendChild(label);
+        list.appendChild(item);
+      });
+      body.appendChild(list);
+    }
+    if (scene.sound_notes) {
+      var sound = el("p", "scene-note");
+      sound.appendChild(el("span", "k", "Sound: "));
+      sound.appendChild(document.createTextNode(scene.sound_notes));
+      body.appendChild(sound);
+    }
+    if (scene.cut_intent) {
+      var cut = el("p", "scene-note");
+      cut.appendChild(el("span", "k", "Edit intent: "));
+      cut.appendChild(document.createTextNode(scene.cut_intent));
+      body.appendChild(cut);
+    }
+    details.appendChild(body);
+    card.appendChild(details);
+  }
+
+  var row = el("div", "path-row");
+  entry.input = document.createElement("input");
+  entry.input.type = "text";
+  entry.input.id = "mov-folder-" + scene.number;
+  entry.input.placeholder = "/path/to/scene-" + scene.number + "-footage";
+  entry.input.spellcheck = false;
+  entry.input.setAttribute("autocomplete", "off");
+  entry.input.setAttribute("aria-label", "Footage folder for scene " + scene.number);
+  row.appendChild(entry.input);
+  if (pickAvailable) {
+    var browse = el("button", "btn ghost mov-browse", "Browse…");
+    browse.type = "button";
+    browse.id = "mov-browse-sc-" + scene.number;
+    browse.addEventListener("click", function () {
+      browsePath("folder", entry.input.id, browse.id);
+    });
+    row.appendChild(browse);
+  }
+  var assignBtn = el("button", "btn", "Assign");
+  assignBtn.type = "button";
+  assignBtn.appendChild(el("span", "spin"));
+  assignBtn.addEventListener("click", function () {
+    var folder = entry.input.value.trim();
+    if (!folder) {
+      toast("Add the footage folder for scene " + scene.number +
+        " first — Browse… or paste its path.");
+      entry.input.focus();
+      return;
+    }
+    movAssign(entry, folder, assignBtn);
+  });
+  row.appendChild(assignBtn);
+  entry.unassignBtn = el("button", "btn ghost", "Unassign");
+  entry.unassignBtn.type = "button";
+  entry.unassignBtn.appendChild(el("span", "spin"));
+  entry.unassignBtn.addEventListener("click", function () {
+    movAssign(entry, "", entry.unassignBtn);
+  });
+  row.appendChild(entry.unassignBtn);
+  card.appendChild(row);
+  entry.input.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); assignBtn.click(); }
+  });
+
+  var checkRow = el("div", "mov-check-row");
+  entry.checkBtn = el("button", "btn ghost", "Check footage");
+  entry.checkBtn.type = "button";
+  entry.checkBtn.appendChild(el("span", "spin"));
+  entry.checkBtn.addEventListener("click", function () { movCheck(entry); });
+  checkRow.appendChild(entry.checkBtn);
+  entry.checkHint = el("span", "help-small",
+    "Assign a folder first, then Monteur sifts it and judges the match.");
+  checkRow.appendChild(entry.checkHint);
+  card.appendChild(checkRow);
+
+  var panelHost = el("div");
+  panelHost.id = "mov-check-panel-" + scene.number;
+  card.appendChild(panelHost);
+  var msg = el("p", "scan-note");
+  msg.id = entry.msgId;
+  msg.setAttribute("role", "status");
+  msg.hidden = true;
+  card.appendChild(msg);
+  entry.resultBox = el("div", "mov-check-result");
+  entry.resultBox.hidden = true;
+  card.appendChild(entry.resultBox);
+
+  entry.card = card;
+  return entry;
+}
+
+function movRenderScenes() {
+  movStopJobs(); // a re-render replaces every panel host — no orphan pollers
+  var host = $("mov-scenes");
+  clear(host);
+  mov.scenes = {};
+  (mov.project ? mov.project.scenes : []).forEach(function (scene) {
+    var entry = movBuildSceneCard(scene);
+    host.appendChild(entry.card);
+    mov.scenes[scene.number] = entry;
+  });
+  // job panels attach by host id — create them once the cards are in the DOM
+  Object.keys(mov.scenes).forEach(function (n) {
+    var entry = mov.scenes[n];
+    entry.panel = makeJobPanel("mov-check-panel-" + n, {
+      starting: "Starting the footage check…",
+      working: "Checking the footage…"
+    });
+    movUpdateSceneCard(entry);
+  });
+}
+
+function movOpenProjectData(dir, data) {
+  mov.dir = dir;
+  mov.project = data.project;
+  mov.progress = data.progress;
+  movShowProject();
+  movRenderScenes();
+}
+
+$("mov-open-btn").addEventListener("click", function () {
+  var dir = $("mov-open-dir").value.trim();
+  if (!dir) {
+    toast("Add the project folder first — Browse… or paste its path.");
+    $("mov-open-dir").focus();
+    return;
+  }
+  $("mov-open-msg").hidden = true;
+  busy($("mov-open-btn"), function () {
+    return api("/api/movie/load", {
+      method: "POST", body: { project_dir: dir }
+    }).then(function (data) {
+      movOpenProjectData(dir, data);
+      toast("Opened “" + (data.project.title || "Untitled") + "” — " +
+        data.project.scenes.length + " scenes.", "success");
+    }).catch(function (err) {
+      var message = err && err.message ? err.message : String(err);
+      creNote("mov-open-msg", message, true);
+      throw err; // busy() shows the toast
+    });
+  });
+});
+$("mov-open-dir").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); $("mov-open-btn").click(); }
+});
+
+$("mov-new-btn").addEventListener("click", function () {
+  if (movNewPanel.running()) return;
+  var dir = $("mov-new-dir").value.trim();
+  var brief = $("mov-brief").value.trim();
+  if (!dir) {
+    toast("Pick a folder for the new project first — Browse… or paste its path.");
+    $("mov-new-dir").focus();
+    return;
+  }
+  if (!brief) {
+    toast("Describe your film first — the idea plus what you really have (people, places, length).");
+    $("mov-brief").focus();
+    return;
+  }
+  $("mov-new-msg").hidden = true;
+  setMovNewBusy(true);
+  var body = { project_dir: dir, brief: brief };
+  var genre = $("mov-genre").value.trim();
+  if (genre) body.genre = genre;
+  api("/api/movie/new", { method: "POST", body: body }).then(function (data) {
+    movNewPanel.start(data.job, {
+      onDone: function (result) {
+        setMovNewBusy(false);
+        movOpenProjectData(dir, result || {});
+        toast("Blueprint ready — “" + ((result && result.project && result.project.title) || "Untitled") +
+          "”, " + (((result || {}).project || {}).scenes || []).length + " scenes written to " + dir + ".", "success");
+      },
+      onCancelled: function () {
+        setMovNewBusy(false);
+        creNote("mov-new-msg", "Blueprint cancelled — nothing was written. Create it again whenever you're ready.");
+      },
+      onError: function (message) {
+        setMovNewBusy(false);
+        creNote("mov-new-msg", message, true);
+        toast(message, "error");
+      }
+    });
+  }).catch(function (err) {
+    setMovNewBusy(false);
+    var message = err && err.message ? err.message : String(err);
+    creNote("mov-new-msg", message, true);
+    toast(message, "error");
+  });
+});
+
+$("mov-switch").addEventListener("click", function () {
+  movStopJobs();
+  mov.project = null;
+  mov.progress = null;
+  mov.dir = "";
+  $("mov-entry").hidden = false;
+  $("mov-project").hidden = true;
+  $("mov-open-dir").focus();
+});
+
+$("mov-browse-open").addEventListener("click", function () {
+  browsePath("folder", "mov-open-dir", "mov-browse-open");
+});
+$("mov-browse-new").addEventListener("click", function () {
+  browsePath("folder", "mov-new-dir", "mov-browse-new");
+});
 
 /* ================= boot ================= */
 

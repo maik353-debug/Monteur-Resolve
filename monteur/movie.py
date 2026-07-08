@@ -33,8 +33,12 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from monteur.ai import DEFAULT_MODEL, MonteurAIError, _client
+
+if TYPE_CHECKING:  # only for type hints — stage 2 never needs sift at runtime
+    from monteur.sift import ClipReport
 
 MOVIE_FORMAT_VERSION = 1
 
@@ -330,3 +334,242 @@ def load_project(project_dir: str | Path) -> MovieProject:
             f"no movie.json in {project_dir} — start with 'monteur movie new'"
         )
     return project_from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+
+# --- stage 2: production slots & footage checks -------------------------------------
+#
+# The Studio's Movie view turns the blueprint into a production board: every
+# scene is a slot that gets a footage folder assigned, and Monteur can hold
+# the sifted (and optionally vision-labeled) footage against the scene text.
+# Everything below is pure — no API calls, no file writes.
+
+# find.py-style token matching, kept local on purpose: find's helpers are
+# private, and the convention is small enough to restate — a token matches a
+# word when either is a prefix of the other and the shorter side has at
+# least 3 characters ("wald" finds "waldweg", "kurven" finds "kurve").
+_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_MIN_TOKEN = 3
+
+#: Fountain slug format words are structure, not content — the INT/EXT and
+#: DAY/NIGHT checks read them; the token overlap must not count them.
+_SLUG_WORDS = frozenset({"int", "ext", "day", "night", "i", "e"})
+
+# Small curated EN+DE word lists, matched against vision labels/tags with
+# the same prefix rule. Deliberately short: these produce HINTS, and a word
+# list that tries to be complete only gets more confidently wrong.
+_OUTDOOR_WORDS = (
+    "forest", "wald", "woods", "road", "straße", "strasse", "street",
+    "mountain", "berg", "sky", "himmel", "field", "feld", "meadow", "wiese",
+    "beach", "strand", "river", "fluss", "lake", "tree", "baum", "outdoor",
+    "outside", "landscape", "landschaft", "trail", "path", "garden", "garten",
+)
+_INDOOR_WORDS = (
+    "room", "zimmer", "kitchen", "küche", "kueche", "interior", "indoor",
+    "inside", "office", "büro", "buero", "wall", "wand", "table", "tisch",
+    "sofa", "couch", "bed", "bett", "corridor", "flur", "hallway", "stairs",
+    "treppe", "ceiling", "basement", "keller", "desk", "lamp", "lampe",
+)
+_NIGHT_WORDS = (
+    "night", "nacht", "dark", "dunkel", "dusk", "dämmerung", "daemmerung",
+    "evening", "abend", "moon", "mond", "headlight", "scheinwerfer",
+)
+_DAY_WORDS = (
+    "day", "tag", "sunny", "sonnig", "daylight", "tageslicht", "sun",
+    "sonne", "bright", "hell", "morning", "morgen", "noon", "mittag",
+    "afternoon", "nachmittag",
+)
+
+
+def _tokens(text: str) -> list[str]:
+    return _WORD_RE.findall(text.lower())
+
+
+def _token_match(token: str, word: str) -> bool:
+    """Bidirectional prefix match; the shorter side needs >= 3 characters."""
+    if token == word:
+        return True
+    if len(token) >= _MIN_TOKEN and word.startswith(token):
+        return True
+    if len(word) >= _MIN_TOKEN and token.startswith(word):
+        return True
+    return False
+
+
+def _hits(words: tuple[str, ...] | list[str], vocabulary: set[str]) -> int:
+    """How many of ``words`` appear in ``vocabulary`` (prefix rule)."""
+    return sum(1 for w in words if any(_token_match(w, v) for v in vocabulary))
+
+
+def assign_scene(project: MovieProject, scene_number: int, folder: str) -> MovieScene:
+    """Assign a footage folder to a scene slot (or unassign with "").
+
+    Sets ``scene.folder`` and flips ``status`` to ``"assigned"``; an empty
+    folder resets the slot to ``"planned"``. Returns the mutated scene.
+    Raises ValueError on an unknown scene number.
+    """
+    for scene in project.scenes:
+        if scene.number == scene_number:
+            scene.folder = str(folder or "").strip()
+            scene.status = "assigned" if scene.folder else "planned"
+            return scene
+    raise ValueError(
+        f"no scene {scene_number} in this project — it has "
+        f"{len(project.scenes)} scene(s)"
+    )
+
+
+def project_progress(project: MovieProject) -> dict:
+    """Shooting progress: ``{"scenes": N, "assigned": n, "percent": int}``."""
+    total = len(project.scenes)
+    assigned = sum(1 for s in project.scenes if s.status == "assigned")
+    percent = round(100 * assigned / total) if total else 0
+    return {"scenes": total, "assigned": assigned, "percent": percent}
+
+
+def check_scene_footage(scene: MovieScene, reports: list[ClipReport]) -> dict:
+    """Honest hints on whether a folder's sifted footage matches a scene.
+
+    Returns exactly this shape::
+
+        {
+            "score": float,           # 0..1 (see scoring below)
+            "content_checked": bool,  # True when vision labels/tags existed
+            "clips": int,             # number of sifted clips
+            "avg_usable": float,      # 0..1 mean usable_ratio across clips
+            "findings": [str, ...],   # human sentences — hints, not verdicts
+        }
+
+    The findings come in three layers:
+
+    1. Technical (always): clip count + average usable ratio, plus one line
+       per clip whose sift notes flag it as mostly unusable. For a NIGHT
+       scene, "mostly too dark" clips get a softened finding instead — dark
+       footage FITS a night scene, the exposure heuristic just can't know.
+    2. Content (only when the moments carry vision labels/tags — otherwise
+       one finding points at ``monteur see`` / the Studio's "Let Claude
+       watch" toggle): token overlap between the scene's heading+summary and
+       the moments' labels/tags/groups, bidirectional prefix, min 3 chars.
+    3. INT/EXT and DAY/NIGHT read from the heading, held against small EN+DE
+       word lists over the vision labels/tags.
+
+    Scoring: starts at 0.5; +0.25 for content overlap; +0.15 when INT/EXT
+    agrees; +0.1 when DAY/NIGHT agrees; clamped to 0..1. Without vision data
+    the score stays at the 0.5 baseline and ``content_checked`` is False —
+    the caller must not read the baseline as a verdict either way.
+    """
+    findings: list[str] = []
+    clips = len(reports)
+    avg_usable = (
+        sum(r.usable_ratio for r in reports) / clips if clips else 0.0
+    )
+    heading_words = set(_tokens(scene.heading))
+    wants_int = "int" in heading_words
+    wants_ext = "ext" in heading_words
+    wants_day = "day" in heading_words
+    wants_night = "night" in heading_words
+
+    # -- 1. technical ------------------------------------------------------
+    if clips:
+        findings.append(
+            f"{clips} clip{'s' if clips != 1 else ''} in the folder, "
+            f"on average {round(avg_usable * 100)}% usable."
+        )
+    else:
+        findings.append("No clips to judge — the folder sift found nothing.")
+    for report in reports:
+        name = Path(report.path).name
+        for note in report.notes:
+            if "unusable" not in note and "no usable stretch" not in note:
+                continue
+            if wants_night and "dark" in note:
+                findings.append(
+                    f"{name} is mostly dark — that fits a NIGHT scene, so "
+                    "judge it by eye rather than by the numbers."
+                )
+            else:
+                findings.append(f"{name}: {note}.")
+
+    # -- 2 + 3. content (needs vision labels/tags on the moments) ----------
+    vocabulary: set[str] = set()
+    for report in reports:
+        for moment in report.moments:
+            vocabulary.update(_tokens(getattr(moment, "label", "") or ""))
+            for tag in getattr(moment, "tags", None) or []:
+                vocabulary.update(_tokens(str(tag)))
+            vocabulary.update(_tokens(getattr(moment, "group", "") or ""))
+    content_checked = bool(vocabulary)
+    score = 0.5
+
+    if not content_checked:
+        findings.append(
+            "Content checks need Claude's eyes — run 'monteur see' on the "
+            "folder or turn on \"Let Claude watch\" and check again."
+        )
+    else:
+        scene_tokens = [
+            t
+            for t in dict.fromkeys(_tokens(scene.heading + " " + scene.summary))
+            if t not in _SLUG_WORDS
+        ]
+        matched = sorted(
+            {
+                t
+                for t in scene_tokens
+                if any(_token_match(t, w) for w in vocabulary)
+            }
+        )
+        if matched:
+            score += 0.25
+            findings.append(
+                "Looks related — the footage mentions: " + ", ".join(matched) + "."
+            )
+        else:
+            findings.append(
+                "No overlap between the scene description and what Claude "
+                "saw in the footage — worth a look before you edit, though "
+                "word matching is a blunt tool."
+            )
+
+        outdoor = _hits(_OUTDOOR_WORDS, vocabulary)
+        indoor = _hits(_INDOOR_WORDS, vocabulary)
+        lean = "ext" if outdoor > indoor else ("int" if indoor > outdoor else "")
+        if lean and (wants_int or wants_ext):
+            lean_word = "outdoor" if lean == "ext" else "indoor"
+            if (lean == "ext" and wants_ext) or (lean == "int" and wants_int):
+                score += 0.15
+                findings.append(
+                    f"The labels lean {lean_word} — that matches the "
+                    f"{'EXT.' if lean == 'ext' else 'INT.'} heading."
+                )
+            else:
+                findings.append(
+                    f"The heading says {'INT.' if wants_int else 'EXT.'} but "
+                    f"the labels lean {lean_word} — double-check that this "
+                    "is the right folder."
+                )
+
+        nightish = _hits(_NIGHT_WORDS, vocabulary)
+        dayish = _hits(_DAY_WORDS, vocabulary)
+        tod = "night" if nightish > dayish else ("day" if dayish > nightish else "")
+        if tod and (wants_day or wants_night):
+            tod_word = "nighttime" if tod == "night" else "daytime"
+            if (tod == "night" and wants_night) or (tod == "day" and wants_day):
+                score += 0.1
+                findings.append(
+                    f"The labels sound like {tod_word} — that matches the "
+                    f"{'NIGHT' if tod == 'night' else 'DAY'} heading."
+                )
+            else:
+                findings.append(
+                    f"The heading says {'NIGHT' if wants_night else 'DAY'} "
+                    f"but the labels sound like {tod_word} — double-check "
+                    "that this is the right folder."
+                )
+
+    return {
+        "score": max(0.0, min(1.0, score)),
+        "content_checked": content_checked,
+        "clips": clips,
+        "avg_usable": avg_usable,
+        "findings": findings,
+    }

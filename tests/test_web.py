@@ -780,3 +780,261 @@ class TestCrashRobustness:
         assert not t.is_alive()
         # serve()'s finally block must have restored the original.
         assert threading.excepthook is original
+
+
+# --- /api/movie/* — the Studio's Movie view -----------------------------------------
+
+
+def _movie_project(n_scenes=3, folders=()):
+    from monteur.movie import MovieProject, MovieScene
+
+    scenes = []
+    for i in range(n_scenes):
+        scene = MovieScene(
+            number=i + 1,
+            heading="EXT. WALDWEG - NIGHT" if i % 2 else "INT. AUTO - NIGHT",
+            summary=f"Szene {i + 1} treibt die Geschichte voran.",
+            action="Scheinwerfer schneiden durch den Nebel.",
+            shooting_tips=["Kamera tief halten", "2 Takes"],
+            sound_notes="Motor separat aufnehmen.",
+            cut_intent="ruhig halten",
+        )
+        if i < len(folders) and folders[i]:
+            scene.folder = folders[i]
+            scene.status = "assigned"
+        scenes.append(scene)
+    return MovieProject(
+        title="Nachtfahrt", genre="thriller", brief="Wald und Auto, nachts",
+        logline="Ein Fahrer, ein Wald, ein Geheimnis.", scenes=scenes,
+    )
+
+
+def _write_movie_project(project_dir, n_scenes=3, folders=()):
+    from monteur.movie import save_project
+
+    save_project(_movie_project(n_scenes, folders), project_dir)
+    return str(project_dir)
+
+
+class TestMovieApi:
+    def test_load_missing_project_dir_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/movie/load", {})
+        assert exc_info.value.code == 400
+        assert "project_dir" in json.loads(exc_info.value.read())["error"]
+
+    def test_load_without_movie_json_is_400_with_load_error(self, server, tmp_path):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/movie/load", {"project_dir": str(tmp_path)})
+        assert exc_info.value.code == 400
+        error = json.loads(exc_info.value.read())["error"]
+        assert "movie.json" in error and "movie new" in error
+
+    def test_load_happy_path(self, server, tmp_path):
+        project_dir = _write_movie_project(tmp_path / "proj", folders=["/f1"])
+        data = _post(f"{server}/api/movie/load", {"project_dir": project_dir})
+        assert data["project"]["title"] == "Nachtfahrt"
+        assert data["project"]["monteur_movie"] == 1
+        assert len(data["project"]["scenes"]) == 3
+        assert data["project"]["scenes"][0]["folder"] == "/f1"
+        assert data["progress"] == {"scenes": 3, "assigned": 1, "percent": 33}
+
+    def test_new_missing_brief_is_400(self, server, tmp_path):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/movie/new", {"project_dir": str(tmp_path)})
+        assert exc_info.value.code == 400
+        assert "brief" in json.loads(exc_info.value.read())["error"]
+
+    def test_new_with_fake_generate_movie(self, server, tmp_path, monkeypatch):
+        """The movie job resolves generate_movie at call time — patchable."""
+        import monteur.movie as movie_module
+
+        seen = {}
+
+        def fake_generate(brief, genre="", model=None):
+            seen["brief"], seen["genre"] = brief, genre
+            return _movie_project()
+
+        monkeypatch.setattr(movie_module, "generate_movie", fake_generate)
+        project_dir = tmp_path / "neu"
+        data = _post(
+            f"{server}/api/movie/new",
+            {"project_dir": str(project_dir), "brief": "Waldthriller",
+             "genre": "thriller"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert job["kind"] == "movie"
+        assert seen == {"brief": "Waldthriller", "genre": "thriller"}
+        assert {"stage": "movie", "name": "drafting the screenplay"} in job["progress"]
+
+        result = job["result"]
+        assert result["project"]["title"] == "Nachtfahrt"
+        assert result["progress"] == {"scenes": 3, "assigned": 0, "percent": 0}
+        assert [Path(p).name for p in result["paths"]] == [
+            "movie.json", "script.fountain", "shotlist.md",
+        ]
+        assert all(Path(p).is_file() for p in result["paths"])
+        # and the saved project loads back through the load endpoint
+        loaded = _post(f"{server}/api/movie/load", {"project_dir": str(project_dir)})
+        assert loaded["project"]["title"] == "Nachtfahrt"
+
+    def test_new_ai_error_is_job_error(self, server, tmp_path, monkeypatch):
+        """A screenplay has no offline fallback — MonteurAIError fails the job."""
+        import monteur.movie as movie_module
+        from monteur.ai import MonteurAIError
+
+        def fail(brief, genre="", model=None):
+            raise MonteurAIError("install the AI extra: pip install 'monteur[ai]'")
+
+        monkeypatch.setattr(movie_module, "generate_movie", fail)
+        data = _post(
+            f"{server}/api/movie/new",
+            {"project_dir": str(tmp_path / "neu"), "brief": "Waldthriller"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "monteur[ai]" in job["message"]
+        assert job["result"] is None
+
+    def test_assign_persists_to_disk(self, server, tmp_path):
+        project_dir = _write_movie_project(tmp_path / "proj")
+        data = _post(
+            f"{server}/api/movie/assign",
+            {"project_dir": project_dir, "scene": 2, "folder": "/footage/wald"},
+        )
+        assert data["project"]["scenes"][1]["folder"] == "/footage/wald"
+        assert data["project"]["scenes"][1]["status"] == "assigned"
+        assert data["progress"] == {"scenes": 3, "assigned": 1, "percent": 33}
+
+        # a fresh load reads the assignment back from movie.json on disk
+        loaded = _post(f"{server}/api/movie/load", {"project_dir": project_dir})
+        assert loaded["project"]["scenes"][1]["folder"] == "/footage/wald"
+        assert loaded["progress"]["assigned"] == 1
+
+    def test_assign_empty_folder_unassigns(self, server, tmp_path):
+        project_dir = _write_movie_project(tmp_path / "proj", folders=["/f1"])
+        data = _post(
+            f"{server}/api/movie/assign",
+            {"project_dir": project_dir, "scene": 1, "folder": ""},
+        )
+        assert data["project"]["scenes"][0]["status"] == "planned"
+        assert data["progress"]["assigned"] == 0
+
+    def test_assign_unknown_scene_is_400(self, server, tmp_path):
+        project_dir = _write_movie_project(tmp_path / "proj")
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/movie/assign",
+                {"project_dir": project_dir, "scene": 9, "folder": "/f"},
+            )
+        assert exc_info.value.code == 400
+        assert "no scene 9" in json.loads(exc_info.value.read())["error"]
+
+    def test_assign_bad_project_is_400(self, server, tmp_path):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/movie/assign",
+                {"project_dir": str(tmp_path), "scene": 1, "folder": "/f"},
+            )
+        assert exc_info.value.code == 400
+
+
+class TestMovieCheckApi:
+    """POST /api/movie/check — sift a scene's folder and judge the match."""
+
+    DEMO = TestCreateApi.DEMO
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+        _clear_scan_cache()
+
+    def _project_with_demo(self, tmp_path):
+        return _write_movie_project(tmp_path / "proj", folders=[self.DEMO])
+
+    def _check(self, server, project_dir, scene=1, **extra):
+        data = _post(
+            f"{server}/api/movie/check",
+            {"project_dir": project_dir, "scene": scene, **extra},
+        )
+        assert isinstance(data["job"], str) and data["job"]
+        return _wait_for_job(server, data["job"])
+
+    def test_check_end_to_end(self, server, tmp_path):
+        project_dir = self._project_with_demo(tmp_path)
+        job = self._check(server, project_dir)
+        assert job["state"] == "done"
+        assert job["kind"] == "scene-check"
+
+        # the usual per-clip sift progress ran
+        stages = [p["stage"] for p in job["progress"]]
+        assert stages.count("start") == 4
+        assert stages.count("done") == 4
+
+        result = job["result"]
+        assert result["scene"] == 1
+        check = result["check"]
+        assert check["clips"] == 4
+        assert 0.0 <= check["avg_usable"] <= 1.0
+        assert check["content_checked"] is False  # no vision annotations
+        assert check["score"] == 0.5
+        assert any("4 clips" in f for f in check["findings"])
+        assert any("monteur see" in f for f in check["findings"])
+        clips = result["clips"]
+        assert {c["name"] for c in clips} == {
+            "clip_A.mp4", "clip_B.mp4", "clip_C.mp4", "clip_D.mp4",
+        }
+        assert all(0.0 <= c["usable_ratio"] <= 1.0 for c in clips)
+        assert "vision_error" not in result
+
+    def test_second_check_reuses_scan_cache(self, server, tmp_path):
+        project_dir = self._project_with_demo(tmp_path)
+        first = self._check(server, project_dir)
+        assert first["state"] == "done"
+
+        job = self._check(server, project_dir)
+        assert job["state"] == "done"
+        assert {"stage": "cache", "name": "using previous scan"} in job["progress"]
+        assert not any(p["stage"] in ("start", "done") for p in job["progress"])
+        assert job["result"]["check"]["clips"] == 4
+
+    def test_check_with_see_uses_vision_annotations(self, server, tmp_path, monkeypatch):
+        fake = _fake_vision()
+        monkeypatch.setitem(sys.modules, "monteur.vision", fake)
+        project_dir = self._project_with_demo(tmp_path)
+        job = self._check(server, project_dir, see=True)
+        assert job["state"] == "done"
+        assert fake.calls == [4]
+        assert any(p["stage"] == "vision" for p in job["progress"])
+        check = job["result"]["check"]
+        assert check["content_checked"] is True
+        assert "vision_error" not in job["result"]
+
+    def test_check_with_see_vision_error_still_checks(self, server, tmp_path, monkeypatch):
+        fake = _fake_vision(fail_with="ANTHROPIC_API_KEY is not set")
+        monkeypatch.setitem(sys.modules, "monteur.vision", fake)
+        project_dir = self._project_with_demo(tmp_path)
+        job = self._check(server, project_dir, see=True)
+        assert job["state"] == "done"  # vision stays an upgrade, not a gate
+        assert job["result"]["vision_error"] == "ANTHROPIC_API_KEY is not set"
+        assert job["result"]["check"]["content_checked"] is False
+
+    def test_check_unassigned_scene_is_error_job(self, server, tmp_path):
+        project_dir = _write_movie_project(tmp_path / "proj")  # nothing assigned
+        job = self._check(server, project_dir, scene=2)
+        assert job["state"] == "error"
+        assert "no footage folder assigned" in job["message"]
+
+    def test_check_unknown_scene_is_error_job(self, server, tmp_path):
+        project_dir = self._project_with_demo(tmp_path)
+        job = self._check(server, project_dir, scene=99)
+        assert job["state"] == "error"
+        assert "no scene 99" in job["message"]
+
+    def test_check_missing_scene_is_400(self, server, tmp_path):
+        project_dir = self._project_with_demo(tmp_path)
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/movie/check", {"project_dir": project_dir})
+        assert exc_info.value.code == 400

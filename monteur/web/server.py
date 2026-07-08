@@ -20,6 +20,12 @@ API (all JSON):
 * ``POST /api/create/pick``   {"folder", "music_dir",
   "max_duration"?}                                              -> {"job": id}
 * ``POST /api/create/kit``    {build payload + "kit_dir"}       -> {"job": id}
+* ``POST /api/movie/load``    {"project_dir"}                   -> {"project", "progress"}
+* ``POST /api/movie/new``     {"project_dir", "brief",
+  "genre"?}                                                     -> {"job": id}
+* ``POST /api/movie/assign``  {"project_dir", "scene",
+  "folder"}                                                     -> {"project", "progress"}
+* ``POST /api/movie/check``   {"project_dir", "scene", "see"?}  -> {"job": id}
 * ``GET  /api/jobs/<id>``                                       -> the job dict
 * ``POST /api/jobs/<id>/cancel``                                -> {"ok": true}
 * ``POST /api/pick``          {"kind": "folder"|"music"|"file"} -> {"path"} | {"error"}
@@ -45,6 +51,17 @@ base64 so the browser can show them.
 label the good moments after the sift. Vision is an upgrade, not a gate: a
 missing anthropic package or API key (``MonteurVisionError``) never fails the
 job — the result simply carries ``"vision_error"`` instead of annotations.
+
+The ``/api/movie/*`` endpoints drive the Studio's Movie view on top of
+:mod:`monteur.movie`. ``load`` and ``assign`` are instant (no job; both
+return the project dict plus its shooting progress). ``new`` drafts a whole
+blueprint with Claude as a ``"movie"`` job — unlike vision this IS a gate: a
+screenplay cannot degrade to offline, so a ``MonteurAIError`` fails the job
+with its message. ``check`` sifts a scene's assigned folder (through the
+same scan cache as build/pick/kit) as a ``"scene-check"`` job, optionally
+lets Claude vision label it (``"see"``, soft-fail as above), and holds the
+footage against the scene text with
+:func:`monteur.movie.check_scene_footage` — honest hints, not verdicts.
 """
 
 from __future__ import annotations
@@ -213,7 +230,7 @@ _PICK_LOCK = threading.Lock()
 def _new_job(kind: str) -> dict:
     job = {
         "id": secrets.token_hex(4),
-        "kind": kind,  # "scan" | "build" | "pick" | "kit"
+        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "movie" | "scene-check"
         "state": "running",  # -> "done" | "error" | "cancelled"
         "progress": [],  # dicts: {"index","total","name","stage"[,"usable_ratio"]}
         "message": "",  # human-readable reason when state == "error"
@@ -633,6 +650,117 @@ def _run_kit_job(job: dict, payload: dict) -> None:
         job["state"] = "error"
 
 
+def _movie_module():
+    """Resolve :mod:`monteur.movie` at CALL time (same seam as vision).
+
+    ``importlib.import_module`` honours ``sys.modules``, so tests can either
+    ``monkeypatch.setattr("monteur.movie.generate_movie", fake)`` or replace
+    the whole module — mirroring how the scan worker resolves vision.
+    """
+    import importlib
+
+    return importlib.import_module("monteur.movie")
+
+
+def _movie_payload(movie, project) -> dict:
+    """The response body every movie endpoint shares: project + progress."""
+    return {
+        "project": movie.project_to_dict(project),
+        "progress": movie.project_progress(project),
+    }
+
+
+def _run_movie_job(job: dict, payload: dict) -> None:
+    """Daemon-thread body for POST /api/movie/new (draft a blueprint).
+
+    Unlike vision, the screenplay is a GATE: there is no offline fallback
+    for writing a movie, so a MonteurAIError fails the job with its message
+    (which already tells the user about packages/keys/briefs).
+    """
+    from monteur.ai import MonteurAIError
+
+    movie = _movie_module()
+    try:
+        with _JOBS_LOCK:
+            job["progress"].append(
+                {"stage": "movie", "name": "drafting the screenplay"}
+            )
+        project = movie.generate_movie(
+            payload.get("brief", ""), genre=payload.get("genre", "")
+        )
+        paths = movie.save_project(project, payload.get("project_dir", ""))
+        result = _movie_payload(movie, project)
+        result["paths"] = [str(p) for p in paths]
+        job["result"] = result
+        job["state"] = "done"
+    except (MonteurAIError, OSError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
+def _run_scene_check_job(job: dict, payload: dict) -> None:
+    """Daemon-thread body for POST /api/movie/check.
+
+    Sifts the scene's assigned folder through the same cache path as
+    build/pick/kit, optionally lets Claude vision label the moments
+    (``"see"``, soft-fail — the technical check still runs), then holds the
+    footage against the scene text with movie.check_scene_footage.
+    """
+    from monteur.media import MonteurMediaError
+    from monteur.sift import SiftCancelled
+
+    movie = _movie_module()
+    try:
+        project = movie.load_project(payload.get("project_dir", ""))
+        scene_number = int(payload.get("scene", 0))
+        scene = next(
+            (s for s in project.scenes if s.number == scene_number), None
+        )
+        if scene is None:
+            raise ValueError(
+                f"no scene {scene_number} in this project — it has "
+                f"{len(project.scenes)} scene(s)"
+            )
+        if not scene.folder:
+            raise ValueError(
+                f"scene {scene.number} has no footage folder assigned yet — "
+                "assign one, then check"
+            )
+        reports, _cached = _sift_or_cached(job, scene.folder)
+        if job["cancel"].is_set():
+            raise SiftCancelled("cancelled")
+        result: dict = {}
+        if payload.get("see"):
+            # Reports that already carry labels (a see-scan, or a previous
+            # check on the same folder) don't need a second vision pass.
+            annotated = any(
+                m.label or m.tags for r in reports for m in r.moments
+            )
+            if not annotated:
+                _notes, error = _apply_vision(job, reports)
+                if error:
+                    result["vision_error"] = error
+        result["scene"] = scene.number
+        result["check"] = movie.check_scene_footage(scene, reports)
+        result["clips"] = [
+            {"name": Path(r.path).name, "usable_ratio": r.usable_ratio}
+            for r in reports
+        ]
+        job["result"] = result
+        job["state"] = "done"
+    except SiftCancelled:
+        job["state"] = "cancelled"
+    except (MonteurMediaError, ValueError, FileNotFoundError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
 _AUDIO_FILETYPES = [
     ("Audio files", "*.wav *.mp3 *.m4a *.aac *.flac *.ogg *.aiff *.aif *.wma"),
     ("All files", "*.*"),
@@ -755,6 +883,10 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/create/build"): self._create_build,
             ("POST", "/api/create/pick"): self._create_pick,
             ("POST", "/api/create/kit"): self._create_kit,
+            ("POST", "/api/movie/load"): self._movie_load,
+            ("POST", "/api/movie/new"): self._movie_new,
+            ("POST", "/api/movie/assign"): self._movie_assign,
+            ("POST", "/api/movie/check"): self._movie_check,
             ("POST", "/api/pick"): self._pick,
         }
         if (method, path) in routes:
@@ -1004,6 +1136,72 @@ class MonteurHandler(BaseHTTPRequestHandler):
             target=_run_kit_job,
             args=(job, payload),
             name=f"monteur-kit-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    # -- movie endpoints (the Studio's Movie view) --------------------------
+
+    def _movie_dir(self, payload: dict) -> str:
+        project_dir = str(payload.get("project_dir") or "").strip()
+        if not project_dir:
+            raise ApiError(400, "missing 'project_dir' (the movie project folder)")
+        return project_dir
+
+    def _movie_scene_number(self, payload: dict) -> int:
+        try:
+            return int(payload.get("scene"))
+        except (TypeError, ValueError):
+            raise ApiError(400, "missing or invalid 'scene' (the scene number)")
+
+    def _movie_load(self) -> None:
+        payload = self._read_json()
+        project_dir = self._movie_dir(payload)
+        movie = _movie_module()
+        try:
+            project = movie.load_project(project_dir)
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            raise ApiError(400, str(exc))
+        self._send_json(_movie_payload(movie, project))
+
+    def _movie_new(self) -> None:
+        payload = self._read_json()
+        self._movie_dir(payload)
+        if not str(payload.get("brief") or "").strip():
+            raise ApiError(400, "missing 'brief' (the film idea + constraints)")
+        job = _new_job("movie")
+        threading.Thread(
+            target=_run_movie_job,
+            args=(job, payload),
+            name=f"monteur-movie-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _movie_assign(self) -> None:
+        payload = self._read_json()
+        project_dir = self._movie_dir(payload)
+        scene_number = self._movie_scene_number(payload)
+        movie = _movie_module()
+        try:
+            project = movie.load_project(project_dir)
+            movie.assign_scene(
+                project, scene_number, str(payload.get("folder") or "")
+            )
+            movie.save_project(project, project_dir)
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            raise ApiError(400, str(exc))
+        self._send_json(_movie_payload(movie, project))
+
+    def _movie_check(self) -> None:
+        payload = self._read_json()
+        self._movie_dir(payload)
+        self._movie_scene_number(payload)
+        job = _new_job("scene-check")
+        threading.Thread(
+            target=_run_scene_check_job,
+            args=(job, payload),
+            name=f"monteur-scene-check-{job['id']}",
             daemon=True,
         ).start()
         self._send_json({"job": job["id"]})
