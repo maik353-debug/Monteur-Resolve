@@ -2167,6 +2167,13 @@ class ResolveBridge:
                 f"project {self.project_name()!r}."
             )
 
+        # A new timeline inherits the PROJECT's frame rate — in a 50 fps
+        # project every 25 fps record frame would land at half its time:
+        # cuts beside the beat, titles past the end of the video. Pin the
+        # rate to the plan's fps and TRUST the read-back value for all
+        # positioning (some Resolve builds refuse the setting).
+        fps = _pin_timeline_fps(timeline, fps, warnings)
+
         # AppendToTimeline addresses the SOURCE in the media pool item's own
         # frame space: the clip's native frame rate (a 50 fps DJI file counts
         # 50 frames per second no matter what the timeline runs at), anchored
@@ -2321,6 +2328,44 @@ class ResolveBridge:
 
 
 # --- Canvas (resolution + cinemascope crop) -------------------------------------
+
+
+def _pin_timeline_fps(timeline: Any, fps: float, warnings) -> float:
+    """Set the fresh timeline's frame rate to ``fps``; return the REAL rate.
+
+    ``CreateEmptyTimeline`` inherits the project's frame rate, so the
+    plan's fps and the timeline's fps can disagree — and every record
+    frame, title frame and music frame would land at the wrong time.
+    Tries ``SetSetting("useCustomSettings"/"timelineFrameRate")``, then
+    reads the rate back and returns what the timeline ACTUALLY runs at
+    (the caller does all positioning in that currency). A refusal is
+    non-fatal: one warning explains that the cut was placed at the
+    timeline's own rate to stay on the beat.
+    """
+    setter = getattr(timeline, "SetSetting", None)
+    if callable(setter):
+        try:
+            setter("useCustomSettings", "1")
+            setter("timelineFrameRate", f"{fps:g}")
+        except Exception:  # noqa: BLE001 - refusal handled via read-back
+            pass
+    getter = getattr(timeline, "GetSetting", None)
+    actual: float | None = None
+    if callable(getter):
+        try:
+            raw = str(getter("timelineFrameRate") or "").split()
+            actual = float(raw[0]) if raw else None
+        except Exception:  # noqa: BLE001 - unreadable rate: trust the request
+            actual = None
+    if actual and actual > 0 and abs(actual - fps) > 1e-3:
+        if warnings is not None:
+            warnings.append(
+                f"the timeline runs at {actual:g} fps (the project's "
+                f"default won over the requested {fps:g}) — the cut was "
+                f"placed at {actual:g} fps so it stays on the beat."
+            )
+        return actual
+    return fps
 
 
 def _set_timeline_resolution(timeline: Any, width: int, height: int) -> bool:

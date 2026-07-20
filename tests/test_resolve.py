@@ -217,6 +217,9 @@ class FakeTimeline:
 
     def SetSetting(self, key: str, value: str) -> bool:
         self.settings_set.append((key, value))
+        if self.set_setting_result and key == "timelineFrameRate":
+            # An accepting Resolve honors the rate: read-back returns it.
+            self._fps = value
         return self.set_setting_result
 
     def GetStartFrame(self) -> int:
@@ -813,6 +816,8 @@ def test_build_timeline_canvas_cine_sets_resolution_and_crop() -> None:
     # Timeline-level custom settings, in order, with STRING values.
     assert created.settings_set == [
         ("useCustomSettings", "1"),
+        ("timelineFrameRate", "24"),
+        ("useCustomSettings", "1"),
         ("timelineResolutionWidth", "3840"),
         ("timelineResolutionHeight", "1608"),
     ]
@@ -838,6 +843,8 @@ def test_build_timeline_canvas_uhd_sets_resolution_and_fill() -> None:
     created = project._timelines[-1]
     assert created.settings_set == [
         ("useCustomSettings", "1"),
+        ("timelineFrameRate", "24"),
+        ("useCustomSettings", "1"),
         ("timelineResolutionWidth", "3840"),
         ("timelineResolutionHeight", "2160"),
     ]
@@ -852,7 +859,11 @@ def test_build_timeline_without_canvas_touches_no_settings() -> None:
     bridge, project = make_bridge([standard_timeline()])
     bridge.build_timeline_from_plan(make_plan(), fps=24.0)
     created = project._timelines[-1]
-    assert created.settings_set == []
+    # Only the frame-rate pin: no canvas means no resolution/scaling calls.
+    assert created.settings_set == [
+        ("useCustomSettings", "1"),
+        ("timelineFrameRate", "24"),
+    ]
     assert project.settings_set == []
     for item in created._tracks["video"][0]:
         assert item.properties == []
@@ -1306,6 +1317,32 @@ def test_build_timeline_tiles_without_one_frame_gaps() -> None:
     assert lengths == [31, 31, 31]
     assert positions[0] + lengths[0] == positions[1]
     assert positions[1] + lengths[1] == positions[2]
+
+
+def test_build_timeline_repositions_at_the_timelines_real_fps() -> None:
+    # The field bug behind "cuts beside the beat, Text+ past the end": a
+    # 50 fps project ignores the requested 25 fps timeline rate. The build
+    # must trust the READ-BACK rate and place everything in that currency.
+    bridge, project = make_bridge([standard_timeline()])
+    pool = project.media_pool
+    original_create = pool.CreateEmptyTimeline
+
+    def create(name):
+        timeline = original_create(name)
+        timeline.set_setting_result = False  # project default wins...
+        timeline._fps = "50"  # ...and the timeline actually runs at 50
+        return timeline
+
+    pool.CreateEmptyTimeline = create
+    warnings: list[str] = []
+    bridge.build_timeline_from_plan(make_plan(), fps=25.0, warnings=warnings)
+    video = pool.appended[:3]
+    # Record positions and source frames in 50 fps: 0/2/3 s -> 0/100/150.
+    assert [c["recordFrame"] for c in video] == [0, 100, 150]
+    assert (video[0]["startFrame"], video[0]["endFrame"]) == (50, 149)
+    music = pool.appended[3]
+    assert (music["startFrame"], music["endFrame"]) == (0, 199)
+    assert any("50 fps" in w for w in warnings)
 
 
 def test_build_timeline_record_base_uses_timeline_start_frame() -> None:
@@ -2888,6 +2925,8 @@ def test_worker_main_build_plan_canvas_wire_round_trip(monkeypatch, capsys) -> N
     assert data == {"ok": True, "timeline": "Monteur Montage", "warnings": []}
     created = project._timelines[-1]
     assert created.settings_set == [
+        ("useCustomSettings", "1"),
+        ("timelineFrameRate", "24"),
         ("useCustomSettings", "1"),
         ("timelineResolutionWidth", "3840"),
         ("timelineResolutionHeight", "1608"),
