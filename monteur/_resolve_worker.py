@@ -18,6 +18,23 @@ Protocol
 Command is the first CLI argument; extra arguments arrive as a JSON object on
 stdin.
 
+``info``
+    stdin: ignored. Crash-free diagnostics (never imports the native
+    module): interpreter version/bits/executable, ``module_dir`` (where
+    DaVinciResolveScript.py was found, or null), ``searched``, ``env``
+    (RESOLVE_SCRIPT_API / RESOLVE_SCRIPT_LIB / PYTHONPATH /
+    MONTEUR_RESOLVE_PYTHON, each with raw ``value``, ``quoted`` and
+    ``exists`` flags — PYTHONPATH gets per-entry ``missing`` instead of
+    ``exists``) and ``resolve_install`` (``library``: the actual
+    fusionscript.dll/.so found, or null; ``searched``: where it looked).
+
+``load_test``
+    stdin: ignored. The ONE exception to the single-JSON-response protocol:
+    streams one JSON line per completed stage (``locate`` → ``dll-load`` →
+    ``import`` → ``connect``), flushed after each, so a native crash in a
+    later stage still leaves the completed stages on stdout. See
+    :func:`load_test` for the exact stage payloads.
+
 ``status``
     stdin: ignored. Response on success::
 
@@ -105,12 +122,20 @@ def handle(command: str, request: dict) -> dict:
     ``MonteurResolveError`` is converted to a clean ``false`` payload.
     """
     if command == "info":
-        # Safe diagnostic: report this interpreter and whether Resolve's module
-        # FILE exists — WITHOUT importing the native part (so this never crashes).
+        # Safe diagnostic: report this interpreter, whether Resolve's module
+        # FILE and native library exist, and the Resolve-relevant environment
+        # variables (with quoted/stale flags) — WITHOUT importing the native
+        # part (so this never crashes).
         import os.path
         import struct
 
-        from monteur.resolve import _MODULE_NAME, _candidate_module_dirs
+        from monteur.resolve import (
+            _MODULE_NAME,
+            _candidate_module_dirs,
+            _env_report,
+            _fusionscript_candidates,
+            _locate_fusionscript,
+        )
 
         dirs = _candidate_module_dirs()
         found = next(
@@ -127,6 +152,11 @@ def handle(command: str, request: dict) -> dict:
             "executable": sys.executable,
             "module_dir": found,
             "searched": dirs,
+            "env": _env_report(),
+            "resolve_install": {
+                "library": _locate_fusionscript(),
+                "searched": _fusionscript_candidates(),
+            },
         }
 
     from monteur.resolve import (
@@ -203,10 +233,125 @@ def handle(command: str, request: dict) -> dict:
     return {"error": f"Unknown worker command: {command!r}"}
 
 
+def load_test() -> None:
+    """The ``load_test`` command: staged native load, one JSON line per stage.
+
+    Unlike every other command (single JSON response), this streams a line
+    per COMPLETED stage and flushes after each — so when a later stage
+    hard-crashes this process, the parent still knows the last stage that
+    succeeded from the partial stdout. Stages, in order:
+
+    1. ``locate`` — find the fusionscript library file (no native code).
+       Success: ``{"stage": "locate", "ok": true, "path": <lib>}``. When no
+       library exists anywhere Monteur looks, a clean terminal
+       ``{"stage": "locate", "ok": false, "error": ...}`` is emitted and
+       nothing native is ever attempted.
+    2. ``dll-load`` — ``ctypes.CDLL`` of the located library (after
+       ``_register_resolve_dll_dir``, exactly like the real load path).
+    3. ``import`` — ``import DaVinciResolveScript``.
+    4. ``connect`` — ``scriptapp("Resolve")``; ``ok: false`` with the
+       message when it returns None or raises cleanly (module fine, Resolve
+       not reachable).
+
+    Any stage failing CLEANLY (a catchable exception) emits
+    ``{"stage": ..., "ok": false, "error": ...}`` and stops; the process
+    still exits 0. Only an uncatchable native crash exits nonzero — and the
+    parent (:func:`monteur.resolve.load_test_isolated`) pinpoints the crash
+    site from the completed-stage trail.
+    """
+    import ctypes
+
+    from monteur.resolve import (
+        _locate_fusionscript,
+        _register_resolve_dll_dir,
+        find_scripting_module,
+    )
+
+    def emit(payload: dict) -> None:
+        print(json.dumps(payload), flush=True)
+
+    library = _locate_fusionscript()
+    if library is None:
+        emit(
+            {
+                "stage": "locate",
+                "ok": False,
+                "error": (
+                    "No fusionscript library was found — DaVinci Resolve "
+                    "does not appear to be installed in its standard "
+                    "location (and RESOLVE_SCRIPT_LIB, if set, does not "
+                    "point at one)."
+                ),
+            }
+        )
+        return
+    emit({"stage": "locate", "ok": True, "path": library})
+    _register_resolve_dll_dir()
+    try:
+        ctypes.CDLL(library)
+    except Exception as exc:  # noqa: BLE001 - a clean load failure is data
+        emit(
+            {
+                "stage": "dll-load",
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+        return
+    emit({"stage": "dll-load", "ok": True})
+    try:
+        module = find_scripting_module()
+    except Exception as exc:  # noqa: BLE001 - a clean import failure is data
+        emit({"stage": "import", "ok": False, "error": str(exc)})
+        return
+    emit({"stage": "import", "ok": True})
+    try:
+        app = module.scriptapp("Resolve")
+    except Exception as exc:  # noqa: BLE001 - a clean connect failure is data
+        emit(
+            {
+                "stage": "connect",
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+        return
+    if app is None:
+        emit(
+            {
+                "stage": "connect",
+                "ok": False,
+                "error": (
+                    "scriptapp('Resolve') returned nothing — the module is "
+                    "fine, but no running Resolve was reached (is Resolve "
+                    "running with external scripting set to Local?)."
+                ),
+            }
+        )
+        return
+    emit({"stage": "connect", "ok": True})
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Always exits 0 unless the interpreter natively crashes."""
     args = list(sys.argv[1:] if argv is None else argv)
     command = args[0] if args else ""
+    if command == "load_test":
+        # Streams its own line-per-stage protocol; never reads stdin.
+        try:
+            load_test()
+        except Exception as exc:  # noqa: BLE001 - must not look like a crash
+            print(
+                json.dumps(
+                    {
+                        "stage": "internal",
+                        "ok": False,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                ),
+                flush=True,
+            )
+        return 0
     request = _read_request()
     try:
         response = handle(command, request)

@@ -1820,8 +1820,24 @@ class TestResolvePythonApi:
         report = {
             "worker_interpreter": "/py311",
             "interpreter_source": "settings",
-            "status": {"connected": False, "error": "closed"},
-            "verdict": "All fine, just start Resolve.",
+            "status": {"connected": False, "error": "crashed", "reason": "crash"},
+            # the crash-forensics fields travel verbatim to the settings UI
+            "info": {
+                "python_version": "3.11.9",
+                "bits": 64,
+                "env": {
+                    "RESOLVE_SCRIPT_LIB": {
+                        "value": '"C:\\x"', "quoted": True, "exists": False,
+                    },
+                },
+                "resolve_install": {"library": None, "searched": ["C:\\x"]},
+            },
+            "load_test": {
+                "stages": [{"stage": "locate", "ok": True, "path": "C:\\x"}],
+                "crashed_at": "dll-load",
+                "reason": "crash",
+            },
+            "verdict": "Your RESOLVE_SCRIPT_LIB has quotation marks around it.",
         }
         monkeypatch.setattr(resolve, "diagnose", lambda timeout=25.0: report)
         assert _get(f"{server}/api/resolve/diagnose") == report
@@ -1833,6 +1849,23 @@ class TestResolvePythonApi:
         assert data["status"]["connected"] is False
         assert data["interpreter_source"] in ("env", "settings", "default")
         assert data["verdict"]
+        # the crash-forensics payload is present: env flags for all four
+        # variables, the fusionscript search result, and the load_test slot
+        # (None here — a clean "not connected" never triggers the load test).
+        env = data["info"]["env"]
+        assert set(env) == {
+            "RESOLVE_SCRIPT_API",
+            "RESOLVE_SCRIPT_LIB",
+            "PYTHONPATH",
+            "MONTEUR_RESOLVE_PYTHON",
+        }
+        assert all(
+            set(entry) >= {"value", "quoted", "exists"} for entry in env.values()
+        )
+        install = data["info"]["resolve_install"]
+        assert install["library"] is None  # no Resolve in this container
+        assert install["searched"]
+        assert data["load_test"] is None
 
     # -- POST /api/resolve/detect -------------------------------------------
 

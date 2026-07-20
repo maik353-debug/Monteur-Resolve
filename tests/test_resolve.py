@@ -1459,6 +1459,554 @@ def test_diagnose_reports_interpreter_source(tmp_path, monkeypatch) -> None:
     assert "MONTEUR_RESOLVE_PYTHON environment variable" in d["verdict"]
 
 
+# --- Crash forensics: env report, install location, staged load test ------------
+
+
+@pytest.fixture(autouse=True)
+def _clean_resolve_env(monkeypatch):
+    """The forensics read RESOLVE_SCRIPT_API/LIB and PYTHONPATH — keep the
+    developer's (or CI's) real values out of every test; tests that want a
+    value set it explicitly on top of this."""
+    monkeypatch.delenv("RESOLVE_SCRIPT_API", raising=False)
+    monkeypatch.delenv("RESOLVE_SCRIPT_LIB", raising=False)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+
+
+def test_env_report_quoting_and_existence(tmp_path, monkeypatch) -> None:
+    api_dir = tmp_path / "Scripting"
+    api_dir.mkdir()
+    monkeypatch.setenv("RESOLVE_SCRIPT_API", str(api_dir))
+    monkeypatch.setenv("RESOLVE_SCRIPT_LIB", '"C:\\nope\\fusionscript.dll"')
+    good = tmp_path / "Modules"
+    good.mkdir()
+    gone = tmp_path / "gone"
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(good), str(gone)]))
+
+    report = resolve._env_report()
+    assert report["RESOLVE_SCRIPT_API"] == {
+        "value": str(api_dir), "quoted": False, "exists": True,
+    }
+    lib = report["RESOLVE_SCRIPT_LIB"]
+    assert lib["quoted"] is True  # the classic copy-pasted-from-the-docs quotes
+    assert lib["exists"] is False  # checked AFTER stripping the quotes
+    pythonpath = report["PYTHONPATH"]
+    assert pythonpath["exists"] is None  # a path LIST — per-entry instead
+    assert pythonpath["missing"] == [str(gone)]
+    # unset variables report cleanly, never crash the report
+    assert report["MONTEUR_RESOLVE_PYTHON"] == {
+        "value": None, "quoted": False, "exists": None,
+    }
+
+
+def test_env_report_single_sided_quote_counts(monkeypatch) -> None:
+    monkeypatch.setenv("RESOLVE_SCRIPT_LIB", 'C:\\x\\fusionscript.dll"')
+    assert resolve._env_report()["RESOLVE_SCRIPT_LIB"]["quoted"] is True
+
+
+def test_fusionscript_candidates_prefer_env_and_strip_quotes(
+    tmp_path, monkeypatch
+) -> None:
+    lib = tmp_path / "fusionscript.so"
+    lib.write_bytes(b"")
+    monkeypatch.setenv("RESOLVE_SCRIPT_LIB", f'"{lib}"')
+    candidates = resolve._fusionscript_candidates()
+    assert candidates[0] == str(lib)  # quotes stripped, env first
+    assert len(candidates) >= 2  # the per-OS default is still listed
+    assert resolve._locate_fusionscript() == str(lib)
+
+
+def test_locate_fusionscript_none_when_nothing_exists(monkeypatch) -> None:
+    assert resolve._locate_fusionscript() is None  # container has no Resolve
+
+
+def test_worker_info_reports_env_and_install(tmp_path, monkeypatch) -> None:
+    from monteur import _resolve_worker
+
+    lib = tmp_path / "fusionscript.so"
+    lib.write_bytes(b"")
+    monkeypatch.setenv("RESOLVE_SCRIPT_LIB", f'"{lib}"')  # quoted but real
+    response = _resolve_worker.handle("info", {})
+    env = response["env"]
+    assert set(env) == set(resolve._DIAG_ENV_VARS)
+    assert env["RESOLVE_SCRIPT_LIB"]["quoted"] is True
+    assert env["RESOLVE_SCRIPT_LIB"]["exists"] is True
+    install = response["resolve_install"]
+    assert install["library"] == str(lib)
+    assert str(lib) in install["searched"]
+    # the pre-existing info fields survive
+    assert response["python_version"] == "%d.%d.%d" % sys.version_info[:3]
+    assert response["bits"] in (32, 64)
+
+
+def test_worker_info_reports_missing_install(monkeypatch) -> None:
+    from monteur import _resolve_worker
+
+    response = _resolve_worker.handle("info", {})
+    assert response["resolve_install"]["library"] is None
+    assert response["resolve_install"]["searched"]  # the per-OS default path
+
+
+def _load_test_lines(capsys) -> list[dict]:
+    out = capsys.readouterr().out
+    return [json.loads(line) for line in out.splitlines() if line.strip()]
+
+
+def test_worker_load_test_no_library_is_clean_terminal(monkeypatch, capsys) -> None:
+    from monteur import _resolve_worker
+
+    monkeypatch.setattr(resolve, "_locate_fusionscript", lambda: None)
+    assert _resolve_worker.main(["load_test"]) == 0
+    lines = _load_test_lines(capsys)
+    assert len(lines) == 1
+    assert lines[0]["stage"] == "locate"
+    assert lines[0]["ok"] is False
+    assert "does not appear to be installed" in lines[0]["error"]
+
+
+def test_worker_load_test_full_run_with_fake_module(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    import ctypes
+    from types import SimpleNamespace
+
+    from monteur import _resolve_worker
+
+    lib = tmp_path / "fusionscript.so"
+    lib.write_bytes(b"")
+    monkeypatch.setattr(resolve, "_locate_fusionscript", lambda: str(lib))
+    monkeypatch.setattr(ctypes, "CDLL", lambda path: object())
+    fake_module = SimpleNamespace(scriptapp=lambda name: object())
+    monkeypatch.setattr(resolve, "find_scripting_module", lambda: fake_module)
+
+    assert _resolve_worker.main(["load_test"]) == 0
+    lines = _load_test_lines(capsys)
+    assert [line["stage"] for line in lines] == [
+        "locate", "dll-load", "import", "connect",
+    ]
+    assert lines[0] == {"stage": "locate", "ok": True, "path": str(lib)}
+    assert all(line["ok"] for line in lines)
+
+
+def test_worker_load_test_dll_failure_is_clean(tmp_path, monkeypatch, capsys) -> None:
+    # A text file is not a loadable library: the REAL ctypes.CDLL raises a
+    # clean OSError, which must become an ok:false stage line, not a crash.
+    from monteur import _resolve_worker
+
+    lib = tmp_path / "fusionscript.so"
+    lib.write_text("definitely not a shared library")
+    monkeypatch.setattr(resolve, "_locate_fusionscript", lambda: str(lib))
+
+    assert _resolve_worker.main(["load_test"]) == 0
+    lines = _load_test_lines(capsys)
+    assert [line["stage"] for line in lines] == ["locate", "dll-load"]
+    assert lines[1]["ok"] is False
+    assert lines[1]["error"]
+
+
+def test_worker_load_test_import_failure_is_clean(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    import ctypes
+
+    from monteur import _resolve_worker
+
+    lib = tmp_path / "fusionscript.so"
+    lib.write_bytes(b"")
+    monkeypatch.setattr(resolve, "_locate_fusionscript", lambda: str(lib))
+    monkeypatch.setattr(ctypes, "CDLL", lambda path: object())
+
+    def boom():
+        raise MonteurResolveError("Could not locate the DaVinciResolveScript module.")
+
+    monkeypatch.setattr(resolve, "find_scripting_module", boom)
+    assert _resolve_worker.main(["load_test"]) == 0
+    lines = _load_test_lines(capsys)
+    assert [line["stage"] for line in lines] == ["locate", "dll-load", "import"]
+    assert lines[2]["ok"] is False
+    assert "DaVinciResolveScript" in lines[2]["error"]
+
+
+def test_worker_load_test_connect_none_is_ok_false(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    import ctypes
+    from types import SimpleNamespace
+
+    from monteur import _resolve_worker
+
+    lib = tmp_path / "fusionscript.so"
+    lib.write_bytes(b"")
+    monkeypatch.setattr(resolve, "_locate_fusionscript", lambda: str(lib))
+    monkeypatch.setattr(ctypes, "CDLL", lambda path: object())
+    monkeypatch.setattr(
+        resolve, "find_scripting_module",
+        lambda: SimpleNamespace(scriptapp=lambda name: None),
+    )
+    assert _resolve_worker.main(["load_test"]) == 0
+    lines = _load_test_lines(capsys)
+    connect = lines[-1]
+    assert connect["stage"] == "connect"
+    assert connect["ok"] is False
+    assert "running" in connect["error"]
+
+
+def test_worker_load_test_connect_exception_is_clean(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    import ctypes
+    from types import SimpleNamespace
+
+    from monteur import _resolve_worker
+
+    def bad_scriptapp(name):
+        raise RuntimeError("IPC pipe broke")
+
+    lib = tmp_path / "fusionscript.so"
+    lib.write_bytes(b"")
+    monkeypatch.setattr(resolve, "_locate_fusionscript", lambda: str(lib))
+    monkeypatch.setattr(ctypes, "CDLL", lambda path: object())
+    monkeypatch.setattr(
+        resolve, "find_scripting_module",
+        lambda: SimpleNamespace(scriptapp=bad_scriptapp),
+    )
+    assert _resolve_worker.main(["load_test"]) == 0
+    connect = _load_test_lines(capsys)[-1]
+    assert connect == {
+        "stage": "connect", "ok": False, "error": "RuntimeError: IPC pipe broke",
+    }
+
+
+# --- load_test_isolated: parsing full and PARTIAL stage streams -----------------
+
+
+def test_load_test_isolated_full_clean_run(monkeypatch) -> None:
+    lines = [
+        {"stage": "locate", "ok": True, "path": "/lib/fusionscript.so"},
+        {"stage": "dll-load", "ok": True},
+        {"stage": "import", "ok": True},
+        {"stage": "connect", "ok": False, "error": "not running"},
+    ]
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[0] == resolve._worker_python()
+        assert cmd[1].endswith("_resolve_worker.py")
+        assert cmd[2] == "load_test"
+        return _completed(0, "\n".join(json.dumps(line) for line in lines) + "\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    report = resolve.load_test_isolated()
+    assert report["stages"] == lines
+    assert report["crashed_at"] is None
+    assert report["reason"] is None
+
+
+def test_load_test_isolated_partial_output_pinpoints_crash(monkeypatch) -> None:
+    # The child hard-crashed DURING dll-load: only the locate line (plus a
+    # truncated fragment) made it out. crashed_at = the stage AFTER the last
+    # completed one.
+    stdout = (
+        json.dumps({"stage": "locate", "ok": True, "path": "/x/fusionscript.dll"})
+        + "\n"
+        + '{"stage": "dll-'  # truncated mid-write by the crash
+    )
+
+    def fake_run(cmd, **kwargs):
+        return _completed(-1073741819, stdout)  # 0xC0000005
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    report = resolve.load_test_isolated()
+    assert [s["stage"] for s in report["stages"]] == ["locate"]
+    assert report["reason"] == "crash"
+    assert report["crashed_at"] == "dll-load"
+
+
+def test_load_test_isolated_crash_after_import(monkeypatch) -> None:
+    stdout = "\n".join(
+        json.dumps(line)
+        for line in [
+            {"stage": "locate", "ok": True, "path": "/x"},
+            {"stage": "dll-load", "ok": True},
+            {"stage": "import", "ok": True},
+        ]
+    )
+
+    def fake_run(cmd, **kwargs):
+        return _completed(3221225477, stdout)  # unsigned 0xC0000005
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    report = resolve.load_test_isolated()
+    assert report["crashed_at"] == "connect"
+    assert report["reason"] == "crash"
+
+
+def test_load_test_isolated_crash_with_no_output(monkeypatch) -> None:
+    def fake_run(cmd, **kwargs):
+        return _completed(-11, "")  # POSIX SIGSEGV, nothing written
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    report = resolve.load_test_isolated()
+    assert report["stages"] == []
+    assert report["crashed_at"] == "locate"  # died before the first stage
+
+
+def test_load_test_isolated_clean_nonzero_is_worker_error(monkeypatch) -> None:
+    def fake_run(cmd, **kwargs):
+        return _completed(1, "", stderr="SyntaxError: whatever")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    report = resolve.load_test_isolated()
+    assert report["reason"] == "worker-error"
+    assert report["crashed_at"] is None
+
+
+def test_load_test_isolated_no_interpreter(monkeypatch) -> None:
+    def fake_run(cmd, **kwargs):
+        raise FileNotFoundError(2, "No such file", cmd[0])
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    report = resolve.load_test_isolated()
+    assert report == {"stages": [], "crashed_at": None, "reason": "no-interpreter"}
+
+
+def test_load_test_isolated_timeout_keeps_partial_stages(monkeypatch) -> None:
+    partial = json.dumps({"stage": "locate", "ok": True, "path": "/x"}) + "\n"
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 5.0, output=partial)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    report = resolve.load_test_isolated(timeout=5.0)
+    assert report["reason"] == "timeout"
+    assert [s["stage"] for s in report["stages"]] == ["locate"]
+
+
+def test_load_test_isolated_skips_garbage_lines(monkeypatch) -> None:
+    stdout = 'not json\n{"no_stage": 1}\n' + json.dumps(
+        {"stage": "locate", "ok": True, "path": "/x"}
+    )
+
+    def fake_run(cmd, **kwargs):
+        return _completed(0, stdout)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    report = resolve.load_test_isolated()
+    assert [s["stage"] for s in report["stages"]] == ["locate"]
+
+
+# --- Verdict synthesis: naming the exact crash cause ----------------------------
+
+
+def _env_entry(value=None, quoted=False, exists=None, missing=None) -> dict:
+    entry = {"value": value, "quoted": quoted, "exists": exists}
+    if missing is not None:
+        entry["missing"] = missing
+    return entry
+
+
+def _diag_info(env_overrides=None, library="C:/Resolve/fusionscript.dll") -> dict:
+    """A worker `info` payload: compatible 3.11.9 64-bit, clean env, library
+    found at the default spot — overridable per test."""
+    env = {name: _env_entry() for name in resolve._DIAG_ENV_VARS}
+    env.update(env_overrides or {})
+    return {
+        "python_version": "3.11.9",
+        "bits": 64,
+        "module_dir": "/modules",
+        "env": env,
+        "resolve_install": {
+            "library": library,
+            "searched": ["C:/Resolve/fusionscript.dll"],
+        },
+    }
+
+
+def _fake_crash_diag(monkeypatch, info, load_test) -> None:
+    """diagnose() with a faked crash status probe, `info` and load test."""
+
+    def fake_worker(cmd, timeout=25.0, request=None):
+        if cmd == "info":
+            return True, info
+        return False, {"error": resolve._CRASH_MESSAGE, "reason": "crash"}
+
+    monkeypatch.setattr(resolve, "_run_worker", fake_worker)
+    monkeypatch.setattr(
+        resolve,
+        "load_test_isolated",
+        lambda timeout=25.0, interpreter=None: load_test,
+    )
+
+
+_DLL_CRASH = {
+    "stages": [{"stage": "locate", "ok": True, "path": "C:/Resolve/fusionscript.dll"}],
+    "crashed_at": "dll-load",
+    "reason": "crash",
+}
+
+
+def test_diagnose_crash_quoted_env_var_is_named(monkeypatch) -> None:
+    info = _diag_info(
+        {
+            "RESOLVE_SCRIPT_LIB": _env_entry(
+                '"C:\\Resolve\\fusionscript.dll"', quoted=True, exists=True
+            )
+        }
+    )
+    _fake_crash_diag(monkeypatch, info, _DLL_CRASH)
+    d = resolve.diagnose()
+    assert "RESOLVE_SCRIPT_LIB" in d["verdict"]
+    assert "quotation marks" in d["verdict"]
+    assert "Start menu" in d["verdict"]
+    assert "3.10" not in d["verdict"]  # no version guessing — the env var IS the cause
+    assert d["load_test"] == _DLL_CRASH  # the report carries the staged evidence
+
+
+def test_diagnose_crash_stale_env_path_recommends_deleting(monkeypatch) -> None:
+    info = _diag_info(
+        {"RESOLVE_SCRIPT_API": _env_entry("C:\\old-resolve", exists=False)}
+    )
+    _fake_crash_diag(monkeypatch, info, _DLL_CRASH)
+    verdict = resolve.diagnose()["verdict"]
+    assert "RESOLVE_SCRIPT_API" in verdict
+    assert "doesn't exist" in verdict
+    assert "Delete the stale variable" in verdict
+
+
+def test_diagnose_crash_stale_resolve_pythonpath_entry(monkeypatch) -> None:
+    gone = "C:\\ProgramData\\Blackmagic Design\\DaVinci Resolve\\Modules"
+    info = _diag_info(
+        {"PYTHONPATH": _env_entry("C:\\stuff;" + gone, missing=[gone])}
+    )
+    _fake_crash_diag(monkeypatch, info, _DLL_CRASH)
+    verdict = resolve.diagnose()["verdict"]
+    assert "PYTHONPATH" in verdict
+    assert gone in verdict
+
+
+def test_diagnose_crash_unrelated_pythonpath_entry_is_ignored(monkeypatch) -> None:
+    # A missing entry that has nothing to do with Resolve must NOT hijack the
+    # verdict — the staged pinpoint (dll-load) speaks instead.
+    info = _diag_info(
+        {"PYTHONPATH": _env_entry("C:\\my-tools", missing=["C:\\my-tools"])}
+    )
+    _fake_crash_diag(monkeypatch, info, _DLL_CRASH)
+    verdict = resolve.diagnose()["verdict"]
+    assert "PYTHONPATH" not in verdict
+    assert "update DaVinci Resolve" in verdict
+
+
+def test_diagnose_crash_at_dll_load_default_install(monkeypatch) -> None:
+    # THE field case: correct 64-bit 3.11.9, clean env, library at the
+    # default spot — and it still crashes. Verdict: the Resolve release
+    # doesn't support this Python; update Resolve, THEN try 3.10.
+    _fake_crash_diag(monkeypatch, _diag_info(), _DLL_CRASH)
+    verdict = resolve.diagnose()["verdict"]
+    assert "3.11.9" in verdict
+    assert "update DaVinci Resolve" in verdict
+    assert "Studio updates are free" in verdict
+    assert "3.10" in verdict
+    assert "C:/Resolve/fusionscript.dll" in verdict
+
+
+def test_diagnose_crash_at_import_mentions_version_mix(monkeypatch) -> None:
+    load = {
+        "stages": [
+            {"stage": "locate", "ok": True, "path": "C:/Resolve/fusionscript.dll"},
+            {"stage": "dll-load", "ok": True},
+        ],
+        "crashed_at": "import",
+        "reason": "crash",
+    }
+    _fake_crash_diag(monkeypatch, _diag_info(), load)
+    verdict = resolve.diagnose()["verdict"]
+    assert "DaVinciResolveScript" in verdict
+    assert "different Resolve version" in verdict
+    assert "RESOLVE_SCRIPT_API" in verdict
+
+
+def test_diagnose_crash_at_connect(monkeypatch) -> None:
+    load = {
+        "stages": [
+            {"stage": "locate", "ok": True, "path": "C:/Resolve/fusionscript.dll"},
+            {"stage": "dll-load", "ok": True},
+            {"stage": "import", "ok": True},
+        ],
+        "crashed_at": "connect",
+        "reason": "crash",
+    }
+    _fake_crash_diag(monkeypatch, _diag_info(), load)
+    verdict = resolve.diagnose()["verdict"]
+    assert "crashed while connecting" in verdict
+    assert "Restart DaVinci Resolve" in verdict
+
+
+def test_diagnose_crash_library_not_found(monkeypatch) -> None:
+    load = {
+        "stages": [{"stage": "locate", "ok": False, "error": "No fusionscript"}],
+        "crashed_at": None,
+        "reason": None,
+    }
+    _fake_crash_diag(monkeypatch, _diag_info(library=None), load)
+    verdict = resolve.diagnose()["verdict"]
+    assert "could not find Resolve's scripting library" in verdict
+    assert "default folder" in verdict
+
+
+def test_diagnose_too_new_python_still_wins_over_env_issues(monkeypatch) -> None:
+    # A 3.14 interpreter is the certain crash cause — the env checks and the
+    # staged pinpoint must not water that verdict down.
+    info = _diag_info(
+        {"RESOLVE_SCRIPT_LIB": _env_entry('"C:\\x"', quoted=True, exists=False)}
+    )
+    info["python_version"] = "3.14.0"
+    _fake_crash_diag(monkeypatch, info, _DLL_CRASH)
+    verdict = resolve.diagnose()["verdict"]
+    assert "too new" in verdict.lower()
+    assert "quotation marks" not in verdict
+
+
+def test_diagnose_runs_load_test_only_on_crash(monkeypatch) -> None:
+    calls: list[float] = []
+
+    def fake_worker(cmd, timeout=25.0, request=None):
+        if cmd == "info":
+            return True, _diag_info()
+        return True, {"connected": False, "error": "Resolve is not running."}
+
+    monkeypatch.setattr(resolve, "_run_worker", fake_worker)
+    monkeypatch.setattr(
+        resolve,
+        "load_test_isolated",
+        lambda timeout=25.0, interpreter=None: calls.append(timeout),
+    )
+    d = resolve.diagnose()
+    assert calls == []  # clean not-connected: no crash, no load test
+    assert d["load_test"] is None
+
+
+def test_diagnose_clean_not_connected_mentions_studio(monkeypatch) -> None:
+    def fake_worker(cmd, timeout=25.0, request=None):
+        if cmd == "info":
+            return True, _diag_info()
+        return True, {"connected": False, "error": "Resolve is not running."}
+
+    monkeypatch.setattr(resolve, "_run_worker", fake_worker)
+    verdict = resolve.diagnose()["verdict"]
+    assert "loaded Resolve's module fine" in verdict
+    assert "DaVinci Resolve Studio" in verdict  # external scripting needs Studio
+
+
+def test_diagnose_no_interpreter_quoted_env_value(monkeypatch) -> None:
+    monkeypatch.setenv("MONTEUR_RESOLVE_PYTHON", '"C:\\Python311\\python.exe"')
+
+    def fake_worker(cmd, timeout=25.0, request=None):
+        return False, {"error": "could not launch", "reason": "no-interpreter"}
+
+    monkeypatch.setattr(resolve, "_run_worker", fake_worker)
+    verdict = resolve.diagnose()["verdict"]
+    assert "quotation marks" in verdict
+    assert "MONTEUR_RESOLVE_PYTHON" in verdict
+
+
 # --- Worker interpreter choice (env > settings > default) ------------------------
 
 

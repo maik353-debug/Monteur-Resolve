@@ -61,10 +61,12 @@ long-lived process:
         result = build_plan_isolated(plan, fps=25.0)  # build a montage; dict,
                                                       # never raises
 
-The worker commands are ``status``, ``info``, ``read_timeline`` and
-``build_plan`` (build a montage timeline from a serialized MontagePlan,
-optionally with Fusion titles) — see ``monteur._resolve_worker`` for the wire
-protocol.
+The worker commands are ``status``, ``info`` (crash-free environment
+forensics), ``load_test`` (staged, line-per-stage native load test that
+pinpoints WHERE a crash happens — see :func:`load_test_isolated`),
+``read_timeline`` and ``build_plan`` (build a montage timeline from a
+serialized MontagePlan, optionally with Fusion titles) — see
+``monteur._resolve_worker`` for the wire protocol.
 
 Choosing the worker interpreter
 -------------------------------
@@ -167,6 +169,104 @@ def _register_resolve_dll_dir() -> None:
                 os.add_dll_directory(directory)
             except (OSError, AttributeError):
                 pass
+
+
+# Environment variables that can break (or fix) Resolve's scripting-module
+# load. Blackmagic's own docs show them QUOTED — and quotes around a Windows
+# path break DLL loading — so the crash-free `info` worker command reports
+# each one with `quoted` / `exists` flags for the diagnosis verdict.
+_DIAG_ENV_VARS = (
+    "RESOLVE_SCRIPT_API",
+    "RESOLVE_SCRIPT_LIB",
+    "PYTHONPATH",
+    "MONTEUR_RESOLVE_PYTHON",
+)
+
+
+def _is_quoted(value: str) -> bool:
+    """True when a value starts or ends with a quote character.
+
+    Blackmagic's setup docs show the env-var examples in quotes; users paste
+    them verbatim into the Windows environment-variable dialog, where the
+    quotes become part of the value and silently break the DLL/module load.
+    """
+    v = (value or "").strip()
+    return bool(v) and (v[0] in "'\"" or v[-1] in "'\"")
+
+
+def _strip_env_quotes(value: str) -> str:
+    """A path value with any surrounding whitespace and quote characters removed."""
+    return (value or "").strip().strip("'\"")
+
+
+def _env_report() -> dict:
+    """Crash-free report on the Resolve-relevant environment variables.
+
+    For each variable in :data:`_DIAG_ENV_VARS`: the raw ``value`` (or None
+    when unset), ``quoted`` (starts/ends with a quote character — breaks
+    loading on Windows) and ``exists`` (``os.path.exists`` after stripping
+    quotes; None when unset). PYTHONPATH is a path LIST, so it gets
+    ``exists: None`` plus ``missing`` — the entries that do not exist.
+    """
+    report: dict = {}
+    for name in _DIAG_ENV_VARS:
+        raw = os.environ.get(name)
+        if raw is None:
+            report[name] = {"value": None, "quoted": False, "exists": None}
+            continue
+        entry: dict = {"value": raw, "quoted": _is_quoted(raw)}
+        if name == "PYTHONPATH":
+            entries = [
+                _strip_env_quotes(part)
+                for part in raw.split(os.pathsep)
+                if _strip_env_quotes(part)
+            ]
+            entry["exists"] = None
+            entry["missing"] = [p for p in entries if not os.path.exists(p)]
+        else:
+            stripped = _strip_env_quotes(raw)
+            entry["exists"] = os.path.exists(stripped) if stripped else False
+        report[name] = entry
+    return report
+
+
+def _fusionscript_candidates() -> list[str]:
+    """Where Resolve's native scripting library could be, best-first.
+
+    The RESOLVE_SCRIPT_LIB environment variable (quotes stripped — quoted
+    values are a known misconfiguration this diagnosis exists to catch),
+    then the per-OS default install location. Pure and cheap — no native
+    loading, safe for the crash-free ``info`` worker command.
+    """
+    paths: list[str] = []
+    lib = os.environ.get("RESOLVE_SCRIPT_LIB")
+    if lib:
+        stripped = _strip_env_quotes(lib)
+        if stripped:
+            paths.append(stripped)
+    if sys.platform == "darwin":
+        paths.append(
+            "/Applications/DaVinci Resolve/DaVinci Resolve.app"
+            "/Contents/Libraries/Fusion/fusionscript.so"
+        )
+    elif sys.platform.startswith("win"):
+        program_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+        paths.append(
+            os.path.join(
+                program_files,
+                "Blackmagic Design",
+                "DaVinci Resolve",
+                "fusionscript.dll",
+            )
+        )
+    else:
+        paths.append("/opt/resolve/libs/Fusion/fusionscript.so")
+    return paths
+
+
+def _locate_fusionscript() -> str | None:
+    """The actual fusionscript library file, or None when none exists."""
+    return next((p for p in _fusionscript_candidates() if os.path.isfile(p)), None)
 
 
 def find_scripting_module() -> ModuleType:
@@ -419,6 +519,100 @@ def resolve_status_isolated(timeout: float = 25.0) -> dict:
     return payload
 
 
+# The staged load test's stage order (the worker's ``load_test`` command
+# emits one JSON line per completed stage). When the child hard-crashes,
+# the stage AFTER the last completed one is where it died.
+_LOAD_STAGES = ("locate", "dll-load", "import", "connect")
+
+
+def _parse_stage_lines(stdout: str) -> list[dict]:
+    """Parse the load_test worker's line-per-stage stdout, tolerating garbage.
+
+    A native crash can truncate the stream mid-line; unparseable or
+    non-stage lines are simply skipped so the completed stages survive.
+    """
+    stages: list[dict] = []
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(payload, dict) and payload.get("stage"):
+            stages.append(payload)
+    return stages
+
+
+def _stage_after(stages: list[dict]) -> str | None:
+    """The load-test stage following the last completed one (= crash site)."""
+    names = [s.get("stage") for s in stages]
+    last = names[-1] if names else None
+    if last is None:
+        return _LOAD_STAGES[0]
+    try:
+        index = _LOAD_STAGES.index(last)
+    except ValueError:
+        return None
+    return _LOAD_STAGES[index + 1] if index + 1 < len(_LOAD_STAGES) else None
+
+
+def load_test_isolated(timeout: float = 25.0, interpreter: str | None = None) -> dict:
+    """Staged load test of Resolve's scripting module; pinpoints crashes.
+
+    Runs the worker's ``load_test`` command, which prints ONE JSON line per
+    completed stage (``locate`` the fusionscript library, ``dll-load`` it via
+    ctypes, ``import`` DaVinciResolveScript, ``connect`` via scriptapp) and
+    flushes after each — so when a later stage hard-crashes the child, the
+    parent still sees every stage that succeeded. Returns::
+
+        {"stages": [<parsed stage lines, possibly partial>],
+         "crashed_at": <stage name the child died in, when the exit was a
+                        native crash; else None>,
+         "reason": None | "crash" | "timeout" | "no-interpreter" |
+                   "worker-error"}
+
+    A stage may also fail CLEANLY (the worker emits ``ok: false`` with an
+    error and exits 0) — that is data in ``stages``, not a ``reason``.
+    Never raises.
+    """
+    if interpreter is None:
+        interpreter = _worker_python()
+    cmd = [interpreter, _WORKER_PATH, "load_test"]
+    try:
+        result = subprocess.run(
+            cmd,
+            input="{}",
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", "replace")
+        return {
+            "stages": _parse_stage_lines(stdout),
+            "crashed_at": None,
+            "reason": "timeout",
+        }
+    except FileNotFoundError:
+        return {"stages": [], "crashed_at": None, "reason": "no-interpreter"}
+    stdout = result.stdout
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", "replace")
+    stages = _parse_stage_lines(stdout)
+    report: dict = {"stages": stages, "crashed_at": None, "reason": None}
+    if result.returncode != 0:
+        if _looks_like_native_crash(result.returncode):
+            report["reason"] = "crash"
+            report["crashed_at"] = _stage_after(stages)
+        else:
+            report["reason"] = "worker-error"
+    return report
+
+
 def diagnose(timeout: float = 25.0) -> dict:
     """Full self-check of the Resolve bridge, for ``monteur resolve doctor``.
 
@@ -426,8 +620,12 @@ def diagnose(timeout: float = 25.0) -> dict:
     (``interpreter_source``: ``"env"`` — the MONTEUR_RESOLVE_PYTHON override,
     ``"settings"`` — saved by Studio's "Find a compatible Python" button, or
     ``"default"`` — Monteur's own Python), that interpreter's version and
-    bitness, where Resolve's scripting module was found, the live status
-    probe, and a plain-language verdict. Never raises.
+    bitness, where Resolve's scripting module and native library were found,
+    the Resolve-relevant environment variables (with quoted/stale flags),
+    the live status probe, and a plain-language verdict. When the status
+    probe reports a native crash, the staged :func:`load_test_isolated` runs
+    too (``"load_test"`` in the report, else None) so the verdict can name
+    the exact crash site. Never raises.
     """
     interpreter, source = _worker_python_source()
     report: dict = {
@@ -443,7 +641,16 @@ def diagnose(timeout: float = 25.0) -> dict:
         report["info_error"] = info
     status = resolve_status_isolated(timeout=timeout)
     report["status"] = status
-    report["verdict"] = _diagnosis_verdict(source, info if info_ok else None, status)
+    load_report = None
+    if status.get("reason") == "crash":
+        # The plain probe only says "crashed". Run the staged load test to
+        # pinpoint WHERE (dll-load / import / connect) — the child streams a
+        # JSON line per completed stage, so even a hard crash leaves a trail.
+        load_report = load_test_isolated(timeout=timeout)
+    report["load_test"] = load_report
+    report["verdict"] = _diagnosis_verdict(
+        source, info if info_ok else None, status, load_report
+    )
     return report
 
 
@@ -455,13 +662,86 @@ _SOURCE_DESC = {
 }
 
 
-def _diagnosis_verdict(source, info, status) -> str:
+# How to remove a broken environment variable, appended to every env-var
+# verdict. Plain Windows steps because that is where the quoting/staleness
+# problems happen — no CLI, matching the app's fix-it-in-the-UI tone.
+_ENV_REMOVE_HINT = " (Windows: search 'environment variables' in the Start menu.)"
+
+
+def _looks_resolveish(path: str) -> bool:
+    """Heuristic: does a path look like it points at Resolve's scripting files?"""
+    lower = (path or "").lower()
+    return "resolve" in lower or "blackmagic" in lower
+
+
+def _env_issue_verdict(info) -> str:
+    """The verdict for a broken Resolve env variable, or "" when none is.
+
+    Checks the crash-free ``info`` report's ``env`` block for the two
+    real-world misconfigurations that make fusionscript's load crash even
+    under a perfectly compatible Python: values wrapped in quotation marks
+    (Blackmagic's docs show quoted examples; pasted into the Windows dialog
+    the quotes become part of the value and break loading) and values
+    pointing at paths that no longer exist (stale after a Resolve update or
+    uninstall). PYTHONPATH is only flagged when it is quoted or when a
+    MISSING entry looks Resolve-related — unrelated stale entries are not
+    our diagnosis to make.
+    """
+    env = (info or {}).get("env") or {}
+    for name in ("RESOLVE_SCRIPT_LIB", "RESOLVE_SCRIPT_API"):
+        entry = env.get(name) or {}
+        if not entry.get("value"):
+            continue
+        if entry.get("quoted"):
+            return (
+                f"Your {name} environment variable has quotation marks "
+                "around the path — Windows can't load it that way. Remove "
+                "the variable (Monteur finds Resolve by itself) or remove "
+                "the quotes." + _ENV_REMOVE_HINT
+            )
+        if entry.get("exists") is False:
+            return (
+                f"Your {name} environment variable points to a path that "
+                f"doesn't exist ({_strip_env_quotes(str(entry['value']))}). "
+                "Delete the stale variable — Monteur then finds Resolve's "
+                "standard install by itself." + _ENV_REMOVE_HINT
+            )
+    pythonpath = env.get("PYTHONPATH") or {}
+    if pythonpath.get("value"):
+        if pythonpath.get("quoted"):
+            return (
+                "Your PYTHONPATH environment variable has quotation marks "
+                "around it — Windows can't use it that way. Remove the "
+                "quotes, or delete the Resolve entries from it (Monteur "
+                "finds Resolve by itself)." + _ENV_REMOVE_HINT
+            )
+        stale = [
+            p for p in pythonpath.get("missing") or [] if _looks_resolveish(p)
+        ]
+        if stale:
+            return (
+                "Your PYTHONPATH environment variable contains a Resolve "
+                f"scripting path that doesn't exist ({stale[0]}). Remove "
+                "that entry — Monteur finds Resolve by itself."
+                + _ENV_REMOVE_HINT
+            )
+    return ""
+
+
+def _diagnosis_verdict(source, info, status, load_test=None) -> str:
     """One plain-language sentence (or three) summing up the Resolve bridge.
 
     ``source`` is the ``_worker_python_source()`` tag — every verdict says
-    which interpreter was used, and every fixable problem points at the ONE
-    in-app fix (Studio's settings > "Find a compatible Python"); the env var
-    appears only as a trailing advanced note. See :func:`diagnose`.
+    which interpreter was used, and every fixable problem points at ONE
+    plain fix. For a native crash the causes are checked most-certain-first:
+    an incompatible interpreter (too new / 32-bit), a broken environment
+    variable (quoted or stale — see :func:`_env_issue_verdict`), then the
+    staged ``load_test`` pinpoint (crashed at dll-load → the Resolve release
+    doesn't support this Python, update Resolve; crashed at import → module
+    files and library from different Resolve versions; library not found →
+    Resolve isn't installed where Monteur looks). Only when the crash site
+    says the library itself rejected a plausible Python does the verdict
+    suggest trying another Python version. See :func:`diagnose`.
     """
     who = _SOURCE_DESC.get(source, _SOURCE_DESC["default"])
     if status.get("connected"):
@@ -492,6 +772,45 @@ def _diagnosis_verdict(source, info, status) -> str:
                 "That Python is 32-bit; Resolve needs a 64-bit Python. "
                 + _APP_FIX
             )
+        env_issue = _env_issue_verdict(info)
+        if env_issue:
+            return base + env_issue
+        crashed_at = (load_test or {}).get("crashed_at")
+        install = (info or {}).get("resolve_install") or {}
+        library = install.get("library")
+        if crashed_at == "dll-load":
+            return base + (
+                "Resolve's own scripting library"
+                + (f" ({library})" if library else "")
+                + " crashed before Monteur could use it. This usually means "
+                f"this Resolve release doesn't support Python {version} — "
+                "update DaVinci Resolve (Studio updates are free), and if it "
+                "still crashes, try Python 3.10."
+            )
+        if crashed_at == "import":
+            return base + (
+                "The library itself loaded, but Resolve's Python module "
+                "(DaVinciResolveScript) crashed — its Scripting/Modules "
+                "files may come from a different Resolve version than the "
+                "library (this happens when RESOLVE_SCRIPT_API / "
+                "RESOLVE_SCRIPT_LIB point across versions). Update DaVinci "
+                "Resolve and remove those variables so the installed "
+                "version's own files are used."
+            )
+        if crashed_at == "connect":
+            return base + (
+                "The module loaded, but crashed while connecting to "
+                "Resolve. Restart DaVinci Resolve and try again; if it "
+                "keeps happening, update Resolve."
+            )
+        if install and not library:
+            return base + (
+                "Monteur could not find Resolve's scripting library "
+                "(fusionscript) in its standard install location. Install "
+                "DaVinci Resolve in its default folder, or point the "
+                "RESOLVE_SCRIPT_LIB environment variable at the full path "
+                "of fusionscript.dll — without quotation marks."
+            )
         return base + (
             "Even a compatible Python can crash if Resolve isn't the expected "
             "version — check that DaVinci Resolve is installed and up to date."
@@ -502,6 +821,13 @@ def _diagnosis_verdict(source, info, status) -> str:
             f"{status.get('error')}. " + _APP_FIX
         )
     if reason == "no-interpreter":
+        if _is_quoted(os.environ.get("MONTEUR_RESOLVE_PYTHON") or ""):
+            return (
+                f"Monteur could not launch {who} — its value has quotation "
+                "marks around the path. Remove the quotes, or delete the "
+                "variable and use the settings panel instead."
+                + _ENV_REMOVE_HINT
+            )
         return f"Monteur could not launch {who}. " + _APP_FIX
     if reason == "timeout":
         return "Resolve did not respond in time — it may be busy or mid-render."
@@ -512,6 +838,9 @@ def _diagnosis_verdict(source, info, status) -> str:
         + f", {who}) loaded Resolve's module fine, but no running Resolve "
         "was reached: "
         + str(status.get("error", "is Resolve running with scripting set to Local?"))
+        + " Note: driving Resolve from outside (what Monteur does) needs "
+        "DaVinci Resolve Studio — the free edition only runs scripts from "
+        "inside Resolve's own menus."
     )
 
 

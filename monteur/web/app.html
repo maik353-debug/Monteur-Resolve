@@ -1549,7 +1549,11 @@ svg text.axis {
       <h3 id="set-rv-title">DaVinci Resolve &mdash; live connection</h3>
       <p class="set-status" id="set-rv-status" role="status">Checking DaVinci Resolve&hellip;</p>
       <p class="help-small set-verdict" id="set-rv-verdict"></p>
-      <p class="help-small set-env-note" id="set-rv-env-note" hidden>These settings are overridden by this machine&rsquo;s MONTEUR_RESOLVE_PYTHON environment variable &mdash; the controls below take effect again once it is unset.</p>
+      <details class="set-probed" id="set-rv-diag" hidden>
+        <summary>Diagnosis details</summary>
+        <ul id="set-rv-diag-list"></ul>
+      </details>
+      <p class="help-small set-env-note" id="set-rv-env-note" hidden>These settings are overridden by this machine&rsquo;s MONTEUR_RESOLVE_PYTHON environment variable &mdash; the controls below take effect again once it is unset. (Windows: search &ldquo;environment variables&rdquo; in the Start menu, delete the MONTEUR_RESOLVE_PYTHON entry, then restart Monteur.)</p>
 
       <div class="set-test-row">
         <button class="btn small" id="set-rv-detect" type="button"><span class="spin" aria-hidden="true"></span>Find a compatible Python</button>
@@ -5209,6 +5213,63 @@ function resolveHeadline(report) {
   return "DaVinci Resolve is not running.";
 }
 
+/* One flat line per environment variable for the diagnosis details list,
+   e.g. "RESOLVE_SCRIPT_LIB: set, quoted ⚠, path missing ⚠". */
+function diagEnvLine(name, entry) {
+  if (!entry || !entry.value) return name + ": not set";
+  var text = name + ": set";
+  if (entry.quoted) text += ", quoted ⚠";
+  if (entry.exists === false) text += ", path missing ⚠";
+  var missing = entry.missing || [];
+  if (missing.length) {
+    text += ", " + missing.length + " missing entr" + (missing.length === 1 ? "y" : "ies") + " ⚠";
+  }
+  return text;
+}
+
+/* One line per staged load-test result: "✓ dll-load" / "✗ import — <error>". */
+function diagStageLine(s) {
+  var text = (s.ok === false ? "✗ " : "✓ ") + s.stage;
+  if (s.path) text += " — " + s.path;
+  if (s.error) text += " — " + s.error;
+  return text;
+}
+
+/* The collapsed "Diagnosis details" block under the verdict: interpreter +
+   source, fusionscript location, env-variable flags and load-test stages —
+   flat and dense, straight from the GET /api/resolve/diagnose report. */
+function renderResolveDiagDetails(report) {
+  var box = $("set-rv-diag");
+  var ul = $("set-rv-diag-list");
+  clear(ul);
+  if (!report) { box.hidden = true; return; }
+  function add(text) { ul.appendChild(el("li", null, text)); }
+  var sources = { env: "MONTEUR_RESOLVE_PYTHON", settings: "saved in settings", "default": "Monteur's own" };
+  add("Worker Python: " + (report.worker_interpreter || "?") +
+      " (" + (sources[report.interpreter_source] || report.interpreter_source || "?") + ")");
+  var info = report.info || {};
+  if (info.python_version) {
+    add("Runs as: Python " + info.python_version + (info.bits ? " (" + info.bits + "-bit)" : ""));
+  }
+  var install = info.resolve_install;
+  if (install) {
+    add(install.library
+      ? "fusionscript: found at " + install.library
+      : "fusionscript: not found (looked in " + (install.searched || []).join(", ") + ") ⚠");
+  }
+  var env = info.env || {};
+  ["RESOLVE_SCRIPT_API", "RESOLVE_SCRIPT_LIB", "PYTHONPATH", "MONTEUR_RESOLVE_PYTHON"].forEach(function (name) {
+    add(diagEnvLine(name, env[name]));
+  });
+  var lt = report.load_test;
+  if (lt) {
+    (lt.stages || []).forEach(function (s) { add("Load test: " + diagStageLine(s)); });
+    if (lt.crashed_at) add("Load test: crash at " + lt.crashed_at + " (hard crash, not a normal error)");
+    else if (lt.reason) add("Load test: " + lt.reason);
+  }
+  box.hidden = false;
+}
+
 function refreshResolveDiagnosis() {
   var head = $("set-rv-status");
   head.textContent = "Checking DaVinci Resolve…";
@@ -5217,10 +5278,12 @@ function refreshResolveDiagnosis() {
     head.textContent = resolveHeadline(report);
     head.classList.toggle("off", !(report.status && report.status.connected));
     $("set-rv-verdict").textContent = report.verdict || "";
+    renderResolveDiagDetails(report);
   }).catch(function () {
     head.textContent = "Couldn’t reach the Resolve bridge.";
     head.classList.add("off");
     $("set-rv-verdict").textContent = "";
+    renderResolveDiagDetails(null);
   });
 }
 
