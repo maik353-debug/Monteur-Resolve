@@ -1601,10 +1601,10 @@ svg text.axis {
       </details>
 
       <div class="set-install" id="set-rv-install" hidden>
-        <p class="help-small">Resolve&rsquo;s scripting bridge needs Python 3.11 (64-bit) &mdash; newer versions don&rsquo;t work yet. Install it once from <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">python.org/downloads</a> (choose 3.11.x, 64-bit), then click &ldquo;Find a compatible Python&rdquo; again. Monteur remembers it &mdash; this is a one-time setup.</p>
+        <p class="help-small">Resolve&rsquo;s scripting bridge needs Python 3.10&ndash;3.12 (64-bit) for current Resolve releases &mdash; 3.11 is the safest choice (older Resolve versions accepted 3.6+; 3.13 and newer don&rsquo;t work yet). Install it once from <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">python.org/downloads</a> (choose 3.11.x, 64-bit), then click &ldquo;Find a compatible Python&rdquo; again. Monteur remembers it &mdash; this is a one-time setup.</p>
         <p class="help-small" id="set-rv-store" hidden>Prefer an app store? The Microsoft Store also has &ldquo;Python 3.11&rdquo; &mdash; install it there, then click the button again.</p>
       </div>
-      <p class="help-small" id="set-rv-help">Resolve&rsquo;s scripting bridge needs Python 3.11 (64-bit). Monteur finds and remembers one for you &mdash; if none is installed, get it once from <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">python.org/downloads</a>.</p>
+      <p class="help-small" id="set-rv-help">Resolve&rsquo;s scripting bridge needs Python 3.10&ndash;3.12 (64-bit) &mdash; 3.11 is the safest choice. Monteur finds and remembers one for you &mdash; if none is installed, get it once from <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">python.org/downloads</a>.</p>
 
       <div class="set-key-block">
         <label class="set-key-label" for="set-rv-path">Advanced: exact path to a python.exe</label>
@@ -5363,11 +5363,21 @@ function resolveHeadline(report) {
   return "DaVinci Resolve is not running.";
 }
 
-/* One flat line per environment variable for the diagnosis details list,
-   e.g. "RESOLVE_SCRIPT_LIB: set, quoted ⚠, path missing ⚠". */
+/* Long values (paths, PYTHONPATH lists) with the middle elided so the
+   details list stays one line each: "C:\Users\me\…\python.exe". */
+function truncMiddle(value, max) {
+  var text = String(value);
+  if (text.length <= max) return text;
+  var keep = Math.floor((max - 1) / 2);
+  return text.slice(0, keep) + "…" + text.slice(text.length - keep);
+}
+
+/* One flat line per environment variable for the diagnosis details list —
+   the ACTUAL value plus flags, e.g.
+   "RESOLVE_SCRIPT_LIB: "C:\old\fusionscript.dll", quoted ⚠, path missing ⚠". */
 function diagEnvLine(name, entry) {
   if (!entry || !entry.value) return name + ": not set";
-  var text = name + ": set";
+  var text = name + ": " + truncMiddle(entry.value, 60);
   if (entry.quoted) text += ", quoted ⚠";
   if (entry.exists === false) text += ", path missing ⚠";
   var missing = entry.missing || [];
@@ -5375,6 +5385,32 @@ function diagEnvLine(name, entry) {
     text += ", " + missing.length + " missing entr" + (missing.length === 1 ? "y" : "ies") + " ⚠";
   }
   return text;
+}
+
+/* Windows only: the SOFTWARE\Python\PythonCore registry census from the
+   worker's info report. fusionscript.dll loads the HIGHEST HKLM-registered
+   Python (not the worker interpreter), so a too-new highest gets the ⚠.
+   Non-Windows reports an empty census -> no line at all. */
+function diagRegistryLine(info) {
+  var census = (info && info.registered_pythons) || [];
+  if (!census.length) return "";
+  function mm(v) { var m = /^(\d+)\.(\d+)/.exec(String(v || "")); return m ? [+m[1], +m[2]] : null; }
+  function newer(a, b) { return a[0] > b[0] || (a[0] === b[0] && a[1] > b[1]); }
+  var top = mm(info.registry_highest);
+  var worker = mm(info.python_version);
+  // Problematic: the loaded-by-Resolve version is 3.13+ or newer than the worker.
+  var problem = !!(top && (!newer([3, 13], top) || (worker && newer(top, worker))));
+  var marked = false;
+  var parts = census.map(function (e) {
+    var text = e.version + " (" + e.hive + ")";
+    var v = mm(e.version);
+    if (!marked && problem && e.hive === "HKLM" && v && v[0] === top[0] && v[1] === top[1]) {
+      marked = true;
+      text += " ⚠ highest — Resolve loads this one";
+    }
+    return text;
+  });
+  return "Registered Pythons: " + parts.join("; ");
 }
 
 /* One line per staged load-test result: "✓ dll-load" / "✗ import — <error>". */
@@ -5407,6 +5443,8 @@ function renderResolveDiagDetails(report) {
       ? "fusionscript: found at " + install.library
       : "fusionscript: not found (looked in " + (install.searched || []).join(", ") + ") ⚠");
   }
+  var registry = diagRegistryLine(info);
+  if (registry) add(registry);
   var env = info.env || {};
   ["RESOLVE_SCRIPT_API", "RESOLVE_SCRIPT_LIB", "PYTHONPATH", "MONTEUR_RESOLVE_PYTHON"].forEach(function (name) {
     add(diagEnvLine(name, env[name]));
@@ -5443,7 +5481,7 @@ function probedLine(p) {
   if (p.ok) {
     text += p.connected ? " — works, Resolve reached" : " — works, Resolve not running";
   } else if (p.reason === "incompatible") {
-    text += p.bits === 32 ? " — 32-bit (Resolve needs 64-bit)" : " — too new for Resolve (needs 3.6–3.11)";
+    text += p.bits === 32 ? " — 32-bit (Resolve needs 64-bit)" : " — too new for Resolve (needs 3.10–3.12)";
   } else if (p.reason === "crash") {
     text += " — crashed loading Resolve's module";
   } else {

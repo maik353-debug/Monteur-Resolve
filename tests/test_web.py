@@ -2046,6 +2046,18 @@ class TestResolvePythonApi:
         assert install["library"] is None  # no Resolve in this container
         assert install["searched"]
         assert data["load_test"] is None
+        # the Windows registry census travels too (empty off Windows, but
+        # the keys must exist so the UI never branches on absence)
+        assert data["info"]["registered_pythons"] == []
+        assert data["info"]["registry_highest"] is None
+
+    def test_app_renders_the_registry_census(self):
+        # The diagnosis details block lists the registered Pythons and marks
+        # the problematic highest one (the fusionscript registry mechanism).
+        html = Path(_APP_HTML).read_text(encoding="utf-8")
+        assert "Registered Pythons: " in html
+        assert "registered_pythons" in html
+        assert "registry_highest" in html
 
     # -- POST /api/resolve/detect -------------------------------------------
 

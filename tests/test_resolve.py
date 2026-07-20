@@ -1405,7 +1405,7 @@ def test_status_isolated_native_crash_does_not_raise(monkeypatch) -> None:
     assert result["connected"] is False
     assert result["reason"] == "crash"
     assert "MONTEUR_RESOLVE_PYTHON" in result["error"]
-    assert "3.6" in result["error"] and "3.11" in result["error"]
+    assert "3.10" in result["error"] and "3.12" in result["error"]
 
 
 def test_status_isolated_windows_unsigned_crash_code(monkeypatch) -> None:
@@ -1500,7 +1500,7 @@ def test_read_timeline_isolated_native_crash_raises(monkeypatch) -> None:
         resolve.read_timeline_isolated()
     message = str(excinfo.value)
     assert "MONTEUR_RESOLVE_PYTHON" in message
-    assert "3.11" in message
+    assert "3.12" in message
 
 
 def test_read_timeline_isolated_handled_failure_raises(monkeypatch) -> None:
@@ -1639,7 +1639,7 @@ def test_diagnose_verdict_crash_too_new(monkeypatch) -> None:
     monkeypatch.setenv("MONTEUR_RESOLVE_PYTHON", "/py314")
     d = resolve.diagnose()
     assert "too new" in d["verdict"].lower()
-    assert "3.11" in d["verdict"]
+    assert "3.10" in d["verdict"] and "3.12" in d["verdict"]
 
 
 def test_diagnose_verdict_clean_not_connected(monkeypatch) -> None:
@@ -2367,11 +2367,20 @@ def test_candidate_pythons_is_capped(tmp_path, monkeypatch) -> None:
 def test_windows_helpers_are_safe_off_windows() -> None:
     # The registry scan needs winreg (Windows-only) and must degrade to [].
     assert resolve._windows_registry_pythons() == []
-    # The well-known path list is pure string building — 3.11 comes first.
+    # The well-known path list is pure string building — preference order
+    # 3.11 (safest), then 3.12 (now supported), then 3.10, then older.
     wellknown = resolve._windows_wellknown_pythons()
     assert wellknown[0].endswith(os.path.join("Python311", "python.exe"))
+    joined = os.pathsep.join(wellknown)
+    assert joined.index("Python311") < joined.index("Python312")
+    assert joined.index("Python312") < joined.index("Python310")
     assert all(p.endswith("python.exe") for p in wellknown)
     assert any("Python36" in p for p in wellknown)
+
+
+def test_which_names_prefer_311_then_312_then_310() -> None:
+    # PATH discovery mirrors the well-known order: 3.11 > 3.12 > 3.10.
+    assert resolve._WHICH_NAMES[:3] == ("python3.11", "python3.12", "python3.10")
 
 
 def test_parse_py_launcher_output() -> None:
@@ -2915,7 +2924,7 @@ def test_build_plan_isolated_native_crash_never_raises(monkeypatch) -> None:
     assert result["ok"] is False
     assert result["reason"] == "native-crash"
     assert "MONTEUR_RESOLVE_PYTHON" in result["error"]
-    assert "3.6" in result["error"] and "3.11" in result["error"]
+    assert "3.10" in result["error"] and "3.12" in result["error"]
 
 
 def test_build_plan_isolated_windows_unsigned_crash_code(monkeypatch) -> None:
@@ -3569,7 +3578,7 @@ def test_render_isolated_native_crash_never_raises(monkeypatch) -> None:
     result = resolve.render_isolated(None, "/out", "x")
     assert result["ok"] is False
     assert result["reason"] == "native-crash"
-    assert "3.6" in result["error"] and "3.11" in result["error"]
+    assert "3.10" in result["error"] and "3.12" in result["error"]
 
 
 def test_stream_worker_clean_nonzero_is_worker_error(monkeypatch) -> None:
@@ -3691,3 +3700,202 @@ def test_cli_resolve_render_failure_exits_with_error(monkeypatch, capsys) -> Non
         )
     assert excinfo.value.code == 1
     assert "Resolve is not running." in capsys.readouterr().err
+
+
+# --- Windows PythonCore registry census -------------------------------------------
+
+
+class _FakeRegKey:
+    def __init__(self, kind: str, payload) -> None:
+        self.kind = kind  # "core" or "install"
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeWinreg:
+    """A winreg shim. hives = {"HKLM": {"3.11": install_path_or_None}, ...}."""
+
+    HKEY_LOCAL_MACHINE = "HKLM"
+    HKEY_CURRENT_USER = "HKCU"
+    KEY_READ = 1
+    KEY_WOW64_64KEY = 0x0100
+    KEY_WOW64_32KEY = 0x0200
+
+    def __init__(self, hives, broken_tags=()) -> None:
+        self._hives = hives
+        self._broken = set(broken_tags)
+
+    def OpenKey(self, root, path, reserved, access):
+        if root in self._hives and path == r"SOFTWARE\Python\PythonCore":
+            return _FakeRegKey("core", self._hives[root])
+        if isinstance(root, _FakeRegKey) and root.kind == "core":
+            tag = path[: -len(r"\InstallPath")]
+            if tag in self._broken or tag not in root.payload:
+                raise OSError("no InstallPath")
+            return _FakeRegKey("install", root.payload[tag])
+        raise OSError("not found")
+
+    def QueryInfoKey(self, key):
+        return (len(key.payload), 0, 0)
+
+    def EnumKey(self, key, index):
+        return sorted(key.payload)[index]
+
+    def QueryValue(self, key, name):
+        if key.payload is None:
+            raise OSError("no default value")
+        return key.payload
+
+
+def test_census_merges_hives_and_dedupes_views() -> None:
+    shim = _FakeWinreg(
+        {
+            "HKLM": {"3.11": "C:\\P311\\", "3.14": "C:\\Python314\\"},
+            "HKCU": {"3.10": None},
+        }
+    )
+    census = resolve._pythoncore_census(shim)
+    # Three registry views are scanned but every (hive, tag) appears once.
+    assert sorted((e["hive"], e["version"]) for e in census) == [
+        ("HKCU", "3.10"), ("HKLM", "3.11"), ("HKLM", "3.14"),
+    ]
+    by_tag = {e["version"]: e for e in census}
+    assert by_tag["3.14"]["path"] == "C:\\Python314\\"
+    assert by_tag["3.10"]["path"] is None  # InstallPath without a value
+
+
+def test_census_tolerates_broken_install_keys() -> None:
+    shim = _FakeWinreg({"HKLM": {"3.13": "C:\\P313\\"}}, broken_tags={"3.13"})
+    census = resolve._pythoncore_census(shim)
+    assert census == [{"version": "3.13", "hive": "HKLM", "path": None}]
+
+
+def test_registered_pythons_is_guarded() -> None:
+    class _Exploding:
+        HKEY_LOCAL_MACHINE = "HKLM"
+        HKEY_CURRENT_USER = "HKCU"
+
+        def __getattr__(self, name):
+            raise RuntimeError("registry on fire")
+
+    assert resolve._registered_pythons(_Exploding()) == []
+    if not sys.platform.startswith("win"):
+        # Off Windows the real winreg import fails -> [].
+        assert resolve._registered_pythons() == []
+
+
+def test_registry_highest_per_hive_skips_garbage() -> None:
+    census = [
+        {"version": "3.11", "hive": "HKLM", "path": None},
+        {"version": "3.14", "hive": "HKLM", "path": "C:\\Python314\\"},
+        {"version": "not-a-version", "hive": "HKLM", "path": None},
+        {"version": "3.12", "hive": "HKCU", "path": None},
+    ]
+    assert resolve._registry_highest(census) == "3.14"
+    assert resolve._registry_highest(census, hive="HKCU") == "3.12"
+    assert resolve._registry_highest([]) is None
+
+
+# --- The registry-conflict verdict ------------------------------------------------
+
+
+def _field_info(worker="3.11.6", highest="3.14", platform="win32", census=None):
+    if census is None:
+        census = [
+            {"version": "3.11", "hive": "HKLM", "path": "C:\\P311\\"},
+            {"version": highest, "hive": "HKLM", "path": "C:\\Python314\\"},
+        ]
+    return {
+        "platform": platform,
+        "python_version": worker,
+        "bits": 64,
+        "registered_pythons": census,
+        "registry_highest": highest,
+    }
+
+
+def test_registry_conflict_fires_on_the_field_scenario() -> None:
+    # Worker 3.11, HKLM-highest 3.14, hard crash at import: the exact case
+    # that burned a real user for hours. The verdict must name the
+    # mechanism, the version, its path and both fixes.
+    verdict = resolve._registry_conflict_verdict(
+        _field_info(), {"crashed_at": "import"}
+    )
+    assert "highest Python registered" in verdict
+    assert "3.14" in verdict and "C:\\Python314\\" in verdict
+    assert "uninstall" in verdict.lower()
+    assert r"PythonCore\3.14" in verdict
+    assert "3.10" in verdict  # names the actually-working range
+
+
+def test_registry_conflict_mid_range_mismatch_fires() -> None:
+    # Worker 3.10, highest 3.11: not "too new" in absolute terms, but the
+    # registry still wins over the worker -> mismatch copy.
+    verdict = resolve._registry_conflict_verdict(
+        _field_info(worker="3.10.10", highest="3.11"),
+        {"crashed_at": "dll-load"},
+    )
+    assert "does not match the worker" in verdict
+
+
+def test_registry_conflict_mentions_higher_hkcu_python() -> None:
+    census = [
+        {"version": "3.13", "hive": "HKLM", "path": None},
+        {"version": "3.14", "hive": "HKCU", "path": None},
+    ]
+    verdict = resolve._registry_conflict_verdict(
+        _field_info(highest="3.13", census=census), {"crashed_at": "import"}
+    )
+    assert "HKEY_CURRENT_USER" in verdict
+
+
+def test_registry_conflict_stays_silent_when_not_applicable() -> None:
+    fire = {"crashed_at": "import"}
+    # The highest registered version IS the worker's own -> release advice
+    # territory, not this rule.
+    assert resolve._registry_conflict_verdict(
+        _field_info(worker="3.14.3", highest="3.14"), fire
+    ) == ""
+    # Not Windows.
+    assert resolve._registry_conflict_verdict(
+        _field_info(platform="linux"), fire
+    ) == ""
+    # No census (registry unreadable).
+    assert resolve._registry_conflict_verdict(
+        _field_info(census=[]) | {"registry_highest": None}, fire
+    ) == ""
+    # Crash pinpointed elsewhere.
+    assert resolve._registry_conflict_verdict(_field_info(), {}) == ""
+    assert resolve._registry_conflict_verdict(
+        _field_info(), {"crashed_at": "connect"}
+    ) == ""
+
+
+def test_crash_verdict_prefers_registry_conflict_over_release_advice() -> None:
+    verdict = resolve._diagnosis_verdict(
+        "settings",
+        _field_info(),
+        {"connected": False, "reason": "crash"},
+        load_test={"crashed_at": "import"},
+    )
+    assert "highest Python registered" in verdict
+    assert "update DaVinci Resolve" not in verdict
+
+
+# --- Probe short-circuit boundary after the 3.12 allowance ------------------------
+
+
+def test_probe_312_is_probed_not_rejected(monkeypatch) -> None:
+    calls = _fake_probe_worker(
+        monkeypatch,
+        (True, {"python_version": "3.12.4", "bits": 64}),
+        (True, {"connected": False, "error": "Resolve is not running."}),
+    )
+    result = resolve.probe_resolve_python("/py312")
+    assert result["ok"] is True
+    assert calls == ["info", "status"]  # 3.12 gets the real probe now

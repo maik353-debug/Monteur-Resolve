@@ -37,7 +37,8 @@ Crash-safe (isolated) access
 ----------------------------
 Resolve's native scripting module (``fusionscript.dll``/``.so``, loaded by
 ``DaVinciResolveScript``) is built for a specific range of Python versions
-(roughly 3.6–3.11). Importing it under an *incompatible* interpreter (e.g.
+(roughly 3.10–3.12 for current Resolve releases; older Resolve versions
+accepted 3.6+). Importing it under an *incompatible* interpreter (e.g.
 Python 3.14) triggers a C-level access violation that **cannot** be caught
 with ``try``/``except`` — it kills the whole process. That makes the direct
 ``connect()`` path unsafe to call speculatively (a Studio page load, an MCP
@@ -272,6 +273,118 @@ def _locate_fusionscript() -> str | None:
     return next((p for p in _fusionscript_candidates() if os.path.isfile(p)), None)
 
 
+# --- Windows registry Python census (crash forensics) ---------------------------
+#
+# The confirmed field mechanism behind "crashes even under a compatible
+# worker Python": fusionscript.dll does NOT bind to the interpreter that
+# imports it. On Windows it walks HKEY_LOCAL_MACHINE\SOFTWARE\Python\
+# PythonCore and loads the python DLL of the HIGHEST version registered
+# there. A 3.13+ Python registered machine-wide therefore hard-crashes the
+# load (typically at the DaVinciResolveScript import) even when the worker
+# is a perfectly good 3.11. The census below is crash-free — pure winreg
+# reads, never any native loading — and feeds the worker's ``info`` command
+# so the diagnosis verdict can name that mechanism.
+
+
+def _parse_py_tag(tag) -> tuple[int, int] | None:
+    """(major, minor) from a PythonCore tag like "3.14" / "3.11-32", or None."""
+    import re
+
+    match = re.match(r"^(\d+)\.(\d+)", str(tag or "").strip())
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def _pythoncore_census(winreg) -> list[dict]:
+    """Enumerate SOFTWARE\\Python\\PythonCore in HKLM and HKCU.
+
+    Takes the ``winreg`` module explicitly (injectable, so non-Windows
+    tests can drive a shim). Returns ``[{"version": <tag>, "hive":
+    "HKLM"|"HKCU", "path": <InstallPath default value or None>}, ...]``,
+    deduped per hive+tag across the 64/32-bit registry views. Any per-key
+    hiccup yields fewer entries, never an error; wholesale failures are the
+    caller's (:func:`_registered_pythons`) problem.
+    """
+    census: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    views = [0]
+    for name in ("KEY_WOW64_64KEY", "KEY_WOW64_32KEY"):
+        view = getattr(winreg, name, 0)
+        if view and view not in views:
+            views.append(view)
+    for hive, root in (
+        ("HKLM", winreg.HKEY_LOCAL_MACHINE),
+        ("HKCU", winreg.HKEY_CURRENT_USER),
+    ):
+        for view in views:
+            try:
+                core = winreg.OpenKey(
+                    root, r"SOFTWARE\Python\PythonCore", 0,
+                    winreg.KEY_READ | view,
+                )
+            except OSError:
+                continue
+            with core:
+                for tag in _registry_subkeys(winreg, core):
+                    if (hive, tag) in seen:
+                        continue
+                    seen.add((hive, tag))
+                    path = None
+                    try:
+                        install = winreg.OpenKey(
+                            core, tag + r"\InstallPath", 0,
+                            winreg.KEY_READ | view,
+                        )
+                    except OSError:
+                        install = None
+                    if install is not None:
+                        with install:
+                            try:
+                                value = winreg.QueryValue(install, None)
+                            except OSError:
+                                value = None
+                        path = str(value) if value else None
+                    census.append(
+                        {"version": str(tag), "hive": hive, "path": path}
+                    )
+    return census
+
+
+def _registered_pythons(winreg_module=None) -> list[dict]:
+    """The PythonCore registry census, guarded; [] off Windows or on failure.
+
+    ``winreg_module`` is injectable for tests; by default the real
+    ``winreg`` is imported (absent off Windows -> ``[]``). This never
+    raises — it runs inside the crash-free ``info`` worker command.
+    """
+    if winreg_module is None:
+        try:
+            import winreg as winreg_module
+        except ImportError:
+            return []
+    try:
+        return _pythoncore_census(winreg_module)
+    except Exception:  # noqa: BLE001 - forensics must never raise
+        return []
+
+
+def _registry_highest(census, hive: str = "HKLM") -> str | None:
+    """Highest PythonCore version registered in ``hive``, as "major.minor".
+
+    HKLM is what fusionscript.dll keys on (the confirmed mechanism); the
+    HKCU answer is computed the same way so the verdict can mention a
+    per-user Python registered even higher. Unparseable tags are skipped;
+    None when the hive registers nothing.
+    """
+    best: tuple[int, int] | None = None
+    for entry in census or []:
+        if entry.get("hive") != hive:
+            continue
+        parsed = _parse_py_tag(entry.get("version"))
+        if parsed is not None and (best is None or parsed > best):
+            best = parsed
+    return "%d.%d" % best if best else None
+
+
 def find_scripting_module() -> ModuleType:
     """Locate and import ``DaVinciResolveScript``.
 
@@ -363,7 +476,8 @@ _APP_FIX = (
 _CRASH_MESSAGE = (
     "DaVinci Resolve's scripting module crashed while loading — this usually "
     "means the interpreter isn't compatible with your Resolve version (Resolve "
-    "needs a 64-bit Python, roughly 3.6–3.11). " + _APP_FIX
+    "needs a 64-bit Python, roughly 3.10–3.12 for current Resolve releases; "
+    "older Resolve versions accepted 3.6+). " + _APP_FIX
 )
 
 
@@ -403,7 +517,8 @@ def _worker_python() -> str:
     file still exists), then ``sys.executable``. This lets Monteur itself
     run under any Python (e.g. 3.14) while every Resolve scripting-module
     call happens under a Resolve-compatible interpreter (roughly Python
-    3.6–3.11) — necessary because Resolve's native module hard-crashes
+    3.10–3.12 for current Resolve releases) — necessary because Resolve's
+    native module hard-crashes
     under an incompatible Python. See :func:`_worker_python_source`.
     """
     return _worker_python_source()[0]
@@ -731,14 +846,94 @@ def _env_issue_verdict(info) -> str:
     return ""
 
 
+def _registry_conflict_verdict(info, load_test) -> str:
+    """The verdict for Windows' registered-Python conflict, or "" when N/A.
+
+    The confirmed field mechanism: on Windows fusionscript.dll does not
+    bind to the interpreter that imports it — it loads the python DLL of
+    the HIGHEST version registered under HKEY_LOCAL_MACHINE\\SOFTWARE\\
+    Python\\PythonCore. A registered 3.13+ (or anything newer than a
+    compatible 3.10–3.12 worker) therefore hard-crashes the load at
+    dll-load/import no matter which interpreter runs the worker. Fires
+    only on Windows, only when the census found something, only for a
+    crash pinpointed at dll-load or import — and never when the highest
+    registered version IS the worker's version (that case falls through
+    to the Resolve-release advice).
+    """
+    if not str((info or {}).get("platform") or "").startswith("win"):
+        return ""
+    census = (info or {}).get("registered_pythons") or []
+    if not census:
+        return ""
+    if (load_test or {}).get("crashed_at") not in ("dll-load", "import"):
+        return ""
+    highest = (info or {}).get("registry_highest") or _registry_highest(census)
+    top = _parse_py_tag(highest)
+    if top is None:
+        return ""
+    worker = _parse_py_tag((info or {}).get("python_version"))
+    if worker is not None and top == worker:
+        return ""  # the registry picks the worker's own version — not this rule
+    if not (
+        top >= (3, 13)
+        or (worker is not None and (3, 10) <= worker <= (3, 12) and top > worker)
+    ):
+        return ""
+    path = next(
+        (
+            e.get("path")
+            for e in census
+            if e.get("hive") == "HKLM"
+            and _parse_py_tag(e.get("version")) == top
+            and e.get("path")
+        ),
+        None,
+    )
+    if top >= (3, 13):
+        why = (
+            "which this Resolve release cannot handle (it works with "
+            "roughly 3.10–3.12)"
+        )
+    else:
+        why = (
+            "which does not match the worker and crashes when loaded into "
+            "its process"
+        )
+    worker_text = (
+        f"Python {(info or {}).get('python_version')}"
+        if worker is not None
+        else "a compatible version"
+    )
+    verdict = (
+        "Resolve's scripting module picks the highest Python registered on "
+        f"this machine — that is Python {highest}"
+        + (f" ({path})" if path else "")
+        + f", {why}. The worker being {worker_text} doesn't help: the "
+        f"registry entry wins. Fix: uninstall Python {highest} (Windows "
+        "Settings > Apps), or rename its registry key "
+        f"HKEY_LOCAL_MACHINE\\SOFTWARE\\Python\\PythonCore\\{highest} to "
+        "hide it from Resolve. Monteur itself runs fine on any Python 3.10+."
+    )
+    hkcu = _parse_py_tag(_registry_highest(census, hive="HKCU"))
+    if hkcu is not None and hkcu > top:
+        verdict += (
+            " A per-user Python %d.%d is registered even higher "
+            "(HKEY_CURRENT_USER) and may need the same treatment." % hkcu
+        )
+    return verdict
+
+
 def _diagnosis_verdict(source, info, status, load_test=None) -> str:
     """One plain-language sentence (or three) summing up the Resolve bridge.
 
     ``source`` is the ``_worker_python_source()`` tag — every verdict says
     which interpreter was used, and every fixable problem points at ONE
     plain fix. For a native crash the causes are checked most-certain-first:
-    an incompatible interpreter (too new / 32-bit), a broken environment
-    variable (quoted or stale — see :func:`_env_issue_verdict`), then the
+    an incompatible interpreter (too new / 32-bit), the Windows registry
+    mechanism (a too-new Python registered in HKLM is what fusionscript
+    actually loads — see :func:`_registry_conflict_verdict`), a broken
+    environment variable (quoted or stale — see :func:`_env_issue_verdict`),
+    then the
     staged ``load_test`` pinpoint (crashed at dll-load → the Resolve release
     doesn't support this Python, update Resolve; crashed at import → module
     files and library from different Resolve versions; library not found →
@@ -759,7 +954,7 @@ def _diagnosis_verdict(source, info, status, load_test=None) -> str:
         major_minor = version.rsplit(".", 1)[0] if version != "?" else "?"
         too_new = version != "?" and tuple(
             int(x) for x in version.split(".")[:2]
-        ) >= (3, 12)
+        ) >= (3, 13)
         base = (
             f"Resolve's module crashed loading under Python {version}"
             + (f" ({bits}-bit)" if bits else "")
@@ -768,13 +963,20 @@ def _diagnosis_verdict(source, info, status, load_test=None) -> str:
         if too_new:
             return base + (
                 f"Python {major_minor} is too new for Resolve "
-                "(needs ~3.6–3.11). " + _APP_FIX
+                "(current Resolve releases work with roughly 3.10–3.12). "
+                + _APP_FIX
             )
         if bits == 32:
             return base + (
                 "That Python is 32-bit; Resolve needs a 64-bit Python. "
                 + _APP_FIX
             )
+        # The Windows registry mechanism outranks env-var and crash-site
+        # guessing: when a too-new registered Python is what fusionscript
+        # loads, no env cleanup or Resolve update fixes the crash.
+        registry_issue = _registry_conflict_verdict(info, load_test)
+        if registry_issue:
+            return registry_issue
         env_issue = _env_issue_verdict(info)
         if env_issue:
             return base + env_issue
@@ -851,15 +1053,16 @@ def _diagnosis_verdict(source, info, status, load_test=None) -> str:
 #
 # The product rule behind this block: end users never see a CLI or set
 # environment variables. When Monteur runs under a Python that Resolve's
-# native module can't survive (3.12+, or 32-bit), Studio's settings panel
+# native module can't survive (3.13+, or 32-bit), Studio's settings panel
 # calls find_resolve_python() below, which walks the machine's Python
 # installations and safely probes each one in a child process; the endpoint
 # then SAVES the winner to settings so every later Resolve call uses it.
 
-# Names tried on PATH, best-first: Resolve supports ~3.6–3.11, and 3.11 is
-# the newest (fastest, longest-supported) interpreter in that range.
+# Names tried on PATH, best-first: current Resolve releases work with roughly
+# Python 3.10–3.12 (older Resolve versions accepted 3.6+). 3.11 is the safest
+# single choice, then 3.12, then 3.10, then the legacy range.
 _WHICH_NAMES = (
-    "python3.11", "python3.10", "python3.9", "python3.8",
+    "python3.11", "python3.12", "python3.10", "python3.9", "python3.8",
     "python3.7", "python3.6", "python3", "python",
 )
 
@@ -996,16 +1199,17 @@ def _registry_python_exe(winreg, install_key) -> str:
 
 
 def _windows_wellknown_pythons() -> list[str]:
-    """Standard python.org install locations on Windows, newest-compatible
-    first (3.11 down to 3.6): per-user %LOCALAPPDATA%\\Programs\\Python,
-    the legacy C:\\Python3XX, and the Program Files variants."""
+    """Standard python.org install locations on Windows, best-first
+    (3.11, then 3.12, then 3.10, then the legacy range down to 3.6):
+    per-user %LOCALAPPDATA%\\Programs\\Python, the legacy C:\\Python3XX,
+    and the Program Files variants."""
     paths: list[str] = []
     local = os.environ.get("LOCALAPPDATA", "")
     program_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
     program_files_x86 = os.environ.get(
         "PROGRAMFILES(X86)", r"C:\Program Files (x86)"
     )
-    for minor in range(11, 5, -1):
+    for minor in (11, 12, 10, 9, 8, 7, 6):
         folder = f"Python3{minor}"
         if local:
             paths.append(
@@ -1023,7 +1227,8 @@ def _candidate_pythons() -> list[str]:
     Order (most explicit first): the MONTEUR_RESOLVE_PYTHON env override,
     the path saved in Monteur's settings, Windows discovery (py launcher,
     PEP 514 registry, well-known install folders), PATH lookups for
-    python3.11 … python3.6 / python3 / python, and finally the interpreter
+    python3.11 / python3.12 / python3.10 … python3.6 / python3 / python,
+    and finally the interpreter
     running Monteur. Duplicates (after symlink resolution + case folding)
     and non-existent files are dropped; the list is capped at
     ``_MAX_CANDIDATES`` so probing stays bounded. Never raises.
@@ -1076,9 +1281,11 @@ def probe_resolve_python(path: str, timeout: float = 12.0) -> dict:
     1. the worker's ``info`` command — crash-free by design (it never
        imports Resolve's native module). An interpreter that can't even run
        it fails with its ``_run_worker`` reason (``"no-interpreter"``,
-       ``"worker-error"``, …). A version >= 3.12 or 32 bits is rejected as
-       ``{"ok": False, "reason": "incompatible"}`` WITHOUT ever attempting
-       the native load — no point crashing a child we know can't work;
+       ``"worker-error"``, …). A version >= 3.13 or 32 bits is rejected as
+       ``{"ok": False, "reason": "incompatible"}`` — carrying ``version``/
+       ``bits`` so the UI list stays honest — WITHOUT ever attempting the
+       native load (no point crashing a child we know can't work; 3.12 IS
+       attempted, current Resolve releases support it);
     2. the worker's ``status`` command — the real native-module load and
        connect attempt. A native crash yields ``{"ok": False, "reason":
        "crash"}``. A clean result means the interpreter is compatible:
@@ -1101,7 +1308,7 @@ def probe_resolve_python(path: str, timeout: float = 12.0) -> dict:
         major_minor = tuple(int(part) for part in version.split(".")[:2])
     except ValueError:
         major_minor = ()
-    if (major_minor and major_minor >= (3, 12)) or bits == 32:
+    if (major_minor and major_minor >= (3, 13)) or bits == 32:
         return {
             "ok": False,
             "reason": "incompatible",
@@ -1226,7 +1433,8 @@ def build_plan_isolated(
     worker died of an uncatchable native crash the failure additionally
     carries ``"reason": "native-crash"`` and the error explains the fix: set
     MONTEUR_RESOLVE_PYTHON to a Resolve-compatible interpreter (roughly
-    Python 3.6–3.11). Other worker-launch failures pass their
+    Python 3.10–3.12 for current Resolve releases). Other worker-launch
+    failures pass their
     :func:`_run_worker` reason through ("timeout", "no-interpreter",
     "worker-error", "bad-output"); a clean, handled Resolve error carries the
     worker's own message and no reason.

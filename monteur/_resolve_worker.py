@@ -7,7 +7,8 @@ and exits 0.
 Why a separate process? Resolve's native scripting module (``fusionscript``,
 loaded by ``DaVinciResolveScript``) can hard-crash the interpreter with a
 C-level access violation when imported under an incompatible Python version
-(Resolve supports roughly 3.6–3.11). That crash cannot be caught with
+(current Resolve releases support roughly 3.10–3.12; older Resolve versions
+accepted 3.6+). That crash cannot be caught with
 ``try``/``except`` — it kills the process. By performing every Resolve access
 here, in a disposable child, a native crash only takes down this worker; the
 parent detects the nonzero exit code and reports "Resolve unavailable" instead
@@ -20,13 +21,18 @@ stdin.
 
 ``info``
     stdin: ignored. Crash-free diagnostics (never imports the native
-    module): interpreter version/bits/executable, ``module_dir`` (where
-    DaVinciResolveScript.py was found, or null), ``searched``, ``env``
-    (RESOLVE_SCRIPT_API / RESOLVE_SCRIPT_LIB / PYTHONPATH /
-    MONTEUR_RESOLVE_PYTHON, each with raw ``value``, ``quoted`` and
-    ``exists`` flags — PYTHONPATH gets per-entry ``missing`` instead of
-    ``exists``) and ``resolve_install`` (``library``: the actual
-    fusionscript.dll/.so found, or null; ``searched``: where it looked).
+    module): interpreter version/bits/executable/``platform``,
+    ``module_dir`` (where DaVinciResolveScript.py was found, or null),
+    ``searched``, ``env`` (RESOLVE_SCRIPT_API / RESOLVE_SCRIPT_LIB /
+    PYTHONPATH / MONTEUR_RESOLVE_PYTHON, each with raw ``value``,
+    ``quoted`` and ``exists`` flags — PYTHONPATH gets per-entry
+    ``missing`` instead of ``exists``), ``resolve_install`` (``library``:
+    the actual fusionscript.dll/.so found, or null; ``searched``: where it
+    looked), ``registered_pythons`` (Windows only: the
+    SOFTWARE\\Python\\PythonCore registry census, ``[{"version", "hive":
+    "HKLM"|"HKCU", "path"}]``, ``[]`` elsewhere — fusionscript.dll loads
+    the HIGHEST HKLM-registered Python, not the importing interpreter) and
+    ``registry_highest`` (that highest HKLM version, or null).
 
 ``load_test``
     stdin: ignored. An exception to the single-JSON-response protocol:
@@ -176,6 +182,8 @@ def handle(command: str, request: dict) -> dict:
             _env_report,
             _fusionscript_candidates,
             _locate_fusionscript,
+            _registered_pythons,
+            _registry_highest,
         )
 
         dirs = _candidate_module_dirs()
@@ -187,10 +195,12 @@ def handle(command: str, request: dict) -> dict:
             ),
             None,
         )
+        registered = _registered_pythons()  # guarded; [] off Windows
         return {
             "python_version": "%d.%d.%d" % sys.version_info[:3],
             "bits": struct.calcsize("P") * 8,
             "executable": sys.executable,
+            "platform": sys.platform,
             "module_dir": found,
             "searched": dirs,
             "env": _env_report(),
@@ -198,6 +208,11 @@ def handle(command: str, request: dict) -> dict:
                 "library": _locate_fusionscript(),
                 "searched": _fusionscript_candidates(),
             },
+            # Windows: what fusionscript.dll actually loads is the highest
+            # HKLM-registered Python — NOT this interpreter. See
+            # monteur.resolve._registry_conflict_verdict.
+            "registered_pythons": registered,
+            "registry_highest": _registry_highest(registered),
         }
 
     from monteur.resolve import (
