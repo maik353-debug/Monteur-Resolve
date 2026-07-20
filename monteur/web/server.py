@@ -22,6 +22,10 @@ API (all JSON):
 * ``POST /api/create/kit``    {build payload + "kit_dir"}       -> {"job": id}
 * ``POST /api/create/revise`` {"plan_json", "folder", "brief",
   "pins"?, "fps"?, "audio"?, "canvas"?, "format"?}              -> {"job": id}
+* ``POST /api/create/direct`` {"plan_json", "folder", "music"?,
+  "notes"?}                                                     -> {"job": id}
+* ``POST /api/create/direct/apply`` {"plan_json", "folder",
+  "review", "fps"?, "audio"?, "canvas"?, "format"?}             -> {"job": id}
 * ``POST /api/create/distill`` {"timeline": {"filename",
   "content", "fps"?}, "music"?, "target"?, "style"?,
   "canvas"?, "audio"?, "format"?}                               -> {"job": id}
@@ -80,6 +84,23 @@ revise`` does (style recovered from the plan's notes, length from the plan
 itself, ``allow_repeats=True``, SFX from whether cues were planned). The
 result looks like a build result PLUS the revised ``"plan_json"`` (so
 revisions chain) and the parser's ``"rationale"`` line.
+
+``/api/create/direct`` is the Studio's Director's-notes button
+(:mod:`monteur.director`): the browser sends the current ``"plan_json"``
+plus optional ``"notes"`` context, the job re-sifts the folder through
+the same scan cache, re-analyzes the plan's own music (or the payload's
+``"music"`` override) for the dossier, and asks Claude for a structured
+review of the cut against editing craft. Text-only — it runs over the
+user's Claude connection (Claude Code = no extra API cost) and is
+sharpest when a "Let Claude watch" scan annotated the footage. Unlike
+vision this IS a gate: a ``MonteurAIError`` fails the job with its own
+actionable message. The result is ``{"review", "plan_json" (unchanged),
+"applied": false}``. ``/api/create/direct/apply`` then applies the
+review's replacement suggestions (``monteur.director.apply_review`` —
+pure plan surgery, no AI, record grid untouched) and returns the
+standard build-result shape (fresh timeline file + the improved
+``"plan_json"`` + the applied notes), so the Studio's result card
+replaces in place exactly like a revision does.
 
 ``/api/find`` answers instantly (no job) from the ``.monteur-vision.json``
 sidecar that a "Let Claude watch" scan leaves next to the footage
@@ -372,7 +393,7 @@ _PICK_LOCK = threading.Lock()
 def _new_job(kind: str) -> dict:
     job = {
         "id": secrets.token_hex(4),
-        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "distill" | "resolve-build" | "resolve-render" | "resolve-detect" | "movie" | "scene-check" | "movie-assemble" | "ai-test"
+        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "direct" | "direct-apply" | "distill" | "resolve-build" | "resolve-render" | "resolve-detect" | "movie" | "scene-check" | "movie-assemble" | "ai-test"
         "state": "running",  # -> "done" | "error" | "cancelled"
         "progress": [],  # dicts: {"index","total","name","stage"[,"usable_ratio"]}
         "message": "",  # human-readable reason when state == "error"
@@ -880,6 +901,152 @@ def _run_revise_job(job: dict, payload: dict) -> None:
             "plan_json": plan_to_dict(revised),
             # One line saying how the instruction was read — honesty first.
             "rationale": revision.rationale,
+        }
+        job["state"] = "done"
+    except SiftCancelled:
+        job["state"] = "cancelled"
+    except (MonteurMediaError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
+def _run_direct_job(job: dict, payload: dict) -> None:
+    """Daemon-thread body for POST /api/create/direct (director's notes).
+
+    Mirrors ``monteur direct`` (cli.cmd_direct): rebuild the plan from the
+    browser's ``"plan_json"``, re-sift the folder through the same scan
+    cache as build/revise (a cache hit after a see-scan carries the vision
+    annotations, which is exactly what makes the review sharp), re-analyze
+    the plan's own music — the payload's ``"music"`` wins when set — and
+    ask :func:`monteur.director.direct_cut` for the review. The review is
+    a GATE like the movie blueprint: a ``MonteurAIError`` fails the job
+    with its own actionable message (it already explains keys/CLI/logins).
+    The plan itself is returned UNCHANGED — applying is a separate,
+    explicit step (:func:`_run_direct_apply_job`).
+
+    ``direct_cut`` is resolved at CALL time via the ``from``-import below,
+    so tests can monkeypatch it on :mod:`monteur.director` without any AI
+    backend.
+    """
+    from monteur.ai import MonteurAIError
+    from monteur.media import MonteurMediaError
+    from monteur.montage import plan_from_dict, plan_to_dict
+    from monteur.sift import SiftCancelled
+
+    try:
+        plan = plan_from_dict(payload.get("plan_json") or {})  # bad -> ValueError
+        if not plan.entries:
+            raise ValueError("the plan has no entries — nothing to review")
+
+        reports, _cached = _sift_or_cached(job, payload.get("folder", ""))
+        if job["cancel"].is_set():
+            raise SiftCancelled("cancelled")
+
+        music = None
+        music_path = payload.get("music") or plan.music_path
+        if music_path:
+            from monteur.music import analyze_music
+
+            with _JOBS_LOCK:
+                job["progress"].append(
+                    {"stage": "music", "name": Path(music_path).name}
+                )
+            music = analyze_music(music_path)
+        if job["cancel"].is_set():
+            raise SiftCancelled("cancelled")
+
+        with _JOBS_LOCK:
+            job["progress"].append(
+                {"stage": "direct", "name": "Claude is reviewing the cut"}
+            )
+        from monteur.director import direct_cut
+
+        review = direct_cut(
+            plan, reports, music, notes=str(payload.get("notes") or "")
+        )
+        job["result"] = {
+            "review": review,
+            # The plan is untouched — the browser keeps iterating on it.
+            "plan_json": plan_to_dict(plan),
+            "applied": False,
+        }
+        job["state"] = "done"
+    except SiftCancelled:
+        job["state"] = "cancelled"
+    except (MonteurAIError, MonteurMediaError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
+def _run_direct_apply_job(job: dict, payload: dict) -> None:
+    """Daemon-thread body for POST /api/create/direct/apply.
+
+    Pure plan surgery, no AI: :func:`monteur.director.apply_review` swaps
+    the reviewed slots' sources (record grid, transitions, dips and SFX
+    stay bit-identical; pinned or unmatchable suggestions are skipped with
+    a note) and the improved plan is rendered through the SAME output
+    pathway a revise job uses, so the result has the standard build-result
+    shape plus the new ``"plan_json"`` and the ``"notes"`` of what was
+    applied. Nothing is re-planned. The music is NOT re-analyzed (the
+    grid is untouched), so the result's ``tempo`` is 0.
+
+    ``apply_review`` is resolved at CALL time via the ``from``-import
+    below, so tests can monkeypatch it on :mod:`monteur.director`.
+    """
+    from monteur.media import MonteurMediaError
+    from monteur.montage import montage_to_timeline, plan_from_dict, plan_to_dict
+    from monteur.sift import SiftCancelled
+    from monteur.io import write_edl, write_fcpxml
+
+    try:
+        plan = plan_from_dict(payload.get("plan_json") or {})  # bad -> ValueError
+        if not plan.entries:
+            raise ValueError("the plan has no entries — nothing to improve")
+        review = payload.get("review")
+        if not isinstance(review, dict):
+            raise ValueError("'review' must be the director's-notes dict")
+        audio = payload.get("audio") or ("music" if plan.music_path else "original")
+        if not plan.music_path and audio != "original":
+            raise ValueError(f"the plan has no music; audio mode {audio!r} needs a song")
+
+        reports, _cached = _sift_or_cached(job, payload.get("folder", ""))
+        if job["cancel"].is_set():
+            raise SiftCancelled("cancelled")
+
+        from monteur.director import apply_review
+
+        improved, notes = apply_review(plan, review, reports)
+
+        fps = float(payload.get("fps") or 25)
+        timeline_kwargs: dict = {"audio": audio}
+        if payload.get("canvas"):
+            timeline_kwargs["canvas"] = payload["canvas"]
+        timeline = montage_to_timeline(improved, fps=fps, **timeline_kwargs)
+        fmt = (payload.get("format") or "fcpxml").lower()
+        if fmt == "edl":
+            content, filename = write_edl(timeline), "monteur_montage.edl"
+        else:
+            content, filename = write_fcpxml(timeline), "monteur_montage.fcpxml"
+        job["result"] = {
+            "filename": filename,
+            "content": content,
+            "plan": {
+                "duration": improved.duration,
+                "cuts": len(improved.entries),
+                "tempo": 0,
+                "notes": improved.notes,
+            },
+            # The improved plan in the save format, so iterations chain.
+            "plan_json": plan_to_dict(improved),
+            # What was actually applied/skipped — honesty first.
+            "notes": notes,
+            "applied": True,
         }
         job["state"] = "done"
     except SiftCancelled:
@@ -1553,6 +1720,8 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/create/pick"): self._create_pick,
             ("POST", "/api/create/kit"): self._create_kit,
             ("POST", "/api/create/revise"): self._create_revise,
+            ("POST", "/api/create/direct"): self._create_direct,
+            ("POST", "/api/create/direct/apply"): self._create_direct_apply,
             ("POST", "/api/create/distill"): self._create_distill,
             ("POST", "/api/create/resolve"): self._create_resolve,
             ("POST", "/api/find"): self._find,
@@ -1834,6 +2003,44 @@ class MonteurHandler(BaseHTTPRequestHandler):
             target=_run_revise_job,
             args=(job, payload),
             name=f"monteur-revise-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _create_direct(self) -> None:
+        payload = self._read_json()
+        if not payload.get("folder"):
+            raise ApiError(400, "missing 'folder' (path to your footage)")
+        if not isinstance(payload.get("plan_json"), dict):
+            raise ApiError(
+                400, "missing 'plan_json' (the plan a build result carries)"
+            )
+        job = _new_job("direct")
+        threading.Thread(
+            target=_run_direct_job,
+            args=(job, payload),
+            name=f"monteur-direct-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _create_direct_apply(self) -> None:
+        payload = self._read_json()
+        if not payload.get("folder"):
+            raise ApiError(400, "missing 'folder' (path to your footage)")
+        if not isinstance(payload.get("plan_json"), dict):
+            raise ApiError(
+                400, "missing 'plan_json' (the plan a build result carries)"
+            )
+        if not isinstance(payload.get("review"), dict):
+            raise ApiError(
+                400, "missing 'review' (the director's notes to apply)"
+            )
+        job = _new_job("direct-apply")
+        threading.Thread(
+            target=_run_direct_apply_job,
+            args=(job, payload),
+            name=f"monteur-direct-apply-{job['id']}",
             daemon=True,
         ).start()
         self._send_json({"job": job["id"]})

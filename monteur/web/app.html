@@ -732,6 +732,13 @@ svg text.axis {
   overflow-wrap: anywhere;
 }
 .rev-entries { max-height: 260px; overflow-y: auto; }
+/* director's notes: the big score + one card per issue */
+.dir-score .rs-num { font-size: 34px; }
+.dir-issue {
+  border: 1px solid var(--border); border-left: 2px solid var(--accent);
+  border-radius: 3px; background: var(--input-bg); padding: 8px 11px; margin-top: 8px;
+}
+.dir-issue p { margin: 2px 0; }
 .seg-item .seg-label { color: var(--ink-2); flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .find-hero { margin-left: 0; }
 .rs-num { font-size: 24px; font-weight: 650; line-height: 1.15; }
@@ -1344,6 +1351,25 @@ svg text.axis {
             <p class="help-small">Monteur reads regions (&ldquo;zweite Hälfte&rdquo;, &ldquo;ab 1:30&rdquo;), pace (&ldquo;ruhiger&rdquo;, &ldquo;schneller&rdquo;), transitions (&ldquo;harte Schnitte&rdquo;, &ldquo;Blenden&rdquo;) and styles — and tells you exactly how it read your sentence. The result below is replaced by the revised cut.</p>
             <div id="cre-rev-panel"></div>
             <p class="scan-note" id="cre-rev-msg" role="status" hidden></p>
+          </div>
+          <div class="kit-block" id="cre-direct" hidden>
+            <p class="seg-heading">Director&rsquo;s notes — Claude reviews this cut</p>
+            <p class="help-small">A second pair of eyes before you render: Claude judges the planned cut like a seasoned editor — does the opening establish, does the strongest shot land on the drop, do same-scene shots collide, does the imagery track the music&rsquo;s energy — and suggests concrete swaps from your unused material. It runs over your Claude connection (with Claude Code there&rsquo;s no extra API cost) and is sharpest when &ldquo;Let Claude watch your clips&rdquo; ran during the scan.</p>
+            <label class="sr-only" for="cre-dir-notes">Context for the review (optional)</label>
+            <div class="path-row">
+              <input type="text" id="cre-dir-notes" placeholder="What the video is for (optional) — e.g. Instagram teaser for our travel blog" spellcheck="false" autocomplete="off">
+              <button class="btn" id="cre-dir-btn" type="button">Get director&rsquo;s notes<span class="spin" aria-hidden="true"></span></button>
+            </div>
+            <div id="cre-dir-panel"></div>
+            <p class="scan-note" id="cre-dir-msg" role="status" hidden></p>
+            <div id="cre-dir-result" hidden>
+              <div class="result-stats dir-score" id="cre-dir-scorebox"></div>
+              <p class="rev-rationale" id="cre-dir-verdict"></p>
+              <ul class="plan-notes" id="cre-dir-praise"></ul>
+              <div id="cre-dir-issues"></div>
+              <p class="help-small" id="cre-dir-summary" style="margin-top: 8px;"></p>
+              <button class="btn primary" id="cre-dir-apply" type="button" hidden style="margin-top: 10px;">Apply suggestions<span class="spin" aria-hidden="true"></span></button>
+            </div>
           </div>
           <div class="kit-block" id="cre-kit">
             <p class="seg-heading">Publish kit — the upload package for this cut</p>
@@ -3315,6 +3341,7 @@ var buildPanel = makeJobPanel("cre-build-panel", { starting: "Starting the build
 var rankPanel = makeJobPanel("cre-rank-panel", { starting: "Starting the ranking…", working: "Ranking your songs…" });
 var kitPanel = makeJobPanel("cre-kit-panel", { starting: "Starting the publish kit…", working: "Writing the publish kit…" });
 var revisePanel = makeJobPanel("cre-rev-panel", { starting: "Starting the revision…", working: "Revising your cut…" });
+var directPanel = makeJobPanel("cre-dir-panel", { starting: "Sending the cut to Claude…", working: "Claude is reviewing your cut…" });
 var resolveBuildPanel = makeJobPanel("cre-resolve-panel", { starting: "Contacting DaVinci Resolve…", working: "Building the timeline in Resolve…" });
 var renderPanel = makeJobPanel("cre-render-panel", { starting: "Contacting DaVinci Resolve…", working: "Rendering in Resolve…" });
 var distillPanel = makeJobPanel("cre-dst-panel", { starting: "Starting the distillation…", working: "Distilling your trailer…" });
@@ -3352,6 +3379,19 @@ function setReviseBusy(on) {
   btn.disabled = on;
   $("cre-rev-brief").disabled = on;
 }
+function setDirectBusy(on) {
+  var btn = $("cre-dir-btn");
+  btn.classList.toggle("busy", on);
+  btn.disabled = on;
+  $("cre-dir-notes").disabled = on;
+  $("cre-dir-apply").disabled = on || $("cre-dir-apply").classList.contains("busy");
+}
+function setDirectApplyBusy(on) {
+  var btn = $("cre-dir-apply");
+  btn.classList.toggle("busy", on);
+  btn.disabled = on;
+  $("cre-dir-btn").disabled = on;
+}
 function setResolveBuildBusy(on) {
   var btn = $("cre-resolve-btn");
   btn.classList.toggle("busy", on);
@@ -3382,6 +3422,7 @@ function creStopJobs() {
   if (rankPanel.running()) { rankPanel.stop(); setRankBusy(false); }
   if (kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
   if (revisePanel.running()) { revisePanel.stop(); setReviseBusy(false); }
+  if (directPanel.running()) { directPanel.stop(); setDirectBusy(false); setDirectApplyBusy(false); }
   if (resolveBuildPanel.running()) { resolveBuildPanel.stop(); setResolveBuildBusy(false); }
   if (renderPanel.running()) { renderPanel.stop(); setRenderBusy(false); }
   if (distillPanel.running()) { distillPanel.stop(); setDistillBusy(false); }
@@ -3400,6 +3441,7 @@ function creShowStep(n, focusHeading) {
   if (n !== 3 && buildPanel.running()) { buildPanel.stop(); setBuildBusy(false); }
   if (n !== 3 && kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
   if (n !== 3 && revisePanel.running()) { revisePanel.stop(); setReviseBusy(false); }
+  if (n !== 3 && directPanel.running()) { directPanel.stop(); setDirectBusy(false); setDirectApplyBusy(false); }
   if (n !== 3 && resolveBuildPanel.running()) { resolveBuildPanel.stop(); setResolveBuildBusy(false); }
   if (n !== 3 && renderPanel.running()) { renderPanel.stop(); setRenderBusy(false); }
   cre.step = n;
@@ -4012,6 +4054,7 @@ function startBuild(andThen) {
         $("cre-rev-rationale").hidden = true;
         $("cre-rev-msg").hidden = true;
         renderReviseEntries();
+        resetDirectorNotes(); // a fresh cut makes any previous review stale
         renderCreResult(result);
         $("cre-result-title").focus();
         if (andThen) andThen(result);
@@ -4045,7 +4088,7 @@ $("cre-fmt-edl").addEventListener("click", function () { setCreFormat("edl"); })
 $("cre-fmt-fcpxml").addEventListener("click", function () { setCreFormat("fcpxml"); });
 
 $("cre-download").addEventListener("click", function () {
-  if (!cre.result || buildPanel.running() || revisePanel.running()) return;
+  if (!cre.result || buildPanel.running() || revisePanel.running() || directPanel.running()) return;
   function deliver(result) {
     downloadText(result.filename || ("monteur_montage." + cre.format), result.content || "");
     toast("Downloaded " + (result.filename || "timeline") + ".", "success");
@@ -4062,6 +4105,15 @@ $("cre-download").addEventListener("click", function () {
     Object.keys(rev.lastBody).forEach(function (key) { again[key] = rev.lastBody[key]; });
     again.format = cre.format;
     startRevise(again, deliver);
+    return;
+  }
+  // an applied review re-runs the SAME apply (same plan and review), so
+  // the director's swaps are never silently lost to a format switch
+  if (cre.result.kind === "direct-apply" && dnotes.lastApplyBody) {
+    var againApply = {};
+    Object.keys(dnotes.lastApplyBody).forEach(function (key) { againApply[key] = dnotes.lastApplyBody[key]; });
+    againApply.format = cre.format;
+    startDirectApply(againApply, deliver);
     return;
   }
   startBuild(deliver);
@@ -4225,6 +4277,8 @@ function creResetRevise() {
   $("cre-rev-msg").hidden = true;
   $("cre-resolve-msg").hidden = true;
   $("cre-resolve-result").hidden = true;
+  $("cre-direct").hidden = true;
+  resetDirectorNotes();
 }
 
 /* a pin stamp must land INSIDE [record_start, record_end) — the midpoint is
@@ -4259,10 +4313,11 @@ function renderReviseEntries() {
     host.appendChild(li);
   });
   $("cre-revise").hidden = entries.length === 0;
+  $("cre-direct").hidden = entries.length === 0;
 }
 
 function startRevise(body, andThen) {
-  if (revisePanel.running() || buildPanel.running()) return;
+  if (revisePanel.running() || buildPanel.running() || directPanel.running()) return;
   $("cre-rev-msg").hidden = true;
   // a revision replaces the plan — a previous Resolve outcome is stale
   $("cre-resolve-msg").hidden = true;
@@ -4281,6 +4336,7 @@ function startRevise(body, andThen) {
         };
         renderCreResult(result);
         renderReviseEntries();
+        resetDirectorNotes(); // the reviewed plan is gone — review the new one
         if (result && result.rationale) {
           $("cre-rev-rationale").textContent = "How your instruction was read — " + String(result.rationale);
           $("cre-rev-rationale").hidden = false;
@@ -4330,6 +4386,160 @@ $("cre-rev-brief").addEventListener("keydown", function (e) {
   if (e.key === "Enter") { e.preventDefault(); $("cre-rev-btn").click(); }
 });
 
+/* ---- step 3: director's notes (monteur.director) ----------------------
+   The current plan (rev.planJson) goes to /api/create/direct; Claude
+   returns a structured review — verdict, score, praise, issues, and
+   optional replacement shots from the unused material. "Apply
+   suggestions" sends plan + review to /api/create/direct/apply, which
+   swaps ONLY the criticised slots' sources and returns a standard build
+   result, so the card replaces in place exactly like a revision. */
+
+var dnotes = {
+  review: null,       // the last review (the apply payload)
+  lastApplyBody: null // the last successful apply request (format re-runs)
+};
+
+function resetDirectorNotes() {
+  dnotes.review = null;
+  dnotes.lastApplyBody = null;
+  $("cre-dir-result").hidden = true;
+  $("cre-dir-msg").hidden = true;
+}
+
+function renderDirectorReview(review) {
+  dnotes.review = review || {};
+  var box = $("cre-dir-scorebox");
+  clear(box);
+  var stat = el("div", "result-stat");
+  stat.appendChild(el("div", "rs-num", String(Math.round(review.score || 0))));
+  stat.appendChild(el("div", "rs-label", "of 100"));
+  box.appendChild(stat);
+  $("cre-dir-verdict").textContent = String(review.verdict || "");
+  $("cre-dir-verdict").hidden = !review.verdict;
+  var praise = $("cre-dir-praise");
+  clear(praise);
+  (review.praise || []).forEach(function (line) {
+    praise.appendChild(el("li", null, String(line)));
+  });
+  var host = $("cre-dir-issues");
+  clear(host);
+  var replacements = 0;
+  (review.issues || []).forEach(function (issue) {
+    var card = el("div", "dir-issue");
+    var slots = (issue.slots || []).map(function (s) { return s + 1; }).join("–");
+    var kind = String(issue.kind || "").replace(/_/g, " ");
+    card.appendChild(el("p", "seg-heading", "Slot " + slots + (kind ? " — " + kind : "")));
+    if (issue.problem) card.appendChild(el("p", "help-small", String(issue.problem)));
+    if (issue.suggestion) card.appendChild(el("p", "help-small", "→ " + String(issue.suggestion)));
+    if (issue.replacement) {
+      replacements += 1;
+      card.appendChild(el("p", "help-small", "Swap in: " + String(issue.replacement.clip) + " " +
+        fmtClock(issue.replacement.start || 0) + "–" + fmtClock(issue.replacement.end || 0)));
+    }
+    host.appendChild(card);
+  });
+  if (!(review.issues || []).length) {
+    host.appendChild(el("p", "help-small", "No issues — Claude would ship this cut as it is."));
+  }
+  $("cre-dir-summary").textContent = String(review.summary || "");
+  $("cre-dir-summary").hidden = !review.summary;
+  $("cre-dir-apply").hidden = replacements === 0;
+  $("cre-dir-result").hidden = false;
+}
+
+$("cre-dir-btn").addEventListener("click", function () {
+  if (!rev.planJson) return;
+  if (directPanel.running() || buildPanel.running() || revisePanel.running()) return;
+  var built = (cre.result && cre.result.body) || {};
+  var body = {
+    plan_json: rev.planJson,
+    folder: built.folder || $("cre-folder").value.trim(),
+    notes: $("cre-dir-notes").value.trim()
+  };
+  if (built.music) body.music = built.music;
+  resetDirectorNotes();
+  setDirectBusy(true);
+  api("/api/create/direct", { method: "POST", body: body }).then(function (data) {
+    directPanel.start(data.job, {
+      onDone: function (result) {
+        setDirectBusy(false);
+        renderDirectorReview((result && result.review) || {});
+      },
+      onCancelled: function () {
+        setDirectBusy(false);
+        creNote("cre-dir-msg", "Review cancelled — your cut is untouched.");
+      },
+      onError: function (message) {
+        setDirectBusy(false);
+        creNote("cre-dir-msg", message, true);
+      }
+    });
+  }).catch(function (err) {
+    setDirectBusy(false);
+    creNote("cre-dir-msg", err && err.message ? err.message : String(err), true);
+  });
+});
+$("cre-dir-notes").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); $("cre-dir-btn").click(); }
+});
+
+function startDirectApply(body, andThen) {
+  if (directPanel.running() || buildPanel.running() || revisePanel.running()) return;
+  $("cre-dir-msg").hidden = true;
+  // applying replaces the plan — a previous Resolve outcome is stale
+  $("cre-resolve-msg").hidden = true;
+  $("cre-resolve-result").hidden = true;
+  setDirectApplyBusy(true);
+  api("/api/create/direct/apply", { method: "POST", body: body }).then(function (data) {
+    directPanel.start(data.job, {
+      onDone: function (result) {
+        setDirectApplyBusy(false);
+        dnotes.lastApplyBody = body;
+        rev.planJson = (result && result.plan_json) || rev.planJson;
+        rev.pins = [];
+        cre.result = {
+          data: result, format: body.format,
+          body: (cre.result && cre.result.body) || null, kind: "direct-apply"
+        };
+        renderCreResult(result);
+        renderReviseEntries();
+        // the review was applied; the improved plan deserves a fresh one
+        dnotes.review = null;
+        $("cre-dir-result").hidden = true;
+        $("cre-result-title").focus();
+        toast("Suggestions applied — the result replaced the previous one.", "success");
+        if (andThen) andThen(result);
+      },
+      onCancelled: function () {
+        setDirectApplyBusy(false);
+        creNote("cre-dir-msg", "Apply cancelled — your current cut is untouched.");
+      },
+      onError: function (message) {
+        setDirectApplyBusy(false);
+        creNote("cre-dir-msg", message, true);
+      }
+    });
+  }).catch(function (err) {
+    setDirectApplyBusy(false);
+    creNote("cre-dir-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+
+$("cre-dir-apply").addEventListener("click", function () {
+  if (!rev.planJson || !dnotes.review) return;
+  var built = (cre.result && cre.result.body) || {};
+  var body = {
+    plan_json: rev.planJson,
+    folder: built.folder || $("cre-folder").value.trim(),
+    review: dnotes.review,
+    fps: built.fps || fpsFrom($("cre-fps")),
+    format: cre.format
+  };
+  if (built.audio) body.audio = built.audio;
+  if (built.canvas) body.canvas = built.canvas;
+  startDirectApply(body, null);
+});
+
 /* ---- step 3: build the cut directly in DaVinci Resolve ----------------
    POST /api/create/resolve sends the CURRENT plan (rev.planJson — the
    build's plan, or the latest revision's) and the server builds it as a
@@ -4338,7 +4548,7 @@ $("cre-rev-brief").addEventListener("keydown", function (e) {
    job error whose message already names the fix. */
 
 function buildInResolve() {
-  if (resolveBuildPanel.running() || buildPanel.running() || revisePanel.running()) return;
+  if (resolveBuildPanel.running() || buildPanel.running() || revisePanel.running() || directPanel.running()) return;
   if (!rev.planJson) {
     creNote("cre-resolve-msg", "Build your cut first — Resolve gets the finished plan.", true);
     return;

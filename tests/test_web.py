@@ -1303,6 +1303,190 @@ class TestReviseApi:
         assert "brief" in json.loads(exc_info.value.read())["error"]
 
 
+class TestDirectorApi:
+    """POST /api/create/direct + /api/create/direct/apply — director's notes."""
+
+    DEMO = TestCreateApi.DEMO
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+        _clear_scan_cache()
+
+    def _build(self, server, **extra):
+        data = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "format": "edl", **extra},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        return job["result"]
+
+    def test_direct_missing_folder_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/create/direct",
+                {"plan_json": {"monteur_plan": 1}},
+            )
+        assert exc_info.value.code == 400
+        assert "folder" in json.loads(exc_info.value.read())["error"]
+
+    def test_direct_missing_plan_json_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/direct", {"folder": self.DEMO})
+        assert exc_info.value.code == 400
+        assert "plan_json" in json.loads(exc_info.value.read())["error"]
+
+    def test_apply_missing_review_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/create/direct/apply",
+                {"folder": self.DEMO, "plan_json": {"monteur_plan": 1}},
+            )
+        assert exc_info.value.code == 400
+        assert "review" in json.loads(exc_info.value.read())["error"]
+
+    def test_direct_happy_path(self, server, monkeypatch):
+        built = self._build(server)
+        canned = {
+            "verdict": "tight cut", "score": 82,
+            "praise": ["the opening establishes"], "issues": [],
+            "summary": "ship it",
+        }
+        calls: dict = {}
+
+        def fake_direct_cut(plan, reports, music=None, notes=""):
+            calls.update(
+                entries=len(plan.entries), reports=len(reports),
+                has_music=music is not None, notes=notes,
+            )
+            return canned
+
+        monkeypatch.setattr("monteur.director.direct_cut", fake_direct_cut)
+        data = _post(
+            f"{server}/api/create/direct",
+            {"plan_json": built["plan_json"], "folder": self.DEMO,
+             "notes": "for instagram"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert job["kind"] == "direct"
+
+        result = job["result"]
+        assert result["review"] == canned
+        assert result["applied"] is False
+        # the plan itself is returned UNCHANGED — apply is a separate step
+        assert result["plan_json"] == built["plan_json"]
+        assert calls["notes"] == "for instagram"
+        assert calls["entries"] == built["plan"]["cuts"]
+        assert calls["has_music"] is True  # the plan's own song was analyzed
+        assert any(p["stage"] == "music" for p in job["progress"])
+        assert any(p["stage"] == "direct" for p in job["progress"])
+
+    def test_direct_ai_error_is_job_error(self, server, monkeypatch):
+        built = self._build(server)
+        from monteur.ai import MonteurAIError
+
+        def boom(*args, **kwargs):
+            raise MonteurAIError("no way to reach Claude found")
+
+        monkeypatch.setattr("monteur.director.direct_cut", boom)
+        data = _post(
+            f"{server}/api/create/direct",
+            {"plan_json": built["plan_json"], "folder": self.DEMO},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "no way to reach Claude" in job["message"]
+        assert job["result"] is None
+
+    def test_direct_bad_plan_json_is_job_error(self, server):
+        data = _post(
+            f"{server}/api/create/direct",
+            {"plan_json": {"bogus": 1}, "folder": self.DEMO},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "not a Monteur plan" in job["message"]
+
+    def test_apply_end_to_end(self, server):
+        built = self._build(server)
+        entries = built["plan_json"]["entries"]
+        donor = next(
+            (e for e in entries if e["clip_path"] != entries[0]["clip_path"]),
+            None,
+        )
+        assert donor is not None, "demo build should use more than one clip"
+        review = {
+            "verdict": "", "score": 60, "praise": [], "summary": "",
+            "issues": [
+                {
+                    "slots": [0], "kind": "weak_opening",
+                    "problem": "p", "suggestion": "s",
+                    "replacement": {
+                        "clip": Path(donor["clip_path"]).name,
+                        "start": donor["source_start"],
+                        "end": donor["source_end"],
+                    },
+                }
+            ],
+        }
+        data = _post(
+            f"{server}/api/create/direct/apply",
+            {"plan_json": built["plan_json"], "folder": self.DEMO,
+             "review": review, "format": "edl"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert job["kind"] == "direct-apply"
+
+        result = job["result"]
+        assert result["applied"] is True
+        assert result["filename"].endswith(".edl")
+        assert result["content"].startswith("TITLE:")
+        assert result["notes"] and result["notes"][0].startswith("slot 1:")
+
+        new_entries = result["plan_json"]["entries"]
+        assert len(new_entries) == len(entries)
+        # the swapped slot changed clip but kept its record grid ...
+        assert new_entries[0]["clip_path"] == donor["clip_path"]
+        assert new_entries[0]["record_start"] == entries[0]["record_start"]
+        assert new_entries[0]["record_end"] == entries[0]["record_end"]
+        assert new_entries[0]["transition"] == entries[0]["transition"]
+        # ... and every other entry is bit-identical (nothing re-planned)
+        for old, new in zip(entries[1:], new_entries[1:]):
+            assert old == new
+        assert any(
+            n.startswith("director:") for n in result["plan_json"]["notes"]
+        )
+
+    def test_apply_bad_review_shape_does_nothing_but_succeeds(self, server):
+        """A review without issues still returns a valid (unchanged) cut."""
+        built = self._build(server)
+        data = _post(
+            f"{server}/api/create/direct/apply",
+            {"plan_json": built["plan_json"], "folder": self.DEMO,
+             "review": {"issues": "not-a-list"}, "format": "edl"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert job["result"]["plan_json"]["entries"] == built["plan_json"]["entries"]
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_app_has_the_director_block(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert 'id="cre-direct"' in html
+        assert 'id="cre-dir-btn"' in html
+        assert 'id="cre-dir-apply"' in html
+        assert "/api/create/direct" in html
+        assert "/api/create/direct/apply" in html
+        # the help copy explains the no-extra-cost angle and the vision link
+        assert "no extra API cost" in html
+        assert "Let Claude watch your clips" in html
+
+
 def _write_vision_cache(folder, entries):
     """Write a real .monteur-vision.json next to dummy clips.
 

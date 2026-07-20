@@ -10,6 +10,7 @@ Workflow overview::
     monteur convert cut.edl cut.fcpxml --fps 25
     monteur create clips song.mp3 -o cut.fcpxml --save-plan plan.json
     monteur revise plan.json clips -o cut_v2.fcpxml --brief "zweite Hälfte ruhiger"
+    monteur direct plan.json clips --apply -o cut_v3.fcpxml
     monteur resolve status
     monteur resolve render --out renders --preset 2160p
     monteur ai selects cut.md --brief "90s teaser, keep it fast"
@@ -709,21 +710,12 @@ def _parse_pin(raw: str) -> float:
 def cmd_revise(args: argparse.Namespace) -> None:
     from monteur import io
     from monteur.media import MonteurMediaError
-    from monteur.montage import montage_to_timeline, plan_from_dict
+    from monteur.montage import montage_to_timeline
     from monteur.music import analyze_music
     from monteur.revise import parse_revision, revise_plan, style_from_plan
     from monteur.sift import list_media, sift_directory
 
-    try:
-        data = json.loads(Path(args.plan).read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        _fail(f"plan file not found: {args.plan}")
-    except json.JSONDecodeError as exc:
-        _fail(f"{args.plan} is not valid JSON: {exc}")
-    try:
-        plan = plan_from_dict(data)
-    except ValueError as exc:
-        _fail(str(exc))
+    plan = _load_plan(args.plan)
     if not plan.entries:
         _fail("the plan has no entries — nothing to revise")
 
@@ -784,6 +776,119 @@ def cmd_revise(args: argparse.Namespace) -> None:
         _save_plan(revised, args.save_plan)
     for note in revised.notes:
         print(f"  {note}")
+
+
+def _load_plan(path: str):
+    """Read a saved plan JSON (create/revise --save-plan) or fail cleanly."""
+    from monteur.montage import plan_from_dict
+
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        _fail(f"plan file not found: {path}")
+    except json.JSONDecodeError as exc:
+        _fail(f"{path} is not valid JSON: {exc}")
+    try:
+        return plan_from_dict(data)
+    except ValueError as exc:
+        _fail(str(exc))
+
+
+def cmd_direct(args: argparse.Namespace) -> None:
+    """Director's notes: Claude reviews the planned cut against craft.
+
+    Mirrors cmd_revise's plumbing (plan file + re-sift + the plan's own
+    music), then prints the review; --apply additionally swaps in the
+    suggested replacements and writes the timeline through the same
+    output pathway revise uses.
+    """
+    from monteur.ai import MonteurAIError
+    from monteur.director import apply_review, direct_cut
+    from monteur.media import MonteurMediaError
+    from monteur.music import analyze_music
+    from monteur.sift import list_media, sift_directory
+
+    if args.apply and not args.output:
+        _fail("direct --apply needs -o/--output for the improved timeline")
+
+    plan = _load_plan(args.plan)
+    if not plan.entries:
+        _fail("the plan has no entries — nothing to review")
+
+    # The material has to be re-sifted: the plan file stores the cut, not
+    # the footage analysis (same as revise). The cached vision sidecar is
+    # picked up by a prior 'monteur see' run, not here.
+    try:
+        count = len(list_media(args.folder))
+        print(
+            f"Scanning {count} clips in {args.folder} — this decodes each clip, "
+            f"so it can take a few seconds per clip.",
+            flush=True,
+        )
+        reports = sift_directory(args.folder, progress=_sift_progress)
+        music = None
+        music_path = args.music or plan.music_path
+        if music_path:
+            print("Analyzing music ...")
+            music = analyze_music(music_path)
+            print(f"  {music.tempo:.0f} BPM, {len(music.beats)} beats, "
+                  f"{music.duration:.0f}s")
+    except MonteurMediaError as exc:
+        _fail(str(exc))
+    if not reports:
+        _fail(f"no video files found in {args.folder}")
+
+    print("Asking Claude for director's notes ...", flush=True)
+    try:
+        review = direct_cut(plan, reports, music, notes=args.notes)
+    except MonteurAIError as exc:
+        _fail(str(exc))
+
+    print(f"\nVerdict: {review['verdict'] or '(none)'}")
+    print(f"Score  : {review['score']}/100")
+    if review["praise"]:
+        print("Works well:")
+        for line in review["praise"]:
+            print(f"  + {line}")
+    if review["issues"]:
+        print(f"Issues ({len(review['issues'])}):")
+        for n, issue in enumerate(review["issues"], start=1):
+            slots = "+".join(str(s + 1) for s in issue["slots"])
+            kind = issue["kind"].replace("_", " ") or "issue"
+            print(f"  {n}. slot {slots} — {kind}: {issue['problem']}")
+            if issue["suggestion"]:
+                print(f"     -> {issue['suggestion']}")
+            if issue["replacement"]:
+                rep = issue["replacement"]
+                print(
+                    f"     -> swap in {rep['clip']} "
+                    f"{rep['start']:.1f}-{rep['end']:.1f}s"
+                )
+    else:
+        print("Issues : none — Claude would ship this cut.")
+    if review["summary"]:
+        print(f"\n{review['summary']}")
+
+    if not args.apply:
+        return
+
+    from monteur import io
+    from monteur.montage import montage_to_timeline
+
+    audio = args.audio or ("music" if plan.music_path else "original")
+    if not plan.music_path and audio != "original":
+        _fail(f"the plan has no music; audio mode {audio!r} needs a song")
+    improved, applied_notes = apply_review(plan, review, reports)
+    timeline = montage_to_timeline(
+        improved, fps=args.fps, audio=audio, canvas=args.canvas
+    )
+    io.save_timeline(timeline, args.output)
+    print(f"\n{len(improved.entries)} cuts -> {args.output} "
+          f"({improved.duration:.1f}s at {args.fps:g} fps)")
+    for note in applied_notes:
+        print(f"  {note}")
+    if args.save_plan:
+        _save_plan(improved, args.save_plan)
 
 
 def cmd_transcribe(args: argparse.Namespace) -> None:
@@ -1090,6 +1195,46 @@ def build_parser() -> argparse.ArgumentParser:
         help="save the revised plan as JSON for the next iteration",
     )
     p.set_defaults(func=cmd_revise)
+
+    p = sub.add_parser(
+        "direct",
+        help="director's notes: Claude reviews the planned cut against "
+             "editing craft (free over Claude Code; sharpest after "
+             "'monteur see')",
+    )
+    p.add_argument("plan", help="plan JSON from 'monteur create --save-plan' (or a revise)")
+    p.add_argument("folder", help="the same footage folder the plan was cut from")
+    p.add_argument(
+        "--music", default="",
+        help="song file for musical context (default: the plan's own song)",
+    )
+    p.add_argument(
+        "--notes", default="",
+        help='context for the review, e.g. "Instagram teaser for our travel blog"',
+    )
+    p.add_argument(
+        "--apply", action="store_true",
+        help="apply the review's replacement suggestions and write the "
+             "improved timeline (needs -o)",
+    )
+    p.add_argument("-o", "--output", help="output .fcpxml/.edl (with --apply)")
+    p.add_argument("--fps", type=float, default=25.0)
+    p.add_argument(
+        "--audio", choices=["music", "mix", "original"], default=None,
+        help="what plays under the pictures (default: music when the plan "
+             "has a song, original otherwise)",
+    )
+    p.add_argument(
+        "--canvas",
+        choices=["hd", "uhd", "vertical", "vertical-uhd", "cine", "cine-uhd"],
+        default="uhd",
+        help="timeline shape and resolution (same presets as 'create')",
+    )
+    p.add_argument(
+        "--save-plan", default="", metavar="PATH.json",
+        help="save the improved plan as JSON for the next iteration",
+    )
+    p.set_defaults(func=cmd_direct)
 
     p = sub.add_parser(
         "movie",
