@@ -337,6 +337,65 @@ class FakeProject:
         self.set_current_calls: list[FakeTimeline] = []
         self.settings_set: list[tuple[str, str]] = []  # project-level SetSetting
         self.set_setting_result = True
+        # --- render (Deliver) behavior knobs -------------------------------
+        self.render_presets: list = []  # GetRenderPresetList payload
+        self.load_preset_calls: list[str] = []
+        self.load_preset_result = True
+        self.render_formats: dict = {}  # {"desc": "extension"}
+        self.render_codecs: dict = {}   # {"codec desc": "codec key"}
+        self.codec_queries: list[str] = []
+        self.format_codec_calls: list[tuple] = []
+        self.set_format_codec_result = True
+        self.render_settings_calls: list[dict] = []
+        self.set_render_settings_result = True
+        self.add_render_job_result: object = "render-job-1"
+        self.start_rendering_calls: list[list] = []
+        self.start_rendering_result = True
+        # Percents reported while IsRenderingInProgress stays True; each
+        # GetRenderJobStatus pops one. Empty -> rendering finished, and the
+        # status becomes render_final_status.
+        self.render_progress: list[int] = []
+        self.render_final_status: dict = {
+            "JobStatus": "Complete", "CompletionPercentage": 100,
+        }
+
+    def GetRenderPresetList(self):
+        return list(self.render_presets)
+
+    def LoadRenderPreset(self, name: str):
+        self.load_preset_calls.append(name)
+        return self.load_preset_result
+
+    def GetRenderFormats(self):
+        return dict(self.render_formats)
+
+    def GetRenderCodecs(self, render_format: str):
+        self.codec_queries.append(render_format)
+        return dict(self.render_codecs)
+
+    def SetCurrentRenderFormatAndCodec(self, render_format: str, codec: str):
+        self.format_codec_calls.append((render_format, codec))
+        return self.set_format_codec_result
+
+    def SetRenderSettings(self, settings: dict):
+        self.render_settings_calls.append(dict(settings))
+        return self.set_render_settings_result
+
+    def AddRenderJob(self):
+        return self.add_render_job_result
+
+    def StartRendering(self, job_ids: list):
+        self.start_rendering_calls.append(list(job_ids))
+        return self.start_rendering_result
+
+    def IsRenderingInProgress(self):
+        return bool(self.render_progress)
+
+    def GetRenderJobStatus(self, job_id):
+        if self.render_progress:
+            percent = self.render_progress.pop(0)
+            return {"JobStatus": "Rendering", "CompletionPercentage": percent}
+        return dict(self.render_final_status)
 
     def GetName(self) -> str:
         return self._name
@@ -374,6 +433,11 @@ class FakeProjectManager:
 class FakeResolve:
     def __init__(self, project: FakeProject | None) -> None:
         self._manager = FakeProjectManager(project)
+        self.opened_pages: list[str] = []
+
+    def OpenPage(self, name: str) -> bool:
+        self.opened_pages.append(name)
+        return True
 
     def GetProjectManager(self) -> FakeProjectManager:
         return self._manager
@@ -2985,3 +3049,645 @@ def test_cli_into_resolve_failure_exits_with_error(monkeypatch, capsys) -> None:
     assert excinfo.value.code == 1
     err = capsys.readouterr().err
     assert "MONTEUR_RESOLVE_PYTHON" in err  # the crash hint reaches the user
+
+
+# --- Worker `render` command (streamed Deliver drive) ----------------------------
+
+
+def render_project() -> FakeProject:
+    """A FakeProject ready to render: presets, a 3-step progress, success."""
+    project = FakeProject(
+        timelines=[standard_timeline(), FakeTimeline(name="Cut 2", start_frame=0)]
+    )
+    project.render_presets = [
+        "H.264 Master", "YouTube - 2160p", "YouTube - 1080p", "ProRes Master",
+    ]
+    project.render_progress = [25, 50, 75]
+    return project
+
+
+def run_render_worker(monkeypatch, capsys, project, request):
+    """Run the worker's `render` command against a FakeProject.
+
+    Returns ``(lines, app)`` — the parsed emitted JSON lines and the
+    FakeResolve app (for OpenPage assertions). Poll sleeps are zeroed.
+    """
+    from monteur import _resolve_worker
+
+    monkeypatch.setattr(_resolve_worker, "_RENDER_POLL_SECONDS", 0)
+    app = FakeResolve(project)
+    monkeypatch.setattr(resolve, "connect", lambda a=None: ResolveBridge(app))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+    code = _resolve_worker.main(["render"])
+    assert code == 0
+    out = capsys.readouterr().out
+    lines = [json.loads(line) for line in out.splitlines() if line.strip()]
+    return lines, app
+
+
+def render_request(tmp_path, **overrides) -> dict:
+    request = {
+        "timeline": None,
+        "target_dir": str(tmp_path / "renders"),
+        "name": "holiday",
+        "preset": "2160p",
+    }
+    request.update(overrides)
+    return request
+
+
+def test_worker_render_happy_path_with_preset(tmp_path, monkeypatch, capsys) -> None:
+    project = render_project()
+    request = render_request(tmp_path)
+    lines, app = run_render_worker(monkeypatch, capsys, project, request)
+    # prepare -> progress x4 (25/50/75 while rendering, 100 from the final
+    # status read) -> done, all as separate flushed lines.
+    assert lines[0] == {"stage": "prepare", "ok": True, "preset": "YouTube - 2160p"}
+    progress = [l["percent"] for l in lines if l["stage"] == "progress"]
+    assert progress == [25, 50, 75, 100]
+    done = lines[-1]
+    assert done["stage"] == "done" and done["ok"] is True
+    assert done["path"] == os.path.join(str(tmp_path / "renders"), "holiday")
+    assert isinstance(done["seconds"], (int, float))
+    # The Deliver workflow really ran: page, preset, settings, job, start.
+    assert app.opened_pages == ["deliver"]
+    assert project.load_preset_calls == ["YouTube - 2160p"]
+    assert project.render_settings_calls == [
+        {
+            "SelectAllFrames": True,
+            "TargetDir": str(tmp_path / "renders"),
+            "CustomName": "holiday",
+        }
+    ]
+    assert project.start_rendering_calls == [["render-job-1"]]
+    assert (tmp_path / "renders").is_dir()  # created with parents
+
+
+def test_worker_render_null_preset_defaults_to_2160p(tmp_path, monkeypatch, capsys) -> None:
+    project = render_project()
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, project, render_request(tmp_path, preset=None)
+    )
+    assert lines[0]["preset"] == "YouTube - 2160p"
+
+
+def test_worker_render_1080p_preset(tmp_path, monkeypatch, capsys) -> None:
+    project = render_project()
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, project, render_request(tmp_path, preset="1080p")
+    )
+    assert lines[0] == {"stage": "prepare", "ok": True, "preset": "YouTube - 1080p"}
+    assert project.load_preset_calls == ["YouTube - 1080p"]
+
+
+def test_worker_render_loose_preset_match(tmp_path, monkeypatch, capsys) -> None:
+    # "verify against the list at runtime, match loosely by substring":
+    # a differently-worded YouTube preset still wins over a plain one.
+    project = render_project()
+    project.render_presets = ["Custom Master", "My 2160p Export", "YouTube 2160p UHD"]
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, project, render_request(tmp_path)
+    )
+    assert lines[0]["preset"] == "YouTube 2160p UHD"
+
+
+def test_worker_render_preset_match_without_youtube(tmp_path, monkeypatch, capsys) -> None:
+    project = render_project()
+    project.render_presets = ["My 2160p Master"]
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, project, render_request(tmp_path)
+    )
+    assert lines[0]["preset"] == "My 2160p Master"
+
+
+def test_worker_render_dict_preset_list(tmp_path, monkeypatch, capsys) -> None:
+    # Some Resolve versions return dicts from GetRenderPresetList.
+    project = render_project()
+    project.render_presets = [{"RenderPresetName": "YouTube - 2160p"}]
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, project, render_request(tmp_path)
+    )
+    assert lines[0]["preset"] == "YouTube - 2160p"
+
+
+def test_worker_render_fallback_to_format_codec(tmp_path, monkeypatch, capsys) -> None:
+    project = render_project()
+    project.render_presets = ["ProRes Master"]  # nothing matches 2160p
+    project.render_formats = {"QuickTime": "mov", "MP4": "mp4"}
+    project.render_codecs = {"H.264": "H264", "H.265": "H265"}
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, project, render_request(tmp_path)
+    )
+    assert lines[0] == {"stage": "prepare", "ok": True, "preset": "mp4/H264"}
+    assert project.format_codec_calls == [("mp4", "H264")]
+    assert project.codec_queries == ["mp4"]
+    # In fallback mode the extension is knowable — the path carries it.
+    assert lines[-1]["path"].endswith(os.path.join("renders", "holiday.mp4"))
+
+
+def test_worker_render_load_preset_refusal_falls_back(tmp_path, monkeypatch, capsys) -> None:
+    project = render_project()
+    project.load_preset_result = False  # the preset exists but won't load
+    project.render_formats = {"MP4": "mp4"}
+    project.render_codecs = {"H.264 Best": "H264_Main"}
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, project, render_request(tmp_path)
+    )
+    assert lines[0]["preset"] == "mp4/H264_Main"
+
+
+def test_worker_render_no_preset_and_no_format_is_clean(tmp_path, monkeypatch, capsys) -> None:
+    project = render_project()
+    project.render_presets = []
+    project.render_formats = {}
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, project, render_request(tmp_path)
+    )
+    assert len(lines) == 1
+    assert lines[0]["stage"] == "prepare" and lines[0]["ok"] is False
+    assert "no mp4 render format" in lines[0]["error"]
+    assert project.start_rendering_calls == []
+
+
+def test_worker_render_no_h264_codec_is_clean(tmp_path, monkeypatch, capsys) -> None:
+    project = render_project()
+    project.render_presets = []
+    project.render_formats = {"MP4": "mp4"}
+    project.render_codecs = {"VP9": "VP9"}
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, project, render_request(tmp_path)
+    )
+    assert lines[0]["ok"] is False
+    assert "H.264" in lines[0]["error"]
+
+
+def test_worker_render_selects_named_timeline(tmp_path, monkeypatch, capsys) -> None:
+    project = render_project()
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, project, render_request(tmp_path, timeline="Cut 2")
+    )
+    assert lines[-1]["stage"] == "done"
+    assert [t.GetName() for t in project.set_current_calls] == ["Cut 2"]
+
+
+def test_worker_render_unknown_timeline_is_clean(tmp_path, monkeypatch, capsys) -> None:
+    project = render_project()
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, project, render_request(tmp_path, timeline="Nope")
+    )
+    assert len(lines) == 1
+    assert lines[0]["stage"] == "prepare" and lines[0]["ok"] is False
+    assert "'Nope'" in lines[0]["error"]
+    assert "Cut 1" in lines[0]["error"]  # the available timelines are listed
+
+
+def test_worker_render_add_render_job_refusal_is_clean(tmp_path, monkeypatch, capsys) -> None:
+    project = render_project()
+    project.add_render_job_result = None
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, project, render_request(tmp_path)
+    )
+    assert lines[-1]["stage"] == "prepare" and lines[-1]["ok"] is False
+    assert "AddRenderJob" in lines[-1]["error"]
+    assert project.start_rendering_calls == []
+
+
+def test_worker_render_start_rendering_refusal_is_clean(tmp_path, monkeypatch, capsys) -> None:
+    project = render_project()
+    project.start_rendering_result = False
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, project, render_request(tmp_path)
+    )
+    # prepare succeeded; the failure is a terminal render-stage line.
+    assert lines[0]["ok"] is True
+    assert lines[-1]["stage"] == "render" and lines[-1]["ok"] is False
+    assert "StartRendering" in lines[-1]["error"]
+
+
+def test_worker_render_failed_job_status_is_clean(tmp_path, monkeypatch, capsys) -> None:
+    project = render_project()
+    project.render_progress = [40]
+    project.render_final_status = {"JobStatus": "Failed", "Error": "Disk full"}
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, project, render_request(tmp_path)
+    )
+    assert lines[-1]["stage"] == "render" and lines[-1]["ok"] is False
+    assert "'Failed'" in lines[-1]["error"]
+    assert "Disk full" in lines[-1]["error"]
+
+
+def test_worker_render_settings_refusal_is_clean(tmp_path, monkeypatch, capsys) -> None:
+    project = render_project()
+    project.set_render_settings_result = False
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, project, render_request(tmp_path)
+    )
+    assert lines[-1]["stage"] == "prepare" and lines[-1]["ok"] is False
+    assert "SetRenderSettings" in lines[-1]["error"]
+
+
+def test_worker_render_progress_only_when_changed(tmp_path, monkeypatch, capsys) -> None:
+    project = render_project()
+    project.render_progress = [25, 25, 25, 50]
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, project, render_request(tmp_path)
+    )
+    progress = [l["percent"] for l in lines if l["stage"] == "progress"]
+    assert progress == [25, 50, 100]  # duplicates are silent
+
+
+def test_worker_render_status_without_percent_still_finishes(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    # A Resolve version whose job status carries no CompletionPercentage:
+    # no progress lines, but the render still completes cleanly.
+    class NoPercentProject(FakeProject):
+        def __init__(self):
+            super().__init__(timelines=[standard_timeline()])
+            self.render_presets = ["YouTube - 2160p"]
+            self._polls = 2
+
+        def IsRenderingInProgress(self):
+            self._polls -= 1
+            return self._polls > 0
+
+        def GetRenderJobStatus(self, job_id):
+            return {"JobStatus": "Complete"}
+
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, NoPercentProject(), render_request(tmp_path)
+    )
+    assert [l["stage"] for l in lines] == ["prepare", "done"]
+    assert lines[-1]["ok"] is True
+
+
+def test_worker_render_creates_target_dir_with_parents(tmp_path, monkeypatch, capsys) -> None:
+    target = tmp_path / "deep" / "nested" / "renders"
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, render_project(),
+        render_request(tmp_path, target_dir=str(target)),
+    )
+    assert lines[-1]["stage"] == "done"
+    assert target.is_dir()
+
+
+def test_worker_render_unwritable_target_dir_is_clean(tmp_path, monkeypatch, capsys) -> None:
+    blocked = tmp_path / "blocked"
+    blocked.write_text("i am a file")
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, render_project(),
+        render_request(tmp_path, target_dir=str(blocked)),
+    )
+    assert len(lines) == 1
+    assert lines[0]["stage"] == "prepare" and lines[0]["ok"] is False
+    assert "could not create the render folder" in lines[0]["error"]
+
+
+def test_worker_render_unknown_quality_is_clean(tmp_path, monkeypatch, capsys) -> None:
+    lines, _ = run_render_worker(
+        monkeypatch, capsys, render_project(),
+        render_request(tmp_path, preset="720p"),
+    )
+    assert len(lines) == 1
+    assert lines[0]["ok"] is False
+    assert "unknown render preset '720p'" in lines[0]["error"]
+
+
+def test_worker_render_resolve_not_running_is_clean(tmp_path, monkeypatch, capsys) -> None:
+    from monteur import _resolve_worker
+
+    monkeypatch.setattr(_resolve_worker, "_RENDER_POLL_SECONDS", 0)
+
+    def boom(app=None):
+        raise MonteurResolveError("Resolve is not running.")
+
+    monkeypatch.setattr(resolve, "connect", boom)
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(json.dumps(render_request(tmp_path)))
+    )
+    assert _resolve_worker.main(["render"]) == 0
+    lines = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
+    ]
+    assert lines == [
+        {"stage": "prepare", "ok": False, "error": "Resolve is not running."}
+    ]
+
+
+# --- _stream_worker / render_isolated --------------------------------------------
+
+
+def _fake_stream_child(tmp_path, monkeypatch, body: str) -> None:
+    """Point _WORKER_PATH at a tiny stand-in script for real-subprocess tests."""
+    script = tmp_path / "fake_stream_worker.py"
+    script.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(resolve, "_WORKER_PATH", str(script))
+
+
+_HAPPY_RENDER_CHILD = """\
+import json, sys, time
+sys.stdin.read()
+print(json.dumps({"stage": "prepare", "ok": True, "preset": "YouTube - 2160p"}), flush=True)
+print("this line is not JSON and must be skipped", flush=True)
+for percent in (10, 60, 100):
+    time.sleep(0.05)
+    print(json.dumps({"stage": "progress", "percent": percent}), flush=True)
+print(json.dumps({"stage": "done", "ok": True, "path": "/out/x.mp4", "seconds": 1.5}), flush=True)
+"""
+
+
+def test_stream_worker_streams_lines_while_running(tmp_path, monkeypatch) -> None:
+    _fake_stream_child(tmp_path, monkeypatch, _HAPPY_RENDER_CHILD)
+    seen: list[dict] = []
+    ok, lines, failure = resolve._stream_worker(
+        "render", 30.0, request={"x": 1}, on_line=seen.append
+    )
+    assert ok is True and failure == {}
+    assert seen == lines  # every parsed line reached the callback, in order
+    assert [l["stage"] for l in lines] == [
+        "prepare", "progress", "progress", "progress", "done",
+    ]  # the garbage line was skipped
+
+
+def test_render_isolated_happy_path_streams_progress(tmp_path, monkeypatch) -> None:
+    _fake_stream_child(tmp_path, monkeypatch, _HAPPY_RENDER_CHILD)
+    percents: list[int] = []
+    result = resolve.render_isolated(
+        None, "/out", "x", preset="2160p", progress=percents.append
+    )
+    assert percents == [10, 60, 100]  # live, increasing, ints
+    assert result == {
+        "ok": True,
+        "path": "/out/x.mp4",
+        "seconds": 1.5,
+        "preset": "YouTube - 2160p",
+    }
+
+
+def test_render_isolated_sends_request_on_stdin(tmp_path, monkeypatch) -> None:
+    _fake_stream_child(
+        tmp_path,
+        monkeypatch,
+        """\
+import json, sys
+request = json.loads(sys.stdin.read())
+print(json.dumps({"stage": "prepare", "ok": True, "preset": request["preset"]}), flush=True)
+print(json.dumps({"stage": "done", "ok": True,
+                  "path": request["target_dir"] + "/" + request["name"],
+                  "seconds": 0.1}), flush=True)
+""",
+    )
+    result = resolve.render_isolated("Cut 7", "/renders", "movie", preset="1080p")
+    assert result["ok"] is True
+    assert result["path"] == "/renders/movie"
+    assert result["preset"] == "1080p"
+
+
+def test_render_isolated_clean_failure_line(tmp_path, monkeypatch) -> None:
+    _fake_stream_child(
+        tmp_path,
+        monkeypatch,
+        """\
+import json, sys
+sys.stdin.read()
+print(json.dumps({"stage": "prepare", "ok": False,
+                  "error": "No project is open in Resolve."}), flush=True)
+""",
+    )
+    result = resolve.render_isolated(None, "/out", "x")
+    assert result == {"ok": False, "error": "No project is open in Resolve."}
+
+
+def test_render_isolated_timeout_kills_child_and_says_render_continues(
+    tmp_path, monkeypatch
+) -> None:
+    _fake_stream_child(
+        tmp_path,
+        monkeypatch,
+        """\
+import json, sys, time
+sys.stdin.read()
+print(json.dumps({"stage": "progress", "percent": 5}), flush=True)
+time.sleep(30)
+""",
+    )
+    percents: list[int] = []
+    started = __import__("time").monotonic()
+    result = resolve.render_isolated(
+        None, "/out", "x", timeout=0.7, progress=percents.append
+    )
+    assert __import__("time").monotonic() - started < 10
+    assert percents == [5]  # the streamed line arrived before the kill
+    assert result["ok"] is False
+    assert result["reason"] == "timeout"
+    assert "continues inside Resolve" in result["error"]
+
+
+def test_render_isolated_no_terminal_line_is_bad_output(tmp_path, monkeypatch) -> None:
+    _fake_stream_child(
+        tmp_path,
+        monkeypatch,
+        """\
+import json, sys
+sys.stdin.read()
+print(json.dumps({"stage": "progress", "percent": 50}), flush=True)
+""",
+    )
+    result = resolve.render_isolated(None, "/out", "x")
+    assert result["ok"] is False
+    assert result["reason"] == "bad-output"
+
+
+def test_render_isolated_progress_exception_propagates_and_kills_child(
+    tmp_path, monkeypatch
+) -> None:
+    # The cooperative-cancel seam: a raising progress callback aborts the
+    # stream (the child is killed first) and the exception reaches the
+    # caller — Studio's render job uses exactly this to honour Cancel.
+    _fake_stream_child(
+        tmp_path,
+        monkeypatch,
+        """\
+import json, sys, time
+sys.stdin.read()
+print(json.dumps({"stage": "progress", "percent": 5}), flush=True)
+time.sleep(30)
+print(json.dumps({"stage": "done", "ok": True, "path": "/x", "seconds": 30.0}), flush=True)
+""",
+    )
+
+    class Cancelled(Exception):
+        pass
+
+    def cancelling_progress(percent: int) -> None:
+        raise Cancelled("stop watching")
+
+    started = __import__("time").monotonic()
+    with pytest.raises(Cancelled):
+        resolve.render_isolated(None, "/out", "x", progress=cancelling_progress)
+    assert __import__("time").monotonic() - started < 10  # child did not linger
+
+
+class _FakeStreamPopen:
+    """A Popen stand-in for exit-code classification tests (portable)."""
+
+    def __init__(self, lines: str, returncode: int = 0, stderr: str = "") -> None:
+        self.stdout = io.StringIO(lines)
+        self.stderr = io.StringIO(stderr)
+        self.stdin = io.StringIO()
+        self.returncode: int | None = None
+        self._rc = returncode
+
+    def wait(self, timeout=None):
+        self.returncode = self._rc
+        return self._rc
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = self._rc
+
+
+def test_stream_worker_native_crash_is_classified(monkeypatch) -> None:
+    fake = _FakeStreamPopen(
+        json.dumps({"stage": "prepare", "ok": True, "preset": "P"}) + "\n",
+        returncode=-1073741819,  # 0xC0000005 access violation
+    )
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: fake)
+    ok, lines, failure = resolve._stream_worker("render", 5.0)
+    assert ok is False
+    assert failure["reason"] == "crash"
+    assert lines and lines[0]["stage"] == "prepare"  # partial stream survives
+
+
+def test_render_isolated_native_crash_never_raises(monkeypatch) -> None:
+    fake = _FakeStreamPopen("", returncode=3221225477)  # unsigned 0xC0000005
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: fake)
+    result = resolve.render_isolated(None, "/out", "x")
+    assert result["ok"] is False
+    assert result["reason"] == "native-crash"
+    assert "3.6" in result["error"] and "3.11" in result["error"]
+
+
+def test_stream_worker_clean_nonzero_is_worker_error(monkeypatch) -> None:
+    # stderr goes to the spool file _stream_worker passes in (not a pipe) —
+    # the fake writes there like a real child would.
+    fake = _FakeStreamPopen("", returncode=1)
+
+    def fake_popen(cmd, **kwargs):
+        kwargs["stderr"].write("Traceback...\nImportError: nope\n")
+        return fake
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    ok, lines, failure = resolve._stream_worker("render", 5.0)
+    assert ok is False
+    assert failure["reason"] == "worker-error"
+    assert "ImportError: nope" in failure["error"]
+
+
+def test_stream_worker_missing_interpreter(monkeypatch) -> None:
+    def raise_missing(*args, **kwargs):
+        raise FileNotFoundError("no such interpreter")
+
+    monkeypatch.setattr(subprocess, "Popen", raise_missing)
+    ok, lines, failure = resolve._stream_worker("render", 5.0)
+    assert ok is False
+    assert failure["reason"] == "no-interpreter"
+    assert "Find a compatible Python" in failure["error"]
+
+
+def test_stream_worker_uses_worker_python(monkeypatch) -> None:
+    monkeypatch.setenv("MONTEUR_RESOLVE_PYTHON", "/opt/py311/bin/python3.11")
+    captured: dict = {}
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeStreamPopen(
+            json.dumps({"stage": "done", "ok": True, "path": "/x", "seconds": 0.1})
+            + "\n"
+        )
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    ok, _lines, _failure = resolve._stream_worker("render", 5.0)
+    assert ok is True
+    assert captured["cmd"][0] == "/opt/py311/bin/python3.11"
+    assert captured["cmd"][1].endswith("_resolve_worker.py")
+    assert captured["cmd"][2] == "render"
+
+
+# --- CLI: monteur resolve render ---------------------------------------------------
+
+
+def _run_cli_render(monkeypatch, result, argv):
+    from monteur.cli import main
+
+    calls: list[dict] = []
+
+    def fake_render(
+        timeline, target_dir, name, preset=None, timeout=7200.0, progress=None
+    ):
+        calls.append(
+            {
+                "timeline": timeline, "target_dir": target_dir, "name": name,
+                "preset": preset,
+            }
+        )
+        if progress is not None:
+            progress(50)
+        return dict(result)
+
+    monkeypatch.setattr(resolve, "render_isolated", fake_render)
+    main(argv)
+    return calls
+
+
+def test_cli_resolve_render_happy_path(monkeypatch, capsys) -> None:
+    calls = _run_cli_render(
+        monkeypatch,
+        {"ok": True, "path": "/out/v.mp4", "seconds": 12.0,
+         "preset": "YouTube - 2160p"},
+        ["resolve", "render", "--out", "/out", "--name", "v",
+         "--preset", "2160p", "--timeline", "Cut 1"],
+    )
+    assert calls == [
+        {"timeline": "Cut 1", "target_dir": "/out", "name": "v", "preset": "2160p"}
+    ]
+    out = capsys.readouterr().out
+    assert "\rRendering… 50%" in out  # streamed percents redraw one line
+    assert "Your video is ready: /out/v.mp4 in 12s" in out
+    assert "YouTube - 2160p" in out
+
+
+def test_cli_resolve_render_defaults(monkeypatch, capsys) -> None:
+    calls = _run_cli_render(
+        monkeypatch,
+        {"ok": True, "path": "/r/monteur_render", "seconds": 3.0, "preset": "P"},
+        ["resolve", "render", "--out", "/r"],
+    )
+    assert calls == [
+        {"timeline": None, "target_dir": "/r", "name": "monteur_render",
+         "preset": None}
+    ]
+
+
+def test_cli_resolve_render_requires_out(monkeypatch, capsys) -> None:
+    from monteur.cli import main
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["resolve", "render"])
+    assert excinfo.value.code == 1
+    assert "--out" in capsys.readouterr().err
+
+
+def test_cli_resolve_render_failure_exits_with_error(monkeypatch, capsys) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        _run_cli_render(
+            monkeypatch,
+            {"ok": False, "error": "Resolve is not running."},
+            ["resolve", "render", "--out", "/out"],
+        )
+    assert excinfo.value.code == 1
+    assert "Resolve is not running." in capsys.readouterr().err

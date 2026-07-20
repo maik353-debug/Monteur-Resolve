@@ -1626,6 +1626,154 @@ class TestResolveBuildApi:
         assert "no entries" in job["message"]
 
 
+class TestResolveRenderApi:
+    """POST /api/resolve/render — render the built timeline to a video file.
+
+    ``render_isolated`` is replaced at its import site (the job body does
+    ``from monteur.resolve import render_isolated`` at CALL time), so
+    ``monkeypatch.setattr`` on :mod:`monteur.resolve` is a complete test
+    hook — no running Resolve, no worker child process.
+    """
+
+    def _patch_render(self, monkeypatch, result, percents=()):
+        """Fake render_isolated; feeds ``percents`` through the progress
+        callback before returning ``result``. Returns the recorded calls."""
+        import monteur.resolve as resolve_module
+
+        calls = []
+
+        def fake_render(
+            timeline, target_dir, name, preset=None, timeout=7200.0,
+            progress=None,
+        ):
+            calls.append(
+                {
+                    "timeline": timeline, "target_dir": target_dir,
+                    "name": name, "preset": preset,
+                }
+            )
+            if progress is not None:
+                for percent in percents:
+                    progress(percent)
+            return dict(result)
+
+        monkeypatch.setattr(resolve_module, "render_isolated", fake_render)
+        return calls
+
+    def _render(self, server, **payload):
+        data = _post(f"{server}/api/resolve/render", payload)
+        assert isinstance(data["job"], str) and data["job"]
+        return _wait_for_job(server, data["job"])
+
+    def test_render_happy_path_with_live_progress(self, server, monkeypatch):
+        calls = self._patch_render(
+            monkeypatch,
+            {"ok": True, "path": "/renders/holiday.mp4", "seconds": 12.5,
+             "preset": "YouTube - 2160p"},
+            percents=(30, 80),
+        )
+        job = self._render(
+            server, timeline="Monteur Montage", target_dir="/renders",
+            name="holiday", preset="2160p",
+        )
+        assert job["state"] == "done"
+        assert job["kind"] == "resolve-render"
+        assert job["result"] == {
+            "path": "/renders/holiday.mp4",
+            "seconds": 12.5,
+            "preset": "YouTube - 2160p",
+        }
+        # The worker's percent stream landed as job-progress entries — the
+        # shape the Studio job panel renders as a determinate bar.
+        assert {
+            "stage": "resolve", "name": "starting the render in Resolve"
+        } in job["progress"]
+        rendered = [p for p in job["progress"] if p["stage"] == "render"]
+        assert [p["percent"] for p in rendered] == [30, 80]
+        assert calls == [
+            {"timeline": "Monteur Montage", "target_dir": "/renders",
+             "name": "holiday", "preset": "2160p"}
+        ]
+
+    def test_render_defaults(self, server, monkeypatch):
+        calls = self._patch_render(
+            monkeypatch,
+            {"ok": True, "path": "/r/monteur_render", "seconds": 1.0,
+             "preset": "YouTube - 2160p"},
+        )
+        job = self._render(server, target_dir="/r")
+        assert job["state"] == "done"
+        # No timeline (current one), no name (monteur_render), no preset
+        # (the worker's own 2160p default).
+        assert calls == [
+            {"timeline": None, "target_dir": "/r", "name": "monteur_render",
+             "preset": None}
+        ]
+
+    def test_render_failure_is_job_error_with_worker_message(
+        self, server, monkeypatch
+    ):
+        message = (
+            "Resolve reported the render job as 'Failed': Disk full"
+        )
+        self._patch_render(monkeypatch, {"ok": False, "error": message})
+        job = self._render(server, target_dir="/renders")
+        assert job["state"] == "error"
+        assert job["message"] == message  # verbatim — it already names the fix
+        assert job["result"] is None
+
+    def test_render_missing_target_dir_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/resolve/render", {"name": "x"})
+        assert exc_info.value.code == 400
+        assert "target_dir" in json.loads(exc_info.value.read())["error"]
+
+    def test_render_bad_preset_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/resolve/render",
+                {"target_dir": "/r", "preset": "720p"},
+            )
+        assert exc_info.value.code == 400
+        assert "preset" in json.loads(exc_info.value.read())["error"]
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_app_has_the_render_row(self):
+        # No JS harness here, so assert on the source (the established
+        # pattern): the render row lives inside the Resolve-build success
+        # block, with the folder/name/quality controls, live percent
+        # handling in the job panel, the highlighted ready line, the calm
+        # Deliver-engine note — and honest cancel copy (Resolve keeps
+        # rendering; Monteur only stops watching).
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            'id="cre-render-block"',
+            'id="cre-render-dir"',
+            'id="cre-browse-render"',
+            'id="cre-render-name"',
+            'id="cre-render-preset"',
+            'id="cre-render-btn"',
+            'id="cre-render-panel"',
+            'id="cre-render-done"',
+            '<option value="2160p" selected>',
+            '<option value="1080p">',
+            '"/api/resolve/render"',
+            'p.stage === "render"',
+            "Your video is ready: ",
+            "Resolve&rsquo;s own Deliver engine",
+            "Resolve itself may still be rendering",
+        ):
+            assert needle in source, needle
+        # The render row is nested in the Resolve-build success block (which
+        # is hidden until a build succeeds), so it only ever shows after a
+        # successful build: it appears after the block opens and before the
+        # next sibling (the export bar) begins.
+        result_block = source.split('id="cre-resolve-result"', 1)[1]
+        assert result_block.index('id="cre-render-block"') < result_block.index(
+            'class="export-bar"'
+        )
+
+
 class TestSettingsApi:
     """The AI connection settings endpoints (backend choice + API key).
 

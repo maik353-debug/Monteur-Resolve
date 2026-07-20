@@ -64,8 +64,11 @@ long-lived process:
 The worker commands are ``status``, ``info`` (crash-free environment
 forensics), ``load_test`` (staged, line-per-stage native load test that
 pinpoints WHERE a crash happens — see :func:`load_test_isolated`),
-``read_timeline`` and ``build_plan`` (build a montage timeline from a
-serialized MontagePlan, optionally with Fusion titles) — see
+``read_timeline``, ``build_plan`` (build a montage timeline from a
+serialized MontagePlan, optionally with Fusion titles) and ``render``
+(streamed: drive Resolve's Deliver engine to a finished video file — see
+:func:`render_isolated`; the child only MONITORS the render, so killing it
+on a timeout leaves Resolve rendering on) — see
 ``monteur._resolve_worker`` for the wire protocol.
 
 Choosing the worker interpreter
@@ -1253,6 +1256,242 @@ def build_plan_isolated(
         }
     payload.setdefault("warnings", [])
     return payload
+
+
+def _stream_worker(
+    command: str,
+    timeout: float,
+    request: dict | None = None,
+    interpreter: str | None = None,
+    on_line=None,
+) -> tuple[bool, list[dict], dict]:
+    """Run one STREAMED worker command, reading its stdout while it runs.
+
+    The streamed counterpart of :func:`_run_worker` (which collects output
+    at the end): the child is launched with ``subprocess.Popen``, the
+    request is written to its stdin, and stdout is consumed line by line AS
+    THE CHILD RUNS — each parseable JSON-object line is appended to the
+    returned list and (when given) passed to ``on_line(payload)``. That is
+    what lets a caller show live render progress instead of a frozen bar.
+
+    Returns ``(ok, lines, failure)``:
+
+    * ``(True, lines, {})`` — the child exited 0; ``lines`` holds every
+      parsed JSON line (unparseable lines are skipped, like
+      :func:`_parse_stage_lines` does).
+    * ``(False, lines, failure)`` — ``failure`` carries ``error`` and a
+      ``reason`` of ``"crash"`` (native-crash exit code), ``"timeout"``
+      (the deadline passed; the child was killed), ``"no-interpreter"`` or
+      ``"worker-error"``, mirroring :func:`_run_worker` exactly. Even on
+      failure, ``lines`` holds whatever the child managed to stream first.
+
+    Timeout is enforced with a watchdog timer (the read loop itself blocks
+    on the pipe). An exception raised BY ``on_line`` propagates to the
+    caller — that is the cooperative-cancel seam — but the child process is
+    always killed first, so no orphaned worker lingers. Existing callers of
+    ``_run_worker`` are untouched.
+    """
+    import tempfile
+    import threading
+
+    if interpreter is None:
+        interpreter = _worker_python()
+    cmd = [interpreter, _WORKER_PATH, command]
+    # stderr goes to a spool file, not a pipe: only stdout is read while the
+    # child runs, and a long command (a render can take hours) with a chatty
+    # native module could otherwise fill the stderr pipe and deadlock.
+    stderr_spool = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=stderr_spool,
+            text=True,
+        )
+    except FileNotFoundError:
+        stderr_spool.close()
+        return False, [], {
+            "error": (
+                f"Could not launch the Resolve worker interpreter {interpreter!r}. "
+                "Open Studio's settings (gear) > DaVinci Resolve and click "
+                "“Find a compatible Python”, or fix the saved path there. "
+                "(Advanced: MONTEUR_RESOLVE_PYTHON overrides the saved choice.)"
+            ),
+            "reason": "no-interpreter",
+        }
+    timed_out = threading.Event()
+
+    def _kill_on_timeout() -> None:
+        timed_out.set()
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+    watchdog = threading.Timer(timeout, _kill_on_timeout)
+    watchdog.daemon = True
+    watchdog.start()
+    lines: list[dict] = []
+    completed = False
+    try:
+        try:
+            proc.stdin.write(json.dumps(request or {}))
+            proc.stdin.close()
+        except (OSError, ValueError):
+            pass  # child died instantly — the exit code tells the story
+        for raw in proc.stdout:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            lines.append(payload)
+            if on_line is not None:
+                on_line(payload)
+        proc.wait()
+        completed = True
+    finally:
+        watchdog.cancel()
+        if not completed:  # on_line raised (cancel) — never orphan the child
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                    proc.wait()
+                except OSError:
+                    pass
+            stderr_spool.close()
+    if timed_out.is_set():
+        stderr_spool.close()
+        return False, lines, {
+            "error": (
+                f"The Resolve worker did not finish within {timeout:g}s and "
+                "was terminated."
+            ),
+            "reason": "timeout",
+        }
+    if proc.returncode != 0:
+        if _looks_like_native_crash(proc.returncode):
+            stderr_spool.close()
+            return False, lines, {"error": _CRASH_MESSAGE, "reason": "crash"}
+        stderr = ""
+        try:
+            stderr_spool.seek(0)
+            stderr = stderr_spool.read() or ""
+        except (OSError, ValueError):
+            pass
+        finally:
+            stderr_spool.close()
+        tail = stderr.strip().splitlines()[-1] if stderr.strip() else ""
+        detail = tail or f"exit code {proc.returncode}"
+        return False, lines, {
+            "error": (
+                f"The Resolve helper failed to run under {interpreter!r}: "
+                f"{detail}. Make sure that interpreter is a working Python 3 "
+                "(the helper needs only the standard library)."
+            ),
+            "reason": "worker-error",
+        }
+    stderr_spool.close()
+    return True, lines, {}
+
+
+def render_isolated(
+    timeline: str | None,
+    target_dir: str,
+    name: str,
+    preset: str | None = None,
+    timeout: float = 7200.0,
+    progress=None,
+) -> dict:
+    """Render a Resolve timeline to a finished video file; never raises.
+
+    The last step of "media in, finished video out": runs the worker's
+    streamed ``render`` command (see ``monteur._resolve_worker`` for the
+    wire format) through :func:`_stream_worker`, so the child's per-event
+    JSON lines are consumed WHILE the render runs. ``progress`` (optional)
+    is called with each new integer percent as Resolve reports it.
+
+    ``timeline`` (None = the current one) is rendered through Resolve's own
+    Deliver engine into ``target_dir`` (created if missing) as ``name``:
+    a shipped render preset matched loosely against ``preset`` ("2160p",
+    the default, or "1080p") when one exists, else an mp4/H.264 fallback.
+
+    Returns ``{"ok": True, "path": <file>, "seconds": <wall time>,
+    "preset": <what was actually chosen>}`` or ``{"ok": False, "error":
+    <message>}`` — with the same graceful ``reason`` classification as the
+    other ``*_isolated`` functions on a native crash ("native-crash"),
+    timeout, missing interpreter or garbage output. On a timeout the child
+    monitor is killed but the render CONTINUES inside Resolve (the error
+    message says so) — Monteur only ever watches, Resolve does the work.
+    Like ``_stream_worker``, an exception raised by ``progress`` itself
+    propagates (after the child is killed) — the cooperative-cancel seam.
+    """
+    request = {
+        "timeline": timeline,
+        "target_dir": target_dir,
+        "name": name,
+        "preset": preset,
+    }
+    prepare: dict = {}
+
+    def on_line(payload: dict) -> None:
+        stage = payload.get("stage")
+        if stage == "prepare" and payload.get("ok"):
+            prepare.update(payload)
+        elif stage == "progress" and progress is not None:
+            try:
+                percent = int(payload.get("percent"))
+            except (TypeError, ValueError):
+                return
+            progress(percent)
+
+    ok, lines, failure = _stream_worker(
+        "render", timeout, request=request, on_line=on_line
+    )
+    if not ok:
+        result = {"ok": False, **failure}
+        if result.get("reason") == "crash":
+            result["reason"] = "native-crash"
+        elif result.get("reason") == "timeout":
+            result["error"] = str(result.get("error") or "") + (
+                " The render itself continues inside Resolve — check the "
+                "Deliver page there."
+            )
+        return result
+    terminal = next(
+        (
+            line
+            for line in reversed(lines)
+            if line.get("stage") == "done" or line.get("ok") is False
+        ),
+        None,
+    )
+    if terminal is None:
+        return {
+            "ok": False,
+            "error": (
+                "The Resolve render worker ended without reporting a result."
+            ),
+            "reason": "bad-output",
+        }
+    if terminal.get("ok") and terminal.get("stage") == "done":
+        return {
+            "ok": True,
+            "path": terminal.get("path"),
+            "seconds": terminal.get("seconds"),
+            "preset": prepare.get("preset"),
+        }
+    return {
+        "ok": False,
+        "error": str(
+            terminal.get("error") or "DaVinci Resolve could not render the video."
+        ),
+    }
 
 
 # --- Timeline (de)serialization ------------------------------------------------

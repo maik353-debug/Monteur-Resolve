@@ -690,6 +690,14 @@ svg text.axis {
 .resolve-send { margin: 4px 0 2px; }
 .resolve-send .help-small { margin-top: 8px; max-width: 620px; }
 
+/* render the video (inside the Resolve-build success block) */
+.render-block { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.render-ready {
+  margin: 10px 0 4px; padding: 10px 12px; border-radius: 6px;
+  background: var(--good-wash); border: 1px solid var(--good);
+  font-weight: 600; font-size: 13px; word-break: break-all;
+}
+
 /* publish kit */
 .kit-block { border-top: 1px solid var(--grid); margin-top: 14px; padding-top: 12px; }
 .thumb-strip { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 6px; }
@@ -1278,6 +1286,34 @@ svg text.axis {
             <div id="cre-resolve-result" hidden>
               <p class="scan-note" id="cre-resolve-done" role="status"></p>
               <ul class="plan-notes" id="cre-resolve-warnings"></ul>
+              <div class="render-block" id="cre-render-block">
+                <p class="seg-heading">Render the video</p>
+                <p class="help-small">One more click and Resolve renders the finished video file for you — no Deliver page, no export settings. Pick where the file should go and how big it should be.</p>
+                <label class="sr-only" for="cre-render-dir">Folder for the finished video</label>
+                <div class="path-row">
+                  <input type="text" id="cre-render-dir" placeholder="/Users/you/Movies/my-trip/monteur-render" spellcheck="false" autocomplete="off">
+                  <button class="btn ghost" id="cre-browse-render" type="button">Browse&hellip;</button>
+                </div>
+                <div class="export-bar">
+                  <label class="export-field">File name
+                    <input type="text" id="cre-render-name" spellcheck="false" autocomplete="off">
+                  </label>
+                  <div class="export-field">
+                    <span id="cre-render-preset-label">Quality</span>
+                    <select id="cre-render-preset" aria-labelledby="cre-render-preset-label">
+                      <option value="2160p" selected>4K &middot; 2160p</option>
+                      <option value="1080p">HD &middot; 1080p</option>
+                    </select>
+                  </div>
+                  <button class="btn primary" id="cre-render-btn" type="button">Render the video<span class="spin" aria-hidden="true"></span></button>
+                </div>
+                <div id="cre-render-panel"></div>
+                <p class="scan-note" id="cre-render-msg" role="status" hidden></p>
+                <div id="cre-render-result" hidden>
+                  <p class="render-ready" id="cre-render-done" role="status"></p>
+                  <p class="help-small">The render ran through Resolve&rsquo;s own Deliver engine — the same quality you&rsquo;d get exporting by hand.</p>
+                </div>
+              </div>
             </div>
           </div>
           <div class="export-bar">
@@ -3144,6 +3180,7 @@ function makeJobPanel(hostId, texts) {
 
   function renderProgress(progress) {
     var total = 0, done = 0, cached = 0;
+    var renderPct = null; // resolve-render jobs stream {"stage":"render","percent":N}
     var lines = [];
     progress.forEach(function (p) {
       // vision entries count MOMENTS, song entries count SONGS and scene
@@ -3176,6 +3213,8 @@ function makeJobPanel(hostId, texts) {
         lines.push(String(p.name || "writing publish kit") + "…");
       } else if (p.stage === "resolve") {
         lines.push(String(p.name || "building the timeline in Resolve") + "…");
+      } else if (p.stage === "render") {
+        if (typeof p.percent === "number") renderPct = p.percent;
       } else if (p.stage === "movie") {
         lines.push("Claude · " + String(p.name || "drafting the screenplay") + "…");
       } else if (p.stage === "scene") {
@@ -3205,6 +3244,15 @@ function makeJobPanel(hostId, texts) {
       fill.style.width = pctDone + "%";
       bar.setAttribute("aria-valuenow", String(pctDone));
       bar.setAttribute("aria-label", texts.working + " " + done + " of " + total + " clips done");
+    }
+    if (renderPct !== null) {
+      // A render job's live percent: Resolve's own Deliver progress.
+      status.textContent = "Rendering in Resolve — " + renderPct + "%";
+      count.textContent = renderPct + " %";
+      bar.classList.remove("indet");
+      fill.style.width = Math.max(0, Math.min(100, renderPct)) + "%";
+      bar.setAttribute("aria-valuenow", String(renderPct));
+      bar.setAttribute("aria-label", texts.working + " " + renderPct + "% done");
     }
     clear(log);
     lines.forEach(function (line) { log.appendChild(el("li", null, line)); });
@@ -3268,6 +3316,7 @@ var rankPanel = makeJobPanel("cre-rank-panel", { starting: "Starting the ranking
 var kitPanel = makeJobPanel("cre-kit-panel", { starting: "Starting the publish kit…", working: "Writing the publish kit…" });
 var revisePanel = makeJobPanel("cre-rev-panel", { starting: "Starting the revision…", working: "Revising your cut…" });
 var resolveBuildPanel = makeJobPanel("cre-resolve-panel", { starting: "Contacting DaVinci Resolve…", working: "Building the timeline in Resolve…" });
+var renderPanel = makeJobPanel("cre-render-panel", { starting: "Contacting DaVinci Resolve…", working: "Rendering in Resolve…" });
 var distillPanel = makeJobPanel("cre-dst-panel", { starting: "Starting the distillation…", working: "Distilling your trailer…" });
 
 function setScanBusy(on) {
@@ -3308,6 +3357,15 @@ function setResolveBuildBusy(on) {
   btn.classList.toggle("busy", on);
   btn.disabled = on;
 }
+function setRenderBusy(on) {
+  var btn = $("cre-render-btn");
+  btn.classList.toggle("busy", on);
+  btn.disabled = on;
+  $("cre-render-dir").disabled = on;
+  $("cre-browse-render").disabled = on;
+  $("cre-render-name").disabled = on;
+  $("cre-render-preset").disabled = on;
+}
 function setDistillBusy(on) {
   var btn = $("cre-dst-btn");
   btn.classList.toggle("busy", on);
@@ -3325,6 +3383,7 @@ function creStopJobs() {
   if (kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
   if (revisePanel.running()) { revisePanel.stop(); setReviseBusy(false); }
   if (resolveBuildPanel.running()) { resolveBuildPanel.stop(); setResolveBuildBusy(false); }
+  if (renderPanel.running()) { renderPanel.stop(); setRenderBusy(false); }
   if (distillPanel.running()) { distillPanel.stop(); setDistillBusy(false); }
 }
 
@@ -3342,6 +3401,7 @@ function creShowStep(n, focusHeading) {
   if (n !== 3 && kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
   if (n !== 3 && revisePanel.running()) { revisePanel.stop(); setReviseBusy(false); }
   if (n !== 3 && resolveBuildPanel.running()) { resolveBuildPanel.stop(); setResolveBuildBusy(false); }
+  if (n !== 3 && renderPanel.running()) { renderPanel.stop(); setRenderBusy(false); }
   cre.step = n;
   var names = { 1: "Your footage", 2: "Music & options", 3: "Your cut" };
   $("wiz-progress").textContent = "Step " + n + " of 3 — " + names[n];
@@ -3361,6 +3421,7 @@ function hideBrowseButtons() {
   $("cre-browse-music").hidden = true;
   $("cre-browse-musicdir").hidden = true;
   $("cre-browse-kit").hidden = true;
+  $("cre-browse-render").hidden = true;
   $("cre-dst-browse-music").hidden = true;
   // the movie view's Browse buttons (incl. the per-scene ones) share the fate
   Array.prototype.forEach.call(document.querySelectorAll(".mov-browse"), function (b) {
@@ -3384,6 +3445,7 @@ $("cre-browse-folder").addEventListener("click", function () { browsePath("folde
 $("cre-browse-music").addEventListener("click", function () { browsePath("music", "cre-music", "cre-browse-music"); });
 $("cre-browse-musicdir").addEventListener("click", function () { browsePath("folder", "cre-music-dir", "cre-browse-musicdir"); });
 $("cre-browse-kit").addEventListener("click", function () { browsePath("folder", "cre-kit-dir", "cre-browse-kit"); });
+$("cre-browse-render").addEventListener("click", function () { browsePath("folder", "cre-render-dir", "cre-browse-render"); });
 
 /* ---- step 1: scan the footage folder ---- */
 
@@ -4291,6 +4353,7 @@ function buildInResolve() {
   };
   $("cre-resolve-msg").hidden = true;
   $("cre-resolve-result").hidden = true;
+  if (renderPanel.running()) { renderPanel.stop(); setRenderBusy(false); }
   setResolveBuildBusy(true);
   api("/api/create/resolve", { method: "POST", body: body }).then(function (data) {
     resolveBuildPanel.start(data.job, {
@@ -4305,6 +4368,7 @@ function buildInResolve() {
           warnings.appendChild(el("li", null, String(w)));
         });
         $("cre-resolve-result").hidden = false;
+        prepareRenderRow(String((result && result.timeline) || "Monteur Montage"));
         toast("Timeline built in DaVinci Resolve.", "success");
       },
       onCancelled: function () {
@@ -4330,6 +4394,89 @@ function buildInResolve() {
   });
 }
 $("cre-resolve-btn").addEventListener("click", buildInResolve);
+
+/* ---- step 3: render the built timeline to a finished video ------------
+   The last step of "media in, finished video out": after the timeline is
+   in Resolve, POST /api/resolve/render lets Resolve's own Deliver engine
+   write the file. Live percent arrives as {"stage":"render"} progress
+   entries; the shared job panel turns them into a real bar. Cancel is
+   honest: it stops Monteur's monitoring — Resolve keeps rendering. */
+
+var renderState = { timeline: null }; // the timeline the last Resolve build created
+
+/* a filesystem-friendly file name from a timeline/project name */
+function sanitizeFileName(name) {
+  var slug = String(name || "").replace(/[^A-Za-z0-9._ -]+/g, "").trim()
+    .replace(/[ ]+/g, "-").replace(/-+/g, "-").replace(/^[-.]+|[-.]+$/g, "");
+  return slug || "monteur_render";
+}
+
+/* join a folder + child using the folder's own separator style */
+function joinFolder(folder, child) {
+  var sep = folder.indexOf("\\") !== -1 ? "\\" : "/";
+  var base = folder.replace(/[\/\\]+$/, "");
+  return base + sep + child;
+}
+
+/* fill the render row's defaults after a successful Resolve build */
+function prepareRenderRow(timelineName) {
+  renderState.timeline = timelineName;
+  $("cre-render-msg").hidden = true;
+  $("cre-render-result").hidden = true;
+  if (!$("cre-render-dir").value.trim()) {
+    var built = (cre.result && cre.result.body) || {};
+    var folder = built.folder || $("cre-folder").value.trim();
+    if (folder) $("cre-render-dir").value = joinFolder(folder, "monteur-render");
+  }
+  if (!$("cre-render-name").value.trim()) {
+    $("cre-render-name").value = sanitizeFileName(timelineName);
+  }
+}
+
+function renderVideo() {
+  if (renderPanel.running() || resolveBuildPanel.running()) return;
+  var dir = $("cre-render-dir").value.trim();
+  if (!dir) {
+    creNote("cre-render-msg", "Pick a folder for the finished video first — Browse… or paste its path.", true);
+    $("cre-render-dir").focus();
+    return;
+  }
+  var body = {
+    timeline: renderState.timeline,
+    target_dir: dir,
+    name: sanitizeFileName($("cre-render-name").value.trim() || renderState.timeline),
+    preset: $("cre-render-preset").value
+  };
+  $("cre-render-msg").hidden = true;
+  $("cre-render-result").hidden = true;
+  setRenderBusy(true);
+  api("/api/resolve/render", { method: "POST", body: body }).then(function (data) {
+    renderPanel.start(data.job, {
+      onDone: function (result) {
+        setRenderBusy(false);
+        $("cre-render-done").textContent = "Your video is ready: " + String((result && result.path) || dir);
+        $("cre-render-result").hidden = false;
+        toast("Video rendered through Resolve.", "success");
+      },
+      onCancelled: function () {
+        setRenderBusy(false);
+        creNote("cre-render-msg", "Stopped watching the render. Resolve itself may still be rendering — check its Deliver page to let it finish or stop it there.");
+      },
+      onError: function (message) {
+        setRenderBusy(false);
+        var text = String(message);
+        if (!/Resolve/i.test(text)) {
+          text += " Make sure DaVinci Resolve is still running with your project open.";
+        }
+        creNote("cre-render-msg", text, true);
+      }
+    });
+  }).catch(function (err) {
+    setRenderBusy(false);
+    creNote("cre-render-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+$("cre-render-btn").addEventListener("click", renderVideo);
 
 /* ---- distill a trailer from a finished cut (monteur.distill) ---------- */
 

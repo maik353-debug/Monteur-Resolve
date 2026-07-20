@@ -27,6 +27,8 @@ API (all JSON):
   "canvas"?, "audio"?, "format"?}                               -> {"job": id}
 * ``POST /api/create/resolve`` {"plan_json", "fps"?, "name"?,
   "canvas"?}                                                    -> {"job": id}
+* ``POST /api/resolve/render`` {"timeline"?, "target_dir",
+  "name"?, "preset"?}                                           -> {"job": id}
 * ``POST /api/find``      {"folder", "query", "limit"?}         -> {"shots"} | {"error"}
 * ``POST /api/movie/load``    {"project_dir"}                   -> {"project", "progress"}
 * ``POST /api/movie/new``     {"project_dir", "brief",
@@ -113,6 +115,28 @@ scripting disabled, incompatible Python, native crash, timeout) fails
 the job with the worker's own error message verbatim — it already
 explains the fix. Success carries the created ``"timeline"`` name plus
 any non-fatal title/canvas ``"warnings"``.
+
+``/api/resolve/render`` is the LAST step of "media in, finished video
+out": after "Build in DaVinci Resolve" put the timeline into the open
+project, one more click renders it to a finished video file — no Deliver
+page needed. A ``"resolve-render"`` job runs
+:func:`monteur.resolve.render_isolated` (crash-safe by contract: the
+streamed ``render`` worker command in a disposable child process; never
+raises): ``"timeline"`` (default: the current one) is rendered into
+``"target_dir"`` (required, 400 when missing; created with parents) as
+``"name"`` (default ``monteur_render``) using ``"preset"`` quality
+("2160p", the default, or "1080p" — anything else is a 400). Progress
+arrives live: each new percent Resolve reports becomes a ``{"stage":
+"render", "percent": N}`` job-progress entry, which the Studio job panel
+turns into a real progress bar. The result is ``{"path", "seconds",
+"preset"}`` — the finished file, the wall-clock render time and what was
+actually chosen (a shipped preset name like "YouTube - 2160p", or the
+"mp4/H264"-style format/codec fallback). Cancelling the job kills the
+MONITORING child process (checked at the next progress line) — Resolve
+itself keeps rendering; the UI says so honestly and points at Resolve's
+Deliver page. A worker failure (Resolve closed meanwhile, no usable
+preset/codec, a failed render job) fails the job with the worker's own
+message verbatim.
 
 The ``/api/settings`` endpoints manage how Monteur reaches Claude — the end
 user has a finished application, not a CLI, so the backend choice and the
@@ -346,7 +370,7 @@ _PICK_LOCK = threading.Lock()
 def _new_job(kind: str) -> dict:
     job = {
         "id": secrets.token_hex(4),
-        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "distill" | "resolve-build" | "resolve-detect" | "movie" | "scene-check" | "movie-assemble" | "ai-test"
+        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "distill" | "resolve-build" | "resolve-render" | "resolve-detect" | "movie" | "scene-check" | "movie-assemble" | "ai-test"
         "state": "running",  # -> "done" | "error" | "cancelled"
         "progress": [],  # dicts: {"index","total","name","stage"[,"usable_ratio"]}
         "message": "",  # human-readable reason when state == "error"
@@ -999,6 +1023,81 @@ def _run_resolve_build_job(job: dict, payload: dict) -> None:
         job["state"] = "error"
 
 
+class _RenderCancelled(Exception):
+    """Raised inside the render job's progress callback to honour a cancel.
+
+    ``render_isolated`` documents that an exception raised by the caller's
+    own ``progress`` callback propagates AFTER the worker child process is
+    killed — so raising here terminates the monitoring child. Resolve
+    itself keeps rendering (Monteur only watches); the UI copy says so.
+    """
+
+
+def _run_resolve_render_job(job: dict, payload: dict) -> None:
+    """Daemon-thread body for POST /api/resolve/render (timeline -> video).
+
+    Runs :func:`monteur.resolve.render_isolated` — crash-safe by contract
+    (the streamed worker child does every Resolve call and never raises) —
+    and feeds its live percent callbacks into the job's progress entries as
+    ``{"stage": "render", "percent": N}``, the shape the Studio job panel
+    renders as a determinate bar. The callback doubles as the cancel seam:
+    when the job's cancel event is set it raises :class:`_RenderCancelled`,
+    which kills the monitoring child. That only stops the WATCHING —
+    Resolve keeps rendering, which the UI states honestly. A failure dict
+    fails the job with the worker's message verbatim (it already names the
+    fix, e.g. Resolve was closed meanwhile).
+
+    ``render_isolated`` is resolved at CALL time via the ``from``-import
+    below, so tests can monkeypatch it on :mod:`monteur.resolve` without a
+    running Resolve.
+    """
+    from monteur.resolve import render_isolated
+
+    try:
+        target_dir = str(payload.get("target_dir") or "").strip()
+        name = str(payload.get("name") or "").strip() or "monteur_render"
+        preset = payload.get("preset") or None
+        timeline = payload.get("timeline") or None
+        with _JOBS_LOCK:
+            job["progress"].append(
+                {"stage": "resolve", "name": "starting the render in Resolve"}
+            )
+
+        def progress(percent: int) -> None:
+            if job["cancel"].is_set():
+                raise _RenderCancelled("cancelled")
+            with _JOBS_LOCK:
+                job["progress"].append(
+                    {"stage": "render", "percent": int(percent), "name": "rendering"}
+                )
+
+        result = render_isolated(
+            timeline, target_dir, name, preset=preset, progress=progress
+        )
+        if job["cancel"].is_set():
+            # Cancelled between the last progress line and the result.
+            job["state"] = "cancelled"
+            return
+        if not result.get("ok"):
+            job["message"] = str(
+                result.get("error")
+                or "DaVinci Resolve could not render the video."
+            )
+            job["state"] = "error"
+            return
+        job["result"] = {
+            "path": result.get("path"),
+            "seconds": result.get("seconds"),
+            "preset": result.get("preset"),
+        }
+        job["state"] = "done"
+    except _RenderCancelled:
+        job["state"] = "cancelled"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
 def _movie_module():
     """Resolve :mod:`monteur.movie` at CALL time (same seam as vision).
 
@@ -1444,6 +1543,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("GET", "/api/resolve/diagnose"): self._resolve_diagnose,
             ("POST", "/api/resolve/detect"): self._resolve_detect,
             ("POST", "/api/resolve/analyze"): self._resolve_analyze,
+            ("POST", "/api/resolve/render"): self._resolve_render,
             ("POST", "/api/assembly/plan"): self._assembly_plan,
             ("POST", "/api/assembly/export"): self._assembly_export,
             ("POST", "/api/create/scan"): self._create_scan,
@@ -1976,6 +2076,32 @@ class MonteurHandler(BaseHTTPRequestHandler):
             target=_run_resolve_detect_job,
             args=(job,),
             name=f"monteur-resolve-detect-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _resolve_render(self) -> None:
+        """POST /api/resolve/render — render the built timeline to a file.
+
+        Validation happens here (a missing ``target_dir`` or an unknown
+        ``preset`` is a 400 with a user-ready message); the actual render
+        monitoring runs as a ``"resolve-render"`` job — see
+        :func:`_run_resolve_render_job`, including the honest cancel
+        semantics (cancel stops the monitoring; Resolve keeps rendering).
+        """
+        payload = self._read_json()
+        if not str(payload.get("target_dir") or "").strip():
+            raise ApiError(
+                400, "missing 'target_dir' (the folder for the finished video)"
+            )
+        preset = payload.get("preset")
+        if preset not in (None, "", "2160p", "1080p"):
+            raise ApiError(400, "'preset' must be '2160p' or '1080p'")
+        job = _new_job("resolve-render")
+        threading.Thread(
+            target=_run_resolve_render_job,
+            args=(job, payload),
+            name=f"monteur-resolve-render-{job['id']}",
             daemon=True,
         ).start()
         self._send_json({"job": job["id"]})

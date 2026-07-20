@@ -11,6 +11,7 @@ Workflow overview::
     monteur create clips song.mp3 -o cut.fcpxml --save-plan plan.json
     monteur revise plan.json clips -o cut_v2.fcpxml --brief "zweite Hälfte ruhiger"
     monteur resolve status
+    monteur resolve render --out renders --preset 2160p
     monteur ai selects cut.md --brief "90s teaser, keep it fast"
 """
 
@@ -211,6 +212,35 @@ def cmd_resolve(args: argparse.Namespace) -> None:
         except MonteurResolveError as exc:
             _fail(str(exc))
         _print_stats(analyze_timeline(timeline))
+        return
+
+    if args.action == "render":
+        # The finished-video step: Resolve's own Deliver engine does the
+        # work; Monteur watches from an isolated child (crash-safe, never
+        # raises). Percent updates redraw one \r line, like a download.
+        from monteur.resolve import render_isolated
+
+        if not args.out:
+            _fail("resolve render needs --out DIR (folder for the finished video)")
+
+        def progress(percent: int) -> None:
+            print(f"\rRendering… {percent}%", end="", flush=True)
+
+        print("Rendering through Resolve's Deliver engine …", flush=True)
+        result = render_isolated(
+            args.timeline,
+            args.out,
+            args.name or "monteur_render",
+            preset=args.preset,
+            progress=progress,
+        )
+        print(flush=True)  # end the \r progress line
+        if not result.get("ok"):
+            _fail(result.get("error", "DaVinci Resolve could not render the video."))
+        seconds = result.get("seconds")
+        timing = f" in {seconds:.0f}s" if isinstance(seconds, (int, float)) else ""
+        print(f"Your video is ready: {result.get('path')}{timing}")
+        print(f"  (rendered with {result.get('preset')})")
         return
 
     # Mutating ops still use the in-process bridge (they need a compatible
@@ -912,9 +942,25 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("resolve", help="talk to a running DaVinci Resolve")
     p.add_argument(
         "action",
-        choices=["status", "doctor", "import", "analyze", "install-scripts"],
+        choices=["status", "doctor", "import", "analyze", "render", "install-scripts"],
     )
     p.add_argument("file", nargs="?", help="file for 'import'")
+    p.add_argument(
+        "--timeline", default=None,
+        help="timeline to render (default: the current one)",
+    )
+    p.add_argument(
+        "--out", default="",
+        help="folder for the finished video (render; created if missing)",
+    )
+    p.add_argument(
+        "--name", default="",
+        help="output file name for 'render' (default: monteur_render)",
+    )
+    p.add_argument(
+        "--preset", choices=["2160p", "1080p"], default=None,
+        help="render quality (default: 2160p)",
+    )
     p.set_defaults(func=cmd_resolve)
 
     p = sub.add_parser("create", help="automatic first cut: footage folder + song")

@@ -29,11 +29,47 @@ stdin.
     fusionscript.dll/.so found, or null; ``searched``: where it looked).
 
 ``load_test``
-    stdin: ignored. The ONE exception to the single-JSON-response protocol:
+    stdin: ignored. An exception to the single-JSON-response protocol:
     streams one JSON line per completed stage (``locate`` → ``dll-load`` →
     ``import`` → ``connect``), flushed after each, so a native crash in a
     later stage still leaves the completed stages on stdout. See
     :func:`load_test` for the exact stage payloads.
+
+``render``
+    stdin::
+
+        {"timeline": <str|null>,     # null = the current timeline
+         "target_dir": <str>,        # created (with parents) if missing
+         "name": <str>,              # output file name (no extension)
+         "preset": "2160p" | "1080p" | null}   # null = "2160p"
+
+    The other STREAMED command (line-per-event, flushed after each, like
+    ``load_test``): drives Resolve's Deliver page end-to-end — load a
+    render preset (matched loosely against ``GetRenderPresetList()``, e.g.
+    "YouTube - 2160p"; falling back to ``SetCurrentRenderFormatAndCodec``
+    with mp4 + an H.264-ish codec when no preset matches), point
+    ``SetRenderSettings`` at ``target_dir``/``name``, ``AddRenderJob()``,
+    ``StartRendering([job_id])``, then poll ``IsRenderingInProgress()`` /
+    ``GetRenderJobStatus(job_id)`` about every 2 seconds. Emitted lines::
+
+        {"stage": "prepare", "ok": true, "preset": <what was actually
+                    chosen: the preset name, or "ext/codec" for the
+                    format/codec fallback>}
+        {"stage": "progress", "percent": <int>}     # only when it changed
+        {"stage": "done", "ok": true, "path": <TargetDir/CustomName, plus
+                    the extension when knowable (fallback mode)>,
+         "seconds": <wall-clock render time>}
+
+    Any CLEAN failure (bad timeline name, no usable preset AND no workable
+    format/codec, AddRenderJob/StartRendering refusing, a failed job
+    status) emits a terminal ``{"stage": ..., "ok": false, "error": ...}``
+    line and still exits 0.
+
+    IMPORTANT — a render is never left unmonitored lightly: this worker
+    only WATCHES the render; Resolve itself does the work. If the parent
+    times out or kills this process (or the machine's Python crashes), the
+    render keeps going inside Resolve — check Resolve's Deliver page. The
+    parent's timeout message says exactly that.
 
 ``status``
     stdin: ignored. Response on success::
@@ -340,6 +376,330 @@ def load_test() -> None:
     emit({"stage": "connect", "ok": True})
 
 
+# How long the render command sleeps between IsRenderingInProgress polls.
+# Module-level so tests (and desperate users) can shrink it.
+_RENDER_POLL_SECONDS = 2.0
+
+# The two qualities Monteur offers. Deliberately small: this is the "one
+# more click and the video exists" button, not a Deliver-page replacement.
+_RENDER_PRESETS = ("2160p", "1080p")
+
+
+def _emit(payload: dict) -> None:
+    """One flushed JSON line — the streamed commands' shared emitter."""
+    print(json.dumps(payload), flush=True)
+
+
+def _preset_names(project) -> list[str]:
+    """GetRenderPresetList(), normalized to a list of names, defensively.
+
+    Depending on the Resolve version the list holds plain strings or dicts
+    (keyed ``RenderPresetName``); anything unreadable yields fewer names,
+    never an error.
+    """
+    try:
+        raw = project.GetRenderPresetList() or []
+    except Exception:  # noqa: BLE001 - a refusing API means no presets
+        return []
+    names: list[str] = []
+    for entry in raw:
+        if isinstance(entry, str):
+            names.append(entry)
+        elif isinstance(entry, dict):
+            name = entry.get("RenderPresetName") or entry.get("Name") or ""
+            if name:
+                names.append(str(name))
+    return names
+
+
+def _looks_h264(text: str) -> bool:
+    """True when a codec key/label looks like H.264 (H264, H.264, h264...)."""
+    return "h264" in (text or "").lower().replace(".", "").replace(" ", "")
+
+
+def _select_render_quality(project, preset: str) -> tuple[str | None, str | None, str]:
+    """Pick the render quality: a shipped preset, else the mp4/H.264 fallback.
+
+    Returns ``(chosen_label, extension, error)`` — exactly one of
+    ``chosen_label`` / ``error`` is set. Preset matching is loose and
+    case-insensitive against the live ``GetRenderPresetList()``: a name
+    containing both "youtube" and the wanted token ("2160p"/"1080p") wins
+    (Resolve ships "YouTube - 2160p"-style presets), else any name
+    containing the token. A matched name must also survive
+    ``LoadRenderPreset``. When no preset works, the manual fallback walks
+    ``GetRenderFormats()`` for an mp4 format and ``GetRenderCodecs`` for an
+    H.264-ish codec and applies ``SetCurrentRenderFormatAndCodec``; its
+    label is ``"<ext>/<codec>"`` and the extension makes the output path
+    knowable. Every Resolve call is guarded — versions differ.
+    """
+    token = preset.lower()
+    names = _preset_names(project)
+    best = next(
+        (n for n in names if "youtube" in n.lower() and token in n.lower()), None
+    )
+    if best is None:
+        best = next((n for n in names if token in n.lower()), None)
+    if best is not None:
+        try:
+            loaded = bool(project.LoadRenderPreset(best))
+        except Exception:  # noqa: BLE001 - fall through to the manual setup
+            loaded = False
+        if loaded:
+            return best, None, ""
+    # Manual fallback: mp4 + an H.264-ish codec.
+    try:
+        formats = dict(project.GetRenderFormats() or {})
+    except Exception:  # noqa: BLE001
+        formats = {}
+    ext = None
+    for desc, extension in formats.items():
+        candidate = str(extension or "").lower().lstrip(".")
+        if candidate == "mp4" or str(desc).lower() == "mp4":
+            ext = candidate or "mp4"
+            break
+    if ext is None:
+        return None, None, (
+            "Resolve offered no matching render preset (looked for "
+            f"{preset!r} in {names or 'an empty preset list'}) and no mp4 "
+            "render format — render from Resolve's Deliver page instead."
+        )
+    try:
+        codecs = dict(project.GetRenderCodecs(ext) or {})
+    except Exception:  # noqa: BLE001
+        codecs = {}
+    codec = None
+    for desc, key in codecs.items():
+        if _looks_h264(str(key)) or _looks_h264(str(desc)):
+            codec = str(key or desc)
+            break
+    if codec is None:
+        return None, None, (
+            "Resolve offered no H.264 codec for its mp4 format — render "
+            "from Resolve's Deliver page instead."
+        )
+    try:
+        applied = bool(project.SetCurrentRenderFormatAndCodec(ext, codec))
+    except Exception as exc:  # noqa: BLE001
+        return None, None, (
+            f"Resolve refused the mp4/{codec} render setup: "
+            f"{type(exc).__name__}: {exc}"
+        )
+    if not applied:
+        return None, None, (
+            f"Resolve refused the mp4/{codec} render setup "
+            "(SetCurrentRenderFormatAndCodec returned false)."
+        )
+    return f"{ext}/{codec}", ext, ""
+
+
+def _render_percent(status: dict) -> int | None:
+    """CompletionPercentage from a job-status dict, defensively, or None."""
+    if not isinstance(status, dict):
+        return None
+    value = status.get("CompletionPercentage")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _job_status(project, job_id) -> dict:
+    """GetRenderJobStatus(job_id) as a dict, defensively ({} on refusal)."""
+    try:
+        status = project.GetRenderJobStatus(job_id)
+    except Exception:  # noqa: BLE001 - keys and behavior differ across versions
+        return {}
+    return status if isinstance(status, dict) else {}
+
+
+def render(request: dict) -> None:
+    """The ``render`` command: drive Resolve's Deliver engine, streamed.
+
+    See the module docstring for the wire format. Structure: everything up
+    to (and including) ``AddRenderJob`` is the *prepare* phase — any clean
+    failure there emits ``{"stage": "prepare", "ok": false, ...}``; from
+    ``StartRendering`` on, failures are ``{"stage": "render", ...}``. This
+    process only monitors: killing it does NOT stop the render in Resolve.
+    """
+    import time
+
+    from monteur.resolve import MonteurResolveError, connect
+
+    target_dir = str(request.get("target_dir") or "").strip()
+    name = str(request.get("name") or "").strip() or "monteur_render"
+    preset = request.get("preset") or "2160p"
+    if preset not in _RENDER_PRESETS:
+        _emit(
+            {
+                "stage": "prepare",
+                "ok": False,
+                "error": (
+                    f"unknown render preset {preset!r} — use "
+                    + " or ".join(repr(p) for p in _RENDER_PRESETS)
+                ),
+            }
+        )
+        return
+    if not target_dir:
+        _emit(
+            {
+                "stage": "prepare",
+                "ok": False,
+                "error": "the render request is missing a 'target_dir'.",
+            }
+        )
+        return
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+    except OSError as exc:
+        _emit(
+            {
+                "stage": "prepare",
+                "ok": False,
+                "error": (
+                    f"could not create the render folder {target_dir!r}: {exc}"
+                ),
+            }
+        )
+        return
+
+    try:
+        bridge = connect()
+        project = bridge._project()
+        timeline_name = request.get("timeline")
+        if timeline_name:
+            timeline = bridge._timeline_by_name(str(timeline_name))
+            project.SetCurrentTimeline(timeline)
+        else:
+            bridge._current_timeline()  # no timeline at all -> clean error
+    except MonteurResolveError as exc:
+        _emit({"stage": "prepare", "ok": False, "error": str(exc)})
+        return
+
+    # Cosmetic but faithful to the Deliver workflow; older hosts may lack it.
+    open_page = getattr(bridge.app, "OpenPage", None)
+    if callable(open_page):
+        try:
+            open_page("deliver")
+        except Exception:  # noqa: BLE001 - purely cosmetic
+            pass
+
+    chosen, ext, error = _select_render_quality(project, preset)
+    if chosen is None:
+        _emit({"stage": "prepare", "ok": False, "error": error})
+        return
+
+    settings = {
+        "SelectAllFrames": True,
+        "TargetDir": target_dir,
+        "CustomName": name,
+    }
+    try:
+        accepted = project.SetRenderSettings(settings)
+    except Exception as exc:  # noqa: BLE001 - a refusing API is a clean failure
+        _emit(
+            {
+                "stage": "prepare",
+                "ok": False,
+                "error": f"Resolve refused the render settings: {exc}",
+            }
+        )
+        return
+    if accepted is False:
+        _emit(
+            {
+                "stage": "prepare",
+                "ok": False,
+                "error": (
+                    "Resolve refused the render settings "
+                    "(SetRenderSettings returned false)."
+                ),
+            }
+        )
+        return
+    try:
+        job_id = project.AddRenderJob()
+    except Exception as exc:  # noqa: BLE001
+        job_id = None
+        add_error = f": {type(exc).__name__}: {exc}"
+    else:
+        add_error = "."
+    if not job_id:
+        _emit(
+            {
+                "stage": "prepare",
+                "ok": False,
+                "error": (
+                    "Resolve did not create a render job "
+                    "(AddRenderJob returned nothing)" + add_error
+                ),
+            }
+        )
+        return
+    _emit({"stage": "prepare", "ok": True, "preset": chosen})
+
+    started_at = time.monotonic()
+    try:
+        started = project.StartRendering([job_id])
+    except Exception as exc:  # noqa: BLE001
+        started = False
+        start_error = f": {type(exc).__name__}: {exc}"
+    else:
+        start_error = "."
+    if not started:
+        _emit(
+            {
+                "stage": "render",
+                "ok": False,
+                "error": (
+                    "Resolve did not start the render "
+                    "(StartRendering returned false)" + start_error
+                ),
+            }
+        )
+        return
+
+    last_percent: int | None = None
+    while True:
+        try:
+            in_progress = bool(project.IsRenderingInProgress())
+        except Exception:  # noqa: BLE001 - treat a refusing poll as finished
+            in_progress = False
+        percent = _render_percent(_job_status(project, job_id))
+        if percent is not None and percent != last_percent:
+            _emit({"stage": "progress", "percent": percent})
+            last_percent = percent
+        if not in_progress:
+            break
+        if _RENDER_POLL_SECONDS > 0:
+            time.sleep(_RENDER_POLL_SECONDS)
+
+    final = _job_status(project, job_id)
+    job_state = str(final.get("JobStatus") or "")
+    if "fail" in job_state.lower() or "cancel" in job_state.lower():
+        detail = str(final.get("Error") or "").strip()
+        _emit(
+            {
+                "stage": "render",
+                "ok": False,
+                "error": (
+                    f"Resolve reported the render job as {job_state!r}"
+                    + (f": {detail}" if detail else ".")
+                ),
+            }
+        )
+        return
+    path = os.path.join(target_dir, name + (f".{ext}" if ext else ""))
+    _emit(
+        {
+            "stage": "done",
+            "ok": True,
+            "path": path,
+            "seconds": round(time.monotonic() - started_at, 2),
+        }
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Always exits 0 unless the interpreter natively crashes."""
     args = list(sys.argv[1:] if argv is None else argv)
@@ -361,6 +721,22 @@ def main(argv: list[str] | None = None) -> int:
             )
         return 0
     request = _read_request()
+    if command == "render":
+        # Streamed like load_test, but driven by a stdin request.
+        try:
+            render(request)
+        except Exception as exc:  # noqa: BLE001 - must not look like a crash
+            print(
+                json.dumps(
+                    {
+                        "stage": "internal",
+                        "ok": False,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                ),
+                flush=True,
+            )
+        return 0
     try:
         response = handle(command, request)
     except Exception as exc:  # noqa: BLE001 - a normal error must not look like a crash
