@@ -10,11 +10,14 @@ Slotting algorithm
 ------------------
 1. The montage length is ``min(song duration, max_duration)``.
 2. A cut grid is walked beat by beat: in a "high" section the next cut is
-   1 beat away, in "mid" 2 beats, in "low" 4 beats. If that interval would
-   be shorter than :data:`MIN_CUT_INTERVAL` (0.4 s) the beat step is doubled
-   until it isn't (no strobing). With no beats at all, a fixed 2 s grid is
-   used and noted. Cuts at/after the montage length are dropped; the last
-   slot always ends exactly at the montage length.
+   1 beat away, in "mid" 2 beats, in "low" 4 beats — as the section's BASE,
+   not a metronome: a longer hold (~2x the base, capped so it never eats
+   the section) opens each section and every 4th cut breathes at 2x (see
+   Rhythm below). If an interval would be shorter than
+   :data:`MIN_CUT_INTERVAL` (0.4 s) the beat step is doubled until it
+   isn't (no strobing). With no beats at all, a fixed 2 s grid is used and
+   noted. Cuts at/after the montage length are dropped; the last slot
+   always ends exactly at the montage length.
 3. Every moment from every report goes into one pool (keeping its clip
    path). CHRONOLOGICAL sorts the pool by (clip path, moment start) and
    fills slots left to right. BEST_FIRST sorts the pool by score descending
@@ -47,6 +50,41 @@ downbeats, then beats, when phrases are unknown), slow phases
 beat grid; with neither beats nor downbeats the fixed 2 s grid is used,
 exactly as in "auto".
 
+Rhythm
+------
+Within a phase the beat step is a BASE, not a metronome — real editing
+varies shot length deliberately, and a cut of nothing but equal-length
+clips reads mechanical no matter how well it hits the beat. The grid
+builders therefore apply a deterministic rhythm canon (no RNG; every cut
+still lands on the beat/downbeat grid, quantized to whole units):
+
+* **Establishing hold** — the montage's FIRST shot holds ~2x the opening
+  base (:func:`_opening_hold`, capped at half the phase so it never eats
+  it): the viewer must arrive.
+* **Accelerando** — the build's cut lengths step down monotonically from
+  the previous phase's base toward the following phase's (the trailer
+  ramp); a split build ramps across the whole run.
+* **Drop hold + stutter** — the slot ON the drop holds 2-4 beats
+  (:func:`_drop_hold`, aim 3x the climax base) — impact needs screen
+  time — and ``_STUTTER_CUTS`` one-beat cuts directly before it sharpen
+  the hit (only when the build ends fast enough to afford them). The
+  "auto" style clears grid cuts inside ~2 beats after each drop-forced
+  cut for the same reason.
+* **Pattern texture** — the other phases cycle a per-style multiplier
+  pattern on their base (:attr:`MontageStyle.rhythm`; trailer aggressive,
+  travel/wedding gentle, music_video punchy). A phrase boundary falling
+  inside a cycle re-anchors it, so the pattern restarts with the music's
+  own phrasing. All multipliers are >= 1, so ``pace`` keeps meaning
+  "seconds per shot in the FASTEST phase".
+* **Decelerando** — each outro cut is at least as long as the previous
+  one and the FINAL shot is the longest (up to 2x the outro base, the
+  remainder to the montage length — the total duration never changes).
+
+The plan notes summarize what was applied in one ``rhythm: ...`` line.
+No-music plans get the same canon on pseudo-beat units; "auto" gets the
+gentler section-hold + breath treatment described in the slotting
+algorithm above.
+
 Drops
 -----
 With a named style that has a climax phase, the climax start is aligned to
@@ -57,7 +95,9 @@ used, and only when it lies within 5%..95% of the montage — otherwise a
 note explains why alignment was skipped. In "auto", every in-range drop
 forces a cut exactly on the drop and the slot starting there is reserved
 for the unused moment with the highest (highlight, score), so the impact
-lands on the strongest material.
+lands on the strongest material. In both cases the drop slot is a HOLD
+(see Rhythm above): a pinned climax opens on a 2-4 beat held shot, and
+"auto" clears grid cuts inside ~2 beats after the forced cut.
 
 Highlights and motion matching
 ------------------------------
@@ -232,6 +272,13 @@ FALLBACK_INTERVAL = 2.0
 _SLOW_PHASE_STEP = 4
 # Downbeat detection assumes 4/4; slow phases cut every (step / this) downbeats.
 _BEATS_PER_BAR = 4
+# Rhythm (the anti-monotony canon; see the module docstring's Rhythm section):
+# a stutter burst is this many consecutive one-beat cuts directly before the
+# drop (only when the build is fast enough to afford it).
+_STUTTER_CUTS = 3
+# "auto" rhythm: a longer hold opens each music section (the first multiplier,
+# capped by _opening_hold), then a breath every len(pattern)-th cut.
+_AUTO_PATTERN = (2.0, 1.0, 1.0, 1.0)
 # Repetition guard: a montage longer than (unique material x this factor)
 # repeats footage too visibly and is capped (unless allow_repeats=True).
 _REPEAT_TOLERANCE = 1.5
@@ -358,6 +405,13 @@ class MontageStyle:
     # Smash to black: act changes cut to a short black gap (a title slot)
     # instead of running clip-to-clip — the classic trailer breath.
     smash_to_black: bool = False
+    # Per-phase rhythm texture: a repeating cycle of multipliers on the
+    # phase's base step (quantized to whole beats at build time; every
+    # multiplier >= 1, so `pace` keeps meaning "fastest cut"). A missing
+    # label cuts at the constant base — the canon moves (opening hold,
+    # build accelerando, drop hold, stutter, outro decelerando) are applied
+    # by the grid builders on top and are the same for every style.
+    rhythm: dict[str, tuple[float, ...]] = field(default_factory=dict)
 
 
 _ARC_STANDARD = [(0.15, "opening"), (0.35, "build"), (0.35, "climax"), (0.15, "outro")]
@@ -382,6 +436,8 @@ STYLES: dict[str, MontageStyle] = {
         ),
         arc=list(_ARC_STANDARD),
         beats_per_cut={"opening": 4, "build": 2, "climax": 1, "outro": 4},
+        # Gentle texture: the climax breathes every fourth cut.
+        rhythm={"climax": (1, 1, 2, 1)},
     ),
     "wedding": MontageStyle(
         key="wedding",
@@ -392,6 +448,8 @@ STYLES: dict[str, MontageStyle] = {
         ),
         arc=list(_ARC_STANDARD),
         beats_per_cut={"opening": 4, "build": 2, "climax": 2, "outro": 4},
+        # Gentle waltz breath: alternate 2- and 3-beat cuts at the peak.
+        rhythm={"climax": (1, 1.5)},
     ),
     "music_video": MontageStyle(
         key="music_video",
@@ -402,18 +460,23 @@ STYLES: dict[str, MontageStyle] = {
         ),
         arc=list(_ARC_STANDARD),
         beats_per_cut={"opening": 2, "build": 1, "climax": 1, "outro": 2},
+        # Punchy: an accented long cut early in the opening cycle and a
+        # 2-beat slam every fourth climax cut.
+        rhythm={"opening": (1, 2, 1, 1), "climax": (1, 1, 2, 1)},
     ),
     "trailer": MontageStyle(
         key="trailer",
         name="Trailer",
         description=(
-            "Long tease, accelerating build (every 2 beats, then every beat), "
-            "hard climax, snap outro (20/50/20/10 arc)."
+            "Long tease, accelerating build (ramping from every 4 beats down "
+            "to every beat), hard climax, snap outro (20/50/20/10 arc)."
         ),
         # The build is split in half so the beat step can ramp 2 -> 1.
         arc=[(0.2, "opening"), (0.25, "build"), (0.25, "build"), (0.2, "climax"), (0.1, "outro")],
         beats_per_cut={"opening": 4, "build": 2, "climax": 1, "outro": 4},
         smash_to_black=True,
+        # Aggressive: three snaps, then a 2-beat slam.
+        rhythm={"climax": (1, 1, 1, 2)},
     ),
 }
 
@@ -528,6 +591,22 @@ def _label_at(sections: list[MusicSection], t: float) -> str:
     return "mid"
 
 
+def _section_bounds_at(
+    sections: list[MusicSection], t: float, length: float
+) -> tuple[float, float]:
+    """Span ``(start, end)`` of the section containing ``t``.
+
+    Mirrors :func:`_label_at` exactly (same boundary semantics); an
+    uncovered ``t`` — or no sections at all — spans the whole montage.
+    """
+    for s in sections:
+        if s.start - _EPS <= t < s.end - _EPS:
+            return s.start, s.end
+    if sections and t >= sections[-1].end - _EPS:
+        return sections[-1].start, length
+    return 0.0, length
+
+
 def _energy_at(sections: list[MusicSection], t: float) -> float:
     """Energy value of the section containing ``t`` (0.5 if uncovered)."""
     for s in sections:
@@ -567,9 +646,27 @@ def _build_grid(
             cuts.append(t)
             t += FALLBACK_INTERVAL
     else:
+        # Rhythm (gentle, for "auto"): a longer hold opens each music
+        # section (capped so it never eats the section) and every fourth
+        # cut of a section takes a 2x-base breath — deliberate variation
+        # instead of one metronomic interval, still walked on the beats.
         cur = 0.0
+        run_key: tuple[str, float] | None = None
+        run_i = 0
+        hold_cap = 1
         while True:
-            step = lookup.get(_label_at(music.sections, cur), 2)
+            label = _label_at(music.sections, cur)
+            base = lookup.get(label, 2)
+            sec_start, sec_end = _section_bounds_at(music.sections, cur, length)
+            if (label, sec_start) != run_key:
+                run_key = (label, sec_start)
+                run_i = 0
+                lo = bisect.bisect_right(beats, cur + _EPS)
+                hi = bisect.bisect_right(beats, min(sec_end, length) + _EPS)
+                hold_cap = _opening_hold(base, hi - lo)
+            step = max(1, round(_AUTO_PATTERN[run_i % len(_AUTO_PATTERN)] * base))
+            if run_i == 0:
+                step = min(step, max(1, hold_cap))  # section-opening hold, capped
             nxt = _nth_beat_after(beats, cur, step)
             # Anti-strobe: double the beat step until the interval is sane.
             while nxt is not None and nxt - cur < MIN_CUT_INTERVAL:
@@ -579,6 +676,11 @@ def _build_grid(
                 break  # beats ran out or past the end: close at `length`
             cuts.append(nxt)
             cur = nxt
+            run_i += 1
+        notes.append(
+            "rhythm: a hold opens each music section, a breath every "
+            f"{len(_AUTO_PATTERN)}th cut"
+        )
     cuts.append(length)
     return cuts, notes
 
@@ -632,7 +734,9 @@ def _phase_steps(style: MontageStyle) -> list[int]:
 
     A run of consecutive arc entries with the same label ramps linearly from
     that label's own step to the FOLLOWING phase's step — "trailer" uses this
-    to accelerate through its split build (every 2 beats, then every beat).
+    to accelerate through its split build. (The rhythm accelerando,
+    :func:`_style_rhythm_specs`, refines this further: build cut lengths ramp
+    per cut, from the previous phase's base to the next one's.)
     """
     labels = [lab for _, lab in style.arc]
     steps: list[int] = []
@@ -653,6 +757,221 @@ def _phase_steps(style: MontageStyle) -> list[int]:
     return steps
 
 
+# --- rhythm (the anti-monotony canon) ----------------------------------------
+#
+# Within a phase, cut lengths follow a deliberate texture instead of one
+# constant interval: the montage opens on an establishing hold, the build
+# accelerates from the opening's base toward the climax's, the drop gets a
+# held shot (sharpened by a one-beat stutter burst before it when the build
+# is fast enough), the climax cycles a per-style pattern re-anchored on
+# phrase starts, and the outro decelerates into its longest final shot.
+# Everything is quantized to whole grid units (beats, downbeats or
+# pseudo-beats), fully deterministic, and never cuts faster than the
+# phase's base — so `pace` keeps meaning "seconds per shot in the fastest
+# phase" and every cut still lands on the musical grid.
+
+
+def _opening_hold(base: int, n_units: int) -> int:
+    """Units for the establishing hold: ~2x the base, capped by the phase.
+
+    The cap (half the phase's units, never below the base) keeps the hold
+    from eating the whole phase; when the phase is too short the hold
+    degrades to the plain base, i.e. no hold.
+    """
+    return min(2 * base, max(base, n_units // 2))
+
+
+def _drop_hold(base: int) -> int:
+    """Units for the drop hold: aim 3x the base, clamped to 2..4 units.
+
+    Never below the phase's own base, so the drop slot is never the
+    shortest cut even when a slow pace inflates the base past the clamp.
+    """
+    return max(base, min(4, 3 * base))
+
+
+def _phase_cut_lengths(
+    n_units: int,
+    base: int,
+    pattern: tuple[float, ...] = (),
+    *,
+    first_hold: int = 0,
+    ramp_from: float | None = None,
+    ramp_to: float | None = None,
+    stutter: int = 0,
+    decel: bool = False,
+    phrase_units: tuple[int, ...] = (),
+) -> list[int]:
+    """Cut lengths (whole grid units) for one phase — the rhythm kernel.
+
+    ``n_units`` is how many grid units (beats / downbeats / pseudo-beats)
+    the phase spans, ``base`` the phase's beats-per-cut in those units.
+    Deterministic: the same inputs always yield the same list. Every
+    length is a whole unit count >= 1; a phase's final slot is whatever
+    remains to the phase boundary, so the sum may cover ``n_units``
+    loosely (exactly, for ``decel``).
+
+    * ``first_hold`` > 0 makes the FIRST cut exactly that long (clamped to
+      the phase) — the establishing hold or the drop hold.
+    * ``ramp_from``/``ramp_to`` (both set) generate the accelerando: a
+      monotone run from one base toward the other, quantized per cut.
+      ``stutter`` then reserves that many trailing one-unit cuts (the
+      burst into the drop).
+    * ``decel`` generates the outro: non-decreasing lengths summing to
+      exactly ``n_units`` whose final entry — the last shot — is the
+      longest, up to 2x the base.
+    * ``pattern`` (otherwise) cycles multipliers on ``base``; a phrase
+      boundary (``phrase_units``: cumulative unit offsets) re-anchors the
+      cycle so the pattern restarts with the music's own phrasing.
+    """
+    if n_units <= 0:
+        return []
+    base = max(1, base)
+    lengths: list[int] = []
+    consumed = 0
+    if first_hold > 0:
+        hold = max(1, min(first_hold, n_units))
+        lengths.append(hold)
+        consumed = hold
+    if decel:
+        remaining = n_units - consumed
+        if remaining <= base:
+            return lengths  # the remainder slot IS the final hold
+        last = min(2 * base, remaining)
+        rest = remaining - last
+        body = [base] * (rest // base)
+        extra = rest % base
+        if extra:
+            if body:
+                body[-1] += extra
+            else:
+                body = [extra]
+        # The final hold is never emitted as a cut: the remainder slot up
+        # to the phase boundary IS the montage's longest, final shot.
+        return lengths + body
+    if ramp_from is not None and ramp_to is not None:
+        span = n_units - consumed - max(0, stutter)
+        done = 0
+        prev: int | None = None
+        while done < span:
+            f = done / span
+            step = max(1, round(ramp_from + (ramp_to - ramp_from) * f))
+            if prev is not None and ramp_from >= ramp_to:
+                step = min(step, prev)  # accelerando never speeds back up
+            lengths.append(step)
+            prev = step
+            done += step
+            consumed += step
+        lengths.extend([1] * min(max(0, stutter), n_units - consumed))
+        return lengths
+    pat = tuple(pattern) or (1.0,)
+    i = 1 % len(pat) if first_hold > 0 else 0
+    while consumed < n_units:
+        length = max(1, round(pat[i % len(pat)] * base))
+        prev_consumed = consumed
+        lengths.append(length)
+        consumed += length
+        if any(prev_consumed < pu <= consumed for pu in phrase_units):
+            i = 0  # a phrase boundary re-anchors the cycle
+        else:
+            i += 1
+    return lengths
+
+
+def _style_rhythm_specs(
+    style: MontageStyle,
+    steps: list[int],
+    factors: list[int],
+    n_units_list: list[int],
+    phrase_units_list: list[tuple[int, ...]],
+    pinned: set[int],
+) -> tuple[list[dict], str]:
+    """Per-arc-entry kwargs for :func:`_phase_cut_lengths`, plus a note.
+
+    ``steps`` are the per-entry beat steps (:func:`_phase_steps`),
+    ``factors`` the beats-per-unit of each entry's grid (1 = beats,
+    ``_BEATS_PER_BAR`` = downbeats), ``n_units_list`` the units each phase
+    spans and ``pinned`` the arc indices whose start was pinned to a drop.
+    Encodes the canon: establishing hold on the montage's first phase,
+    build runs ramping from the previous phase's base to the following
+    phase's (with a stutter burst into a pinned climax when the ramp ends
+    fast enough), drop hold on a pinned climax, per-style pattern texture,
+    decelerando on a final outro. The note summarizes the rhythm in beats.
+    """
+    labels = [lab for _, lab in style.arc]
+    specs: list[dict] = []
+    bits: list[str] = []
+    stutter_used = False
+    ramp_span: tuple[int, int] | None = None
+    i = 0
+    while i < len(labels):
+        if labels[i] == "build":
+            j = i
+            while j + 1 < len(labels) and labels[j + 1] == "build":
+                j += 1
+            rf = float(steps[i - 1] if i > 0 else steps[i])
+            rt = float(steps[j + 1] if j + 1 < len(labels) else steps[j])
+            total = sum(n_units_list[i : j + 1]) or 1
+            done = 0
+            for k in range(i, j + 1):
+                f0 = done / total
+                done += n_units_list[k]
+                f1 = done / total
+                spec = {
+                    "n_units": n_units_list[k],
+                    "base": max(1, round(steps[k] / factors[k])),
+                    "ramp_from": (rf + (rt - rf) * f0) / factors[k],
+                    "ramp_to": (rf + (rt - rf) * f1) / factors[k],
+                }
+                if (
+                    k == j
+                    and j + 1 < len(labels)
+                    and labels[j + 1] == "climax"
+                    and (j + 1) in pinned
+                    and rt <= 2
+                    and n_units_list[k] > _STUTTER_CUTS + round(rf / factors[k])
+                ):
+                    spec["stutter"] = _STUTTER_CUTS
+                    stutter_used = True
+                specs.append(spec)
+            if rf != rt:
+                ramp_span = (int(rf), int(rt))
+            i = j + 1
+            continue
+        label = labels[i]
+        base = max(1, round(steps[i] / factors[i]))
+        spec: dict = {
+            "n_units": n_units_list[i],
+            "base": base,
+            "pattern": tuple(style.rhythm.get(label, ())),
+        }
+        if len(spec["pattern"]) > 1 and phrase_units_list[i]:
+            spec["phrase_units"] = phrase_units_list[i]
+        if label == "climax" and i in pinned:
+            spec["first_hold"] = _drop_hold(base)
+            bits.append(f"drop hold {spec['first_hold'] * factors[i]} beats")
+        if label == "outro" and i == len(labels) - 1:
+            spec["decel"] = True
+        specs.append(spec)
+        i += 1
+    if specs and "first_hold" not in specs[0]:
+        hold = _opening_hold(specs[0]["base"], specs[0]["n_units"])
+        if hold > specs[0]["base"]:
+            specs[0]["first_hold"] = hold
+            bits.insert(0, f"opening hold {hold * factors[0]} beats")
+    if ramp_span is not None:
+        pos = 1 if bits and bits[0].startswith("opening hold") else 0
+        bits.insert(pos, f"build ramps {ramp_span[0]}->{ramp_span[1]} beats")
+    if stutter_used:
+        bits.append(f"{_STUTTER_CUTS}-cut stutter into the drop")
+    if any(spec.get("decel") for spec in specs):
+        bits.append("outro decays to the longest shot")
+    if any(len(spec.get("pattern", ())) > 1 for spec in specs):
+        bits.append("pattern texture in between")
+    note = ("rhythm: " + ", ".join(bits)) if bits else ""
+    return specs, note
+
+
 def _build_style_grid(
     music: MusicAnalysis, length: float, style: MontageStyle
 ) -> tuple[list[float], list[tuple[float, float, str]], list[str]]:
@@ -665,7 +984,10 @@ def _build_style_grid(
     (limits: first drop only, and only when it lies within 5%..95% of the
     montage — otherwise a note explains the skip). Slow phases
     (>= ``_SLOW_PHASE_STEP`` beats per cut) cut on downbeats, fast phases
-    walk the beat grid with the phase's step; with neither beats nor
+    walk the beat grid — each with its phase's rhythm sequence
+    (:func:`_phase_cut_lengths` via :func:`_style_rhythm_specs`: opening
+    hold, build accelerando, drop hold + stutter, pattern texture, outro
+    decelerando) on the phase's base step; with neither beats nor
     downbeats the fixed 2 s fallback grid is used, exactly as in "auto".
     """
     notes: list[str] = []
@@ -738,22 +1060,48 @@ def _build_style_grid(
             cuts.append(t)
             t += FALLBACK_INTERVAL
     else:
-        for (p_start, p_end, _label), step in zip(phases, _phase_steps(style)):
+        # Rhythm: each phase gets a deliberate cut-length sequence (whole
+        # grid units) instead of one constant interval — establishing hold,
+        # build accelerando, drop hold + stutter, pattern texture, outro
+        # decelerando. Slow phases (>= _SLOW_PHASE_STEP) keep walking
+        # downbeats, fast phases the beat grid, exactly as before.
+        steps = _phase_steps(style)
+        slow_flags = [s >= _SLOW_PHASE_STEP and bool(downs) for s in steps]
+        unit_lists = [downs if slow else pulse for slow in slow_flags]
+        factors = [_BEATS_PER_BAR if slow else 1 for slow in slow_flags]
+        phrase_pts = sorted(p for p in music.phrases)
+        n_units_list: list[int] = []
+        phrase_units_list: list[tuple[int, ...]] = []
+        for (p_start, p_end, _label), units in zip(phases, unit_lists):
+            lo = bisect.bisect_right(units, p_start + _EPS)
+            hi = bisect.bisect_left(units, p_end - _EPS)
+            # Interior grid points plus one for the closing stretch to the
+            # boundary — the phase's unit count even when the boundary
+            # itself sits off the grid.
+            n_units_list.append(
+                max(0, hi - lo) + (1 if p_end - p_start > _EPS else 0)
+            )
+            in_phase = units[lo:hi]
+            phrase_units_list.append(
+                tuple(
+                    bisect.bisect_left(in_phase, p - _EPS) + 1
+                    for p in phrase_pts
+                    if p_start + _EPS < p < p_end - _EPS
+                )
+            )
+        specs, rhythm_note = _style_rhythm_specs(
+            style, steps, factors, n_units_list, phrase_units_list, pinned
+        )
+        for (p_start, p_end, _label), units, slow, spec in zip(
+            phases, unit_lists, slow_flags, specs
+        ):
             cur = cuts[-1]
-            slow = step >= _SLOW_PHASE_STEP and bool(downs)
-            while True:
-                if slow:  # slow phase: cut on downbeats (every bar-multiple)
-                    n = max(1, round(step / _BEATS_PER_BAR))
-                    nxt = _nth_beat_after(downs, cur, n)
-                    while nxt is not None and nxt - cur < MIN_CUT_INTERVAL:
-                        n += 1  # anti-strobe: skip to a later downbeat
-                        nxt = _nth_beat_after(downs, cur, n)
-                else:  # fast phase: walk the beat grid
-                    s = step
-                    nxt = _nth_beat_after(pulse, cur, s)
-                    while nxt is not None and nxt - cur < MIN_CUT_INTERVAL:
-                        s *= 2
-                        nxt = _nth_beat_after(pulse, cur, s)
+            for units_ahead in _phase_cut_lengths(**spec):
+                n = units_ahead
+                nxt = _nth_beat_after(units, cur, n)
+                while nxt is not None and nxt - cur < MIN_CUT_INTERVAL:
+                    n += 1  # anti-strobe: skip to a later grid point
+                    nxt = _nth_beat_after(units, cur, n)
                 if nxt is None or nxt >= p_end - _EPS:
                     break
                 cuts.append(nxt)
@@ -762,6 +1110,8 @@ def _build_style_grid(
                 cur = nxt
             if p_end < length - _EPS and p_end > cuts[-1] + _EPS:
                 cuts.append(p_end)  # the phase boundary itself is a cut
+        if rhythm_note:
+            notes.append(rhythm_note)
     cuts.append(length)
 
     if snapped and snapped_to:
@@ -776,12 +1126,15 @@ def _build_pseudo_grid(
     style: MontageStyle,
     auto_steps: dict[str, int] | None = None,
 ) -> tuple[list[float], list[tuple[float, float, str]], list[str]]:
-    """Cut grid and phase spans for a NO-MUSIC plan (fixed intervals).
+    """Cut grid and phase spans for a NO-MUSIC plan (pseudo-beat units).
 
-    With no song there is no beat grid to walk, so each arc phase cuts on a
-    fixed interval of ``beats_per_cut x _PSEUDO_BEAT`` (0.75 s) seconds —
-    slow phases (4 beats per cut) every ~3 s, fast phases every ~0.75 s.
-    Phase boundaries are the raw arc shares mapped onto ``length`` (nothing
+    With no song there is no beat grid to walk, so each arc phase cuts on
+    multiples of the ``_PSEUDO_BEAT`` (0.75 s): the phase's
+    ``beats_per_cut`` is the base — slow phases ~3 s, fast phases ~0.75 s —
+    and the same rhythm canon as the musical grids applies on top
+    (:func:`_phase_cut_lengths`: opening hold, build accelerando, pattern
+    texture, outro decelerando; no drops or phrases exist here). Phase
+    boundaries are the raw arc shares mapped onto ``length`` (nothing
     musical to snap to). "auto" has no arc; it cuts on a flat "mid" interval
     (2 x _PSEUDO_BEAT = 1.5 s), or on the paced "high" step when
     ``auto_steps`` is given (see :func:`_apply_pace`).
@@ -799,14 +1152,28 @@ def _build_pseudo_grid(
             bounds.append(length * acc / total_share)
         bounds[-1] = length
         phases = [(bounds[i], bounds[i + 1], labels[i]) for i in range(len(labels))]
-        for (p_start, p_end, _label), step in zip(phases, _phase_steps(style)):
-            interval = max(step * _PSEUDO_BEAT, MIN_CUT_INTERVAL)
-            t = cuts[-1] + interval
-            while t < p_end - _EPS:
+        # The same rhythm canon as the musical grids, on pseudo-beat units:
+        # establishing hold, build accelerando, texture, outro decelerando
+        # (no drops or phrases exist without music).
+        steps = _phase_steps(style)
+        n_units_list = [
+            int((p_end - p_start) / _PSEUDO_BEAT + _EPS) for p_start, p_end, _ in phases
+        ]
+        specs, rhythm_note = _style_rhythm_specs(
+            style, steps, [1] * len(steps), n_units_list, [()] * len(steps), set()
+        )
+        for (p_start, p_end, _label), spec in zip(phases, specs):
+            cur = cuts[-1]
+            for units_ahead in _phase_cut_lengths(**spec):
+                t = cur + max(units_ahead * _PSEUDO_BEAT, MIN_CUT_INTERVAL)
+                if t >= p_end - _EPS:
+                    break
                 cuts.append(t)
-                t += interval
+                cur = t
             if p_end < length - _EPS and p_end > cuts[-1] + _EPS:
                 cuts.append(p_end)  # the phase boundary itself is a cut
+        if rhythm_note:
+            notes.append(rhythm_note)
     else:
         # "auto" cuts on one flat interval: the "mid" default, but the paced
         # "high" step when a pace is set — with a single interval, the pace
@@ -1438,6 +1805,18 @@ def plan_montage(
                 bisect.insort(cuts, d)
             drop_starts.append(d)
             grid_notes.append(f"cut forced at drop {d:.1f}s; strongest moment assigned")
+        if drop_starts:
+            # The drop slot is a HOLD: impact needs screen time, so grid
+            # cuts inside the first ~2 beats after each drop are cleared
+            # (the montage end and other drop cuts always survive).
+            hold = 2 * _pulse_interval(grid_music)
+            cuts = [
+                c
+                for c in cuts
+                if c >= length - _EPS
+                or any(abs(c - d) <= _EPS for d in drop_starts)
+                or not any(d + _EPS < c < d + hold - _EPS for d in drop_starts)
+            ]
     plan.notes.extend(grid_notes)
     # Cut-ahead lead: interior cuts move slightly BEFORE their beat so the
     # incoming shot is on screen when the beat lands. Drop-slot matching

@@ -225,14 +225,14 @@ def test_calmer_second_half_merges_and_keeps_first_half_bit_identical():
     # first half: every entry BIT-IDENTICAL to the original plan's
     first_orig = [e for e in original.entries if e.record_end <= 6.0 + 1e-9]
     first_new = [e for e in revised.entries if e.record_end <= 6.0 + 1e-9]
-    assert len(first_orig) == 4
+    assert len(first_orig) == 3
     assert entry_dicts(first_new) == entry_dicts(first_orig)
-    # region: 10 slots merged pairwise into 5 (x1.6 rounds to whole slots)
+    # region: 8 slots merged pairwise into 4 (x1.6 rounds to whole slots)
     region_orig = [e for e in original.entries if e.record_start >= 6.0 - 1e-9]
     region_new = [e for e in revised.entries if e.record_start >= 6.0 - 1e-9]
-    assert len(region_orig) == 10
-    assert len(region_new) == 5
-    assert [slot_length(e) for e in region_new] == pytest.approx([2.0, 1.0, 1.0, 1.0, 1.0])
+    assert len(region_orig) == 8
+    assert len(region_new) == 4
+    assert [slot_length(e) for e in region_new] == pytest.approx([2.0, 1.5, 1.0, 1.5])
     # cuts in the region are a SUBSET of the original grid positions
     orig_starts = {round(e.record_start, 6) for e in original.entries}
     assert {round(e.record_start, 6) for e in region_new} <= orig_starts
@@ -241,7 +241,7 @@ def test_calmer_second_half_merges_and_keeps_first_half_bit_identical():
         assert nxt.record_start == pytest.approx(prev.record_end)
     assert revised.entries[-1].record_end == pytest.approx(12.0)
     assert any(
-        "revision: calmer 6.0-12.0s (pace x1.6): 10 slots -> 5" in n
+        "revision: calmer 6.0-12.0s (pace x1.6): 8 slots -> 4" in n
         for n in revised.notes
     )
 
@@ -271,11 +271,11 @@ def test_pinned_shot_survives_a_calmed_region_untouched():
     # the pinned entry is verbatim: exact material AND record window
     kept = [e for e in revised.entries if asdict(e) == asdict(donor)]
     assert len(kept) == 1
-    # the merge worked AROUND it: 10 region slots became 6, not 5
+    # the merge worked AROUND it: 8 region slots became 5, not 4
     region_new = [e for e in revised.entries if e.record_start >= 6.0 - 1e-9]
-    assert len(region_new) == 6
+    assert len(region_new) == 5
     assert any(
-        "revision: calmer 6.0-12.0s (pace x1.6): 10 slots -> 6; 1 pinned shot kept" in n
+        "revision: calmer 6.0-12.0s (pace x1.6): 8 slots -> 5; 1 pinned shot kept" in n
         for n in revised.notes
     )
 
@@ -311,15 +311,21 @@ def test_calmer_region_never_absorbs_a_dip():
 def test_snappier_second_half_recuts_region_and_restores_the_rest():
     kwargs = dict(order=CHRONOLOGICAL, cut_lead=0.0, pace=2.0)
     original = plan_montage(make_reports(), make_high_music(), **kwargs)
-    assert [slot_length(e) for e in original.entries] == pytest.approx([2.0] * 6)
+    # pace 2s -> 4-beat base cuts, opened by the rhythm hold (2x, capped)
+    assert [slot_length(e) for e in original.entries] == pytest.approx(
+        [4.0, 2.0, 2.0, 2.0, 2.0]
+    )
     rev = Revision(region=(0.5, 1.0), pace_scale=SNAPPY_SCALE)
     revised = revise_plan(original, make_reports(), make_high_music(), rev, **kwargs)
     # outside the region: restored VERBATIM from the original plan
     first_new = [e for e in revised.entries if e.record_end <= 6.0 + 1e-9]
-    assert entry_dicts(first_new) == entry_dicts(original.entries[:3])
-    # inside: re-cut at 2.0 x 0.6 = 1.2s -> 2 beats -> 1s slots, on beats
+    assert entry_dicts(first_new) == entry_dicts(original.entries[:2])
+    # inside: re-cut at 2.0 x 0.6 = 1.2s -> 2 beats -> 1s base slots (the
+    # re-plan's own rhythm keeps a longer final breath), still on beats
     region_new = [e for e in revised.entries if e.record_start >= 6.0 - 1e-9]
-    assert [slot_length(e) for e in region_new] == pytest.approx([1.0] * 6)
+    assert [slot_length(e) for e in region_new] == pytest.approx(
+        [1.0, 1.0, 1.0, 1.0, 2.0]
+    )
     assert all((e.record_start * 2) == pytest.approx(round(e.record_start * 2)) for e in region_new)
     for prev, nxt in zip(revised.entries, revised.entries[1:]):
         assert nxt.record_start == pytest.approx(prev.record_end)
@@ -331,25 +337,25 @@ def test_snappier_second_half_recuts_region_and_restores_the_rest():
 
 
 def test_snappier_region_trims_new_entries_to_the_original_boundary():
-    # 4s slots ([0,4) [4,8) [8,12)): only [8,12) lies fully inside the second
-    # half, so the fill window is [8,12) and the faster grid (2.5s slots at
-    # pace 4 x 0.6 = 2.4) enters it mid-slot: its [7.5,10) entry is trimmed
-    # to [8,10), the source moving 1:1 with the record.
+    # Slots [0,5.5) [5.5,9.5) [9.5,12): only [9.5,12) lies fully inside the
+    # second half, so the fill window is [9.5,12) and the faster grid (pace
+    # 2.5 x 0.6 = 1.5s -> 3-beat cuts) enters it mid-slot: its [7.5,10.5)
+    # entry is trimmed to [9.5,10.5), the source moving 1:1 with the record.
     kwargs = dict(order=CHRONOLOGICAL, cut_lead=0.0, pace=4.0)
     original = plan_montage(make_reports(), make_high_music(), **kwargs)
-    assert [slot_length(e) for e in original.entries] == pytest.approx([4.0] * 3)
+    assert [slot_length(e) for e in original.entries] == pytest.approx([5.5, 4.0, 2.5])
     rev = Revision(region=(0.5, 1.0), pace_scale=SNAPPY_SCALE)
     revised = revise_plan(original, make_reports(), make_high_music(), rev, **kwargs)
     windows = [(e.record_start, e.record_end) for e in revised.entries]
     assert windows == [
-        (pytest.approx(0.0), pytest.approx(4.0)),
-        (pytest.approx(4.0), pytest.approx(8.0)),
-        (pytest.approx(8.0), pytest.approx(10.0)),
-        (pytest.approx(10.0), pytest.approx(12.0)),
+        (pytest.approx(0.0), pytest.approx(5.5)),
+        (pytest.approx(5.5), pytest.approx(9.5)),
+        (pytest.approx(9.5), pytest.approx(10.5)),
+        (pytest.approx(10.5), pytest.approx(12.0)),
     ]
     assert entry_dicts(revised.entries[:2]) == entry_dicts(original.entries[:2])
     trimmed = revised.entries[2]
-    assert trimmed.source_end - trimmed.source_start == pytest.approx(2.0)
+    assert trimmed.source_end - trimmed.source_start == pytest.approx(1.0)
 
 
 def test_pinned_shot_survives_a_snappier_region():
@@ -366,7 +372,7 @@ def test_pinned_shot_survives_a_snappier_region():
         e for e in revised.entries
         if e.record_start >= 6.0 - 1e-9 and asdict(e) != asdict(donor)
     ]
-    assert [slot_length(e) for e in others] == pytest.approx([1.0] * 4)
+    assert [slot_length(e) for e in others] == pytest.approx([1.0, 1.0, 2.0])
     assert any("1 pinned shot kept" in n for n in revised.notes)
 
 
@@ -427,7 +433,7 @@ def test_absolute_region_resolves_against_the_cut_length():
     assert rev.region_seconds == (6.0, None)
     revised = revise_plan(original, make_reports(), make_music(), rev, **CALM_KWARGS)
     region_new = [e for e in revised.entries if e.record_start >= 6.0 - 1e-9]
-    assert len(region_new) == 5
+    assert len(region_new) == 4
     assert any("calmer 6.0-12.0s" in n for n in revised.notes)
 
 

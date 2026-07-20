@@ -57,17 +57,28 @@ def slot_length(entry) -> float:
 
 
 def test_grid_density_follows_section_energy():
+    # Faster where loud: each section's cuts average at least twice the next
+    # louder section's, no cut is ever faster than the section's base step,
+    # and (the rhythm canon) a section opens on a hold with a breath later —
+    # not one metronomic interval.
     plan = plan_montage(make_reports(), make_music(), cut_lead=0.0)
     assert plan.duration == 12.0
-    for e in plan.entries:
-        if e.record_start < 4.0:  # low: every 4 beats
-            assert slot_length(e) == pytest.approx(2.0)
-        elif e.record_start < 8.0:  # mid: every 2 beats
-            assert slot_length(e) == pytest.approx(1.0)
-        else:  # high: every beat
-            assert slot_length(e) == pytest.approx(0.5)
-    # 2 low + 4 mid + 8 high slots
-    assert len(plan.entries) == 14
+    low = [slot_length(e) for e in plan.entries if e.record_start < 4.0]
+    mid = [slot_length(e) for e in plan.entries if 4.0 <= e.record_start < 8.0]
+    high = [slot_length(e) for e in plan.entries if e.record_start >= 8.0]
+    assert low and mid and high
+    avg = lambda xs: sum(xs) / len(xs)
+    assert avg(low) > avg(mid) > avg(high)
+    # base steps are the floor: low >= 4 beats, mid >= 2, high >= 1
+    assert min(low) >= 2.0 - 1e-9
+    assert min(mid) >= 1.0 - 1e-9
+    assert min(high) >= 0.5 - 1e-9
+    # the exact grid: mid and high open on a hold, high breathes mid-run
+    assert low == pytest.approx([2.0, 2.0])
+    assert mid == pytest.approx([2.0, 1.0, 1.0])
+    assert high == pytest.approx([1.0, 0.5, 0.5, 0.5, 1.0, 0.5])
+    assert len(plan.entries) == 11
+    assert any("rhythm" in n for n in plan.notes)
 
 
 def test_grid_is_contiguous_and_ends_on_duration():
@@ -158,7 +169,8 @@ def test_every_moment_used_once_before_reuse_and_repeat_noted():
         moments=[Moment(0.0, 0.5, 0.9), Moment(1.0, 1.5, 0.8)],
     )
     plan = plan_montage([report], music, order=CHRONOLOGICAL, allow_repeats=True, cut_lead=0.0)
-    assert len(plan.entries) == 24  # 0.5s slots over 12s
+    # beat-based slots over 12s (0.5s base with the section hold + breaths)
+    assert len(plan.entries) == 19
     # both moments used once before anything repeats
     assert {plan.entries[0].source_start, plan.entries[1].source_start} == {0.0, 1.0}
     reused = [e for e in plan.entries[2:] if e.source_start in (0.0, 1.0)]
@@ -180,7 +192,7 @@ def test_long_moment_sliced_into_fresh_pieces_before_repeating():
         moments=[Moment(0.0, 4.0, 0.9), Moment(5.0, 5.5, 0.5)],
     )
     plan = plan_montage([report], music, order=CHRONOLOGICAL)
-    assert len(plan.entries) == 8
+    assert len(plan.entries) == 6
     # all pieces from the long moment are non-overlapping slices
     long_pieces = [
         (e.source_start, e.source_end) for e in plan.entries if e.source_start < 4.0
@@ -244,17 +256,25 @@ def test_default_auto_style_matches_previous_behavior():
 def test_travel_phase_beat_densities():
     plan = plan_montage(make_long_reports(), make_arc_music(), style="travel", cut_lead=0.0)
     assert plan.duration == 40.0
-    # phases after phrase snapping: opening 0-8, build 8-16, climax 16-32, outro 32-40
-    for e in plan.entries:
-        if e.record_start < 8.0:  # opening: downbeats, every 4 beats = 2s
-            assert slot_length(e) == pytest.approx(2.0)
-        elif e.record_start < 16.0:  # build: every 2 beats = 1s
-            assert slot_length(e) == pytest.approx(1.0)
-        elif e.record_start < 32.0:  # climax: every beat = 0.5s
-            assert slot_length(e) == pytest.approx(0.5)
-        else:  # outro: every 4 beats = 2s
-            assert slot_length(e) == pytest.approx(2.0)
-    assert len(plan.entries) == 4 + 8 + 32 + 4
+    # phases after phrase snapping: opening 0-8, build 8-16, climax 16-32,
+    # outro 32-40. Each phase averages its own density — faster where the
+    # arc peaks — while the rhythm canon varies lengths WITHIN the phases.
+    opening = [slot_length(e) for e in plan.entries if e.record_start < 8.0]
+    build = [slot_length(e) for e in plan.entries if 8.0 <= e.record_start < 16.0]
+    climax = [slot_length(e) for e in plan.entries if 16.0 <= e.record_start < 32.0]
+    outro = [slot_length(e) for e in plan.entries if e.record_start >= 32.0]
+    avg = lambda xs: sum(xs) / len(xs)
+    assert avg(opening) > avg(build) > avg(climax)
+    assert avg(outro) > avg(climax)
+    # the fastest cuts are the climax base (1 beat = 0.5s), nothing faster
+    assert min(climax) == pytest.approx(0.5)
+    assert min(slot_length(e) for e in plan.entries) >= 0.5 - 1e-9
+    # the exact phase textures: opening hold, build accelerando, climax
+    # pattern with 2-beat accents, outro decelerando
+    assert opening == pytest.approx([4.0, 2.0, 2.0])
+    assert build == pytest.approx([2.0, 1.5, 1.5, 1.0, 1.0, 0.5, 0.5])
+    assert outro == pytest.approx([2.0, 2.0, 4.0])
+    assert len(plan.entries) == 3 + 7 + 26 + 3
     # grid stays contiguous and closes on the montage length
     assert plan.entries[0].record_start == 0.0
     for prev, nxt in zip(plan.entries, plan.entries[1:]):
@@ -268,12 +288,14 @@ def test_phase_boundaries_snap_to_phrase_starts():
     by_start = {round(e.record_start, 6): e for e in plan.entries}
     # raw boundaries 6.0 / 20.0 / 34.0 snap to the phrase grid (multiples of 8)
     assert {8.0, 16.0, 32.0} <= set(by_start)
-    # 6.0 is still inside the opening (2s slots), so the build really moved to 8.0
+    # 6.0 is still inside the opening: its slot runs to the snapped 8.0 bound
+    assert by_start[6.0].record_end == pytest.approx(8.0)
     assert slot_length(by_start[6.0]) == pytest.approx(2.0)
-    assert slot_length(by_start[8.0]) == pytest.approx(1.0)
+    # the climax density (1-beat base) starts at the snapped 16.0, not 20.0
+    assert slot_length(by_start[16.0]) == pytest.approx(0.5)
     # 32.0 starts the outro (2s slots), so the climax->outro boundary moved off 34.0
     assert slot_length(by_start[32.0]) == pytest.approx(2.0)
-    assert 34.0 not in by_start or slot_length(by_start[34.0]) == pytest.approx(2.0)
+    assert 34.0 not in by_start or slot_length(by_start[34.0]) >= 2.0 - 1e-9
     assert any("snapped to phrase" in note for note in plan.notes)
 
 
@@ -282,14 +304,16 @@ def test_drop_aligns_travel_climax():
         make_long_reports(), make_arc_music(drops=[20.0]), style="travel", cut_lead=0.0
     )
     assert any("climax aligned to drop at 20.0s" in note for note in plan.notes)
-    # a cut lands exactly on the drop and the climax density starts there
+    # a cut lands exactly on the drop, and the drop slot is a HOLD: 3 beats
+    # (1.5s), longer than its neighbours — impact needs screen time
     drop_entries = [e for e in plan.entries if e.record_start == pytest.approx(20.0)]
     assert len(drop_entries) == 1
-    assert slot_length(drop_entries[0]) == pytest.approx(0.5)
-    # the slot before the drop still belongs to the (slower) build
+    assert slot_length(drop_entries[0]) == pytest.approx(1.5)
+    # the build ends in the one-beat stutter burst that sharpens the drop
     before = [e for e in plan.entries if e.record_end == pytest.approx(20.0)]
     assert len(before) == 1
-    assert slot_length(before[0]) == pytest.approx(1.0)
+    assert slot_length(before[0]) == pytest.approx(0.5)
+    assert slot_length(drop_entries[0]) > slot_length(before[0])
 
 
 def test_drop_in_auto_forces_cut_and_takes_highest_highlight():
@@ -373,6 +397,221 @@ def test_style_plan_renders_timeline_unchanged():
     audio = timeline.audio_clips()
     assert len(audio) == 1
     assert (audio[0].record_in, audio[0].record_out) == (0, 1000)
+
+
+# --- rhythm (the anti-monotony canon) --------------------------------------------
+#
+# The field complaint: "es ist und bleibt eine Aneinanderreihung von kurzen,
+# GLEICH LANGEN Clips". Within a phase, cut lengths must VARY deliberately —
+# these tests pin the canon: establishing hold, build accelerando, drop hold
+# with a stutter burst, phrase-anchored pattern texture, outro decelerando.
+
+
+def test_phase_cut_lengths_deterministic_and_quantized():
+    from monteur.montage import _phase_cut_lengths
+
+    kwargs = dict(n_units=32, base=1, pattern=(1, 1.5, 2, 1), first_hold=3)
+    a = _phase_cut_lengths(**kwargs)
+    b = _phase_cut_lengths(**kwargs)
+    assert a == b  # same inputs -> same lengths, no RNG anywhere
+    assert all(isinstance(v, int) and v >= 1 for v in a)  # whole beats only
+    # fractional multipliers quantize to whole units (1.5 x 1 -> 2)
+    assert set(a[1:]) <= {1, 2}
+    assert a[0] == 3  # the hold is the FIRST cut, exactly as asked
+
+
+def test_phase_cut_lengths_hold_is_clamped_to_the_phase():
+    from monteur.montage import _phase_cut_lengths
+
+    assert _phase_cut_lengths(n_units=2, base=1, first_hold=5) == [2]
+    assert _phase_cut_lengths(n_units=0, base=1, first_hold=5) == []
+
+
+def test_phase_cut_lengths_accelerando_is_monotone():
+    from monteur.montage import _phase_cut_lengths
+
+    lengths = _phase_cut_lengths(n_units=24, base=2, ramp_from=4.0, ramp_to=1.0)
+    assert lengths[0] == 4 and lengths[-1] == 1
+    for a, b in zip(lengths, lengths[1:]):
+        assert b <= a  # steps down, never back up
+    # a stutter reserves trailing one-unit cuts ahead of the drop
+    stuttered = _phase_cut_lengths(
+        n_units=24, base=2, ramp_from=4.0, ramp_to=1.0, stutter=3
+    )
+    assert stuttered[-3:] == [1, 1, 1]
+    for a, b in zip(stuttered, stuttered[1:]):
+        assert b <= a
+
+
+def test_phase_cut_lengths_decelerando_sums_exactly():
+    from monteur.montage import _phase_cut_lengths
+
+    # non-decreasing body; the final hold is the REMAINDER slot, so the
+    # body must sum to exactly n_units - min(2 x base, n_units)
+    lengths = _phase_cut_lengths(n_units=8, base=2, decel=True)
+    for a, b in zip(lengths, lengths[1:]):
+        assert b >= a
+    assert sum(lengths) == 8 - 4  # leaves a 2x-base final hold
+    assert max(lengths, default=0) <= 4
+    # a phase too short for a body is one single (hold) slot
+    assert _phase_cut_lengths(n_units=2, base=2, decel=True) == []
+
+
+def test_phase_cut_lengths_phrase_boundary_reanchors_the_cycle():
+    from monteur.montage import _phase_cut_lengths
+
+    plain = _phase_cut_lengths(n_units=12, base=1, pattern=(1, 1, 2, 1))
+    anchored = _phase_cut_lengths(
+        n_units=12, base=1, pattern=(1, 1, 2, 1), phrase_units=(2,)
+    )
+    assert plain == [1, 1, 2, 1, 1, 1, 2, 1, 1, 1]
+    # the phrase at unit 2 restarts the cycle there: the 2x accent shifts
+    assert anchored == [1, 1, 1, 1, 2, 1, 1, 1, 2, 1]
+    assert anchored != plain
+
+
+def test_opening_and_drop_hold_caps():
+    from monteur.montage import _drop_hold, _opening_hold
+
+    assert _opening_hold(1, 24) == 2  # ~2x the base
+    assert _opening_hold(2, 24) == 4
+    assert _opening_hold(2, 4) == 2  # capped: never eats the whole phase
+    assert _opening_hold(4, 4) == 4  # degrades to the plain base
+    assert _drop_hold(1) == 3  # aim 3x ...
+    assert _drop_hold(2) == 4  # ... clamped to 4 ...
+    assert _drop_hold(6) == 6  # ... but never below the phase's own base
+
+
+def test_rhythm_first_cut_is_longest_of_opening():
+    # Canon 1: the viewer must arrive — the montage's first shot holds
+    # noticeably longer than the opening's base and no opening cut tops it.
+    for style, base in (("travel", 2.0), ("wedding", 2.0), ("trailer", 2.0)):
+        plan = plan_montage(
+            make_long_reports(), make_arc_music(), style=style, cut_lead=0.0
+        )
+        opening = [e for e in plan.entries if e.record_start < 8.0]
+        first = slot_length(opening[0])
+        assert first > base, style
+        assert first == max(slot_length(e) for e in opening), style
+
+
+def test_rhythm_varies_within_phases():
+    # THE monotony regression test: within any phase with >= 4 cuts, the
+    # cut lengths are NOT all equal — never again "GLEICH LANGE Clips".
+    cases = (
+        ("travel", None, [(8.0, 16.0), (16.0, 32.0)]),
+        ("wedding", None, [(8.0, 16.0), (16.0, 32.0)]),
+        ("music_video", None, [(0.0, 8.0), (8.0, 16.0), (16.0, 32.0)]),
+        ("trailer", [20.0], [(8.0, 16.0), (20.0, 32.0)]),
+    )
+    for style, drops, windows in cases:
+        plan = plan_montage(
+            make_long_reports(), make_arc_music(drops=drops), style=style, cut_lead=0.0
+        )
+        for lo, hi in windows:
+            lengths = [
+                round(slot_length(e), 6)
+                for e in plan.entries
+                if lo - 1e-9 <= e.record_start < hi - 1e-9
+            ]
+            assert len(lengths) >= 4, (style, lo, hi)
+            assert len(set(lengths)) > 1, (style, lo, hi, lengths)
+
+
+def test_rhythm_build_accelerando_travel():
+    # Canon 3: across the build the cut lengths step down from the
+    # opening's base (4 beats) toward the climax's (1 beat) — trailer ramp.
+    plan = plan_montage(make_long_reports(), make_arc_music(), style="travel", cut_lead=0.0)
+    build = [slot_length(e) for e in plan.entries if 8.0 <= e.record_start < 16.0]
+    assert build[0] == pytest.approx(2.0) and build[-1] == pytest.approx(0.5)
+    for a, b in zip(build, build[1:]):
+        assert b <= a + 1e-9  # monotone trend, never speeds back up
+
+
+def test_rhythm_drop_hold_and_stutter():
+    # Canon 4: the slot ON the drop is a HOLD (2-4 beats, longer than its
+    # neighbours, never the shortest); a one-beat stutter burst directly
+    # before the drop sharpens it.
+    plan = plan_montage(
+        make_long_reports(), make_arc_music(drops=[20.0]), style="trailer", cut_lead=0.0
+    )
+    drop = next(e for e in plan.entries if e.record_start == pytest.approx(20.0))
+    hold = slot_length(drop)
+    assert 1.0 - 1e-9 <= hold <= 2.0 + 1e-9  # 2..4 beats at 120 bpm
+    before = [e for e in plan.entries if e.record_end <= 20.0 + 1e-9][-3:]
+    assert all(slot_length(e) == pytest.approx(0.5) for e in before)  # stutter
+    assert hold > slot_length(before[-1])
+    after = next(e for e in plan.entries if e.record_start == pytest.approx(drop.record_end))
+    assert hold > slot_length(after) - 1e-9
+    assert hold > min(slot_length(e) for e in plan.entries)  # never the shortest
+    assert any("drop hold" in n and "stutter" in n for n in plan.notes)
+
+
+def test_rhythm_drop_hold_in_auto():
+    # The auto style's drop-forced cut holds >= 2 beats too: grid cuts
+    # inside the hold window are cleared, the forced cut itself stays.
+    music = MusicAnalysis(
+        path="/music/track.wav",
+        duration=40.0,
+        tempo=200.0,
+        beats=[i * 0.3 for i in range(134)],
+        sections=[MusicSection(0.0, 40.0, 0.5, "mid")],
+        drops=[20.0],
+    )
+    report = ClipReport(
+        path="/footage/a.mp4",
+        duration=60.0,
+        moments=[Moment(0.0, 2.0, 0.9), Moment(10.0, 12.0, 0.8), Moment(30.0, 32.0, 0.4)],
+    )
+    plan = plan_montage([report], music, style="auto", allow_repeats=True, cut_lead=0.0)
+    drop = next(e for e in plan.entries if e.record_start == pytest.approx(20.0))
+    assert slot_length(drop) >= 2 * 0.3 - 1e-9
+
+
+def test_rhythm_outro_decelerando():
+    # Canon 6: each outro cut at least as long as the last; the FINAL shot
+    # is the longest (up to 2x the outro base) and the total is unchanged.
+    for style in ("travel", "wedding", "music_video", "trailer"):
+        plan = plan_montage(
+            make_long_reports(), make_arc_music(), style=style, cut_lead=0.0
+        )
+        outro = [slot_length(e) for e in plan.entries if e.record_start >= 32.0]
+        assert outro, style
+        for a, b in zip(outro, outro[1:]):
+            assert b >= a - 1e-9, style
+        assert outro[-1] == max(outro), style
+        assert plan.entries[-1].record_end == pytest.approx(40.0), style
+
+
+def test_rhythm_cuts_still_land_on_the_beat_grid():
+    # Every guarantee stays: cuts on musical positions, total unchanged.
+    music = make_arc_music(drops=[20.0])
+    on_grid = {round(b, 6) for b in music.beats} | {round(d, 6) for d in music.downbeats}
+    for style in ("travel", "wedding", "music_video", "trailer"):
+        plan = plan_montage(make_long_reports(), music, style=style, cut_lead=0.0)
+        for e in plan.entries:
+            assert round(e.record_start, 6) in on_grid | {0.0}, (style, e.record_start)
+        assert plan.entries[-1].record_end == pytest.approx(40.0)
+
+
+def test_rhythm_is_deterministic():
+    # Same inputs -> bit-identical grids, for styles and auto alike.
+    for style in ("auto", "travel", "trailer"):
+        a = plan_montage(make_long_reports(), make_arc_music(drops=[20.0]), style=style)
+        b = plan_montage(make_long_reports(), make_arc_music(drops=[20.0]), style=style)
+        assert [entry_key(e) for e in a.entries] == [entry_key(e) for e in b.entries]
+        assert a.notes == b.notes
+
+
+def test_rhythm_plan_note_summarizes_the_canon():
+    plan = plan_montage(
+        make_long_reports(), make_arc_music(drops=[20.0]), style="travel", cut_lead=0.0
+    )
+    note = next(n for n in plan.notes if n.startswith("rhythm: "))
+    assert "opening hold 8 beats" in note
+    assert "build ramps 4->1 beats" in note
+    assert "drop hold 3 beats" in note
+    assert "outro decays" in note
 
 
 # --- energy windowing (short cut from a long song) ------------------------------
@@ -521,15 +760,15 @@ def test_fade_fields_for_auto_style():
 
 def test_transitions_in_gentle_phases_only():
     plan = plan_montage(make_long_reports(), make_arc_music(), style="travel")
-    # phases: opening 0-8 (2s slots), build 8-16, climax 16-32, outro 32-40 (2s)
+    # phases: opening 0-8 (slow slots), build 8-16, climax 16-32, outro 32-40
     assert plan.entries[0].transition == 0.0  # first entry: its fade is fade_in
     for e in plan.entries[1:]:
         if e.record_start < 8.0 or e.record_start >= 32.0:  # opening / outro
-            assert e.transition == pytest.approx(0.5)  # min(0.5, half of 2.0s)
+            assert e.transition == pytest.approx(0.5)  # min(0.5, half the slot)
         else:  # build / climax cut hard
             assert e.transition == 0.0
     dissolves = sum(1 for e in plan.entries if e.transition > 0)
-    assert dissolves == 7  # 3 opening (minus the first) + 4 outro
+    assert dissolves == 5  # 3 opening (minus the first) + 3 outro
     assert any(f"{dissolves} dissolves in gentle phases" in n for n in plan.notes)
 
 
@@ -734,10 +973,11 @@ def test_cut_lead_shifts_interior_cuts_earlier():
 
 
 def test_cut_lead_zero_matches_default_grid_of_before():
-    # cut_lead=0 reproduces the exact historical grid (2s/1s/0.5s slots).
+    # cut_lead=0 reproduces the raw beat grid (with the rhythm canon: the
+    # mid section opens on a 2s hold at 4.0 before its 1s base cuts).
     plan = plan_montage(make_reports(), make_music(), cut_lead=0.0)
     starts = [e.record_start for e in plan.entries]
-    assert starts[:4] == pytest.approx([0.0, 2.0, 4.0, 5.0])
+    assert starts[:4] == pytest.approx([0.0, 2.0, 4.0, 6.0])
     assert plan.entries[-1].record_end == pytest.approx(12.0)
 
 
@@ -768,9 +1008,11 @@ def test_pace_slows_the_auto_grid():
     snappy = plan_montage(make_reports(), make_music(), cut_lead=0.0, pace=1.0)
     calm = plan_montage(make_reports(), make_music(), cut_lead=0.0, pace=4.0)
     assert len(calm.entries) < len(snappy.entries)
-    # the fastest (high-energy) section cuts at ~the requested pace
-    high = [e for e in snappy.entries if e.record_start >= 8.0]
-    assert high and all(slot_length(e) == pytest.approx(1.0) for e in high)
+    # the fastest (high-energy) section cuts at ~the requested pace: its
+    # base cuts are 1s; the rhythm hold/breath never exceeds 2x the pace
+    high = [slot_length(e) for e in snappy.entries if e.record_start >= 8.0]
+    assert high and any(v == pytest.approx(1.0) for v in high)
+    assert max(high) <= 2.0 + 1e-9
     assert any("cut pace ~1s" in n for n in snappy.notes)
     assert any("cut pace ~4s" in n for n in calm.notes)
 
@@ -956,8 +1198,8 @@ def entry_key(e) -> tuple:
 
 def test_role_bonus_flips_pick_in_matching_phase():
     # 20 equal-score moments; the third is a vision-tagged opener. Plain
-    # order would spend it on the slot at 4.0s; the role bonus pulls it one
-    # window position forward into the opening slot at 2.0s.
+    # order would spend it on the second opening slot's successor; the role
+    # bonus pulls it one window position forward into the slot at 4.0s.
     moments = [Moment(i * 4.0, i * 4.0 + 2.0, 0.8) for i in range(20)]
     moments[2] = sem_moment(8.0, 10.0, 0.8, role="opener")
     reports = [ClipReport(path="/footage/long.mp4", duration=120.0, moments=moments)]
@@ -966,24 +1208,24 @@ def test_role_bonus_flips_pick_in_matching_phase():
     # slot 0 keeps the pool leader: the opener sits TWO order steps behind,
     # and the mild bonus flips one step, never two
     assert by_start[0.0].source_start == pytest.approx(0.0)
-    # at the 2.0s slot (opening phase) the opener is one step behind: it wins
-    assert by_start[2.0].source_start == pytest.approx(8.0)
-    assert any("semantic casting: 1 of 48 slots matched to roles" in n for n in plan.notes)
+    # at the 4.0s slot (opening phase) the opener is one step behind: it wins
+    assert by_start[4.0].source_start == pytest.approx(8.0)
+    assert any("semantic casting: 1 of 39 slots matched to roles" in n for n in plan.notes)
 
 
 def test_first_and_last_slot_prefer_opener_and_closer_in_auto():
     # "auto" has no arc phases, but the montage's first/last slot still ask
-    # for an opener/closer. make_music() yields 14 slots; with neutral
+    # for an opener/closer. make_music() yields 11 slots; with neutral
     # motion the fill would walk the pool in order — the roles flip it.
     moments = [Moment(i * 4.0, i * 4.0 + 2.0, 0.8) for i in range(16)]
     moments[1] = sem_moment(4.0, 6.0, 0.8, role="opener")
-    moments[14] = sem_moment(56.0, 58.0, 0.8, role="closer")
+    moments[11] = sem_moment(44.0, 46.0, 0.8, role="closer")
     reports = [ClipReport(path="/footage/long.mp4", duration=120.0, moments=moments)]
     plan = plan_montage(reports, make_music(), cut_lead=0.0)
-    assert len(plan.entries) == 14
+    assert len(plan.entries) == 11
     assert plan.entries[0].source_start == pytest.approx(4.0)  # the opener opens
-    assert plan.entries[-1].source_start == pytest.approx(56.0)  # the closer closes
-    assert any("2 of 14 slots matched to roles" in n for n in plan.notes)
+    assert plan.entries[-1].source_start == pytest.approx(44.0)  # the closer closes
+    assert any("2 of 11 slots matched to roles" in n for n in plan.notes)
 
 
 def test_hero_shot_wins_the_drop_slot():
@@ -1020,7 +1262,8 @@ def test_hero_bonus_beats_motion_continuity_in_climax():
     # Mirrors test_highlight_preference_in_climax_phase: at the first climax
     # slot the higher-scored moment leads the window, but the hero shot one
     # step behind takes it — the hero bonus outweighs order and motion.
-    fillers = [Moment(i * 2.0, i * 2.0 + 2.0, 0.8) for i in range(12)]
+    # (10 fillers cover the 3 opening + 7 build slots exactly.)
+    fillers = [Moment(i * 2.0, i * 2.0 + 2.0, 0.8) for i in range(10)]
     quiet_good = Moment(40.0, 42.0, 0.9)
     hero_shot = sem_moment(44.0, 46.0, 0.5, hero=0.9)
     report = ClipReport(

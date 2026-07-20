@@ -140,14 +140,23 @@ def test_no_music_plan_travel_uses_pseudo_beat_grid():
     assert plan.entries
     assert any("no music" in n for n in plan.notes)
 
-    # travel arc over 30s: opening 0-4.5 (3s cuts), build 4.5-15 (1.5s),
-    # climax 15-25.5 (0.75s), outro 25.5-30 (3s) — beats_per_cut x 0.75s.
+    # travel arc over 30s: opening 0-4.5, build 4.5-15, climax 15-25.5,
+    # outro 25.5-30, on pseudo-beat units (beats_per_cut x 0.75s) with the
+    # rhythm canon: the build accelerates 3s -> 0.75s, the climax cuts at
+    # its 0.75s base with 1.5s pattern accents, the outro's final shot is
+    # the longest of the whole cut.
     starts = {round(e.record_start, 6) for e in plan.entries}
     assert {0.0, 3.0, 4.5, 15.0, 25.5} <= starts
-    build = [e for e in plan.entries if 4.5 <= e.record_start < 15.0 - 1e-9]
-    assert build and all(slot_length(e) == pytest.approx(1.5) for e in build)
-    climax = [e for e in plan.entries if 15.0 <= e.record_start < 25.5 - 1e-9]
-    assert climax and all(slot_length(e) == pytest.approx(0.75) for e in climax)
+    build = [slot_length(e) for e in plan.entries if 4.5 <= e.record_start < 15.0 - 1e-9]
+    assert build and build[0] == pytest.approx(3.0) and build[-1] == pytest.approx(0.75)
+    for a, b in zip(build, build[1:]):  # accelerando: never speeds back up
+        assert b <= a + 1e-9
+    climax = [slot_length(e) for e in plan.entries if 15.0 <= e.record_start < 25.5 - 1e-9]
+    assert climax and min(climax) == pytest.approx(0.75)
+    assert set(round(v, 6) for v in climax) == {0.75, 1.5}  # base + accents
+    last = plan.entries[-1]
+    assert slot_length(last) == pytest.approx(4.5)  # the decelerando hold
+    assert slot_length(last) == max(slot_length(e) for e in plan.entries)
     # grid is contiguous and closes exactly on the requested duration
     assert plan.entries[0].record_start == 0.0
     for prev, nxt in zip(plan.entries, plan.entries[1:]):
