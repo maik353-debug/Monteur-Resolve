@@ -14,6 +14,7 @@ Workflow overview::
     monteur create clips song.mp3 -o cut.fcpxml --elements sfx_library
     monteur revise plan.json clips -o cut_v2.fcpxml --brief "zweite Hälfte ruhiger"
     monteur preview plan.json -o preview.mp4
+    monteur export plan.json -o video.mp4 --canvas uhd --quality high
     monteur direct plan.json clips --apply -o cut_v3.fcpxml
     monteur resolve status
     monteur resolve render --out renders --preset 2160p
@@ -914,6 +915,59 @@ def cmd_preview(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_export(args: argparse.Namespace) -> None:
+    """Direct Export: render a saved plan to the finished MP4 — no Resolve.
+
+    A thin wrapper over :func:`monteur.preview.render_export`: the full
+    delivery pipeline (canvas resolution, real dissolves, act titles on
+    the dips, placed sound effects, YouTube-target loudness, +faststart)
+    with the same progress-line style as ``monteur preview``.
+    """
+    from monteur.media import MonteurMediaError
+    from monteur.preview import render_export
+
+    plan = _load_plan(args.plan)
+    if not plan.entries:
+        _fail("the plan has no entries — nothing to export")
+    audio = args.audio or ("music" if plan.music_path else "original")
+    if not plan.music_path and audio != "original":
+        _fail(f"the plan has no music; audio mode {audio!r} needs a song")
+    size = None
+    if args.size:
+        try:
+            w, h = args.size.lower().split("x", 1)
+            size = (int(w), int(h))
+        except ValueError:
+            _fail(f"--size must look like 1920x1080, not {args.size!r}")
+
+    def progress(done: int, total: int, label: str) -> None:
+        print(f"[{done}/{total}] {label}", flush=True)
+
+    print(
+        f"Exporting the video with Monteur's own engine "
+        f"({args.quality} quality, {audio} audio) ...",
+        flush=True,
+    )
+    try:
+        result = render_export(
+            plan, args.output, canvas=args.canvas, fps=args.fps, audio=audio,
+            quality=args.quality, progress=progress, size=size,
+        )
+    except (MonteurMediaError, ValueError) as exc:
+        _fail(str(exc))
+    print(
+        f"\nExport -> {args.output} ({result['duration']:.1f}s, "
+        f"{result['width']}x{result['height']}, "
+        f"rendered in {result['seconds']:.1f}s)"
+    )
+    for note in result["notes"]:
+        print(f"  {note}")
+    print(
+        "  Upload-ready from Monteur's own engine — Resolve stays the "
+        "place for grading and fine-tuning."
+    )
+
+
 def _load_plan(path: str):
     """Read a saved plan JSON (create/revise --save-plan) or fail cleanly."""
     from monteur.montage import plan_from_dict
@@ -1367,6 +1421,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--fps", type=float, default=25.0)
     p.set_defaults(func=cmd_preview)
+
+    p = sub.add_parser(
+        "export",
+        help="Direct Export: render a saved plan to the finished, "
+             "upload-ready MP4 with Monteur's own engine — dissolves, act "
+             "titles, sound effects and YouTube loudness, no Resolve needed",
+    )
+    p.add_argument("plan", help="plan JSON from 'monteur create --save-plan' (or a revise)")
+    p.add_argument("-o", "--output", required=True, help="output .mp4")
+    p.add_argument(
+        "--canvas",
+        choices=["hd", "uhd", "vertical", "vertical-uhd", "cine", "cine-uhd"],
+        default="uhd",
+        help="canvas shape and resolution (same presets as 'create'; the "
+             "export renders at the preset's exact size)",
+    )
+    p.add_argument(
+        "--audio", choices=["music", "mix", "original"], default=None,
+        help="what plays under the pictures (default: music when the plan "
+             "has a song, original otherwise)",
+    )
+    p.add_argument(
+        "--quality", choices=["high", "medium"], default="high",
+        help="encode profile: high = crf 18 preset slow + AAC 320k (the "
+             "upload master), medium = crf 21 preset medium + AAC 192k",
+    )
+    p.add_argument("--fps", type=float, default=25.0)
+    p.add_argument(
+        "--size", default="", metavar="WxH",
+        help="advanced/testing: render at an explicit resolution instead "
+             "of the canvas preset (e.g. 480x270)",
+    )
+    p.set_defaults(func=cmd_export)
 
     p = sub.add_parser(
         "direct",

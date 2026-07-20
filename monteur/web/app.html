@@ -1425,6 +1425,36 @@ svg text.axis {
               </div>
             </div>
           </div>
+          <div class="render-block" id="cre-export-block">
+            <p class="seg-heading">Export video</p>
+            <p class="help-small">No Resolve? Monteur&rsquo;s own engine renders the finished, upload-ready MP4 right here &mdash; real dissolves, act titles on the black dips, your placed sound effects and YouTube-friendly loudness included. Pick where the file should go.</p>
+            <label class="sr-only" for="cre-export-dir">Folder for the exported video</label>
+            <div class="path-row">
+              <input type="text" id="cre-export-dir" placeholder="/Users/you/Movies/my-trip/monteur-export" spellcheck="false" autocomplete="off">
+              <button class="btn ghost" id="cre-browse-export" type="button">Browse&hellip;</button>
+            </div>
+            <div class="export-bar">
+              <label class="export-field">File name
+                <input type="text" id="cre-export-name" spellcheck="false" autocomplete="off">
+              </label>
+              <div class="export-field">
+                <span id="cre-export-quality-label">Quality</span>
+                <select id="cre-export-quality" aria-labelledby="cre-export-quality-label">
+                  <option value="high" selected>High &middot; 2160p-ready</option>
+                  <option value="medium">Medium</option>
+                </select>
+              </div>
+              <button class="btn primary" id="cre-export-btn" type="button">Export video<span class="spin" aria-hidden="true"></span></button>
+            </div>
+            <p class="help-small">Canvas and audio follow the choices your cut was built with.</p>
+            <div id="cre-export-panel"></div>
+            <p class="scan-note" id="cre-export-msg" role="status" hidden></p>
+            <div id="cre-export-result" hidden>
+              <p class="render-ready" id="cre-export-done" role="status"></p>
+              <ul class="plan-notes" id="cre-export-notes"></ul>
+              <p class="help-small">This render comes from Monteur&rsquo;s own engine &mdash; Resolve stays the path for grading and fine-tuning.</p>
+            </div>
+          </div>
           <div class="export-bar">
             <div class="export-field">
               <span id="cre-fmt-label">File format</span>
@@ -3329,7 +3359,7 @@ function makeJobPanel(hostId, texts) {
       // entries count SCENES and preview entries count SEGMENTS, not clips
       // — keep them out of the "x / y clips" total so the bar keeps
       // meaning clips.
-      if (p.stage !== "vision" && p.stage !== "song" && p.stage !== "scene" && p.stage !== "preview" && p.total > total) total = p.total;
+      if (p.stage !== "vision" && p.stage !== "song" && p.stage !== "scene" && p.stage !== "preview" && p.stage !== "export" && p.total > total) total = p.total;
       if (p.stage === "done" || p.stage === "cache") {
         done += 1;
         if (p.stage === "cache") cached += 1;
@@ -3365,6 +3395,12 @@ function makeJobPanel(hostId, texts) {
           previewProg = { done: p.index, total: p.total };
         }
         lines.push("▸ " + String(p.name || "segment"));
+      } else if (p.stage === "export") {
+        // the Direct Export's staged progress: same segments bar as preview
+        if (typeof p.index === "number" && typeof p.total === "number") {
+          previewProg = { done: p.index, total: p.total };
+        }
+        lines.push("▸ " + String(p.name || "segment"));
       } else if (p.stage === "movie") {
         lines.push("Claude · " + String(p.name || "drafting the screenplay") + "…");
       } else if (p.stage === "scene") {
@@ -3384,6 +3420,7 @@ function makeJobPanel(hostId, texts) {
     else if (last && last.stage === "elements") status.textContent = "Rating your sound elements…";
     else if (last && last.stage === "kit") status.textContent = "Writing the publish kit…";
     else if (last && last.stage === "preview") status.textContent = "Rendering the preview…";
+    else if (last && last.stage === "export") status.textContent = "Exporting the video…";
     else if (last && last.stage === "resolve") status.textContent = "Building the timeline in Resolve…";
     else if (last && last.stage === "movie") status.textContent = "Claude is writing your screenplay…";
     else if (last && last.stage === "scene") status.textContent = "Assembling scene " + (typeof last.index === "number" ? last.index : "") + (typeof last.total === "number" && last.total > 0 ? " of " + last.total : "") + "…";
@@ -3481,6 +3518,7 @@ var resolveBuildPanel = makeJobPanel("cre-resolve-panel", { starting: "Contactin
 var renderPanel = makeJobPanel("cre-render-panel", { starting: "Contacting DaVinci Resolve…", working: "Rendering in Resolve…" });
 var distillPanel = makeJobPanel("cre-dst-panel", { starting: "Starting the distillation…", working: "Distilling your trailer…" });
 var previewPanel = makeJobPanel("cre-preview-panel", { starting: "Starting the preview render…", working: "Rendering the preview…" });
+var exportPanel = makeJobPanel("cre-export-panel", { starting: "Starting the export…", working: "Exporting the video…" });
 
 function setScanBusy(on) {
   var btn = $("cre-scan-btn");
@@ -3547,6 +3585,15 @@ function setPreviewBusy(on) {
   btn.classList.toggle("busy", on);
   btn.disabled = on;
 }
+function setExportBusy(on) {
+  var btn = $("cre-export-btn");
+  btn.classList.toggle("busy", on);
+  btn.disabled = on;
+  $("cre-export-dir").disabled = on;
+  $("cre-browse-export").disabled = on;
+  $("cre-export-name").disabled = on;
+  $("cre-export-quality").disabled = on;
+}
 function setDistillBusy(on) {
   var btn = $("cre-dst-btn");
   btn.classList.toggle("busy", on);
@@ -3568,6 +3615,7 @@ function creStopJobs() {
   if (renderPanel.running()) { renderPanel.stop(); setRenderBusy(false); }
   if (distillPanel.running()) { distillPanel.stop(); setDistillBusy(false); }
   if (previewPanel.running()) { previewPanel.stop(); setPreviewBusy(false); }
+  if (exportPanel.running()) { exportPanel.stop(); setExportBusy(false); }
 }
 
 function creNote(id, message, isError) {
@@ -3587,6 +3635,7 @@ function creShowStep(n, focusHeading) {
   if (n !== 3 && resolveBuildPanel.running()) { resolveBuildPanel.stop(); setResolveBuildBusy(false); }
   if (n !== 3 && renderPanel.running()) { renderPanel.stop(); setRenderBusy(false); }
   if (n !== 3 && previewPanel.running()) { previewPanel.stop(); setPreviewBusy(false); }
+  if (n !== 3 && exportPanel.running()) { exportPanel.stop(); setExportBusy(false); }
   cre.step = n;
   var names = { 1: "Your footage", 2: "Music & options", 3: "Your cut" };
   $("wiz-progress").textContent = "Step " + n + " of 3 — " + names[n];
@@ -3607,6 +3656,7 @@ function hideBrowseButtons() {
   $("cre-browse-musicdir").hidden = true;
   $("cre-browse-kit").hidden = true;
   $("cre-browse-render").hidden = true;
+  $("cre-browse-export").hidden = true;
   $("cre-dst-browse-music").hidden = true;
   // the movie view's Browse buttons (incl. the per-scene ones) share the fate
   Array.prototype.forEach.call(document.querySelectorAll(".mov-browse"), function (b) {
@@ -3636,6 +3686,7 @@ $("cre-elements").addEventListener("input", function () {
   if (this.value.trim()) $("cre-sfx").checked = true;
 });
 $("cre-browse-render").addEventListener("click", function () { browsePath("folder", "cre-render-dir", "cre-browse-render"); });
+$("cre-browse-export").addEventListener("click", function () { browsePath("folder", "cre-export-dir", "cre-browse-export"); });
 
 /* ---- step 1: scan the footage folder ---- */
 
@@ -4194,6 +4245,10 @@ function renderCreResult(data) {
   // a fresh result gets a fresh default draft name (editable before saving)
   $("cre-draft-name").value = defaultDraftName(plan);
   $("cre-draft-msg").hidden = true;
+  // a fresh plan makes any previous Direct Export outcome stale
+  $("cre-export-msg").hidden = true;
+  $("cre-export-result").hidden = true;
+  prepareExportRow();
   $("cre-result").hidden = false;
 }
 
@@ -5294,6 +5349,85 @@ function renderVideo() {
   });
 }
 $("cre-render-btn").addEventListener("click", renderVideo);
+
+/* ---- step 3: Direct Export — the finished video from Monteur's engine --
+   POST /api/create/export-video renders the CURRENT plan (rev.planJson)
+   to the finished, upload-ready MP4 with monteur.preview.render_export:
+   real dissolves, act titles on the dips, placed sound effects, YouTube
+   loudness, moov up front. Canvas and audio follow the build's own
+   choices; the engine's staged progress arrives as {"stage":"export"}
+   entries the shared job panel renders as a segments bar. */
+
+/* fill the export row's defaults whenever a result card renders */
+function prepareExportRow() {
+  var built = (cre.result && cre.result.body) || {};
+  var folder = built.folder || $("cre-folder").value.trim();
+  if (!$("cre-export-dir").value.trim() && folder) {
+    $("cre-export-dir").value = joinFolder(folder, "monteur-export");
+  }
+  if (!$("cre-export-name").value.trim()) {
+    $("cre-export-name").value = sanitizeFileName(
+      $("cre-draft-name").value || "monteur_export"
+    );
+  }
+}
+
+function exportVideo() {
+  if (exportPanel.running() || buildPanel.running() || revisePanel.running() || directPanel.running()) return;
+  if (!rev.planJson) {
+    creNote("cre-export-msg", "Build your cut first — the export renders the finished plan.", true);
+    return;
+  }
+  var dir = $("cre-export-dir").value.trim();
+  if (!dir) {
+    creNote("cre-export-msg", "Pick a folder for the finished video first — Browse… or paste its path.", true);
+    $("cre-export-dir").focus();
+    return;
+  }
+  var built = (cre.result && cre.result.body) || {};
+  var body = {
+    plan_json: rev.planJson,
+    target_dir: dir,
+    name: sanitizeFileName($("cre-export-name").value.trim() || "monteur_export"),
+    quality: $("cre-export-quality").value,
+    // the wizard's canvas choice: the build's recorded key, else the
+    // current selection — the export renders at that preset's exact size
+    canvas: built.canvas || canvasKey(),
+    fps: built.fps || fpsFrom($("cre-fps"))
+  };
+  // the audio mode follows the build's, exactly like the preview player
+  if (built.audio) body.audio = built.audio;
+  $("cre-export-msg").hidden = true;
+  $("cre-export-result").hidden = true;
+  setExportBusy(true);
+  api("/api/create/export-video", { method: "POST", body: body }).then(function (data) {
+    exportPanel.start(data.job, {
+      onDone: function (result) {
+        setExportBusy(false);
+        $("cre-export-done").textContent = "Your video is ready: " + String((result && result.path) || dir);
+        var notes = $("cre-export-notes");
+        clear(notes);
+        ((result && result.notes) || []).forEach(function (note) {
+          notes.appendChild(el("li", null, String(note)));
+        });
+        $("cre-export-result").hidden = false;
+        toast("Video exported with Monteur's own engine.", "success");
+      },
+      onCancelled: function () {
+        setExportBusy(false);
+        creNote("cre-export-msg", "Export cancelled — your cut is untouched.");
+      },
+      onError: function (message) {
+        setExportBusy(false);
+        creNote("cre-export-msg", message, true);
+      }
+    });
+  }).catch(function (err) {
+    setExportBusy(false);
+    creNote("cre-export-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+$("cre-export-btn").addEventListener("click", exportVideo);
 
 /* ---- distill a trailer from a finished cut (monteur.distill) ---------- */
 

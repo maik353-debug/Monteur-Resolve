@@ -3128,3 +3128,219 @@ class TestStoryboardAndPreviewUi:
         assert source.index('id="cre-preview-btn"') < source.index('id="cre-resolve-btn"')
         # a new build/revise/apply/resume invalidates the player
         assert source.count("resetPreview()") >= 5
+
+
+class TestExportVideoApi:
+    """POST /api/create/export-video — the Direct Export job.
+
+    ``render_export`` is replaced at its import site (the job body does
+    ``from monteur.preview import render_export`` at CALL time), so
+    ``monkeypatch.setattr`` on :mod:`monteur.preview` is a complete test
+    hook — no ffmpeg render behind the endpoint tests.
+    """
+
+    def _patch_export(self, monkeypatch, result=None, ticks=()):
+        """Fake render_export; feeds ``ticks`` through the progress
+        callback before returning. Returns the recorded calls."""
+        import monteur.preview as preview_module
+
+        calls = []
+
+        def fake_export(
+            plan, out_path, *, canvas, fps, audio, quality, progress=None,
+            size=None,
+        ):
+            calls.append(
+                {
+                    "entries": len(plan.entries),
+                    "out_path": out_path,
+                    "canvas": canvas,
+                    "fps": fps,
+                    "audio": audio,
+                    "quality": quality,
+                    "size": size,
+                }
+            )
+            if progress is not None:
+                for done, total, label in ticks:
+                    progress(done, total, label)
+            return dict(
+                result
+                or {
+                    "path": out_path, "duration": 6.0, "width": 3840,
+                    "height": 2160, "seconds": 12.5, "notes": [],
+                }
+            )
+
+        monkeypatch.setattr(preview_module, "render_export", fake_export)
+        return calls
+
+    def _export(self, server, **payload):
+        payload.setdefault("plan_json", _preview_plan_dict())
+        data = _post(f"{server}/api/create/export-video", payload)
+        assert isinstance(data["job"], str) and data["job"]
+        return _wait_for_job(server, data["job"])
+
+    def test_export_happy_path_with_defaults(self, server, monkeypatch, tmp_path):
+        target = str(tmp_path / "exports" / "nested")
+        notes = ["dissolve into clip_D.mp4 at 4.4s: ... hard cut instead"]
+        calls = self._patch_export(
+            monkeypatch,
+            result={
+                "path": target + "/monteur_export.mp4", "duration": 6.0,
+                "width": 3840, "height": 2160, "seconds": 12.5,
+                "notes": notes,
+            },
+            ticks=[(1, 3, "clip_A.mp4"), (2, 3, "black"), (3, 3, "mux")],
+        )
+        job = self._export(server, target_dir=target)
+        assert job["state"] == "done"
+        assert job["kind"] == "export-video"
+        # defaults: uhd canvas, high quality, 25 fps, the plan's music,
+        # the default file name with .mp4 appended, NO size override
+        assert calls == [
+            {
+                "entries": 3,
+                "out_path": os.path.join(target, "monteur_export.mp4"),
+                "canvas": "uhd",
+                "fps": 25.0,
+                "audio": "music",
+                "quality": "high",
+                "size": None,
+            }
+        ]
+        # the target folder was created with parents before the render
+        assert Path(target).is_dir()
+        # the engine's staged progress flowed into the job entries
+        stages = [p for p in job["progress"] if p["stage"] == "export"]
+        assert [(p["index"], p["total"], p["name"]) for p in stages] == [
+            (1, 3, "clip_A.mp4"), (2, 3, "black"), (3, 3, "mux"),
+        ]
+        # the result is exactly the documented shape, notes verbatim
+        assert job["result"] == {
+            "path": target + "/monteur_export.mp4",
+            "duration": 6.0,
+            "seconds": 12.5,
+            "notes": notes,
+        }
+
+    def test_export_forwards_explicit_options(self, server, monkeypatch, tmp_path):
+        calls = self._patch_export(monkeypatch)
+        job = self._export(
+            server, target_dir=str(tmp_path), name="holiday", canvas="cine",
+            audio="mix", quality="medium", fps=30,
+        )
+        assert job["state"] == "done"
+        assert calls == [
+            {
+                "entries": 3,
+                "out_path": str(tmp_path / "holiday.mp4"),
+                "canvas": "cine",
+                "fps": 30.0,
+                "audio": "mix",
+                "quality": "medium",
+                "size": None,
+            }
+        ]
+
+    def test_export_audio_defaults_to_original_without_music(
+        self, server, monkeypatch, tmp_path
+    ):
+        calls = self._patch_export(monkeypatch)
+        job = self._export(
+            server, plan_json=_preview_plan_dict(music=False),
+            target_dir=str(tmp_path),
+        )
+        assert job["state"] == "done"
+        assert calls[0]["audio"] == "original"
+
+    def test_export_music_mode_without_music_is_a_job_error(
+        self, server, monkeypatch, tmp_path
+    ):
+        self._patch_export(monkeypatch)
+        job = self._export(
+            server, plan_json=_preview_plan_dict(music=False),
+            target_dir=str(tmp_path), audio="music",
+        )
+        assert job["state"] == "error"
+        assert "no music" in job["message"]
+
+    def test_export_missing_plan_json_is_400(self, server, tmp_path):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/create/export-video",
+                {"target_dir": str(tmp_path)},
+            )
+        assert exc_info.value.code == 400
+        assert "plan_json" in json.loads(exc_info.value.read())["error"]
+
+    def test_export_missing_target_dir_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/create/export-video",
+                {"plan_json": _preview_plan_dict()},
+            )
+        assert exc_info.value.code == 400
+        assert "target_dir" in json.loads(exc_info.value.read())["error"]
+
+    def test_export_bad_quality_is_400(self, server, tmp_path):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/create/export-video",
+                {
+                    "plan_json": _preview_plan_dict(),
+                    "target_dir": str(tmp_path),
+                    "quality": "ultra",
+                },
+            )
+        assert exc_info.value.code == 400
+        assert "quality" in json.loads(exc_info.value.read())["error"]
+
+    def test_export_bad_plan_is_a_job_error(self, server, tmp_path):
+        job = self._export(
+            server, plan_json={"nonsense": True}, target_dir=str(tmp_path)
+        )
+        assert job["state"] == "error"
+        assert "not a Monteur plan" in job["message"]
+
+    def test_export_empty_plan_is_a_job_error(self, server, tmp_path):
+        plan = _preview_plan_dict()
+        plan["entries"] = []
+        job = self._export(server, plan_json=plan, target_dir=str(tmp_path))
+        assert job["state"] == "error"
+        assert "no entries" in job["message"]
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_app_has_the_export_video_block(self):
+        # Static asserts (the established pattern): the Export-video block
+        # with folder/name/quality controls, the staged progress handling,
+        # the ready line with the notes list, and the calm own-engine
+        # sentence — placed right AFTER the Build-in-Resolve block and
+        # before the timeline download bar.
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            'id="cre-export-block"',
+            'id="cre-export-dir"',
+            'id="cre-browse-export"',
+            'id="cre-export-name"',
+            'id="cre-export-quality"',
+            'id="cre-export-btn"',
+            'id="cre-export-panel"',
+            'id="cre-export-done"',
+            'id="cre-export-notes"',
+            '<option value="high" selected>',
+            '<option value="medium">',
+            '"/api/create/export-video"',
+            'p.stage === "export"',
+            "Your video is ready: ",
+            "Resolve stays the path for grading and fine-tuning",
+        ):
+            assert needle in source, needle
+        # the export block sits right after the Build-in-DaVinci-Resolve
+        # block (which holds the Resolve render row) and before the
+        # timeline download bar
+        resolve_block = source.index('id="cre-resolve-btn"')
+        render_row = source.index('id="cre-render-block"')
+        export_block = source.index('id="cre-export-block"')
+        download_bar = source.index('id="cre-fmt-label"')
+        assert resolve_block < render_row < export_block < download_bar

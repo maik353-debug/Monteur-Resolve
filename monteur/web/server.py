@@ -37,6 +37,8 @@ API (all JSON):
 * ``POST /api/create/preview`` {"plan_json", "audio"?,
   "width"?}                                                     -> {"job": id}
 * ``GET  /api/preview/<token>.mp4``                              -> MP4 bytes (Range-capable)
+* ``POST /api/create/export-video`` {"plan_json", "target_dir",
+  "name"?, "canvas"?, "audio"?, "quality"?, "fps"?}             -> {"job": id}
 * ``GET  /api/drafts``                                          -> {"drafts": [...]}
 * ``GET  /api/drafts/<id>``                                     -> the full draft
 * ``POST /api/drafts``    the draft record                      -> the stored record
@@ -191,6 +193,25 @@ LATEST preview: after a successful render every older preview file is
 deleted, so iterating on a cut never accumulates videos on disk (the fresh
 job result simply carries a new URL). The result is ``{"url":
 "/api/preview/<token>.mp4", "duration", "width"}``.
+
+``POST /api/create/export-video`` is the Direct Export: the finished,
+upload-ready video straight from Monteur's own engine
+(:func:`monteur.preview.render_export`) — no Resolve anywhere in the
+path. The browser sends the current ``"plan_json"`` plus ``"target_dir"``
+(required, 400 when missing; created with parents) and optionally
+``"name"`` (default ``monteur_export``; ``.mp4`` is appended when
+missing), ``"canvas"`` (a :data:`monteur.montage.CANVASES` preset key,
+default ``"uhd"``), ``"audio"`` (defaults like preview: the plan's music
+when it has a song, else ``"original"``), ``"quality"`` (``"high"``, the
+default, or ``"medium"`` — anything else is a 400) and ``"fps"``. The
+``"export-video"`` job feeds the engine's staged progress through as
+``{"stage": "export", "index", "total", "name"}`` entries (one per
+segment, one for the audio bed, one for the final transitions + mux
+pass). The result is ``{"path", "duration", "seconds", "notes"}`` —
+``notes`` carries the engine's graceful degradations verbatim (dissolves
+without source handles, skipped titles, missing SFX files). Rendering
+comes from Monteur's own engine; the Resolve build/render pair stays the
+path for grading and fine-tuning.
 
 ``GET /api/preview/<token>.mp4`` serves that file WITH HTTP Range support —
 ``<video>`` seeking needs 206 partial responses: a valid ``Range:
@@ -614,10 +635,72 @@ def _run_preview_job(job: dict, payload: dict) -> None:
         job["state"] = "error"
 
 
+def _run_export_video_job(job: dict, payload: dict) -> None:
+    """Daemon-thread body for POST /api/create/export-video (plan -> MP4).
+
+    The Direct Export: pure plan -> finished video through
+    :func:`monteur.preview.render_export` — no sift, no re-plan, no
+    Resolve. Audio defaults exactly like the preview job (the plan's
+    music when it has a song, else "original"); the engine's staged
+    progress callback feeds ``{"stage": "export"}`` entries the Studio
+    job panel renders as a segments bar. The target directory is created
+    with parents; the result carries the engine's honest ``notes``
+    (missing dissolve handles, skipped titles, missing SFX files).
+    """
+    from monteur.media import MonteurMediaError
+    from monteur.montage import plan_from_dict
+
+    try:
+        plan = plan_from_dict(payload.get("plan_json") or {})  # bad -> ValueError
+        if not plan.entries:
+            raise ValueError("the plan has no entries — nothing to export")
+        audio = payload.get("audio") or ("music" if plan.music_path else "original")
+        if not plan.music_path and audio != "original":
+            raise ValueError(f"the plan has no music; audio mode {audio!r} needs a song")
+        target_dir = str(payload.get("target_dir") or "").strip()
+        name = str(payload.get("name") or "").strip() or "monteur_export"
+        if not name.lower().endswith(".mp4"):
+            name += ".mp4"
+        canvas = str(payload.get("canvas") or "uhd")
+        quality = str(payload.get("quality") or "high")
+        try:
+            fps = float(payload.get("fps") or 25.0)
+        except (TypeError, ValueError):
+            raise ValueError("'fps' must be a number")
+        os.makedirs(target_dir, exist_ok=True)
+        out_path = os.path.join(target_dir, name)
+
+        def progress(done: int, total: int, label: str) -> None:
+            entry = {"stage": "export", "index": done, "total": total, "name": label}
+            with _JOBS_LOCK:
+                job["progress"].append(entry)
+
+        # Resolved at CALL time so tests can monkeypatch monteur.preview.
+        from monteur.preview import render_export
+
+        result = render_export(
+            plan, out_path, canvas=canvas, fps=fps, audio=audio,
+            quality=quality, progress=progress,
+        )
+        job["result"] = {
+            "path": result["path"],
+            "duration": result["duration"],
+            "seconds": result["seconds"],
+            "notes": list(result.get("notes") or []),
+        }
+        job["state"] = "done"
+    except (MonteurMediaError, ValueError, OSError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
 def _new_job(kind: str) -> dict:
     job = {
         "id": secrets.token_hex(4),
-        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "direct" | "direct-apply" | "distill" | "resolve-build" | "resolve-render" | "resolve-detect" | "movie" | "scene-check" | "movie-assemble" | "ai-test"
+        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "direct" | "direct-apply" | "distill" | "preview" | "export-video" | "resolve-build" | "resolve-render" | "resolve-detect" | "movie" | "scene-check" | "movie-assemble" | "ai-test"
         "state": "running",  # -> "done" | "error" | "cancelled"
         "progress": [],  # dicts: {"index","total","name","stage"[,"usable_ratio"]}
         "message": "",  # human-readable reason when state == "error"
@@ -2081,6 +2164,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/create/distill"): self._create_distill,
             ("POST", "/api/create/export"): self._create_export,
             ("POST", "/api/create/preview"): self._create_preview,
+            ("POST", "/api/create/export-video"): self._create_export_video,
             ("GET", "/api/thumb"): self._thumb,
             ("POST", "/api/create/resolve"): self._create_resolve,
             ("GET", "/api/drafts"): self._drafts_list,
@@ -2598,6 +2682,35 @@ class MonteurHandler(BaseHTTPRequestHandler):
             target=_run_preview_job,
             args=(job, payload),
             name=f"monteur-preview-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _create_export_video(self) -> None:
+        """POST /api/create/export-video — the Direct Export job.
+
+        Validation happens here (a missing ``plan_json``/``target_dir``
+        or an unknown ``quality`` is a 400 with a user-ready message);
+        the actual render runs as an ``"export-video"`` job — see
+        :func:`_run_export_video_job`.
+        """
+        payload = self._read_json()
+        if not isinstance(payload.get("plan_json"), dict):
+            raise ApiError(
+                400, "missing 'plan_json' (the plan a build result carries)"
+            )
+        if not str(payload.get("target_dir") or "").strip():
+            raise ApiError(
+                400, "missing 'target_dir' (the folder for the finished video)"
+            )
+        quality = payload.get("quality")
+        if quality not in (None, "", "high", "medium"):
+            raise ApiError(400, "'quality' must be 'high' or 'medium'")
+        job = _new_job("export-video")
+        threading.Thread(
+            target=_run_export_video_job,
+            args=(job, payload),
+            name=f"monteur-export-video-{job['id']}",
             daemon=True,
         ).start()
         self._send_json({"job": job["id"]})

@@ -1,12 +1,14 @@
-"""Sehen ohne Resolve: render a MontagePlan to a small MP4, plus thumbnails.
+"""Sehen ohne Resolve: render a MontagePlan to video, plus thumbnails.
 
-This is the engine behind Studio's preview player and storyboard: a
-:class:`~monteur.montage.MontagePlan` becomes a low-resolution, uniformly
-encoded MP4 (:func:`render_preview`) and any clip position becomes a
-storyboard thumbnail (:func:`extract_thumbnail`) — no DaVinci Resolve, no
-export/import round-trip. The point is a fast, honest look at the cut the
-plan describes: the same source ranges, the same record positions, the
-same black dips, the same music offset the Resolve timeline would get.
+This is the engine behind Studio's preview player, storyboard AND the
+Direct Export: a :class:`~monteur.montage.MontagePlan` becomes a
+low-resolution, uniformly encoded MP4 (:func:`render_preview`), a
+full-quality upload-ready MP4 (:func:`render_export`), and any clip
+position becomes a storyboard thumbnail (:func:`extract_thumbnail`) — no
+DaVinci Resolve, no export/import round-trip. The point is an honest
+render of the cut the plan describes: the same source ranges, the same
+record positions, the same black dips, the same music offset the Resolve
+timeline would get.
 
 Dependency story: exactly like :mod:`monteur.media` — everything runs
 through the same ffmpeg binary located by :func:`monteur.media.find_ffmpeg`
@@ -40,10 +42,14 @@ Audio modes mirror :func:`monteur.montage.montage_to_timeline`:
   :data:`MIX_ORIGINAL_LEVEL` (0.6) — a preview approximation of "song on
   A1, camera sound under it", not a mixing console.
 
-Limitations (v1, deliberate): no titles/drawtext on the dips yet — they
-render as plain black; SFX cues with placed ``file``\\ s are NOT mixed in;
-dissolves (``MontageEntry.transition``) render as hard cuts. All three are
-follow-ups once Studio's player needs them.
+Limitations (deliberate, PREVIEW only): :func:`render_preview` draws no
+titles on the dips — they render as plain black; SFX cues with placed
+``file``\\ s are NOT mixed in; dissolves (``MontageEntry.transition``)
+render as hard cuts. The preview is a fast, rough look — all three ARE
+rendered by :func:`render_export`, the full-quality path (real ``xfade``
+dissolves, ``drawtext`` act titles, placed sound effects, YouTube-target
+loudness), which shares the segment machinery above but encodes for
+delivery instead of speed.
 """
 
 from __future__ import annotations
@@ -51,6 +57,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from monteur.media import MonteurMediaError, find_ffmpeg, probe
@@ -72,6 +79,46 @@ _MIN_GAP = 0.01
 _AUDIO_MODES = ("music", "mix", "original")
 # How much ffmpeg stderr to carry into the error message.
 _STDERR_TAIL = 400
+
+# --- Direct Export (render_export) -------------------------------------------
+#
+# Encode profiles for the finished video. "high" is the upload master:
+# visually transparent H.264 (crf 18) with 320 kbit/s AAC at 48 kHz —
+# comfortably above YouTube's own re-encode, so nothing is lost twice.
+# Preset choice was measured on real 1080p material: "slow" took ~1.8x
+# "medium" (5.7 s vs 3.2 s for 6 s of footage) — under the 2x line, so
+# "high" keeps the better-compressing "slow". "medium" (crf 21, preset
+# medium, 192 kbit/s AAC) is the smaller share/review file. Both are
+# yuv420p with the moov atom up front (+faststart), the YouTube-friendly
+# layout that lets playback start before the download finishes.
+EXPORT_QUALITIES: dict[str, dict[str, str]] = {
+    "high": {"crf": "18", "preset": "slow", "audio_bitrate": "320k", "seg_crf": "14"},
+    "medium": {"crf": "21", "preset": "medium", "audio_bitrate": "192k", "seg_crf": "17"},
+}
+# Segment intermediates are encoded near-lossless (profile crf - 4) with a
+# fast preset: the FINAL pass defines the delivered quality, the segment
+# pass must only not lose anything on the way there.
+_SEG_PRESET = "faster"
+# Act titles on the dips: plain white, centered, sized from the canvas
+# height; when the dip is long enough the text fades in/out this long.
+_TITLE_FADE = 0.3
+# Loudness finish: single-pass loudnorm at YouTube's streaming target
+# (-14 LUFS integrated, -1 dBTP true peak, LRA 11) — the platform then
+# leaves the level alone instead of turning it down.
+_EXPORT_LOUDNORM = "loudnorm=I=-14:TP=-1:LRA=11"
+# Dissolves shorter than this are rounding noise, not transitions.
+_MIN_TRANSITION = 0.01
+# Font candidates for drawtext, probed in order (Linux, macOS, Windows).
+# Missing everywhere = titles are skipped with a note, never a failure.
+_FONT_CANDIDATES = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/Library/Fonts/Arial.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+)
 
 
 def _run_ffmpeg(args: list[str], label: str) -> None:
@@ -339,4 +386,572 @@ def render_preview(
         "duration": info.duration,
         "width": w,
         "segments": len(segments),
+    }
+
+
+# --- Direct Export: the finished video from Monteur's own engine --------------
+
+
+def _find_font() -> str | None:
+    """First existing drawtext font file, or None (titles are then skipped)."""
+    for candidate in _FONT_CANDIDATES:
+        if Path(candidate).is_file():
+            return candidate
+    return None
+
+
+# Whether a given ffmpeg binary ships the drawtext filter (the bundled
+# imageio-ffmpeg build does NOT — no libfreetype), cached per binary path.
+_DRAWTEXT_CACHE: dict[str, bool] = {}
+
+
+def _supports_drawtext() -> bool:
+    """True when the resolved ffmpeg build ships the ``drawtext`` filter.
+
+    Some builds (notably the ``[media]`` extra's bundled imageio-ffmpeg
+    binary) are compiled without libfreetype and have no ``drawtext`` at
+    all — titles must then be skipped with a note, never fail the export.
+    """
+    try:
+        binary = find_ffmpeg()
+    except MonteurMediaError:
+        return False
+    if binary not in _DRAWTEXT_CACHE:
+        try:
+            result = subprocess.run(
+                [binary, "-hide_banner", "-filters"], capture_output=True
+            )
+            _DRAWTEXT_CACHE[binary] = b"drawtext" in result.stdout
+        except OSError:
+            _DRAWTEXT_CACHE[binary] = False
+    return _DRAWTEXT_CACHE[binary]
+
+
+def _fq(value: str) -> str:
+    """Quote a value for use inside an ffmpeg filter option.
+
+    Single-quotes the value (protecting ``:``/``,``/``;`` from the filter
+    and graph parsers), escapes embedded quotes the ffmpeg way and turns
+    backslashes into forward slashes (Windows paths; ffmpeg accepts ``/``
+    everywhere and ``\\`` would start an escape).
+    """
+    return "'" + str(value).replace("\\", "/").replace("'", r"'\''") + "'"
+
+
+def _title_filter(text_file: str, font: str, height: int, dip_len: float) -> str:
+    """The drawtext filter for one act title over a black dip segment.
+
+    Plain white, centered, font size proportional to the canvas height.
+    A dip long enough to afford it fades the text in and out over
+    :data:`_TITLE_FADE` seconds INSIDE the dip; a short dip shows the
+    text for the dip's full length. The alpha expression always cuts to
+    0 after ``dip_len`` — a segment extended for a following dissolve
+    must not carry the title into the extension.
+    """
+    fade = _TITLE_FADE if dip_len >= 2 * _TITLE_FADE + 0.2 else 0.0
+    if fade > 0:
+        alpha = (
+            f"if(lt(t,{fade:.3f}),t/{fade:.3f},"
+            f"if(lt(t,{dip_len - fade:.3f}),1,"
+            f"max(({dip_len:.3f}-t)/{fade:.3f},0)))"
+        )
+    else:
+        alpha = f"lt(t,{dip_len:.3f})"
+    size = max(12, round(height / 12))
+    return (
+        f"drawtext=fontfile={_fq(font)}:textfile={_fq(text_file)}"
+        f":fontcolor=white:fontsize={size}"
+        f":x=(w-text_w)/2:y=(h-text_h)/2:alpha={_fq(alpha)}"
+    )
+
+
+def _export_video_graph(
+    lengths: list[float],
+    transitions: list[float],
+    fade_in: float,
+    fade_out: float,
+    duration: float,
+) -> str:
+    """The filter_complex video chain over the export's segment inputs.
+
+    ``lengths[i]`` is segment i's RENDERED length (its nominal record
+    length plus the extension that feeds the next boundary's dissolve);
+    ``transitions[i]`` is the xfade seconds INTO segment i (0 = hard
+    cut; ``transitions[0]`` is always 0). Segments are chained left to
+    right: a dissolve boundary becomes ``xfade`` (offset = the incoming
+    segment's record position, so the timeline timing never moves — the
+    overlap material comes entirely from the outgoing segment's
+    extension), a hard cut becomes a 2-input ``concat``. One graph, one
+    decode, ONE final encode — no generation loss from pairwise
+    intermediate files. The chain ends in the plan's fades and
+    ``format=yuv420p`` under the output label ``[v]``.
+    """
+    # Normalize every input's timebase first: concat and xfade both refuse
+    # mismatched timebases, and MP4 segments arrive with their container tb.
+    parts = [f"[{i}:v]settb=AVTB[sv{i}]" for i in range(len(lengths))]
+    cur = "[sv0]"
+    acc = lengths[0]
+    for i in range(1, len(lengths)):
+        t = transitions[i]
+        out = f"[vx{i}]"
+        if t > 0:
+            offset = acc - t
+            parts.append(
+                f"{cur}[sv{i}]xfade=transition=fade"
+                f":duration={t:.3f}:offset={offset:.3f}{out}"
+            )
+            acc = offset + lengths[i]
+        else:
+            parts.append(f"{cur}[sv{i}]concat=n=2:v=1:a=0{out}")
+            acc += lengths[i]
+        cur = out
+    tail: list[str] = []
+    if fade_in > 0:
+        tail.append(f"fade=t=in:st=0:d={fade_in:.3f}")
+    if fade_out > 0:
+        st = max(0.0, duration - fade_out)
+        tail.append(f"fade=t=out:st={st:.3f}:d={fade_out:.3f}")
+    tail.append("format=yuv420p")
+    parts.append(f"{cur}{','.join(tail)}[v]")
+    return ";".join(parts)
+
+
+def _export_audio_graph(
+    audio: str,
+    music_label: str | None,
+    bed_label: str | None,
+    sfx: list[tuple[str, float, float]],
+    fade_in: float,
+    fade_out: float,
+    duration: float,
+) -> str:
+    """The filter_complex audio chain, ending in the output label ``[a]``.
+
+    The bed follows the preview's audio-mode semantics exactly —
+    ``"music"`` is the song alone, ``"original"`` the concatenated clip
+    sound, ``"mix"`` both at the fixed :data:`MIX_MUSIC_LEVEL` /
+    :data:`MIX_ORIGINAL_LEVEL` levels. Placed SFX cues (``(input label,
+    start seconds, trimmed length)``) are each trimmed, resampled to the
+    export rate, delayed to their cue time and ``amix``-ed ON TOP of the
+    bed at full level (``normalize=0`` keeps everyone's gain honest).
+    The chain finishes with the plan's ``afade``\\ s and — always last —
+    single-pass ``loudnorm`` at YouTube's -14 LUFS / -1 dBTP / LRA 11
+    target, then a resample back to :data:`_AUDIO_RATE` (loudnorm
+    upsamples internally).
+    """
+    parts: list[str] = []
+    if audio == "music":
+        base = f"[{music_label}]"
+    elif audio == "original":
+        base = f"[{bed_label}]"
+    else:  # mix
+        parts.append(f"[{music_label}]volume={MIX_MUSIC_LEVEL:g}[xm]")
+        parts.append(f"[{bed_label}]volume={MIX_ORIGINAL_LEVEL:g}[xo]")
+        parts.append(
+            "[xm][xo]amix=inputs=2:duration=first:dropout_transition=0"
+            ":normalize=0[xbed]"
+        )
+        base = "[xbed]"
+    if sfx:
+        labels = ""
+        for k, (label, start, trim) in enumerate(sfx):
+            ms = max(0, int(round(start * 1000)))
+            parts.append(
+                f"[{label}]atrim=0:{trim:.3f},aresample={_AUDIO_RATE},"
+                f"aformat=channel_layouts=stereo,adelay={ms}|{ms}[xs{k}]"
+            )
+            labels += f"[xs{k}]"
+        parts.append(
+            f"{base}{labels}amix=inputs={1 + len(sfx)}:duration=first"
+            ":dropout_transition=0:normalize=0[xfx]"
+        )
+        base = "[xfx]"
+    tail: list[str] = []
+    if fade_in > 0:
+        tail.append(f"afade=t=in:st=0:d={fade_in:.3f}")
+    if fade_out > 0:
+        st = max(0.0, duration - fade_out)
+        tail.append(f"afade=t=out:st={st:.3f}:d={fade_out:.3f}")
+    tail.append(_EXPORT_LOUDNORM)
+    tail.append(f"aresample={_AUDIO_RATE}")
+    parts.append(f"{base}{','.join(tail)}[a]")
+    return ";".join(parts)
+
+
+def _export_transitions(
+    plan: MontagePlan, segments: list[tuple[str, float, object]]
+) -> tuple[list[float], list[str]]:
+    """Per-segment dissolve lengths (INTO segment i) plus degradation notes.
+
+    Mirrors the FCPXML semantics: ``MontageEntry.transition`` is a cross
+    dissolve INTO the entry, starting AT its cut — so the overlap
+    material must come from the OUTGOING side, extending ``transition``
+    seconds past its own cut. A black dip has unlimited handles (black
+    is generated); a clip has them only when its source file holds
+    ``transition`` more seconds after the entry's cut
+    (``clip_duration`` when the plan recorded it, a probe otherwise).
+    Missing handles degrade to a hard cut with an honest note — the
+    timeline timing is authoritative and never moves either way.
+    """
+    notes: list[str] = []
+    trans = [0.0] * len(segments)
+    durations: dict[str, float | None] = {}
+
+    def file_duration(path: str, known: float) -> float | None:
+        if known > 0:
+            return known
+        if path not in durations:
+            try:
+                durations[path] = probe(path).duration
+            except MonteurMediaError:
+                durations[path] = None
+        return durations[path]
+
+    for i in range(1, len(segments)):
+        kind, length, entry = segments[i]
+        if kind != "clip" or entry.transition <= 0:
+            continue
+        prev_kind, prev_len, prev_entry = segments[i - 1]
+        t = min(float(entry.transition), length, prev_len)
+        if t < _MIN_TRANSITION:
+            continue
+        if prev_kind == "clip":
+            available = file_duration(
+                prev_entry.clip_path, prev_entry.clip_duration
+            )
+            needed = prev_entry.source_start + prev_len + t
+            if available is None or needed > available + 1e-3:
+                notes.append(
+                    f"dissolve into {Path(entry.clip_path).name} at "
+                    f"{entry.record_start:.1f}s: the previous shot has no "
+                    "spare material after its cut — hard cut instead"
+                )
+                continue
+        trans[i] = t
+    return trans, notes
+
+
+def render_export(
+    plan: MontagePlan,
+    out_path: str,
+    *,
+    canvas: str = "uhd",
+    fps: float = 25.0,
+    audio: str = "music",
+    quality: str = "high",
+    progress=None,
+    size: tuple[int, int] | None = None,
+) -> dict:
+    """Render ``plan`` to a finished, upload-ready MP4 — no Resolve.
+
+    The full-quality sibling of :func:`render_preview`: same segment
+    pipeline (one intermediate per entry, generated black for the record
+    gaps), but rendered at a real delivery resolution with everything
+    the preview deliberately skips:
+
+    * **Canvas** — ``canvas`` is a :data:`monteur.montage.CANVASES`
+      preset key; the export renders at the preset's exact WxH. Footage
+      always COVERS the frame (aspect preserved, centered, overflow
+      cropped): ``scale=W:H:force_original_aspect_ratio=increase`` +
+      ``crop``. That one formula reproduces both of the Resolve build's
+      scaling modes — "fill" (Scaling 3, non-cine canvases) and "scale
+      full frame with crop" (Scaling 1, ``cine*``) — because both mean
+      cover-the-frame on export; they differ only in WHICH source
+      dimension wins: the dimension needing the larger upscale fills
+      exactly and the other is center-cropped, so 16:9 footage on a
+      cine canvas fills the width and loses top/bottom, while the same
+      footage on a vertical canvas fills the height and loses the
+      sides. ``size=(w, h)`` (advanced/testing) overrides the preset
+      with an explicit even-forced resolution.
+    * **Dissolves** — entries with ``transition > 0`` crossfade INTO the
+      entry (the FCPXML semantics): the outgoing segment is extended
+      past its cut by the transition length and the boundary becomes an
+      ``xfade`` whose offset is the incoming entry's record position —
+      record ranges stay authoritative, the timeline timing never
+      moves. Extensions need source handles; where the outgoing clip
+      has none (checked against ``clip_duration``, probed when the plan
+      does not carry it) the boundary degrades to a hard cut and the
+      returned ``"notes"`` say so. All segments are chained in ONE
+      filter graph (xfade at dissolve boundaries, concat elsewhere), so
+      the export encodes exactly twice per pixel: segment + final.
+    * **Titles** — ``plan.title_texts`` are drawn over their black dips
+      via ``drawtext`` (centered plain white, size ~height/12, a
+      :data:`_TITLE_FADE` in/out when the dip affords it). Both the
+      filter and the font are discovered defensively: an ffmpeg build
+      without ``drawtext`` (the bundled imageio-ffmpeg binary has no
+      libfreetype), or no font from :data:`_FONT_CANDIDATES` (DejaVu on
+      Linux, Arial/Helvetica on macOS/Windows), skips the titles with a
+      note — never a failed export.
+    * **SFX** — cues with a placed ``file`` are trimmed to
+      ``min(cue.duration, file length)``, delayed to ``cue.time`` and
+      mixed on top of the audio bed (one final audio graph). A missing
+      or unreadable file is a note, not an error.
+    * **Loudness** — the audio chain finishes with single-pass
+      ``loudnorm`` at YouTube's target (-14 LUFS, -1 dBTP, LRA 11).
+    * **Fades** — the plan's ``fade_in``/``fade_out``, exactly as in
+      the preview.
+
+    ``audio`` follows the preview's modes (``"music"``/``"original"``/
+    ``"mix"``, same validation); ``quality`` picks an
+    :data:`EXPORT_QUALITIES` profile ("high": crf 18 preset slow + AAC
+    320k, "medium": crf 21 preset medium + AAC 192k — see the profile
+    comment for the measured preset choice); both land as yuv420p with
+    ``+faststart``. ``progress(done, total, label)`` ticks once per
+    segment, once for the audio bed (own-sound modes) and once for the
+    final transitions + mux pass.
+
+    Returns ``{"path", "duration", "width", "height", "seconds",
+    "notes"}`` — duration probed from the finished file, ``seconds``
+    the wall-clock render time, ``notes`` every graceful degradation
+    (missing dissolve handles, skipped titles, missing SFX files).
+    Raises :class:`MonteurMediaError` with the ffmpeg stderr tail on
+    any failure; the intermediate directory is removed on success and
+    failure alike.
+    """
+    started = time.monotonic()
+    if audio not in _AUDIO_MODES:
+        valid = ", ".join(_AUDIO_MODES)
+        raise ValueError(f"unknown audio mode {audio!r}; valid modes: {valid}")
+    if audio in ("music", "mix") and not plan.music_path:
+        raise ValueError(
+            f'plan has no music; audio mode {audio!r} needs a song — '
+            'use audio="original"'
+        )
+    if not plan.entries:
+        raise ValueError("plan has no entries; nothing to render")
+    if quality not in EXPORT_QUALITIES:
+        valid = ", ".join(EXPORT_QUALITIES)
+        raise ValueError(f"unknown quality {quality!r}; valid qualities: {valid}")
+    profile = EXPORT_QUALITIES[quality]
+    if size is not None:
+        w, h = _even(size[0]), _even(size[1])
+    else:
+        from monteur.montage import CANVASES  # lazy, like the other engines
+
+        if canvas not in CANVASES:
+            valid = ", ".join(CANVASES)
+            raise ValueError(f"unknown canvas {canvas!r}; valid canvases: {valid}")
+        w, h = CANVASES[canvas]
+
+    notes: list[str] = []
+    segments = _segments(plan)
+    trans, handle_notes = _export_transitions(plan, segments)
+    notes.extend(handle_notes)
+    fade_in = max(0.0, plan.fade_in)
+    fade_out = max(0.0, plan.fade_out)
+    own_audio = audio in ("original", "mix")
+    total = len(segments) + (1 if own_audio else 0) + 1
+    done = 0
+
+    def tick(label: str) -> None:
+        nonlocal done
+        done += 1
+        if progress is not None:
+            progress(done, total, label)
+
+    # Segment start times in the montage (record time), for title matching.
+    starts: list[float] = []
+    cursor = 0.0
+    for _kind, length, _entry in segments:
+        starts.append(cursor)
+        cursor += length
+
+    # Which black segments carry an act title (dips align with title_texts
+    # by index; a black segment is matched to its dip by record position).
+    titles: dict[int, str] = {}
+    for j, (dip_start, _dip_len) in enumerate(plan.dips):
+        text = plan.title_texts[j].strip() if j < len(plan.title_texts) else ""
+        if not text:
+            continue
+        for i, (kind, _length, _entry) in enumerate(segments):
+            if kind == "black" and abs(starts[i] - dip_start) < 0.05:
+                titles[i] = text
+                break
+    font: str | None = None
+    if titles:
+        if not _supports_drawtext():
+            notes.append(
+                "this ffmpeg build cannot draw text (no drawtext filter) — "
+                "the act titles were skipped (the dips stay plain black)"
+            )
+            titles = {}
+        else:
+            font = _find_font()
+            if not font:
+                notes.append(
+                    "no usable title font found on this system — the act "
+                    "titles were skipped (the dips stay plain black)"
+                )
+                titles = {}
+
+    cover = (
+        f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+        f"crop={w}:{h},setsar=1,fps={fps:g}"
+    )
+    seg_encode = [
+        "-c:v", "libx264", "-preset", _SEG_PRESET, "-crf", profile["seg_crf"],
+        "-pix_fmt", "yuv420p",
+    ]
+    silence = f"anullsrc=r={_AUDIO_RATE}:cl=stereo"
+
+    tmpdir = tempfile.mkdtemp(prefix="monteur-export-")
+    try:
+        # -- video segments (extended where the NEXT boundary dissolves) --
+        paths: list[str] = []
+        lengths: list[float] = []
+        for i, (kind, length, entry) in enumerate(segments):
+            ext = trans[i + 1] if i + 1 < len(segments) else 0.0
+            seg_len = length + ext
+            seg = str(Path(tmpdir) / f"seg_{i:04d}.mp4")
+            if kind == "clip":
+                name = Path(entry.clip_path).name
+                _run_ffmpeg(
+                    [
+                        "-ss", f"{max(0.0, entry.source_start):.3f}",
+                        "-t", f"{seg_len:.3f}", "-i", str(entry.clip_path),
+                        "-map", "0:v:0", "-vf", cover, *seg_encode, "-an", seg,
+                    ],
+                    f"encoding export segment {i + 1}/{len(segments)} ({name})",
+                )
+                tick(name)
+            else:
+                args = [
+                    "-f", "lavfi", "-t", f"{seg_len:.3f}",
+                    "-i", f"color=black:s={w}x{h}:r={fps:g}",
+                    "-map", "0:v:0",
+                ]
+                if i in titles:
+                    text_file = str(Path(tmpdir) / f"title_{i:04d}.txt")
+                    Path(text_file).write_text(titles[i], encoding="utf-8")
+                    args += ["-vf", _title_filter(text_file, font, h, length)]
+                args += [*seg_encode, "-an", seg]
+                _run_ffmpeg(
+                    args,
+                    f"encoding export segment {i + 1}/{len(segments)} "
+                    f"({'title' if i in titles else 'black dip'})",
+                )
+                tick("title" if i in titles else "black")
+            paths.append(seg)
+            lengths.append(seg_len)
+
+        # -- the original-sound bed (nominal lengths — extensions are video-only)
+        bed_path: str | None = None
+        if own_audio:
+            bed_parts: list[str] = []
+            for i, (kind, length, entry) in enumerate(segments):
+                part = str(Path(tmpdir) / f"aud_{i:04d}.wav")
+                pcm = [
+                    "-vn", "-c:a", "pcm_s16le",
+                    "-ar", str(_AUDIO_RATE), "-ac", str(_AUDIO_CHANNELS),
+                ]
+                if kind == "clip" and _has_audio(entry.clip_path):
+                    _run_ffmpeg(
+                        [
+                            "-ss", f"{max(0.0, entry.source_start):.3f}",
+                            "-t", f"{length:.3f}", "-i", str(entry.clip_path),
+                            "-map", "0:a:0", "-af", "apad",
+                            "-t", f"{length:.3f}", *pcm, part,
+                        ],
+                        f"extracting sound for segment {i + 1}/{len(segments)}",
+                    )
+                else:
+                    _run_ffmpeg(
+                        [
+                            "-f", "lavfi", "-t", f"{length:.3f}", "-i", silence,
+                            *pcm, part,
+                        ],
+                        f"generating silence for segment {i + 1}/{len(segments)}",
+                    )
+                bed_parts.append(part)
+            bed_list = Path(tmpdir) / "bed.txt"
+            bed_list.write_text(
+                "".join(
+                    "file '{}'\n".format(p.replace("'", "'\\''"))
+                    for p in bed_parts
+                ),
+                encoding="utf-8",
+            )
+            bed_path = str(Path(tmpdir) / "bed.wav")
+            _run_ffmpeg(
+                [
+                    "-f", "concat", "-safe", "0", "-i", str(bed_list),
+                    "-c", "copy", bed_path,
+                ],
+                "joining the original-sound bed",
+            )
+            tick("audio bed")
+
+        # -- final pass: one graph for transitions, titles' bed, sfx, loudness
+        final: list[str] = []
+        for seg in paths:
+            final += ["-i", seg]
+        idx = len(paths)
+        music_label: str | None = None
+        bed_label: str | None = None
+        if audio in ("music", "mix"):
+            final += [
+                "-ss", f"{max(0.0, plan.music_start):.3f}",
+                "-i", str(plan.music_path),
+            ]
+            music_label = f"{idx}:a"
+            idx += 1
+        if bed_path is not None:
+            final += ["-i", bed_path]
+            bed_label = f"{idx}:a"
+            idx += 1
+        sfx_specs: list[tuple[str, float, float]] = []
+        for cue in plan.sfx:
+            if not cue.file:
+                continue  # a search-query marker, not a placed element
+            cue_file = Path(cue.file)
+            if not cue_file.is_file():
+                notes.append(
+                    f"sound element missing: {cue_file.name} "
+                    f"(cue at {cue.time:.1f}s left out)"
+                )
+                continue
+            try:
+                file_len = probe(str(cue_file)).duration
+            except MonteurMediaError:
+                notes.append(
+                    f"sound element unreadable: {cue_file.name} "
+                    f"(cue at {cue.time:.1f}s left out)"
+                )
+                continue
+            trim = min(cue.duration, file_len) if cue.duration > 0 else file_len
+            if trim < 1e-3:
+                continue
+            final += ["-i", str(cue_file)]
+            sfx_specs.append((f"{idx}:a", max(0.0, cue.time), trim))
+            idx += 1
+        graph = (
+            _export_video_graph(lengths, trans, fade_in, fade_out, plan.duration)
+            + ";"
+            + _export_audio_graph(
+                audio, music_label, bed_label, sfx_specs,
+                fade_in, fade_out, plan.duration,
+            )
+        )
+        final += [
+            "-filter_complex", graph, "-map", "[v]", "-map", "[a]",
+            "-c:v", "libx264", "-preset", profile["preset"],
+            "-crf", profile["crf"], "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", profile["audio_bitrate"],
+            "-ar", str(_AUDIO_RATE), "-ac", str(_AUDIO_CHANNELS),
+            "-movflags", "+faststart",
+            "-t", f"{plan.duration:.3f}", str(out_path),
+        ]
+        _run_ffmpeg(final, f"rendering the export to {Path(out_path).name}")
+        tick("mux")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    info = probe(out_path)
+    return {
+        "path": str(out_path),
+        "duration": info.duration,
+        "width": w,
+        "height": h,
+        "seconds": time.monotonic() - started,
+        "notes": notes,
     }
