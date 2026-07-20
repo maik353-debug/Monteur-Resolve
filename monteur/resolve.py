@@ -66,10 +66,20 @@ The worker commands are ``status``, ``info``, ``read_timeline`` and
 optionally with Fusion titles) — see ``monteur._resolve_worker`` for the wire
 protocol.
 
-``MONTEUR_RESOLVE_PYTHON``
-    Set this environment variable to a Resolve-compatible Python interpreter
-    (e.g. a 3.11 install) to run the worker with it, while Monteur itself runs
-    under any Python (even one Resolve does not support). See ``_worker_python``.
+Choosing the worker interpreter
+-------------------------------
+The isolated worker runs under the first of (see ``_worker_python``):
+
+1. the ``MONTEUR_RESOLVE_PYTHON`` environment variable (advanced override),
+2. the ``resolve_python`` path saved in Monteur's settings
+   (``~/.monteur/settings.json`` — written by Studio's "Find a compatible
+   Python" button; silently ignored if the file no longer exists),
+3. ``sys.executable`` (the interpreter running Monteur).
+
+End users never touch environment variables: :func:`find_resolve_python`
+walks the machine's Python installations (:func:`_candidate_pythons`) and
+:func:`probe_resolve_python` safely checks each one — Studio's settings
+panel drives both and remembers the winner.
 """
 
 from __future__ import annotations
@@ -77,6 +87,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from types import ModuleType
@@ -237,32 +248,69 @@ def _looks_like_native_crash(code: int) -> bool:
     return code < 0 or code >= 2 ** 30 or code in _NATIVE_CRASH_CODES
 
 
+# The in-app fix every crash/incompatibility message points at. End users
+# never see a CLI or set environment variables — the settings panel does the
+# work; the env var stays as a one-line advanced note.
+_APP_FIX = (
+    "Open Studio's settings (gear) > DaVinci Resolve and click "
+    "“Find a compatible Python” — Monteur can locate or remember "
+    "one for you. (Advanced: MONTEUR_RESOLVE_PYTHON overrides this.)"
+)
+
 _CRASH_MESSAGE = (
     "DaVinci Resolve's scripting module crashed while loading — this usually "
     "means the interpreter isn't compatible with your Resolve version (Resolve "
-    "needs a 64-bit Python, roughly 3.6–3.11). Set MONTEUR_RESOLVE_PYTHON to a "
-    "compatible interpreter, or run Monteur under one."
+    "needs a 64-bit Python, roughly 3.6–3.11). " + _APP_FIX
 )
+
+
+def _worker_python_source() -> tuple[str, str]:
+    """The worker interpreter and where it came from.
+
+    Returns ``(path, source)`` with ``source`` one of:
+
+    * ``"env"`` — the ``MONTEUR_RESOLVE_PYTHON`` environment variable
+      (advanced override, always wins);
+    * ``"settings"`` — the ``resolve_python`` path saved in Monteur's
+      settings (written by Studio's "Find a compatible Python" button).
+      A saved path whose file no longer exists (Python uninstalled, drive
+      renamed) is silently skipped — settings are a convenience, never a
+      gate, and the panel still shows the stale value so it can be fixed;
+    * ``"default"`` — ``sys.executable``, the interpreter running Monteur.
+    """
+    override = os.environ.get("MONTEUR_RESOLVE_PYTHON")
+    if override:
+        return override, "env"
+    try:
+        from monteur.settings import resolve_python
+
+        saved = resolve_python()
+    except Exception:  # noqa: BLE001 - settings must never break Resolve access
+        saved = ""
+    if saved and os.path.isfile(saved):
+        return saved, "settings"
+    return sys.executable, "default"
 
 
 def _worker_python() -> str:
     """Interpreter used to run the isolated Resolve worker subprocess.
 
-    Defaults to ``sys.executable`` (the interpreter running Monteur). If the
-    environment variable ``MONTEUR_RESOLVE_PYTHON`` is set and non-empty, that
-    path is used instead. This lets you run Monteur itself under any Python
-    (e.g. 3.14) while pointing every Resolve scripting-module call at a
-    Resolve-compatible interpreter (roughly Python 3.6–3.11) — necessary
-    because Resolve's native module hard-crashes under an incompatible Python.
+    Precedence: the ``MONTEUR_RESOLVE_PYTHON`` environment variable, then
+    the ``resolve_python`` path saved in Monteur's settings (only while the
+    file still exists), then ``sys.executable``. This lets Monteur itself
+    run under any Python (e.g. 3.14) while every Resolve scripting-module
+    call happens under a Resolve-compatible interpreter (roughly Python
+    3.6–3.11) — necessary because Resolve's native module hard-crashes
+    under an incompatible Python. See :func:`_worker_python_source`.
     """
-    override = os.environ.get("MONTEUR_RESOLVE_PYTHON")
-    if override:
-        return override
-    return sys.executable
+    return _worker_python_source()[0]
 
 
 def _run_worker(
-    command: str, timeout: float, request: dict | None = None
+    command: str,
+    timeout: float,
+    request: dict | None = None,
+    interpreter: str | None = None,
 ) -> tuple[bool, dict]:
     """Run one worker command in a child process.
 
@@ -273,8 +321,13 @@ def _run_worker(
     worker interpreter could not be launched) or ``"bad-output"`` (unparseable
     stdout). This function NEVER raises for a child failure — that is the whole
     point of isolating Resolve here.
+
+    ``interpreter`` overrides :func:`_worker_python` for this one call —
+    used by :func:`probe_resolve_python` to try candidate interpreters
+    without touching the configured one.
     """
-    interpreter = _worker_python()
+    if interpreter is None:
+        interpreter = _worker_python()
     cmd = [interpreter, _WORKER_PATH, command]
     try:
         result = subprocess.run(
@@ -297,8 +350,9 @@ def _run_worker(
         return False, {
             "error": (
                 f"Could not launch the Resolve worker interpreter {interpreter!r}. "
-                "Set MONTEUR_RESOLVE_PYTHON to a valid Python 3 executable "
-                "(ideally one Resolve supports, roughly 3.6–3.11)."
+                "Open Studio's settings (gear) > DaVinci Resolve and click "
+                "“Find a compatible Python”, or fix the saved path there. "
+                "(Advanced: MONTEUR_RESOLVE_PYTHON overrides the saved choice.)"
             ),
             "reason": "no-interpreter",
         }
@@ -368,15 +422,18 @@ def resolve_status_isolated(timeout: float = 25.0) -> dict:
 def diagnose(timeout: float = 25.0) -> dict:
     """Full self-check of the Resolve bridge, for ``monteur resolve doctor``.
 
-    Reports which interpreter the isolated worker uses (and whether it came
-    from MONTEUR_RESOLVE_PYTHON), that interpreter's version and bitness, where
-    Resolve's scripting module was found, the live status probe, and a
-    plain-language verdict. Never raises.
+    Reports which interpreter the isolated worker uses and where it came from
+    (``interpreter_source``: ``"env"`` — the MONTEUR_RESOLVE_PYTHON override,
+    ``"settings"`` — saved by Studio's "Find a compatible Python" button, or
+    ``"default"`` — Monteur's own Python), that interpreter's version and
+    bitness, where Resolve's scripting module was found, the live status
+    probe, and a plain-language verdict. Never raises.
     """
-    override = os.environ.get("MONTEUR_RESOLVE_PYTHON")
+    interpreter, source = _worker_python_source()
     report: dict = {
-        "monteur_resolve_python": override or None,
-        "worker_interpreter": _worker_python(),
+        "monteur_resolve_python": os.environ.get("MONTEUR_RESOLVE_PYTHON") or None,
+        "worker_interpreter": interpreter,
+        "interpreter_source": source,
     }
     info_ok, info = _run_worker("info", timeout)
     if info_ok:
@@ -386,15 +443,31 @@ def diagnose(timeout: float = 25.0) -> dict:
         report["info_error"] = info
     status = resolve_status_isolated(timeout=timeout)
     report["status"] = status
-    report["verdict"] = _diagnosis_verdict(override, info if info_ok else None, status)
+    report["verdict"] = _diagnosis_verdict(source, info if info_ok else None, status)
     return report
 
 
-def _diagnosis_verdict(override, info, status) -> str:
+# Human wording for _worker_python_source()'s source tags, used in verdicts.
+_SOURCE_DESC = {
+    "env": "the Python set by the MONTEUR_RESOLVE_PYTHON environment variable",
+    "settings": "the Python saved in Monteur's settings",
+    "default": "Monteur's own Python",
+}
+
+
+def _diagnosis_verdict(source, info, status) -> str:
+    """One plain-language sentence (or three) summing up the Resolve bridge.
+
+    ``source`` is the ``_worker_python_source()`` tag — every verdict says
+    which interpreter was used, and every fixable problem points at the ONE
+    in-app fix (Studio's settings > "Find a compatible Python"); the env var
+    appears only as a trailing advanced note. See :func:`diagnose`.
+    """
+    who = _SOURCE_DESC.get(source, _SOURCE_DESC["default"])
     if status.get("connected"):
         return (
             f"Connected to Resolve (project {status.get('project')!r}). "
-            "The live integration is working."
+            f"The live integration is working, using {who}."
         )
     reason = status.get("reason")
     version = (info or {}).get("python_version", "?")
@@ -404,19 +477,21 @@ def _diagnosis_verdict(override, info, status) -> str:
         too_new = version != "?" and tuple(
             int(x) for x in version.split(".")[:2]
         ) >= (3, 12)
-        who = "MONTEUR_RESOLVE_PYTHON" if override else "the interpreter running Monteur"
         base = (
             f"Resolve's module crashed loading under Python {version}"
             + (f" ({bits}-bit)" if bits else "")
-            + f", used via {who}. "
+            + f" — {who}. "
         )
         if too_new:
             return base + (
-                f"Python {major_minor} is too new for Resolve (needs ~3.6–3.11). "
-                "Point MONTEUR_RESOLVE_PYTHON at a 64-bit Python 3.11."
+                f"Python {major_minor} is too new for Resolve "
+                "(needs ~3.6–3.11). " + _APP_FIX
             )
         if bits == 32:
-            return base + "That Python is 32-bit; Resolve needs a 64-bit Python."
+            return base + (
+                "That Python is 32-bit; Resolve needs a 64-bit Python. "
+                + _APP_FIX
+            )
         return base + (
             "Even a compatible Python can crash if Resolve isn't the expected "
             "version — check that DaVinci Resolve is installed and up to date."
@@ -424,27 +499,337 @@ def _diagnosis_verdict(override, info, status) -> str:
     if reason == "worker-error":
         return (
             "The isolated helper could not run: "
-            f"{status.get('error')}. Check that MONTEUR_RESOLVE_PYTHON points at "
-            "a working Python 3 executable."
+            f"{status.get('error')}. " + _APP_FIX
         )
     if reason == "no-interpreter":
-        return (
-            f"Monteur could not launch {report_interp(override)}. Check the "
-            "MONTEUR_RESOLVE_PYTHON path."
-        )
+        return f"Monteur could not launch {who}. " + _APP_FIX
     if reason == "timeout":
         return "Resolve did not respond in time — it may be busy or mid-render."
     # Clean 'not connected' — module loaded fine, Resolve just isn't reachable.
     return (
         f"The interpreter (Python {version}"
         + (f", {bits}-bit" if bits else "")
-        + ") loaded Resolve's module fine, but no running Resolve was reached: "
+        + f", {who}) loaded Resolve's module fine, but no running Resolve "
+        "was reached: "
         + str(status.get("error", "is Resolve running with scripting set to Local?"))
     )
 
 
-def report_interp(override) -> str:
-    return repr(override) if override else "the default interpreter"
+# --- Finding a compatible worker Python ----------------------------------------
+#
+# The product rule behind this block: end users never see a CLI or set
+# environment variables. When Monteur runs under a Python that Resolve's
+# native module can't survive (3.12+, or 32-bit), Studio's settings panel
+# calls find_resolve_python() below, which walks the machine's Python
+# installations and safely probes each one in a child process; the endpoint
+# then SAVES the winner to settings so every later Resolve call uses it.
+
+# Names tried on PATH, best-first: Resolve supports ~3.6–3.11, and 3.11 is
+# the newest (fastest, longest-supported) interpreter in that range.
+_WHICH_NAMES = (
+    "python3.11", "python3.10", "python3.9", "python3.8",
+    "python3.7", "python3.6", "python3", "python",
+)
+
+# Probing runs one or two subprocesses per candidate — keep the total bounded.
+_MAX_CANDIDATES = 15
+
+
+def _parse_py_launcher_output(text: str) -> list[str]:
+    """Interpreter paths from ``py -0p`` / ``py --list-paths`` output.
+
+    The launcher prints one line per install, tag first, path last, e.g.::
+
+         -V:3.11 *        C:\\Users\\me\\AppData\\...\\Python311\\python.exe
+         -3.10-64         C:\\Python310\\python.exe
+
+    Formats differ across launcher versions, so this just takes everything
+    from the drive letter onward on lines that end in a python executable.
+    Pure and Windows-free for testability.
+    """
+    import re
+
+    paths: list[str] = []
+    for line in (text or "").splitlines():
+        match = re.search(r"[A-Za-z]:\\.*python[.\w]*\.exe", line, re.IGNORECASE)
+        if match:
+            paths.append(match.group(0).strip())
+    return paths
+
+
+def _windows_py_launcher_pythons() -> list[str]:
+    """Interpreters known to the Windows ``py`` launcher; [] when absent.
+
+    Every step is guarded — a missing launcher, a hung launcher (short
+    timeout) or unparseable output just yields no candidates, never an
+    error.
+    """
+    launcher = shutil.which("py")
+    if not launcher:
+        return []
+    for flag in ("-0p", "--list-paths"):
+        try:
+            result = subprocess.run(
+                [launcher, flag], capture_output=True, text=True, timeout=10
+            )
+        except Exception:  # noqa: BLE001 - discovery must never raise
+            continue
+        paths = _parse_py_launcher_output(
+            (result.stdout or "") + "\n" + (result.stderr or "")
+        )
+        if paths:
+            return paths
+    return []
+
+
+def _windows_registry_pythons() -> list[str]:
+    """PEP 514 registry scan: Software\\Python\\<Company>\\<Tag>\\InstallPath.
+
+    Checks HKCU and HKLM in both 64- and 32-bit registry views. Prefers the
+    ``ExecutablePath`` value, falling back to ``<install dir>\\python.exe``.
+    Fully guarded — any registry hiccup yields fewer candidates, never an
+    error. Returns [] off Windows (no ``winreg``).
+    """
+    try:
+        import winreg
+    except ImportError:
+        return []
+    paths: list[str] = []
+    views = {0, getattr(winreg, "KEY_WOW64_64KEY", 0),
+             getattr(winreg, "KEY_WOW64_32KEY", 0)}
+    try:
+        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            for view in views:
+                try:
+                    software = winreg.OpenKey(
+                        root, r"Software\Python", 0, winreg.KEY_READ | view
+                    )
+                except OSError:
+                    continue
+                with software:
+                    for company in _registry_subkeys(winreg, software):
+                        try:
+                            company_key = winreg.OpenKey(
+                                software, company, 0, winreg.KEY_READ | view
+                            )
+                        except OSError:
+                            continue
+                        with company_key:
+                            for tag in _registry_subkeys(winreg, company_key):
+                                try:
+                                    install = winreg.OpenKey(
+                                        company_key,
+                                        tag + r"\InstallPath",
+                                        0,
+                                        winreg.KEY_READ | view,
+                                    )
+                                except OSError:
+                                    continue
+                                with install:
+                                    path = _registry_python_exe(winreg, install)
+                                    if path:
+                                        paths.append(path)
+    except Exception:  # noqa: BLE001 - discovery must never raise
+        pass
+    return paths
+
+
+def _registry_subkeys(winreg, key) -> list[str]:
+    """All subkey names of an open registry key; [] on any failure."""
+    names: list[str] = []
+    try:
+        count = winreg.QueryInfoKey(key)[0]
+        for index in range(count):
+            names.append(winreg.EnumKey(key, index))
+    except OSError:
+        pass
+    return names
+
+
+def _registry_python_exe(winreg, install_key) -> str:
+    """python.exe path from an open PEP 514 InstallPath key, or ""."""
+    try:
+        exe = winreg.QueryValueEx(install_key, "ExecutablePath")[0]
+        if exe:
+            return str(exe)
+    except OSError:
+        pass
+    try:
+        install_dir = winreg.QueryValue(install_key, None)
+        if install_dir:
+            return os.path.join(str(install_dir), "python.exe")
+    except OSError:
+        pass
+    return ""
+
+
+def _windows_wellknown_pythons() -> list[str]:
+    """Standard python.org install locations on Windows, newest-compatible
+    first (3.11 down to 3.6): per-user %LOCALAPPDATA%\\Programs\\Python,
+    the legacy C:\\Python3XX, and the Program Files variants."""
+    paths: list[str] = []
+    local = os.environ.get("LOCALAPPDATA", "")
+    program_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+    program_files_x86 = os.environ.get(
+        "PROGRAMFILES(X86)", r"C:\Program Files (x86)"
+    )
+    for minor in range(11, 5, -1):
+        folder = f"Python3{minor}"
+        if local:
+            paths.append(
+                os.path.join(local, "Programs", "Python", folder, "python.exe")
+            )
+        paths.append(os.path.join(rf"C:\{folder}", "python.exe"))
+        paths.append(os.path.join(program_files, folder, "python.exe"))
+        paths.append(os.path.join(program_files_x86, folder, "python.exe"))
+    return paths
+
+
+def _candidate_pythons() -> list[str]:
+    """Ordered, deduped, existing interpreter paths worth probing.
+
+    Order (most explicit first): the MONTEUR_RESOLVE_PYTHON env override,
+    the path saved in Monteur's settings, Windows discovery (py launcher,
+    PEP 514 registry, well-known install folders), PATH lookups for
+    python3.11 … python3.6 / python3 / python, and finally the interpreter
+    running Monteur. Duplicates (after symlink resolution + case folding)
+    and non-existent files are dropped; the list is capped at
+    ``_MAX_CANDIDATES`` so probing stays bounded. Never raises.
+    """
+    raw: list[str] = []
+    env = (os.environ.get("MONTEUR_RESOLVE_PYTHON") or "").strip()
+    if env:
+        raw.append(env)
+    try:
+        from monteur.settings import resolve_python
+
+        saved = resolve_python()
+    except Exception:  # noqa: BLE001 - settings must never break discovery
+        saved = ""
+    if saved:
+        raw.append(saved)
+    if sys.platform.startswith("win"):
+        raw.extend(_windows_py_launcher_pythons())
+        raw.extend(_windows_registry_pythons())
+        raw.extend(_windows_wellknown_pythons())
+    for name in _WHICH_NAMES:
+        found = shutil.which(name)
+        if found:
+            raw.append(found)
+    raw.append(sys.executable)
+
+    seen: set[str] = set()
+    candidates: list[str] = []
+    for path in raw:
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            key = os.path.normcase(os.path.realpath(path))
+        except OSError:
+            key = os.path.normcase(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(path)
+        if len(candidates) >= _MAX_CANDIDATES:
+            break
+    return candidates
+
+
+def probe_resolve_python(path: str, timeout: float = 12.0) -> dict:
+    """Safely check whether ``path`` is a Resolve-compatible interpreter.
+
+    Two stages, both in child processes, never raising:
+
+    1. the worker's ``info`` command — crash-free by design (it never
+       imports Resolve's native module). An interpreter that can't even run
+       it fails with its ``_run_worker`` reason (``"no-interpreter"``,
+       ``"worker-error"``, …). A version >= 3.12 or 32 bits is rejected as
+       ``{"ok": False, "reason": "incompatible"}`` WITHOUT ever attempting
+       the native load — no point crashing a child we know can't work;
+    2. the worker's ``status`` command — the real native-module load and
+       connect attempt. A native crash yields ``{"ok": False, "reason":
+       "crash"}``. A clean result means the interpreter is compatible:
+       ``{"ok": True, "connected": True, "project": ...}`` when Resolve was
+       reached, ``{"ok": True, "connected": False}`` when Resolve is simply
+       closed / not listening (still a perfectly good interpreter).
+
+    Every result carries ``version``/``bits`` once stage 1 succeeded.
+    """
+    ok, info = _run_worker("info", timeout, interpreter=path)
+    if not ok:
+        return {
+            "ok": False,
+            "reason": info.get("reason", "no-interpreter"),
+            "error": str(info.get("error") or ""),
+        }
+    version = str(info.get("python_version") or "")
+    bits = info.get("bits")
+    try:
+        major_minor = tuple(int(part) for part in version.split(".")[:2])
+    except ValueError:
+        major_minor = ()
+    if (major_minor and major_minor >= (3, 12)) or bits == 32:
+        return {
+            "ok": False,
+            "reason": "incompatible",
+            "version": version,
+            "bits": bits,
+        }
+    ok, status = _run_worker("status", timeout, interpreter=path)
+    if not ok:
+        return {
+            "ok": False,
+            "reason": status.get("reason", "crash"),
+            "version": version,
+            "bits": bits,
+            "error": str(status.get("error") or ""),
+        }
+    if status.get("connected"):
+        return {
+            "ok": True,
+            "connected": True,
+            "version": version,
+            "bits": bits,
+            "project": status.get("project"),
+        }
+    return {
+        "ok": True,
+        "connected": False,
+        "version": version,
+        "bits": bits,
+        "error": str(status.get("error") or ""),
+    }
+
+
+def find_resolve_python(timeout_per: float = 10.0) -> dict:
+    """Probe the machine's Pythons and return the first Resolve-compatible one.
+
+    Walks :func:`_candidate_pythons` through :func:`probe_resolve_python`,
+    stopping at the first compatible interpreter (``"ok": True`` — whether
+    or not Resolve is currently running). Returns::
+
+        {"found": <path or None>, "connected": <bool>,
+         "probed": [{"path": ..., plus the probe result}, ...]}
+
+    ``probed`` lists every candidate tried, in order, so the UI can show
+    what happened. This function only LOOKS — persisting the find into
+    settings is the caller's job (Studio's ``POST /api/resolve/detect``
+    endpoint saves it). Never raises.
+    """
+    probed: list[dict] = []
+    found: str | None = None
+    connected = False
+    for path in _candidate_pythons():
+        result = probe_resolve_python(path, timeout=timeout_per)
+        entry = {"path": path}
+        entry.update(result)
+        probed.append(entry)
+        if result.get("ok"):
+            found = path
+            connected = bool(result.get("connected"))
+            break
+    return {"found": found, "connected": connected, "probed": probed}
 
 
 def read_timeline_isolated(name: str | None = None, timeout: float = 40.0) -> Timeline:

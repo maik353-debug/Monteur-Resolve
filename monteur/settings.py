@@ -12,6 +12,11 @@ Keys currently in use:
 * ``ai_backend`` — ``"auto"`` (default), ``"api"`` or ``"claude-cli"``:
   how :mod:`monteur.ai` reaches Claude. Set from Studio's settings panel.
 * ``api_key`` — the Anthropic API key pasted into Studio; ``""`` = none.
+* ``resolve_python`` — path to the Python interpreter the isolated DaVinci
+  Resolve worker runs under (Resolve's native module needs a 64-bit Python
+  ~3.6–3.11); ``""`` = unset. Normally written by Studio's "Find a
+  compatible Python" button, not by hand. ``MONTEUR_RESOLVE_PYTHON``
+  still overrides it (see :func:`monteur.resolve._worker_python`).
 
 Why plain JSON: Monteur is a local single-user tool, the settings must be
 trivially inspectable and hand-editable, and the stdlib parses it. The file
@@ -99,4 +104,15 @@ def ai_backend() -> str:
 def api_key() -> str:
     """The stored Anthropic API key, or ``""`` when none is saved."""
     value = load_settings().get("api_key", "")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def resolve_python() -> str:
+    """The stored Resolve-worker Python path, or ``""`` when none is saved.
+
+    Existence is deliberately NOT checked here — the reader decides how to
+    treat a stale path (:func:`monteur.resolve._worker_python` silently
+    falls back, Studio's settings panel shows it so it can be fixed).
+    """
+    value = load_settings().get("resolve_python", "")
     return value.strip() if isinstance(value, str) else ""

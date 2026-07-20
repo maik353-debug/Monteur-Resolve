@@ -38,9 +38,12 @@ API (all JSON):
 * ``GET  /api/jobs/<id>``                                       -> the job dict
 * ``POST /api/jobs/<id>/cancel``                                -> {"ok": true}
 * ``POST /api/pick``          {"kind": "folder"|"music"|"file"} -> {"path"} | {"error"}
-* ``GET  /api/settings``                                        -> the AI settings view
-* ``POST /api/settings``      {"backend"?, "api_key"?}          -> the view after applying
+* ``GET  /api/settings``                                        -> the settings view
+* ``POST /api/settings``      {"backend"?, "api_key"?,
+  "resolve_python"?}                                            -> the view after applying
 * ``POST /api/settings/test``                                   -> {"job": id}
+* ``GET  /api/resolve/diagnose``                                -> monteur.resolve.diagnose()
+* ``POST /api/resolve/detect``                                  -> {"job": id}
 
 Timeline content is passed as text (EDL/FCPXML are text formats); ``fps`` is
 required for EDL files.
@@ -122,6 +125,26 @@ must not contain whitespace (400). ``/api/settings/test`` is the user's
 must not freeze on a network round-trip) that runs one tiny completion
 through the CURRENT effective backend and returns ``{"backend", "reply"}``
 — a MonteurAIError fails the job with its own actionable message.
+
+The same settings view also manages WHICH PYTHON runs the isolated DaVinci
+Resolve worker (Resolve's native module needs a 64-bit ~3.6–3.11 and
+hard-crashes newer interpreters — the exact situation an end user cannot
+fix with environment variables). ``GET /api/settings`` additionally carries
+``resolve_python`` (the saved path, "" = unset) and
+``resolve_python_env_set`` (MONTEUR_RESOLVE_PYTHON present — the advanced
+override that wins over the setting). ``POST /api/settings`` accepts
+``resolve_python``: ``""`` clears it, a non-empty path must exist on disk
+(400 otherwise). ``GET /api/resolve/diagnose`` returns
+:func:`monteur.resolve.diagnose` verbatim — the settings panel shows its
+``verdict`` instead of inventing client-side logic. ``POST
+/api/resolve/detect`` is the one-click fix: a ``"resolve-detect"`` job
+(probing several interpreters takes seconds) that runs
+:func:`monteur.resolve.find_resolve_python`; when an interpreter is found
+it is SAVED to settings right there — that is the point of the button —
+and the job result carries ``{"found", "connected", "version", "probed",
+"verdict"}`` with a FRESH post-save diagnosis verdict. Finding nothing is
+information, not an error: the job still succeeds with ``"found": null``
+and the probe report, and the UI shows the guided python.org install help.
 
 The ``/api/movie/*`` endpoints drive the Studio's Movie view on top of
 :mod:`monteur.movie`. ``load`` and ``assign`` are instant (no job; both
@@ -1187,9 +1210,15 @@ def _settings_view() -> dict:
     ``api_key_hint`` so the UI can say WHICH key is saved without ever
     round-tripping the secret. ``effective`` is what the next AI call would
     actually use, computed by the same resolver the calls go through.
+
+    ``resolve_python`` / ``resolve_python_env_set`` cover the DaVinci
+    Resolve worker interpreter: the saved path ("" = unset) and whether the
+    MONTEUR_RESOLVE_PYTHON environment override is active (in which case
+    the UI disables its Resolve-Python controls, like the AI section does
+    for a forced backend).
     """
     from monteur import ai as ai_mod
-    from monteur.settings import ai_backend, api_key
+    from monteur.settings import ai_backend, api_key, resolve_python
 
     key = api_key()
     try:
@@ -1207,7 +1236,55 @@ def _settings_view() -> dict:
         "cli_found": ai_mod._cli_path() is not None,
         "backend_forced_by_env": bool(os.environ.get(ai_mod.BACKEND_ENV, "").strip()),
         "effective": effective,
+        "resolve_python": resolve_python(),
+        "resolve_python_env_set": bool(os.environ.get("MONTEUR_RESOLVE_PYTHON")),
     }
+
+
+def _run_resolve_detect_job(job: dict) -> None:
+    """Daemon-thread body for POST /api/resolve/detect (find a worker Python).
+
+    Runs :func:`monteur.resolve.find_resolve_python` — every candidate is
+    probed in a disposable child process, so even a native-crashing
+    interpreter cannot hurt the server — and, when a compatible interpreter
+    turns up, SAVES it to settings immediately: the user clicked one button
+    and Monteur must remember the answer. The result carries the full probe
+    report plus a fresh post-save :func:`monteur.resolve.diagnose` verdict
+    for the UI to display verbatim. Finding nothing is a SUCCESSFUL job
+    with ``"found": None`` — that is information (the UI shows the guided
+    python.org install help), not an error.
+
+    ``find_resolve_python`` / ``diagnose`` are resolved at call time via
+    the ``from``-import below so tests can monkeypatch them on
+    :mod:`monteur.resolve` without probing real interpreters.
+    """
+    from monteur.resolve import diagnose, find_resolve_python
+    from monteur.settings import save_settings
+
+    try:
+        with _JOBS_LOCK:
+            job["progress"].append(
+                {"stage": "detect", "name": "probing Python installations"}
+            )
+        report = find_resolve_python()
+        found = report.get("found")
+        if found:
+            # THE point of the button: one click finds AND remembers it.
+            save_settings({"resolve_python": found})
+        probed = list(report.get("probed") or [])
+        found_probe = next((p for p in probed if p.get("path") == found), {})
+        fresh = diagnose()  # AFTER the save — the verdict reflects the new state
+        job["result"] = {
+            "found": found,
+            "connected": bool(report.get("connected")),
+            "version": str(found_probe.get("version") or ""),
+            "probed": probed,
+            "verdict": str(fresh.get("verdict") or ""),
+        }
+        job["state"] = "done"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
 
 
 def _run_ai_test_job(job: dict) -> None:
@@ -1353,6 +1430,8 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/analyze"): self._analyze,
             ("POST", "/api/compare"): self._compare,
             ("GET", "/api/resolve/status"): self._resolve_status,
+            ("GET", "/api/resolve/diagnose"): self._resolve_diagnose,
+            ("POST", "/api/resolve/detect"): self._resolve_detect,
             ("POST", "/api/resolve/analyze"): self._resolve_analyze,
             ("POST", "/api/assembly/plan"): self._assembly_plan,
             ("POST", "/api/assembly/export"): self._assembly_export,
@@ -1834,6 +1913,22 @@ class MonteurHandler(BaseHTTPRequestHandler):
                     "unbroken string with no spaces",
                 )
             updates["api_key"] = key
+        if "resolve_python" in payload:
+            raw_path = payload.get("resolve_python")
+            if not isinstance(raw_path, str):
+                raise ApiError(
+                    400, "'resolve_python' must be a string ('' clears it)"
+                )
+            resolve_path = raw_path.strip()
+            if resolve_path and not os.path.isfile(resolve_path):
+                raise ApiError(
+                    400,
+                    f"there is no file at {resolve_path!r} — point this at a "
+                    "Python program (like C:\\Program Files\\Python311\\"
+                    "python.exe), or use “Find a compatible Python” "
+                    "and let Monteur locate one",
+                )
+            updates["resolve_python"] = resolve_path
         if updates:
             save_settings(updates)
         self._send_json(_settings_view())
