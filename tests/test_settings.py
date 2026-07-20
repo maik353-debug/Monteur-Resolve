@@ -17,6 +17,7 @@ from monteur.settings import (
     ai_backend,
     api_key,
     load_settings,
+    resolve_python,
     save_settings,
     settings_path,
 )
@@ -131,3 +132,29 @@ def test_api_key_non_string_reads_as_empty(settings_file):
 def test_api_key_is_stripped_on_read(settings_file):
     settings_file.write_text(json.dumps({"api_key": "  sk-hand-edited \n"}))
     assert api_key() == "sk-hand-edited"
+
+
+def test_resolve_python_defaults_to_empty(settings_file):
+    assert resolve_python() == ""
+
+
+def test_resolve_python_round_trip(settings_file):
+    save_settings({"resolve_python": r"C:\Python311\python.exe"})
+    assert resolve_python() == r"C:\Python311\python.exe"
+
+
+def test_resolve_python_does_not_check_existence(settings_file):
+    # Existence is the READER's concern (_worker_python falls back silently;
+    # the settings panel shows the stale value so it can be fixed).
+    save_settings({"resolve_python": "/long/gone/python3.11"})
+    assert resolve_python() == "/long/gone/python3.11"
+
+
+def test_resolve_python_non_string_reads_as_empty(settings_file):
+    save_settings({"resolve_python": ["not", "a", "path"]})
+    assert resolve_python() == ""
+
+
+def test_resolve_python_is_stripped_on_read(settings_file):
+    settings_file.write_text(json.dumps({"resolve_python": "  /opt/py/bin/python3.11 \n"}))
+    assert resolve_python() == "/opt/py/bin/python3.11"

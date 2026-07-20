@@ -21,6 +21,8 @@ from monteur.web.server import (
     serve,
 )
 
+from _demo import DEMO as _DEMO_FOOTAGE
+
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
@@ -187,7 +189,7 @@ def _wait_for_job(server, job_id, timeout=60.0, states=("done", "error", "cancel
 
 
 class TestCreateApi:
-    DEMO = "/tmp/claude-0/-home-user-Fable-tool/90401078-872b-52b4-9d55-214193ea4ea5/scratchpad/demo-footage"
+    DEMO = str(_DEMO_FOOTAGE)
 
     @pytest.fixture(autouse=True)
     def _needs_demo_media(self):
@@ -1608,6 +1610,7 @@ class TestSettingsApi:
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
         monkeypatch.delenv("MONTEUR_AI_BACKEND", raising=False)
+        monkeypatch.delenv("MONTEUR_RESOLVE_PYTHON", raising=False)
         monkeypatch.setattr(ai, "_cli_path", lambda: None)
         self.ai = ai
         self.monkeypatch = monkeypatch
@@ -1626,6 +1629,8 @@ class TestSettingsApi:
             "cli_found": False,
             "backend_forced_by_env": False,
             "effective": "none",  # nothing to reach Claude with yet
+            "resolve_python": "",  # no Resolve worker Python saved yet
+            "resolve_python_env_set": False,
         }
 
     def test_post_key_saves_and_never_leaks_it(self, server):
@@ -1738,3 +1743,198 @@ class TestSettingsApi:
         assert job["state"] == "error"
         # the combined no-backend message, mentioning the Studio settings
         assert "Studio's settings" in job["message"]
+
+
+class TestResolvePythonApi:
+    """The DaVinci Resolve worker-Python settings + one-click detection.
+
+    The product rule under test: the end user never sees a CLI or an
+    environment variable — Studio finds (or accepts) a compatible Python
+    and REMEMBERS it in the settings file. The autouse _isolated_settings
+    fixture keeps that file in a scratch directory.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch):
+        monkeypatch.delenv("MONTEUR_RESOLVE_PYTHON", raising=False)
+        self.monkeypatch = monkeypatch
+
+    # -- GET/POST /api/settings: the resolve_python field -------------------
+
+    def test_get_reports_saved_path_and_env_flag(self, server, tmp_path):
+        exe = tmp_path / "python311"
+        exe.write_text("")
+        from monteur.settings import save_settings
+
+        save_settings({"resolve_python": str(exe)})
+        data = _get(f"{server}/api/settings")
+        assert data["resolve_python"] == str(exe)
+        assert data["resolve_python_env_set"] is False
+
+    def test_env_override_is_reported(self, server):
+        self.monkeypatch.setenv("MONTEUR_RESOLVE_PYTHON", "/opt/py311/python")
+        data = _get(f"{server}/api/settings")
+        assert data["resolve_python_env_set"] is True
+
+    def test_post_saves_an_existing_path(self, server, tmp_path):
+        exe = tmp_path / "python311"
+        exe.write_text("")
+        data = _post(f"{server}/api/settings", {"resolve_python": f"  {exe}  "})
+        assert data["resolve_python"] == str(exe)  # stripped + echoed back
+        from monteur.settings import resolve_python
+
+        assert resolve_python() == str(exe)
+
+    def test_post_missing_file_is_400_and_saves_nothing(self, server, tmp_path):
+        bogus = str(tmp_path / "not-there" / "python.exe")
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/settings", {"resolve_python": bogus})
+        assert exc_info.value.code == 400
+        message = json.loads(exc_info.value.read())["error"]
+        assert "no file at" in message
+        assert "Find a compatible Python" in message  # points at the button
+        from monteur.settings import resolve_python
+
+        assert resolve_python() == ""
+
+    def test_post_empty_clears(self, server, tmp_path):
+        exe = tmp_path / "python311"
+        exe.write_text("")
+        _post(f"{server}/api/settings", {"resolve_python": str(exe)})
+        data = _post(f"{server}/api/settings", {"resolve_python": ""})
+        assert data["resolve_python"] == ""
+        from monteur.settings import resolve_python
+
+        assert resolve_python() == ""
+
+    def test_post_non_string_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/settings", {"resolve_python": 311})
+        assert exc_info.value.code == 400
+
+    # -- GET /api/resolve/diagnose ------------------------------------------
+
+    def test_diagnose_endpoint_returns_the_report(self, server, monkeypatch):
+        import monteur.resolve as resolve
+
+        report = {
+            "worker_interpreter": "/py311",
+            "interpreter_source": "settings",
+            "status": {"connected": False, "error": "closed"},
+            "verdict": "All fine, just start Resolve.",
+        }
+        monkeypatch.setattr(resolve, "diagnose", lambda timeout=25.0: report)
+        assert _get(f"{server}/api/resolve/diagnose") == report
+
+    def test_diagnose_endpoint_runs_the_real_thing(self, server):
+        # No fakes: the isolated child probes run for real (this container
+        # has no Resolve, so the honest answer is "not connected").
+        data = _get(f"{server}/api/resolve/diagnose")
+        assert data["status"]["connected"] is False
+        assert data["interpreter_source"] in ("env", "settings", "default")
+        assert data["verdict"]
+
+    # -- POST /api/resolve/detect -------------------------------------------
+
+    def _probed(self):
+        return [
+            {"path": "/py313", "ok": False, "reason": "incompatible",
+             "version": "3.13.0", "bits": 64},
+            {"path": "/py311", "ok": True, "connected": False,
+             "version": "3.11.9", "bits": 64},
+        ]
+
+    def test_detect_found_saves_to_settings_and_reports(self, server, monkeypatch):
+        import monteur.resolve as resolve
+
+        probed = self._probed()
+        monkeypatch.setattr(
+            resolve,
+            "find_resolve_python",
+            lambda timeout_per=10.0: {
+                "found": "/py311", "connected": False, "probed": probed,
+            },
+        )
+        diagnose_calls = []
+
+        def fake_diagnose(timeout=25.0):
+            # runs AFTER the save — the verdict reflects the new interpreter
+            from monteur.settings import resolve_python
+
+            diagnose_calls.append(resolve_python())
+            return {"verdict": "Saved Python is ready.", "status": {}}
+
+        monkeypatch.setattr(resolve, "diagnose", fake_diagnose)
+        data = _post(f"{server}/api/resolve/detect", {})
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert job["kind"] == "resolve-detect"
+        assert {"stage": "detect", "name": "probing Python installations"} in job["progress"]
+        result = job["result"]
+        assert result["found"] == "/py311"
+        assert result["connected"] is False
+        assert result["version"] == "3.11.9"  # from the winning probe entry
+        assert result["probed"] == probed
+        assert result["verdict"] == "Saved Python is ready."
+        # THE point of the endpoint: the find was saved automatically...
+        from monteur.settings import resolve_python
+
+        assert resolve_python() == "/py311"
+        # ...the verdict was computed after that save...
+        assert diagnose_calls == ["/py311"]
+        # ...and the settings view reflects it immediately.
+        assert _get(f"{server}/api/settings")["resolve_python"] == "/py311"
+
+    def test_detect_none_found_is_a_successful_job(self, server, monkeypatch):
+        import monteur.resolve as resolve
+
+        probed = [
+            {"path": "/py313", "ok": False, "reason": "incompatible",
+             "version": "3.13.0", "bits": 64},
+        ]
+        monkeypatch.setattr(
+            resolve,
+            "find_resolve_python",
+            lambda timeout_per=10.0: {
+                "found": None, "connected": False, "probed": probed,
+            },
+        )
+        monkeypatch.setattr(
+            resolve,
+            "diagnose",
+            lambda timeout=25.0: {
+                "verdict": "No compatible Python on this machine yet.",
+                "status": {},
+            },
+        )
+        data = _post(f"{server}/api/resolve/detect", {})
+        job = _wait_for_job(server, data["job"])
+        # Not-found is information for the guided-install UI, NOT an error.
+        assert job["state"] == "done"
+        result = job["result"]
+        assert result["found"] is None
+        assert result["connected"] is False
+        assert result["version"] == ""
+        assert result["probed"] == probed
+        assert result["verdict"] == "No compatible Python on this machine yet."
+        from monteur.settings import resolve_python
+
+        assert resolve_python() == ""  # nothing saved
+
+    def test_detect_for_real_probes_this_machine(self, server):
+        # No fakes: candidates are real interpreters on this box. Whatever
+        # the outcome, the job must SUCCEED and report every probe honestly,
+        # and a find must land in the settings file.
+        data = _post(f"{server}/api/resolve/detect", {})
+        job = _wait_for_job(server, data["job"], timeout=120.0)
+        assert job["state"] == "done"
+        result = job["result"]
+        assert isinstance(result["probed"], list) and result["probed"]
+        assert result["verdict"]
+        from monteur.settings import resolve_python
+
+        if result["found"]:
+            assert resolve_python() == result["found"]
+            assert result["probed"][-1]["ok"] is True
+        else:
+            assert resolve_python() == ""

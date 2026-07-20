@@ -354,7 +354,7 @@ svg text.axis {
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* ---------- settings modal (AI — Claude connection) --------------------- */
-.settings-card { width: min(480px, 100%); }
+.settings-card { width: min(480px, 100%); max-height: calc(100vh - 40px); overflow-y: auto; }
 .set-status { margin: 6px 0 0; font-size: 12.5px; font-weight: 600; color: var(--ink); }
 .set-status.off { color: var(--warning); }
 .set-env-note { margin-top: 4px; }
@@ -388,6 +388,25 @@ svg text.axis {
 .set-test-result:empty { display: none; }
 .set-test-result.ok { color: var(--good); }
 .settings-card .modal-actions { margin-top: 14px; }
+.settings-card a { color: var(--accent); }
+/* second section: DaVinci Resolve — live connection */
+.set-section { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--axis); }
+.set-section > h3 {
+  font-size: 11px; font-weight: 650; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--ink-muted);
+}
+.set-verdict { margin-top: 5px; max-width: none; overflow-wrap: anywhere; }
+.set-probed { margin-top: 8px; font-size: 11.5px; color: var(--ink-muted); }
+.set-probed summary { cursor: pointer; }
+.set-probed ul { margin: 6px 0 0; padding-left: 18px; }
+.set-probed li { margin-top: 3px; font-family: var(--mono); font-size: 11px; overflow-wrap: anywhere; }
+.set-install {
+  margin-top: 10px; padding: 9px 11px; border: 1px solid var(--border);
+  border-radius: 3px; background: var(--surface-2);
+}
+.set-install .help-small { max-width: none; }
+.set-install .help-small + .help-small { margin-top: 6px; }
+#resolve-fix-settings { margin-top: 8px; }
 
 /* ---------- assembly view ---------- */
 #assembly { max-width: 980px; margin: 0 auto; padding: 18px 22px 48px; }
@@ -1526,6 +1545,38 @@ svg text.axis {
 
     <p class="help-small">Changes apply immediately &mdash; the next thing you ask Claude for uses them. No restart needed.</p>
 
+    <div class="set-section" id="set-resolve-section">
+      <h3 id="set-rv-title">DaVinci Resolve &mdash; live connection</h3>
+      <p class="set-status" id="set-rv-status" role="status">Checking DaVinci Resolve&hellip;</p>
+      <p class="help-small set-verdict" id="set-rv-verdict"></p>
+      <p class="help-small set-env-note" id="set-rv-env-note" hidden>These settings are overridden by this machine&rsquo;s MONTEUR_RESOLVE_PYTHON environment variable &mdash; the controls below take effect again once it is unset.</p>
+
+      <div class="set-test-row">
+        <button class="btn small" id="set-rv-detect" type="button"><span class="spin" aria-hidden="true"></span>Find a compatible Python</button>
+        <span class="help-small set-test-result" id="set-rv-detect-result" role="status" aria-live="polite"></span>
+      </div>
+      <details class="set-probed" id="set-rv-probed" hidden>
+        <summary>What was tried</summary>
+        <ul id="set-rv-probed-list"></ul>
+      </details>
+
+      <div class="set-install" id="set-rv-install" hidden>
+        <p class="help-small">Resolve&rsquo;s scripting bridge needs Python 3.11 (64-bit) &mdash; newer versions don&rsquo;t work yet. Install it once from <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">python.org/downloads</a> (choose 3.11.x, 64-bit), then click &ldquo;Find a compatible Python&rdquo; again. Monteur remembers it &mdash; this is a one-time setup.</p>
+        <p class="help-small" id="set-rv-store" hidden>Prefer an app store? The Microsoft Store also has &ldquo;Python 3.11&rdquo; &mdash; install it there, then click the button again.</p>
+      </div>
+      <p class="help-small" id="set-rv-help">Resolve&rsquo;s scripting bridge needs Python 3.11 (64-bit). Monteur finds and remembers one for you &mdash; if none is installed, get it once from <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">python.org/downloads</a>.</p>
+
+      <div class="set-key-block">
+        <label class="set-key-label" for="set-rv-path">Advanced: exact path to a python.exe</label>
+        <div class="set-key-row">
+          <input type="text" id="set-rv-path" placeholder="C:\Program Files\Python311\python.exe" autocomplete="off" spellcheck="false">
+          <button class="btn small" id="set-rv-save" type="button"><span class="spin" aria-hidden="true"></span>Save</button>
+          <button class="btn ghost small" id="set-rv-clear" type="button"><span class="spin" aria-hidden="true"></span>Clear</button>
+        </div>
+        <p class="help-small">&ldquo;Find a compatible Python&rdquo; normally fills this in for you &mdash; set it by hand only if you keep a special Python somewhere.</p>
+      </div>
+    </div>
+
     <div class="modal-actions">
       <button class="btn ghost" id="settings-close" type="button">Close</button>
     </div>
@@ -2620,6 +2671,11 @@ function loadResolve() {
       details.appendChild(summary);
       details.appendChild(el("p", null, status.error || "No details available."));
       body.appendChild(details);
+      var fix = el("button", "btn small", "Fix in settings →");
+      fix.type = "button";
+      fix.id = "resolve-fix-settings";
+      fix.addEventListener("click", function () { openSettings(true); });
+      body.appendChild(fix);
     }
   }).catch(function () {
     clear(body);
@@ -5014,21 +5070,42 @@ function renderSettings(s) {
   else key = "none";
   $("set-badge-key").textContent = "API key: " + key;
   $("set-key-clear").disabled = !s.api_key_set;
+  renderResolveSettings(s);
+}
+
+/* The Resolve half of the settings view: the saved worker-Python path and
+   whether the machine's MONTEUR_RESOLVE_PYTHON env override is active (same
+   "environment wins" pattern as the AI backend above). */
+function renderResolveSettings(s) {
+  var envForced = !!s.resolve_python_env_set;
+  $("set-rv-env-note").hidden = !envForced;
+  var input = $("set-rv-path");
+  if (document.activeElement !== input) input.value = s.resolve_python || "";
+  input.disabled = envForced;
+  $("set-rv-detect").disabled = envForced;
+  $("set-rv-save").disabled = envForced;
+  $("set-rv-clear").disabled = envForced || !s.resolve_python;
 }
 
 function saveSettings(body) {
   return api("/api/settings", { method: "POST", body: body }).then(renderSettings);
 }
 
-function openSettings() {
+function openSettings(scrollToResolve) {
   var out = $("set-test-result");
   out.textContent = "";
   out.classList.remove("ok");
   $("set-key").value = "";
+  $("set-rv-detect-result").textContent = "";
+  $("set-rv-detect-result").classList.remove("ok");
+  // the Store hint only makes sense on the machine Studio runs on = this one
+  $("set-rv-store").hidden = !/win/i.test(navigator.platform || navigator.userAgent || "");
+  refreshResolveDiagnosis();
   api("/api/settings").then(function (s) {
     renderSettings(s);
     $("settings-modal").hidden = false;
     $("settings-close").focus();
+    if (scrollToResolve) $("set-resolve-section").scrollIntoView({ block: "start" });
   }).catch(function (err) {
     toast(err && err.message ? err.message : String(err), "error");
   });
@@ -5039,7 +5116,7 @@ function closeSettings() {
   $("settings-open").focus();
 }
 
-$("settings-open").addEventListener("click", openSettings);
+$("settings-open").addEventListener("click", function () { openSettings(false); });
 $("settings-close").addEventListener("click", closeSettings);
 $("settings-modal").addEventListener("keydown", function (e) {
   if (e.key === "Escape") closeSettings();
@@ -5115,6 +5192,143 @@ $("set-test").addEventListener("click", function () {
     })();
   }).catch(function (err) {
     finish(err && err.message ? err.message : String(err), false);
+  });
+});
+
+/* ---- settings: DaVinci Resolve — live connection ----------------------
+   The status headline + verdict come from GET /api/resolve/diagnose (the
+   server's plain-language self-check — no client-side re-diagnosis), the
+   one-click fix is POST /api/resolve/detect (a "resolve-detect" job that
+   probes the machine's Pythons and SAVES the first compatible one), and
+   the advanced path input posts `resolve_python` like any other setting. */
+
+function resolveHeadline(report) {
+  var status = (report && report.status) || {};
+  if (status.connected) return "Connected — project “" + (status.project || "Untitled project") + "”.";
+  if (status.reason === "crash") return "Needs a compatible Python.";
+  return "DaVinci Resolve is not running.";
+}
+
+function refreshResolveDiagnosis() {
+  var head = $("set-rv-status");
+  head.textContent = "Checking DaVinci Resolve…";
+  head.classList.remove("off");
+  api("/api/resolve/diagnose").then(function (report) {
+    head.textContent = resolveHeadline(report);
+    head.classList.toggle("off", !(report.status && report.status.connected));
+    $("set-rv-verdict").textContent = report.verdict || "";
+  }).catch(function () {
+    head.textContent = "Couldn’t reach the Resolve bridge.";
+    head.classList.add("off");
+    $("set-rv-verdict").textContent = "";
+  });
+}
+
+function probedLine(p) {
+  var text = p.path || "?";
+  if (p.version) text += " — Python " + p.version + (p.bits ? " (" + p.bits + "-bit)" : "");
+  if (p.ok) {
+    text += p.connected ? " — works, Resolve reached" : " — works, Resolve not running";
+  } else if (p.reason === "incompatible") {
+    text += p.bits === 32 ? " — 32-bit (Resolve needs 64-bit)" : " — too new for Resolve (needs 3.6–3.11)";
+  } else if (p.reason === "crash") {
+    text += " — crashed loading Resolve's module";
+  } else {
+    text += " — could not be used (" + (p.reason || "unknown") + ")";
+  }
+  return text;
+}
+
+function renderProbed(list) {
+  var ul = $("set-rv-probed-list");
+  clear(ul);
+  (list || []).forEach(function (p) { ul.appendChild(el("li", null, probedLine(p))); });
+  $("set-rv-probed").hidden = !(list && list.length);
+}
+
+$("set-rv-detect").addEventListener("click", function () {
+  var btn = $("set-rv-detect");
+  if (btn.classList.contains("busy")) return;
+  var out = $("set-rv-detect-result");
+  out.classList.remove("ok");
+  out.textContent = "Probing Python installations…";
+  $("set-rv-install").hidden = true;
+  btn.classList.add("busy");
+  btn.disabled = true;
+  function finish(text, ok) {
+    btn.classList.remove("busy");
+    btn.disabled = !!(settingsState && settingsState.resolve_python_env_set);
+    out.textContent = text;
+    out.classList.toggle("ok", !!ok);
+  }
+  api("/api/resolve/detect", { method: "POST", body: {} }).then(function (data) {
+    (function poll() {
+      api("/api/jobs/" + data.job).then(function (job) {
+        if (job.state === "running") { window.setTimeout(poll, 700); return; }
+        if (job.state !== "done") {
+          finish(job.message ? String(job.message) : "Something went wrong.", false);
+          return;
+        }
+        var r = job.result || {};
+        renderProbed(r.probed);
+        if (r.verdict) $("set-rv-verdict").textContent = r.verdict;
+        if (r.found && r.connected) {
+          finish("Connected — using Python " + (r.version || "?") + " at " + r.found + ".", true);
+        } else if (r.found) {
+          finish("Saved Python " + (r.version || "?") + " (" + r.found + "). Start Resolve with scripting set to Local (Preferences > System > General) and this will connect.", true);
+        } else {
+          finish("No compatible Python found on this computer yet.", false);
+          $("set-rv-install").hidden = false;
+        }
+        // reflect the (possibly) saved path + fresh diagnosis everywhere:
+        // the path input, the section headline and the sidebar panel.
+        api("/api/settings").then(renderSettings).catch(function () {});
+        refreshResolveDiagnosis();
+        loadResolve();
+      }).catch(function (err) {
+        finish(err && err.message ? err.message : String(err), false);
+      });
+    })();
+  }).catch(function (err) {
+    finish(err && err.message ? err.message : String(err), false);
+  });
+});
+
+$("set-rv-save").addEventListener("click", function () {
+  var path = $("set-rv-path").value.trim();
+  if (!path) {
+    toast("Paste the full path to a Python program first.", "error");
+    $("set-rv-path").focus();
+    return;
+  }
+  busy($("set-rv-save"), function () {
+    return saveSettings({ resolve_python: path }).then(function () {
+      toast("Resolve Python saved — Monteur uses it from now on.", "success");
+      refreshResolveDiagnosis();
+      loadResolve();
+    });
+  }).then(function () {
+    if (!settingsState) return;
+    var typed = $("set-rv-path").value;
+    renderResolveSettings(settingsState); // busy() re-enabled; re-apply env lock
+    // after a rejected save (400) keep what the user typed so they can fix it
+    if (typed && typed !== settingsState.resolve_python) $("set-rv-path").value = typed;
+  });
+});
+$("set-rv-path").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); $("set-rv-save").click(); }
+});
+
+$("set-rv-clear").addEventListener("click", function () {
+  busy($("set-rv-clear"), function () {
+    return saveSettings({ resolve_python: "" }).then(function () {
+      toast("Saved Python path cleared.", "success");
+      refreshResolveDiagnosis();
+      loadResolve();
+    });
+  }).then(function () {
+    // busy() re-enables its button; re-apply "nothing saved -> Clear disabled".
+    if (settingsState) renderResolveSettings(settingsState);
   });
 });
 

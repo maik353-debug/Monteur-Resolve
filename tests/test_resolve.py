@@ -14,6 +14,18 @@ from monteur.montage import MontageEntry, MontagePlan
 from monteur.resolve import MonteurResolveError, ResolveBridge, connect
 
 
+@pytest.fixture(autouse=True)
+def _isolated_worker_config(tmp_path, monkeypatch):
+    """_worker_python() now reads BOTH the env override and the settings
+    file — every test gets a scratch settings path and a clean env so the
+    developer's real ~/.monteur/settings.json (or shell) never leaks in.
+    Tests that want an override set it explicitly on top of this."""
+    monkeypatch.setenv(
+        "MONTEUR_SETTINGS_PATH", str(tmp_path / "resolve-settings.json")
+    )
+    monkeypatch.delenv("MONTEUR_RESOLVE_PYTHON", raising=False)
+
+
 class FakeItem:
     def __init__(
         self,
@@ -1397,6 +1409,362 @@ def test_diagnose_verdict_clean_not_connected(monkeypatch) -> None:
     d = resolve.diagnose()
     assert "loaded Resolve's module fine" in d["verdict"]
     assert "not running" in d["verdict"].lower()
+
+
+def test_diagnose_crash_verdict_points_at_studio_settings(monkeypatch) -> None:
+    # The product rule: end users fix this INSIDE the app. The verdict leads
+    # with the settings-panel button; the env var is only an advanced note.
+    def fake_worker(cmd, timeout=25.0, request=None):
+        if cmd == "info":
+            return True, {"python_version": "3.13.2", "bits": 64, "module_dir": "/x"}
+        return False, {"error": resolve._CRASH_MESSAGE, "reason": "crash"}
+
+    monkeypatch.setattr(resolve, "_run_worker", fake_worker)
+    d = resolve.diagnose()
+    assert "Find a compatible Python" in d["verdict"]
+    assert "settings (gear)" in d["verdict"]
+    assert "Advanced: MONTEUR_RESOLVE_PYTHON" in d["verdict"]
+
+
+def test_diagnose_reports_interpreter_source(tmp_path, monkeypatch) -> None:
+    from monteur.settings import save_settings
+
+    def fake_worker(cmd, timeout=25.0, request=None):
+        if cmd == "info":
+            return True, {"python_version": "3.11.9", "bits": 64, "module_dir": "/x"}
+        return True, {"connected": False, "error": "Resolve is not running."}
+
+    monkeypatch.setattr(resolve, "_run_worker", fake_worker)
+
+    # default: Monteur's own interpreter
+    d = resolve.diagnose()
+    assert d["interpreter_source"] == "default"
+    assert d["worker_interpreter"] == sys.executable
+    assert "Monteur's own Python" in d["verdict"]
+
+    # a saved settings path (existing file) wins over the default...
+    saved = tmp_path / "python311"
+    saved.write_text("")
+    save_settings({"resolve_python": str(saved)})
+    d = resolve.diagnose()
+    assert d["interpreter_source"] == "settings"
+    assert d["worker_interpreter"] == str(saved)
+    assert "saved in Monteur's settings" in d["verdict"]
+
+    # ...and the env override wins over everything.
+    monkeypatch.setenv("MONTEUR_RESOLVE_PYTHON", "/py311-env")
+    d = resolve.diagnose()
+    assert d["interpreter_source"] == "env"
+    assert d["worker_interpreter"] == "/py311-env"
+    assert "MONTEUR_RESOLVE_PYTHON environment variable" in d["verdict"]
+
+
+# --- Worker interpreter choice (env > settings > default) ------------------------
+
+
+def test_worker_python_prefers_env_over_settings(tmp_path, monkeypatch) -> None:
+    from monteur.settings import save_settings
+
+    saved = tmp_path / "saved-python"
+    saved.write_text("")
+    save_settings({"resolve_python": str(saved)})
+    monkeypatch.setenv("MONTEUR_RESOLVE_PYTHON", "/opt/env/python3.11")
+    assert resolve._worker_python() == "/opt/env/python3.11"
+    assert resolve._worker_python_source() == ("/opt/env/python3.11", "env")
+
+
+def test_worker_python_uses_saved_settings_path(tmp_path) -> None:
+    from monteur.settings import save_settings
+
+    saved = tmp_path / "python311"
+    saved.write_text("")
+    save_settings({"resolve_python": str(saved)})
+    assert resolve._worker_python() == str(saved)
+    assert resolve._worker_python_source() == (str(saved), "settings")
+
+
+def test_worker_python_ignores_stale_settings_path(tmp_path) -> None:
+    from monteur.settings import save_settings
+
+    save_settings({"resolve_python": str(tmp_path / "uninstalled" / "python.exe")})
+    # The file is gone (Python uninstalled) — fall back silently, no error.
+    assert resolve._worker_python() == sys.executable
+    assert resolve._worker_python_source() == (sys.executable, "default")
+
+
+def test_run_worker_uses_worker_python_by_default(tmp_path, monkeypatch) -> None:
+    # Every isolated call (status/info/read_timeline/build_plan) goes through
+    # _run_worker without an explicit interpreter — the settings choice must
+    # reach them all.
+    from monteur.settings import save_settings
+
+    saved = tmp_path / "python311"
+    saved.write_text("")
+    save_settings({"resolve_python": str(saved)})
+    seen: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(cmd[0])
+        return _completed(0, json.dumps({"connected": False, "error": "closed"}))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    resolve.resolve_status_isolated()
+    assert seen == [str(saved)]
+
+
+# --- Interpreter discovery (_candidate_pythons) ----------------------------------
+
+
+def test_candidate_pythons_order(tmp_path, monkeypatch) -> None:
+    from monteur.settings import save_settings
+
+    env_py = tmp_path / "env-python"
+    env_py.write_text("")
+    saved_py = tmp_path / "saved-python"
+    saved_py.write_text("")
+    which_py = tmp_path / "python3.11"
+    which_py.write_text("")
+    monkeypatch.setenv("MONTEUR_RESOLVE_PYTHON", str(env_py))
+    save_settings({"resolve_python": str(saved_py)})
+    monkeypatch.setattr(
+        resolve.shutil,
+        "which",
+        lambda name: str(which_py) if name == "python3.11" else None,
+    )
+    candidates = resolve._candidate_pythons()
+    # env override first, then the saved setting, then PATH, then sys.executable
+    assert candidates[0] == str(env_py)
+    assert candidates[1] == str(saved_py)
+    assert candidates[2] == str(which_py)
+    assert candidates[-1] == sys.executable
+
+
+def test_candidate_pythons_dedupes_symlinks_and_missing(tmp_path, monkeypatch) -> None:
+    from monteur.settings import save_settings
+
+    real = tmp_path / "python3.11"
+    real.write_text("")
+    alias = tmp_path / "alias-python"
+    alias.symlink_to(real)
+    monkeypatch.setenv("MONTEUR_RESOLVE_PYTHON", str(alias))
+    save_settings({"resolve_python": str(real)})  # same interpreter, other name
+    monkeypatch.setattr(resolve.shutil, "which", lambda name: None)
+    candidates = resolve._candidate_pythons()
+    assert candidates[0] == str(alias)
+    assert str(real) not in candidates  # resolves to the same realpath
+    # a nonexistent env path never survives the existence check
+    monkeypatch.setenv("MONTEUR_RESOLVE_PYTHON", str(tmp_path / "nope"))
+    save_settings({"resolve_python": ""})
+    assert resolve._candidate_pythons() == [sys.executable]
+
+
+def test_candidate_pythons_is_capped(tmp_path, monkeypatch) -> None:
+    files = []
+    for index in range(30):
+        path = tmp_path / f"python-{index}"
+        path.write_text("")
+        files.append(str(path))
+    names = iter(files)
+    monkeypatch.setattr(
+        resolve.shutil, "which", lambda name: next(names, None)
+    )
+    monkeypatch.setattr(resolve, "_WHICH_NAMES", tuple(f"p{i}" for i in range(30)))
+    candidates = resolve._candidate_pythons()
+    assert len(candidates) <= resolve._MAX_CANDIDATES
+
+
+def test_windows_helpers_are_safe_off_windows() -> None:
+    # The registry scan needs winreg (Windows-only) and must degrade to [].
+    assert resolve._windows_registry_pythons() == []
+    # The well-known path list is pure string building — 3.11 comes first.
+    wellknown = resolve._windows_wellknown_pythons()
+    assert wellknown[0].endswith(os.path.join("Python311", "python.exe"))
+    assert all(p.endswith("python.exe") for p in wellknown)
+    assert any("Python36" in p for p in wellknown)
+
+
+def test_parse_py_launcher_output() -> None:
+    text = (
+        "Installed Pythons found by py Launcher for Windows\n"
+        r" -V:3.13 *        C:\Users\me\AppData\Local\Programs\Python\Python313\python.exe" + "\n"
+        r" -3.11-64         C:\Python311\python.exe" + "\n"
+        " -3.10-32         no path shown\n"
+    )
+    assert resolve._parse_py_launcher_output(text) == [
+        r"C:\Users\me\AppData\Local\Programs\Python\Python313\python.exe",
+        r"C:\Python311\python.exe",
+    ]
+    assert resolve._parse_py_launcher_output("") == []
+    assert resolve._parse_py_launcher_output("garbage\nlines") == []
+
+
+# --- Probing one interpreter (probe_resolve_python) ------------------------------
+
+
+def _fake_probe_worker(monkeypatch, info_result, status_result=None):
+    """Install a _run_worker fake; returns the list of commands it saw."""
+    calls: list[str] = []
+
+    def fake(cmd, timeout, request=None, interpreter=None):
+        calls.append(cmd)
+        if cmd == "info":
+            return info_result
+        assert status_result is not None, "status must not be attempted"
+        return status_result
+
+    monkeypatch.setattr(resolve, "_run_worker", fake)
+    return calls
+
+
+def test_probe_too_new_short_circuits_without_native_load(monkeypatch) -> None:
+    calls = _fake_probe_worker(
+        monkeypatch, (True, {"python_version": "3.13.1", "bits": 64})
+    )
+    result = resolve.probe_resolve_python("/py313")
+    assert result == {
+        "ok": False, "reason": "incompatible", "version": "3.13.1", "bits": 64,
+    }
+    assert calls == ["info"]  # the crashing status probe was never attempted
+
+
+def test_probe_32bit_short_circuits_without_native_load(monkeypatch) -> None:
+    calls = _fake_probe_worker(
+        monkeypatch, (True, {"python_version": "3.10.9", "bits": 32})
+    )
+    result = resolve.probe_resolve_python("/py310-32")
+    assert result == {
+        "ok": False, "reason": "incompatible", "version": "3.10.9", "bits": 32,
+    }
+    assert calls == ["info"]
+
+
+def test_probe_unlaunchable_interpreter(monkeypatch) -> None:
+    _fake_probe_worker(
+        monkeypatch,
+        (False, {"reason": "no-interpreter", "error": "could not launch"}),
+    )
+    result = resolve.probe_resolve_python("/nope")
+    assert result["ok"] is False
+    assert result["reason"] == "no-interpreter"
+
+
+def test_probe_crash_is_reported(monkeypatch) -> None:
+    calls = _fake_probe_worker(
+        monkeypatch,
+        (True, {"python_version": "3.11.9", "bits": 64}),
+        (False, {"error": resolve._CRASH_MESSAGE, "reason": "crash"}),
+    )
+    result = resolve.probe_resolve_python("/py311-broken")
+    assert result["ok"] is False
+    assert result["reason"] == "crash"
+    assert result["version"] == "3.11.9"
+    assert calls == ["info", "status"]
+
+
+def test_probe_loaded_but_resolve_closed_is_ok(monkeypatch) -> None:
+    # A compatible interpreter with Resolve closed is a FIND — the whole
+    # point is remembering it for when Resolve is running.
+    _fake_probe_worker(
+        monkeypatch,
+        (True, {"python_version": "3.11.9", "bits": 64}),
+        (True, {"connected": False, "error": "Resolve is not running."}),
+    )
+    result = resolve.probe_resolve_python("/py311")
+    assert result["ok"] is True
+    assert result["connected"] is False
+    assert result["version"] == "3.11.9"
+
+
+def test_probe_connected(monkeypatch) -> None:
+    _fake_probe_worker(
+        monkeypatch,
+        (True, {"python_version": "3.10.11", "bits": 64}),
+        (True, {"connected": True, "project": "Film", "timelines": []}),
+    )
+    result = resolve.probe_resolve_python("/py310")
+    assert result["ok"] is True
+    assert result["connected"] is True
+    assert result["project"] == "Film"
+
+
+def test_probe_passes_interpreter_through(monkeypatch) -> None:
+    seen: list[str | None] = []
+
+    def fake(cmd, timeout, request=None, interpreter=None):
+        seen.append(interpreter)
+        return True, {"python_version": "3.13.0", "bits": 64}
+
+    monkeypatch.setattr(resolve, "_run_worker", fake)
+    resolve.probe_resolve_python("/some/python")
+    assert seen == ["/some/python"]
+
+
+# --- Walking the candidates (find_resolve_python) --------------------------------
+
+
+def test_find_stops_at_first_ok_and_saves_nothing(monkeypatch) -> None:
+    from monteur.settings import resolve_python as saved_python
+
+    monkeypatch.setattr(
+        resolve, "_candidate_pythons", lambda: ["/py313", "/py311", "/py310"]
+    )
+
+    def fake_probe(path, timeout=10.0):
+        if path == "/py313":
+            return {"ok": False, "reason": "incompatible",
+                    "version": "3.13.0", "bits": 64}
+        if path == "/py311":
+            return {"ok": True, "connected": False,
+                    "version": "3.11.9", "bits": 64}
+        raise AssertionError("probing must stop at the first ok result")
+
+    monkeypatch.setattr(resolve, "probe_resolve_python", fake_probe)
+    report = resolve.find_resolve_python()
+    assert report["found"] == "/py311"
+    assert report["connected"] is False
+    assert [p["path"] for p in report["probed"]] == ["/py313", "/py311"]
+    assert report["probed"][0]["reason"] == "incompatible"
+    assert report["probed"][1]["ok"] is True
+    # find_resolve_python only LOOKS — persisting is the detect endpoint's job.
+    assert saved_python() == ""
+
+
+def test_find_connected_result(monkeypatch) -> None:
+    monkeypatch.setattr(resolve, "_candidate_pythons", lambda: ["/py311"])
+    monkeypatch.setattr(
+        resolve,
+        "probe_resolve_python",
+        lambda path, timeout=10.0: {
+            "ok": True, "connected": True, "version": "3.11.9",
+            "bits": 64, "project": "Film",
+        },
+    )
+    report = resolve.find_resolve_python()
+    assert report["found"] == "/py311"
+    assert report["connected"] is True
+
+
+def test_find_none_found_reports_every_probe(monkeypatch) -> None:
+    monkeypatch.setattr(
+        resolve, "_candidate_pythons", lambda: ["/py313", "/py312"]
+    )
+    monkeypatch.setattr(
+        resolve,
+        "probe_resolve_python",
+        lambda path, timeout=10.0: {
+            "ok": False, "reason": "incompatible", "version": "3.13.0", "bits": 64,
+        },
+    )
+    report = resolve.find_resolve_python()
+    assert report["found"] is None
+    assert report["connected"] is False
+    assert [p["path"] for p in report["probed"]] == ["/py313", "/py312"]
+
+
+def test_find_with_no_candidates(monkeypatch) -> None:
+    monkeypatch.setattr(resolve, "_candidate_pythons", lambda: [])
+    report = resolve.find_resolve_python()
+    assert report == {"found": None, "connected": False, "probed": []}
 
 
 # --- build_plan: isolated (crash-safe) timeline building -------------------------

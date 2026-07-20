@@ -341,7 +341,7 @@ _PICK_LOCK = threading.Lock()
 def _new_job(kind: str) -> dict:
     job = {
         "id": secrets.token_hex(4),
-        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "distill" | "resolve-build" | "movie" | "scene-check" | "movie-assemble" | "ai-test"
+        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "distill" | "resolve-build" | "resolve-detect" | "movie" | "scene-check" | "movie-assemble" | "ai-test"
         "state": "running",  # -> "done" | "error" | "cancelled"
         "progress": [],  # dicts: {"index","total","name","stage"[,"usable_ratio"]}
         "message": "",  # human-readable reason when state == "error"
@@ -1950,6 +1950,24 @@ class MonteurHandler(BaseHTTPRequestHandler):
         from monteur.resolve import resolve_status_isolated
 
         self._send_json(resolve_status_isolated())
+
+    def _resolve_diagnose(self) -> None:
+        # The full self-check behind the settings panel's Resolve section:
+        # interpreter + source, info probe, live status and the plain-language
+        # verdict the UI shows verbatim. Child-process isolated; never raises.
+        from monteur.resolve import diagnose
+
+        self._send_json(diagnose())
+
+    def _resolve_detect(self) -> None:
+        job = _new_job("resolve-detect")
+        threading.Thread(
+            target=_run_resolve_detect_job,
+            args=(job,),
+            name=f"monteur-resolve-detect-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
 
     def _resolve_analyze(self) -> None:
         from monteur.resolve import MonteurResolveError, read_timeline_isolated
