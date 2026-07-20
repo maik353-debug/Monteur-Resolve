@@ -336,7 +336,7 @@ def cmd_movie_assemble(args: argparse.Namespace) -> None:
         flush=True,
     )
     try:
-        timeline, notes = assemble_movie(
+        timeline, notes, _plan = assemble_movie(
             project, fps=args.fps, canvas=args.canvas, progress=_movie_progress
         )
     except (ValueError, FileNotFoundError, MonteurMediaError) as exc:
@@ -351,7 +351,7 @@ def cmd_movie_assemble(args: argparse.Namespace) -> None:
 
 
 def cmd_movie_status(args: argparse.Namespace) -> None:
-    from monteur.movie import load_project, project_progress
+    from monteur.movie import load_project, project_progress, shoot_plan
 
     try:
         project = load_project(args.project_dir)
@@ -362,12 +362,55 @@ def cmd_movie_status(args: argparse.Namespace) -> None:
         f"{project.title} — {progress['assigned']}/{progress['scenes']} "
         f"scenes assigned ({progress['percent']}%)"
     )
+    plan = shoot_plan(project)
+    status_marks = {"checked-ok": "✓", "checked-weak": "!"}
+    by_number = {s["number"]: s for s in plan["scenes"]}
     for scene in project.scenes:
-        mark = "x" if scene.status == "assigned" else " "
+        state = by_number[scene.number]
+        mark = status_marks.get(
+            state["status"], "x" if scene.status == "assigned" else " "
+        )
         line = f"  [{mark}] {scene.number:>2}  {scene.heading}"
         if scene.folder:
             line += f"  -> {scene.folder}"
         print(line)
+
+    # The shoot plan: what still has to be filmed (deterministic, no AI).
+    if plan["unshot"] or plan["reshoot"] or plan["thin"]:
+        print("\nShoot plan:")
+        for item in plan["unshot"]:
+            print(f"  unshot   scene {item['scene']:>2}  {item['heading']}")
+            for tip in item["tips"][:2]:
+                print(f"           tip: {tip}")
+        for item in plan["reshoot"]:
+            print(f"  reshoot  scene {item['scene']:>2}  {item['heading']}")
+            print(f"           why: {item['why']}")
+        for item in plan["thin"]:
+            print(f"  thin     scene {item['scene']:>2}  {item['heading']}")
+            print(f"           why: {item['why']}")
+    else:
+        print("\nShoot plan: nothing left to shoot — assemble the film.")
+
+    if getattr(args, "advice", False):
+        from monteur.ai import MonteurAIError
+        from monteur.movie import shoot_plan_advice
+
+        try:
+            advice = shoot_plan_advice(project, plan)
+        except MonteurAIError as exc:
+            # Graceful by contract: the deterministic plan above is the
+            # answer; the AI layer is an upgrade, not a gate.
+            print(f"\n(no AI advice: {exc})")
+            return
+        print("\nClaude's shoot-day advice:")
+        for item in advice["first"]:
+            print(f"  first: scene {item['scene']} — {item['why']}")
+        for step in advice["day_plan"]:
+            print(f"  - {step}")
+        if advice["summary"]:
+            print(f"  {advice['summary']}")
+        for note in advice.get("notes", []):
+            print(f"  ({note})")
 
 
 def cmd_find(args: argparse.Namespace) -> None:
@@ -1720,6 +1763,12 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="shooting progress: per-scene status and folders"
     )
     p_status.add_argument("project_dir", help="project folder with movie.json")
+    p_status.add_argument(
+        "--advice",
+        action="store_true",
+        help="ask Claude to prioritize the shoot (falls back to the "
+        "deterministic plan when no AI backend is reachable)",
+    )
     p_status.set_defaults(func=cmd_movie_status)
 
     p = sub.add_parser(

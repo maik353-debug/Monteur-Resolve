@@ -568,7 +568,7 @@ class TestAssembleMovie:
                 _movie_scene(2, heading="EXT. WALDWEG - NIGHT"),
             ]
         )
-        timeline, notes = assemble_movie(project, sift_cache=cache)
+        timeline, notes, _plan = assemble_movie(project, sift_cache=cache)
         assert notes[0].startswith("assembled 'Nachtfahrt': 1 of 2 scenes,")
         assert notes[0].endswith("at 25 fps")
         assert "scene lengths estimated from the script — trim in Resolve" in notes
@@ -587,7 +587,7 @@ class TestAssembleMovie:
             ]
         }
         project = _movie([_movie_scene(1, folder="/f")])
-        timeline, notes = assemble_movie(project, sift_cache=cache)
+        timeline, notes, _plan = assemble_movie(project, sift_cache=cache)
         sources = {Path(c.source_file).name for c in timeline.video_clips()}
         assert sources <= {"S01_T01.mp4", "S01_T02.MP4"}  # S11/broll excluded
         assert any("2 take files named S01_T##" in n for n in notes)
@@ -597,7 +597,7 @@ class TestAssembleMovie:
             "/f": [_sift_report("/f/S01_T01.mp4"), _sift_report("/f/S11_T01.mp4")]
         }
         project = _movie([_movie_scene(11, folder="/f")])
-        timeline, _notes = assemble_movie(project, sift_cache=cache)
+        timeline, _notes, _plan = assemble_movie(project, sift_cache=cache)
         sources = {Path(c.source_file).name for c in timeline.video_clips()}
         assert sources == {"S11_T01.mp4"}
 
@@ -608,7 +608,7 @@ class TestAssembleMovie:
         project = _movie(
             [_movie_scene(1, folder="/f", action="wort " * 60)]  # 21s target
         )
-        timeline, notes = assemble_movie(project, sift_cache=cache)
+        timeline, notes, _plan = assemble_movie(project, sift_cache=cache)
         sources = {Path(c.source_file).name for c in timeline.video_clips()}
         assert sources == {"morgen.mp4", "abend.mp4"}
         assert not any("take file" in n for n in notes)
@@ -624,7 +624,7 @@ class TestAssembleMovie:
                 _movie_scene(2, folder="/b", cut_intent="harter Schnitt"),
             ]
         )
-        timeline, _notes = assemble_movie(project, sift_cache=cache)
+        timeline, _notes, _plan = assemble_movie(project, sift_cache=cache)
         clips = timeline.video_clips()
         scene2_start = timeline.markers[1].frame
         incoming = next(c for c in clips if c.record_in == scene2_start)
@@ -641,7 +641,7 @@ class TestAssembleMovie:
         project = _movie(
             [_movie_scene(1, folder="/a"), _movie_scene(2, folder="/b")]
         )
-        timeline, _notes = assemble_movie(project, sift_cache=cache)
+        timeline, _notes, _plan = assemble_movie(project, sift_cache=cache)
         scene2_start = timeline.markers[1].frame
         incoming = next(
             c for c in timeline.video_clips() if c.record_in == scene2_start
@@ -661,7 +661,7 @@ class TestAssembleMovie:
                 )
             ]
         )
-        _timeline, notes = assemble_movie(project, sift_cache=cache)
+        _timeline, notes, _plan = assemble_movie(project, sift_cache=cache)
         assert (
             "scene 5 has dialogue and transcripts — consider 'monteur assembly' "
             "for line-accurate takes; assembled visually here" in notes
@@ -679,7 +679,7 @@ class TestAssembleMovie:
                 )
             ]
         )
-        _timeline, notes = assemble_movie(project, sift_cache=cache)
+        _timeline, notes, _plan = assemble_movie(project, sift_cache=cache)
         assert not any("monteur assembly" in n for n in notes)
 
     def test_sift_cache_reuse_and_population(self, monkeypatch):
@@ -698,7 +698,7 @@ class TestAssembleMovie:
                 _movie_scene(3, folder="/neu"),
             ]
         )
-        _timeline, _notes = assemble_movie(project, sift_cache=cache)
+        _timeline, _notes, _plan = assemble_movie(project, sift_cache=cache)
         assert calls == ["/neu"]  # /pre reused; /neu sifted exactly once
         assert set(cache) == {"/pre", "/neu"}  # ... and added to the cache
 
@@ -730,7 +730,7 @@ class TestAssembleMovie:
         def boom(*_args):
             raise RuntimeError("broken UI")
 
-        timeline, _notes = assemble_movie(project, sift_cache=cache, progress=boom)
+        timeline, _notes, _plan = assemble_movie(project, sift_cache=cache, progress=boom)
         assert timeline.video_clips()
 
     def test_unsiftable_folder_skips_scene_with_note(self, tmp_path):
@@ -741,7 +741,7 @@ class TestAssembleMovie:
                 _movie_scene(2, folder="/ok"),
             ]
         )
-        timeline, notes = assemble_movie(project, sift_cache=cache)
+        timeline, notes, _plan = assemble_movie(project, sift_cache=cache)
         assert any("scene 1" in n and "skipped" in n for n in notes)
         assert notes[0].startswith("assembled 'Nachtfahrt': 1 of 2 scenes")
         assert timeline.video_clips()
@@ -750,7 +750,7 @@ class TestAssembleMovie:
         # one 3s moment against a 16s target: the repetition guard caps it
         cache = {"/f": [_sift_report("/f/x.mp4", n_moments=1)]}
         project = _movie([_movie_scene(1, folder="/f", action="wort " * 100)])
-        timeline, notes = assemble_movie(project, sift_cache=cache)
+        timeline, notes, _plan = assemble_movie(project, sift_cache=cache)
         assert any("scene runs short" in n for n in notes)
         assert timeline.duration_seconds < 16.0
 
@@ -772,7 +772,7 @@ class TestAssembleMovieDemo:
                 ),
             ]
         )
-        timeline, notes = assemble_movie(project, fps=25.0, sift_cache=demo_cache)
+        timeline, notes, _plan = assemble_movie(project, fps=25.0, sift_cache=demo_cache)
 
         # scenes tile the timeline contiguously: no gaps, no overlaps
         video = timeline.video_clips()
@@ -819,7 +819,7 @@ class TestAssembleMovieDemo:
         shutil.copy(clips[1], tmp_path / "S01_T02.mp4")
         shutil.copy(clips[2], tmp_path / "broll.mp4")
         project = _movie([_movie_scene(1, folder=str(tmp_path))])
-        timeline, notes = assemble_movie(project, sift_cache={})
+        timeline, notes, _plan = assemble_movie(project, sift_cache={})
         sources = {Path(c.source_file).name for c in timeline.video_clips()}
         assert sources and sources <= {"S01_T01.mp4", "S01_T02.mp4"}
         assert any("take files named S01_T##" in n for n in notes)
@@ -918,3 +918,447 @@ def test_cli_movie_status_missing_project_fails_cleanly(tmp_path, capsys):
     with pytest.raises(SystemExit):
         args.func(args)
     assert "movie new" in capsys.readouterr().err
+
+
+# --- the shoot plan: what still has to be filmed -------------------------------------
+
+
+from monteur.movie import (
+    ADVICE_LIMIT,
+    count_scene_takes,
+    record_scene_check,
+    shoot_plan,
+    shoot_plan_advice,
+)
+
+
+def _check(score=0.5, content=False, clips=3, usable=0.9, findings=()):
+    return {
+        "score": score,
+        "content_checked": content,
+        "clips": clips,
+        "avg_usable": usable,
+        "findings": list(findings),
+    }
+
+
+class TestRecordSceneCheck:
+    def test_stores_check_with_folder(self):
+        project = _project()
+        assign_scene(project, 2, "/f")
+        scene = record_scene_check(project, 2, _check())
+        assert scene is project.scenes[1]
+        assert scene.last_check["folder"] == "/f"
+        assert scene.last_check["clips"] == 3
+
+    def test_unknown_scene_is_value_error(self):
+        with pytest.raises(ValueError, match="no scene 9"):
+            record_scene_check(_project(), 9, _check())
+
+    def test_last_check_survives_save_load(self, tmp_path):
+        project = _project()
+        assign_scene(project, 1, "/f")
+        record_scene_check(project, 1, _check(clips=4))
+        save_project(project, tmp_path)
+        loaded = load_project(tmp_path)
+        assert loaded.scenes[0].last_check["clips"] == 4
+        assert loaded.scenes[0].last_check["folder"] == "/f"
+
+    def test_old_movie_json_without_last_check_loads(self, tmp_path):
+        # a project written before the field existed simply has no key
+        project = _project()
+        save_project(project, tmp_path)
+        data = json.loads((tmp_path / "movie.json").read_text(encoding="utf-8"))
+        for scene in data["scenes"]:
+            scene.pop("last_check")
+        (tmp_path / "movie.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+        loaded = load_project(tmp_path)
+        assert all(s.last_check == {} for s in loaded.scenes)
+
+
+class TestCountSceneTakes:
+    def test_no_folder_is_none(self):
+        assert count_scene_takes(_project().scenes[0]) is None
+
+    def test_missing_directory_is_none(self, tmp_path):
+        scene = _project().scenes[0]
+        scene.folder = str(tmp_path / "fehlt")
+        assert count_scene_takes(scene) is None
+
+    def test_counts_only_this_scenes_takes(self, tmp_path):
+        for name in ("S01_T01.mp4", "s01_t02.MOV", "S11_T01.mp4", "broll.mp4"):
+            (tmp_path / name).touch()
+        (tmp_path / "S01_T03.srt").touch()  # a sidecar is not a take
+        scene = _project().scenes[0]
+        scene.folder = str(tmp_path)
+        assert count_scene_takes(scene) == 2
+
+    def test_unnamed_footage_counts_zero(self, tmp_path):
+        (tmp_path / "morgen.mp4").touch()
+        scene = _project().scenes[0]
+        scene.folder = str(tmp_path)
+        assert count_scene_takes(scene) == 0
+
+
+class TestShootPlan:
+    def test_unshot_and_assigned(self):
+        project = _project(3)
+        project.scenes[0].shooting_tips = ["Kamera tief", "2 Takes"]
+        assign_scene(project, 2, "/f")
+        plan = shoot_plan(project)
+        assert [s["status"] for s in plan["scenes"]] == [
+            "unshot", "assigned", "unshot",
+        ]
+        assert [u["scene"] for u in plan["unshot"]] == [1, 3]
+        # the unshot card carries what the scene needs: slug, summary, tips
+        assert plan["unshot"][0]["heading"] == project.scenes[0].heading
+        assert plan["unshot"][0]["summary"] == project.scenes[0].summary
+        assert plan["unshot"][0]["tips"] == ["Kamera tief", "2 Takes"]
+        assert plan["counts"] == {
+            "scenes": 3, "unshot": 2, "assigned": 1,
+            "checked_ok": 0, "checked_weak": 0, "thin": 0,
+        }
+        assert plan["percent"] == 33
+        assert plan["reshoot"] == [] and plan["thin"] == []
+
+    def test_checked_ok(self):
+        project = _project()
+        assign_scene(project, 1, "/f")
+        record_scene_check(project, 1, _check(score=0.9, content=True))
+        plan = shoot_plan(project)
+        assert plan["scenes"][0]["status"] == "checked-ok"
+        assert plan["scenes"][0]["why"] == []
+        assert plan["counts"]["checked_ok"] == 1
+        assert plan["reshoot"] == []
+
+    def test_technical_only_check_is_ok_when_usable(self):
+        # score 0.5 without vision is the neutral baseline, not a failure
+        project = _project()
+        assign_scene(project, 1, "/f")
+        record_scene_check(project, 1, _check(score=0.5, content=False))
+        assert shoot_plan(project)["scenes"][0]["status"] == "checked-ok"
+
+    def test_no_overlap_content_check_is_weak(self):
+        project = _project()
+        assign_scene(project, 1, "/f")
+        record_scene_check(project, 1, _check(score=0.5, content=True))
+        plan = shoot_plan(project)
+        assert plan["scenes"][0]["status"] == "checked-weak"
+        assert plan["reshoot"][0]["scene"] == 1
+        assert "no overlap" in plan["reshoot"][0]["why"]
+
+    def test_low_usable_ratio_is_weak(self):
+        project = _project()
+        assign_scene(project, 1, "/f")
+        record_scene_check(project, 1, _check(usable=0.2))
+        plan = shoot_plan(project)
+        assert plan["scenes"][0]["status"] == "checked-weak"
+        assert "20% of the footage is usable" in plan["reshoot"][0]["why"]
+
+    def test_empty_folder_check_is_weak(self):
+        project = _project()
+        assign_scene(project, 1, "/f")
+        record_scene_check(project, 1, _check(clips=0, usable=0.0))
+        plan = shoot_plan(project)
+        assert "found no usable clips" in plan["reshoot"][0]["why"]
+
+    def test_mismatch_finding_is_weak_with_the_finding_text(self):
+        finding = (
+            "The heading says INT. but the labels lean outdoor — "
+            "double-check that this is the right folder."
+        )
+        project = _project()
+        assign_scene(project, 1, "/f")
+        record_scene_check(
+            project, 1, _check(score=0.75, content=True, findings=[finding])
+        )
+        plan = shoot_plan(project)
+        assert plan["scenes"][0]["status"] == "checked-weak"
+        assert finding in plan["reshoot"][0]["why"]
+
+    def test_stale_check_after_reassign_reads_as_assigned(self):
+        project = _project()
+        assign_scene(project, 1, "/alt")
+        record_scene_check(project, 1, _check(score=0.5, content=True))
+        assign_scene(project, 1, "/neu")  # different folder — check is stale
+        plan = shoot_plan(project)
+        assert plan["scenes"][0]["status"] == "assigned"
+        assert plan["reshoot"] == []
+
+    def test_checks_by_scene_override_wins(self):
+        project = _project()
+        assign_scene(project, 1, "/f")
+        record_scene_check(project, 1, _check(score=0.9, content=True))
+        plan = shoot_plan(
+            project, checks_by_scene={1: _check(score=0.5, content=True)}
+        )
+        assert plan["scenes"][0]["status"] == "checked-weak"
+
+    def test_single_take_is_thin(self, tmp_path):
+        (tmp_path / "S01_T01.mp4").touch()
+        project = _project()
+        assign_scene(project, 1, str(tmp_path))
+        plan = shoot_plan(project)
+        assert plan["scenes"][0]["takes"] == 1
+        assert plan["thin"][0]["scene"] == 1
+        assert "S01_T##" in plan["thin"][0]["why"]
+        assert plan["counts"]["thin"] == 1
+        # thin rides on top of the check status — the scene stays assigned
+        assert plan["scenes"][0]["status"] == "assigned"
+        assert plan["thin"][0]["why"] in plan["scenes"][0]["why"]
+
+    def test_two_takes_are_not_thin(self, tmp_path):
+        (tmp_path / "S01_T01.mp4").touch()
+        (tmp_path / "S01_T02.mp4").touch()
+        project = _project()
+        assign_scene(project, 1, str(tmp_path))
+        plan = shoot_plan(project)
+        assert plan["scenes"][0]["takes"] == 2
+        assert plan["thin"] == []
+
+    def test_unnamed_footage_is_not_thin(self, tmp_path):
+        (tmp_path / "broll.mp4").touch()
+        project = _project()
+        assign_scene(project, 1, str(tmp_path))
+        plan = shoot_plan(project)
+        assert plan["scenes"][0]["takes"] == 0
+        assert plan["thin"] == []  # unnamed footage is unknown, not thin
+
+    def test_empty_project(self):
+        project = MovieProject(title="T", genre="", brief="", logline="")
+        plan = shoot_plan(project)
+        assert plan["percent"] == 0
+        assert plan["scenes"] == [] and plan["unshot"] == []
+
+
+class TestShootPlanAdvice:
+    def _project_with_open_scenes(self):
+        project = _project(3)
+        assign_scene(project, 2, "/f")
+        return project
+
+    def test_happy_path_validates_and_keeps_known_scenes(self, monkeypatch):
+        payload = {
+            "first": [
+                {"scene": 1, "why": "eröffnet den Akt"},
+                {"scene": 99, "why": "hallucinated"},  # dropped: no scene 99
+                {"scene": 3, "why": ""},               # dropped: empty why
+            ],
+            "day_plan": ["Vormittag: Szene 1 im Wald", "  ", "Abend: Szene 3"],
+            "summary": "Zwei Drehblöcke.",
+        }
+        _use_api_client(monkeypatch, _FakeClient(payload))
+        advice = shoot_plan_advice(self._project_with_open_scenes())
+        assert advice["first"] == [{"scene": 1, "why": "eröffnet den Akt"}]
+        assert advice["day_plan"] == [
+            "Vormittag: Szene 1 im Wald", "Abend: Szene 3",
+        ]
+        assert advice["summary"] == "Zwei Drehblöcke."
+        assert advice["notes"] == []
+
+    def test_first_list_is_capped(self, monkeypatch):
+        payload = {
+            "first": [{"scene": 1, "why": f"reason {i}"} for i in range(20)],
+            "day_plan": [],
+            "summary": "",
+        }
+        _use_api_client(monkeypatch, _FakeClient(payload))
+        advice = shoot_plan_advice(self._project_with_open_scenes())
+        assert len(advice["first"]) == ADVICE_LIMIT
+
+    def test_nothing_open_answers_without_a_model_call(self, monkeypatch):
+        def boom(*args, **kwargs):  # pragma: no cover - must never run
+            raise AssertionError("no model call expected")
+
+        monkeypatch.setattr("monteur.movie.complete", boom)
+        project = _project(1)
+        assign_scene(project, 1, "/f")
+        record_scene_check(project, 1, _check(score=0.9, content=True))
+        advice = shoot_plan_advice(project)
+        assert advice["first"] == [] and advice["day_plan"] == []
+        assert "Nothing left to shoot" in advice["summary"]
+        assert any("without a model call" in n for n in advice["notes"])
+
+    def test_ai_error_passes_through(self, monkeypatch):
+        def fail(*args, **kwargs):
+            raise MonteurAIError("no backend reachable")
+
+        monkeypatch.setattr("monteur.movie.complete", fail)
+        with pytest.raises(MonteurAIError, match="no backend"):
+            shoot_plan_advice(self._project_with_open_scenes())
+
+    def test_unparseable_reply_is_ai_error(self, monkeypatch):
+        monkeypatch.setattr(
+            "monteur.movie.complete", lambda *a, **k: "not json {"
+        )
+        with pytest.raises(MonteurAIError, match="unparseable"):
+            shoot_plan_advice(self._project_with_open_scenes())
+
+
+# --- the assembled film as one MontagePlan --------------------------------------------
+
+
+class TestAssembleMoviePlan:
+    def test_plan_mirrors_the_timeline_clips(self):
+        cache = {"/f": [_sift_report("/f/x.mp4")]}
+        project = _movie([_movie_scene(1, folder="/f")])
+        timeline, notes, plan = assemble_movie(project, sift_cache=cache)
+        video = timeline.video_clips()
+        assert len(plan.entries) == len(video)
+        fps = timeline.fps
+        for entry, clip in zip(plan.entries, video):
+            assert entry.clip_path == clip.source_file
+            assert round(entry.record_start * fps) == clip.record_in
+            assert round(entry.record_end * fps) == clip.record_out
+            assert round(entry.source_start * fps) == clip.source_in
+            assert round(entry.source_end * fps) == clip.source_out
+        assert plan.music_path == ""  # a film keeps set sound
+        assert plan.duration == pytest.approx(timeline.duration / fps)
+        assert plan.notes == notes
+
+    def test_plan_round_trips_and_rebuilds_the_same_timeline(self):
+        from monteur.montage import (
+            montage_to_timeline,
+            plan_from_dict,
+            plan_to_dict,
+        )
+
+        cache = {
+            "/a": [_sift_report("/a/x.mp4")],
+            "/b": [_sift_report("/b/y.mp4")],
+        }
+        project = _movie(
+            [
+                _movie_scene(1, folder="/a", cut_intent="weiche Blende"),
+                _movie_scene(2, folder="/b", cut_intent="schnell"),
+            ]
+        )
+        timeline, _notes, plan = assemble_movie(project, sift_cache=cache)
+        rebuilt = montage_to_timeline(
+            plan_from_dict(plan_to_dict(plan)),
+            fps=25.0, audio="original", canvas="uhd",
+        )
+
+        def clip_key(c):
+            return (
+                c.track, c.kind, c.source_file, c.source_in, c.source_out,
+                c.record_in, c.record_out,
+                c.metadata.get("transition"),
+                c.metadata.get("transition_frames"),
+            )
+
+        assert list(map(clip_key, rebuilt.video_clips())) == list(
+            map(clip_key, timeline.video_clips())
+        )
+        # the set sound rides along identically (audio="original" on A1)
+        assert list(map(clip_key, rebuilt.audio_clips())) == list(
+            map(clip_key, timeline.audio_clips())
+        )
+        assert (rebuilt.width, rebuilt.height) == (timeline.width, timeline.height)
+
+    def test_scene_handover_dissolve_lands_in_the_plan(self):
+        cache = {
+            "/a": [_sift_report("/a/x.mp4")],
+            "/b": [_sift_report("/b/y.mp4")],
+        }
+        project = _movie(
+            [
+                _movie_scene(1, folder="/a", cut_intent="weiche Blende zur nächsten"),
+                _movie_scene(2, folder="/b", cut_intent="harter Schnitt"),
+            ]
+        )
+        timeline, _notes, plan = assemble_movie(project, sift_cache=cache)
+        scene2_start = timeline.markers[1].frame
+        incoming = next(
+            e for e in plan.entries if round(e.record_start * 25.0) == scene2_start
+        )
+        assert incoming.transition > 0
+        assert plan.entries[0].transition == 0.0
+
+
+# --- CLI: movie status carries the shoot plan ----------------------------------------
+
+
+class TestCliMovieStatusShootPlan:
+    def test_status_prints_the_shoot_plan(self, tmp_path, capsys):
+        from monteur.cli import build_parser
+
+        project = _movie(
+            [
+                _movie_scene(1, heading="INT. AUTO - NIGHT"),
+                _movie_scene(2, heading="EXT. WALDWEG - NIGHT", folder="/f"),
+            ]
+        )
+        project.scenes[0].shooting_tips = ["Kamera tief halten"]
+        record_scene_check(
+            project, 2,
+            {"score": 0.5, "content_checked": True, "clips": 3,
+             "avg_usable": 0.9, "findings": []},
+        )
+        save_project(project, tmp_path / "proj")
+        args = build_parser().parse_args(["movie", "status", str(tmp_path / "proj")])
+        args.func(args)
+        out = capsys.readouterr().out
+        assert "Shoot plan:" in out
+        assert "unshot   scene  1  INT. AUTO - NIGHT" in out
+        assert "tip: Kamera tief halten" in out
+        assert "reshoot  scene  2  EXT. WALDWEG - NIGHT" in out
+        assert "no overlap" in out
+        # the scene list marks the weak check
+        assert "[!]  2" in out
+
+    def test_status_checked_ok_says_nothing_left(self, tmp_path, capsys):
+        from monteur.cli import build_parser
+
+        project = _movie([_movie_scene(1, folder="/f")])
+        record_scene_check(
+            project, 1,
+            {"score": 0.9, "content_checked": True, "clips": 3,
+             "avg_usable": 0.9, "findings": []},
+        )
+        save_project(project, tmp_path / "proj")
+        args = build_parser().parse_args(["movie", "status", str(tmp_path / "proj")])
+        args.func(args)
+        out = capsys.readouterr().out
+        assert "nothing left to shoot" in out
+        assert "[✓]  1" in out
+
+    def test_status_advice_degrades_gracefully(self, tmp_path, capsys, monkeypatch):
+        from monteur.cli import build_parser
+
+        def fail(*args, **kwargs):
+            raise MonteurAIError("install the AI extra")
+
+        monkeypatch.setattr("monteur.movie.shoot_plan_advice", fail)
+        save_project(_movie([_movie_scene(1)]), tmp_path / "proj")
+        args = build_parser().parse_args(
+            ["movie", "status", str(tmp_path / "proj"), "--advice"]
+        )
+        args.func(args)  # must NOT raise or exit
+        out = capsys.readouterr().out
+        assert "Shoot plan:" in out  # the deterministic plan still printed
+        assert "no AI advice: install the AI extra" in out
+
+    def test_status_advice_prints_priorities(self, tmp_path, capsys, monkeypatch):
+        from monteur.cli import build_parser
+
+        monkeypatch.setattr(
+            "monteur.movie.shoot_plan_advice",
+            lambda project, plan=None, model=None: {
+                "first": [{"scene": 1, "why": "blockt Akt 1"}],
+                "day_plan": ["Vormittag: Szene 1"],
+                "summary": "Ein Drehtag reicht.",
+                "notes": [],
+            },
+        )
+        save_project(_movie([_movie_scene(1)]), tmp_path / "proj")
+        args = build_parser().parse_args(
+            ["movie", "status", str(tmp_path / "proj"), "--advice"]
+        )
+        args.func(args)
+        out = capsys.readouterr().out
+        assert "first: scene 1 — blockt Akt 1" in out
+        assert "- Vormittag: Szene 1" in out
+        assert "Ein Drehtag reicht." in out

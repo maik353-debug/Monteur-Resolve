@@ -87,6 +87,11 @@ order, each filled from its assigned footage folder, paced by its
 8. **Canvas** — validated against :data:`monteur.montage.CANVASES` exactly
    like ``montage_to_timeline`` (invalid -> ValueError listing the
    presets).
+9. **The film plan** — besides the timeline, :func:`assemble_movie`
+   returns the assembled film as one :class:`monteur.montage.MontagePlan`
+   (no music, entries at absolute film positions, dissolves included).
+   That plan is what gives the assembled film the full plan toolchain:
+   preview, direct export, Resolve build, director's notes.
 """
 
 from __future__ import annotations
@@ -131,6 +136,11 @@ class MovieScene:
     # Stage-2 production tracking (empty in a fresh blueprint):
     status: str = "planned"  # "planned" | "shot" | "assigned"
     folder: str = ""  # footage folder assigned to this scene
+    # The last footage-check result for this slot (the dict
+    # :func:`check_scene_footage` returned, plus the ``"folder"`` it was
+    # checked against — see :func:`record_scene_check`). ``{}`` = never
+    # checked. Persisted in movie.json so the shoot plan survives restarts.
+    last_check: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -630,6 +640,380 @@ def check_scene_footage(scene: MovieScene, reports: list[ClipReport]) -> dict:
     }
 
 
+def record_scene_check(project: MovieProject, scene_number: int, check: dict) -> MovieScene:
+    """Persist a footage-check result on its scene slot (pure mutation).
+
+    Stores ``check`` (a :func:`check_scene_footage` dict) as
+    ``scene.last_check`` together with the ``"folder"`` it was checked
+    against, so :func:`shoot_plan` can ignore a check that no longer
+    matches the assigned folder. Returns the mutated scene; raises
+    ValueError on an unknown scene number. The caller decides whether to
+    :func:`save_project` afterwards.
+    """
+    for scene in project.scenes:
+        if scene.number == scene_number:
+            scene.last_check = {**dict(check or {}), "folder": scene.folder}
+            return scene
+    raise ValueError(
+        f"no scene {scene_number} in this project — it has "
+        f"{len(project.scenes)} scene(s)"
+    )
+
+
+# --- the shoot plan: what still has to be filmed --------------------------------------
+#
+# The blueprint IS the soll-list (scenes + shooting tips) and the checks are
+# the ist-state. shoot_plan folds both into one actionable view — the movie
+# sibling of monteur.coverage's pre-cut shot list, but scene-aware and fully
+# deterministic (no AI, no sifting; at most a cheap directory listing to
+# count take files).
+
+#: Below this mean usable ratio a checked scene reads as reshoot material.
+_WEAK_USABLE = 0.4
+
+#: A content-checked score below this means Claude saw no overlap between
+#: the scene text and the footage (0.5 baseline + 0.25 overlap bonus).
+_OK_SCORE = 0.75
+
+#: How many "shoot these first" entries a validated advice reply may carry.
+ADVICE_LIMIT = 6
+
+#: Structured-output contract for :func:`shoot_plan_advice` — validated
+#: defensively by :func:`_validate_advice` either way (coverage.py pattern).
+ADVICE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "first": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "scene": {"type": "integer"},
+                    "why": {"type": "string"},
+                },
+                "required": ["scene", "why"],
+            },
+            "description": "scenes to shoot first, most urgent first",
+        },
+        "day_plan": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "a practical shooting-day order, one step per line",
+        },
+        "summary": {"type": "string"},
+    },
+    "required": ["first", "day_plan", "summary"],
+}
+
+_ADVICE_SYSTEM = (
+    "You are an experienced first assistant director planning a hobbyist's "
+    "shooting day. You get the screenplay's scene list with each scene's "
+    "production state (unshot, assigned footage, checked ok/weak, thin "
+    "coverage) and the shooting tips. Prioritize practically: group by "
+    "location and light, name what blocks the story first, keep it "
+    "shootable. Never invent scenes that are not in the list."
+)
+
+
+def count_scene_takes(scene: MovieScene) -> int | None:
+    """How many take-named files (``S03_T##``) the scene's folder holds.
+
+    A cheap directory listing — no sifting, no decoding. Returns ``None``
+    when nothing can be counted (no folder assigned, or the folder is not
+    a directory); ``0`` when the folder exists but holds no take files
+    named for THIS scene (the footage may simply be unnamed — unknown is
+    not thin).
+    """
+    folder = scene.folder.strip()
+    if not folder:
+        return None
+    path = Path(folder)
+    try:
+        if not path.is_dir():
+            return None
+        from monteur.media import MEDIA_EXTENSIONS
+
+        take_re = _take_pattern(scene.number)
+        return sum(
+            1
+            for p in path.iterdir()
+            if p.suffix.lower() in MEDIA_EXTENSIONS and take_re.search(p.name)
+        )
+    except OSError:
+        return None
+
+
+def _matching_check(scene: MovieScene, checks_by_scene: dict | None) -> dict | None:
+    """The check to judge ``scene`` by: the caller's override, else the
+    stored ``last_check`` — but only while it still matches the assigned
+    folder (a re-assigned slot must not be judged by a stale check)."""
+    if checks_by_scene and scene.number in checks_by_scene:
+        check = checks_by_scene[scene.number]
+        return dict(check) if isinstance(check, dict) else None
+    check = scene.last_check
+    if (
+        isinstance(check, dict)
+        and check
+        and scene.folder
+        and check.get("folder") == scene.folder
+    ):
+        return check
+    return None
+
+
+def _weak_reasons(check: dict) -> list[str]:
+    """Why a checked scene reads as reshoot material ([] = it holds up).
+
+    Deterministic re-reading of a :func:`check_scene_footage` dict: no
+    clips at all, a mostly-unusable folder, a content check that saw no
+    overlap, or an INT/EXT / DAY/NIGHT mismatch finding.
+    """
+    reasons: list[str] = []
+    clips = int(check.get("clips") or 0)
+    if clips == 0:
+        reasons.append("the folder sift found no usable clips")
+        return reasons
+    avg = float(check.get("avg_usable") or 0.0)
+    if avg < _WEAK_USABLE:
+        reasons.append(f"only {round(avg * 100)}% of the footage is usable")
+    if check.get("content_checked") and float(check.get("score") or 0.0) < _OK_SCORE:
+        reasons.append(
+            "Claude saw no overlap between the footage and the scene "
+            "description"
+        )
+    for finding in check.get("findings") or []:
+        if "double-check" in str(finding):
+            reasons.append(str(finding))
+    return reasons
+
+
+def shoot_plan(project: MovieProject, checks_by_scene: dict | None = None) -> dict:
+    """The scene-aware shoot plan: what still has to be filmed, and why.
+
+    Deterministic — no AI, no sifting. Per scene it combines what the
+    blueprint already knows (slugline, summary, shooting tips) with the
+    production state:
+
+    * ``"unshot"`` — no footage folder assigned;
+    * ``"assigned"`` — a folder, but no (still-matching) check result;
+    * ``"checked-ok"`` / ``"checked-weak"`` — judged from the scene's
+      stored ``last_check`` (:func:`record_scene_check`), or from the
+      optional ``checks_by_scene`` override (``{scene_number: check
+      dict}``, e.g. fresh in-memory results). Weak = no clips, mean
+      usable ratio below 40%, a content check without overlap, or an
+      INT/EXT / DAY/NIGHT mismatch finding — the reasons land in the
+      scene's ``why`` list verbatim.
+
+    Returns::
+
+        {"scenes": [{"number", "heading", "summary", "status", "folder",
+                     "takes",        # take-named files (None = unknowable)
+                     "tips", "why"}, ...],
+         "unshot":  [{"scene", "heading", "summary", "tips"}, ...],
+         "reshoot": [{"scene", "heading", "why", "tips"}, ...],
+         "thin":    [{"scene", "heading", "why", "tips"}, ...],
+         "counts": {"scenes", "unshot", "assigned",
+                    "checked_ok", "checked_weak", "thin"},
+         "percent": int}   # scenes with footage, like project_progress
+
+    ``thin`` lists scenes whose folder holds EXACTLY ONE take file named
+    for them (``S03_T01`` and nothing else) — one take means no
+    alternative in the edit. A folder without take-named files stays out
+    of ``thin``: unnamed footage is unknown, not thin.
+    """
+    scenes_out: list[dict] = []
+    unshot: list[dict] = []
+    reshoot: list[dict] = []
+    thin: list[dict] = []
+    counts = {
+        "scenes": len(project.scenes),
+        "unshot": 0,
+        "assigned": 0,
+        "checked_ok": 0,
+        "checked_weak": 0,
+        "thin": 0,
+    }
+    for scene in project.scenes:
+        tips = list(scene.shooting_tips)
+        why: list[str] = []
+        takes = count_scene_takes(scene)
+        if not scene.folder.strip():
+            status = "unshot"
+            counts["unshot"] += 1
+            unshot.append(
+                {
+                    "scene": scene.number,
+                    "heading": scene.heading,
+                    "summary": scene.summary,
+                    "tips": tips,
+                }
+            )
+        else:
+            check = _matching_check(scene, checks_by_scene)
+            if check is None:
+                status = "assigned"
+                counts["assigned"] += 1
+            else:
+                why = _weak_reasons(check)
+                if why:
+                    status = "checked-weak"
+                    counts["checked_weak"] += 1
+                    reshoot.append(
+                        {
+                            "scene": scene.number,
+                            "heading": scene.heading,
+                            "why": "; ".join(why),
+                            "tips": tips,
+                        }
+                    )
+                else:
+                    status = "checked-ok"
+                    counts["checked_ok"] += 1
+            if takes == 1:
+                thin_why = (
+                    f"only one take named S{scene.number:02d}_T## in the "
+                    "folder — no alternative if it doesn't play"
+                )
+                why = why + [thin_why]
+                counts["thin"] += 1
+                thin.append(
+                    {
+                        "scene": scene.number,
+                        "heading": scene.heading,
+                        "why": thin_why,
+                        "tips": tips,
+                    }
+                )
+        scenes_out.append(
+            {
+                "number": scene.number,
+                "heading": scene.heading,
+                "summary": scene.summary,
+                "status": status,
+                "folder": scene.folder,
+                "takes": takes,
+                "tips": tips,
+                "why": why,
+            }
+        )
+    total = counts["scenes"]
+    shot = total - counts["unshot"]
+    return {
+        "scenes": scenes_out,
+        "unshot": unshot,
+        "reshoot": reshoot,
+        "thin": thin,
+        "counts": counts,
+        "percent": round(100 * shot / total) if total else 0,
+    }
+
+
+def _validate_advice(data, valid_scenes: set[int]) -> dict:
+    """Defensively normalise a parsed advice reply (coverage.py pattern).
+
+    ``first`` entries must name a scene that exists (hallucinated numbers
+    are dropped) and carry a non-empty ``why``; the list is capped at
+    :data:`ADVICE_LIMIT`. ``day_plan`` lines are coerced to non-empty
+    strings (capped at 10); ``summary`` to a string.
+    """
+    if not isinstance(data, dict):
+        data = {}
+    first: list[dict] = []
+    for raw in data.get("first") or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            number = int(raw.get("scene"))
+        except (TypeError, ValueError):
+            continue
+        why = str(raw.get("why") or "").strip()
+        if number not in valid_scenes or not why:
+            continue
+        first.append({"scene": number, "why": why})
+        if len(first) >= ADVICE_LIMIT:
+            break
+    day_plan = [
+        str(line).strip() for line in (data.get("day_plan") or [])
+        if str(line).strip()
+    ][:10]
+    return {
+        "first": first,
+        "day_plan": day_plan,
+        "summary": str(data.get("summary") or ""),
+    }
+
+
+def shoot_plan_advice(
+    project: MovieProject, plan: dict | None = None, model: str = DEFAULT_MODEL
+) -> dict:
+    """Turn the deterministic shoot plan into a prioritized day plan.
+
+    ONE completion through :func:`monteur.ai.complete`
+    (:data:`ADVICE_SCHEMA`): the screenplay's scene list with each
+    scene's production state and shooting tips goes in, a "shoot these
+    first" list plus a practical day plan comes back::
+
+        {"first": [{"scene": int, "why": str}, ...],   # <= ADVICE_LIMIT
+         "day_plan": [str, ...], "summary": str, "notes": [str, ...]}
+
+    Callers MUST degrade gracefully: a :class:`monteur.ai.MonteurAIError`
+    passes through unchanged (no backend, request failed, unparseable
+    reply) and the deterministic plan alone is still a complete answer.
+    A parseable but structurally odd reply is repaired by
+    :func:`_validate_advice` (hallucinated scene numbers dropped, lists
+    capped). When nothing is left to shoot, no model is called at all —
+    the result says so in ``notes``.
+    """
+    plan = plan if plan is not None else shoot_plan(project)
+    if not (plan["unshot"] or plan["reshoot"] or plan["thin"]):
+        return {
+            "first": [],
+            "day_plan": [],
+            "summary": (
+                "Nothing left to shoot — every scene has footage that "
+                "holds up. Assemble the film."
+            ),
+            "notes": ["no open scenes — answered without a model call"],
+        }
+    inventory = [
+        {
+            "scene": s["number"],
+            "heading": s["heading"],
+            "summary": s["summary"],
+            "status": s["status"],
+            "why": s["why"],
+            "takes": s["takes"],
+            "tips": s["tips"],
+        }
+        for s in plan["scenes"]
+    ]
+    prompt = (
+        f"FILM: {project.title}\n"
+        + (f"LOGLINE: {project.logline}\n" if project.logline else "")
+        + "SCENES (with production state):\n"
+        + json.dumps(inventory, ensure_ascii=False)
+        + "\n\nPlan the shoot:\n"
+        "- `first`: the scenes to shoot first, most urgent first — `why` "
+        "names what they unblock (act, story beat, light window); at most "
+        f"{ADVICE_LIMIT} entries, only scene numbers from the list;\n"
+        "- `day_plan`: a practical order for the next shooting day, one "
+        "step per line (group by location/light, reshoots where they fit);\n"
+        "- `summary`: 1-2 sentences on where this production stands."
+    )
+    raw = complete(
+        prompt, system=_ADVICE_SYSTEM, model=model, json_schema=ADVICE_SCHEMA
+    )
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise MonteurAIError(
+            f"the shoot-plan advice came back as unparseable JSON: {raw[:200]!r}"
+        ) from exc
+    result = _validate_advice(data, {s.number for s in project.scenes})
+    result["notes"] = []
+    return result
+
+
 # --- stage 3: the assembly engine ----------------------------------------------------
 #
 # assemble_movie builds the FILM along the screenplay (rules documented in the
@@ -739,12 +1123,24 @@ def assemble_movie(
     canvas: str = "uhd",
     progress: Callable | None = None,
     sift_cache: dict | None = None,
-) -> tuple["Timeline", list[str]]:
-    """Assemble the film along the screenplay: ``(timeline, notes)``.
+) -> tuple["Timeline", list[str], "MontagePlan"]:
+    """Assemble the film along the screenplay: ``(timeline, notes, plan)``.
 
     Scenes in order, each filled from its assigned ``scene.folder``, paced
     by its ``cut_intent``, with the clips' own sound on A1 — the full rules
     live in the module docstring's "Stage 3" section.
+
+    ``plan`` is the assembled film as ONE :class:`monteur.montage.
+    MontagePlan` — no music, entries at their absolute film positions
+    (frame-exact: positions derive from the same rounded frames the
+    timeline uses), each carrying its dissolve (scene handovers included)
+    and vision label, notes shared with ``notes``. It round-trips through
+    :func:`monteur.montage.plan_to_dict` / :func:`plan_from_dict`, and
+    ``montage_to_timeline(plan, fps, audio="original", canvas=...)``
+    reproduces exactly this timeline's clips — which is what plugs the
+    assembled film into every plan-based engine (preview, direct export,
+    Resolve build, director's notes). Only the scene markers live on the
+    timeline alone.
 
     ``progress(index, total, name, stage)`` is called with stage
     ``"scene"`` once per scene (``name`` = the heading, ``index``/``total``
@@ -765,7 +1161,13 @@ def assemble_movie(
     """
     from monteur.media import MonteurMediaError
     from monteur.model import AUDIO, VIDEO, Clip, Marker, Timeline, seconds_to_frames
-    from monteur.montage import CANVASES, CHRONOLOGICAL, plan_montage
+    from monteur.montage import (
+        CANVASES,
+        CHRONOLOGICAL,
+        MontageEntry,
+        MontagePlan,
+        plan_montage,
+    )
     from monteur.sift import sift_directory
 
     if canvas not in CANVASES:
@@ -787,6 +1189,10 @@ def assemble_movie(
     cursor = 0  # record frames: where the next scene starts
     assembled = 0
     prev_transitions = "cuts"  # the previous ASSEMBLED scene's parsed intent
+    # The assembled film as one MontagePlan entry list: mirrors the V1 clips
+    # 1:1, in seconds derived from the SAME rounded frames, so the plan and
+    # the timeline can never drift apart.
+    film_entries: list[MontageEntry] = []
 
     def _forward_sift(index: int, clip_total: int, name: str, stage: str, _report) -> None:
         _notify(progress, index, clip_total, name, stage)
@@ -864,6 +1270,7 @@ def assemble_movie(
             )
         )
         scene_first_clip = len(timeline.clips)
+        scene_first_entry = len(film_entries)
         for entry in plan.entries:
             stem = Path(entry.clip_path).stem
             rec_in = cursor + seconds_to_frames(entry.record_start, fps)
@@ -918,6 +1325,25 @@ def assemble_movie(
                     },
                 )
             )
+            # The same cut in film-plan terms (seconds FROM the rounded
+            # frames — round-tripping through seconds_to_frames yields the
+            # identical timeline positions).
+            film_entries.append(
+                MontageEntry(
+                    clip_path=entry.clip_path,
+                    source_start=src_in / fps,
+                    source_end=src_out / fps,
+                    record_start=rec_in / fps,
+                    record_end=rec_out / fps,
+                    score=entry.score,
+                    transition=(
+                        transition_frames / fps if transition_frames > 0 else 0.0
+                    ),
+                    media_start=entry.media_start,
+                    clip_duration=entry.clip_duration,
+                    label=entry.label,
+                )
+            )
 
         # Between scenes: hard cut by default; a previous scene that asked
         # for dissolves hands over with a dissolve INTO this scene instead.
@@ -928,6 +1354,8 @@ def assemble_movie(
             if frames > 0:
                 incoming.metadata["transition"] = "dissolve"
                 incoming.metadata["transition_frames"] = frames
+                if scene_first_entry < len(film_entries):
+                    film_entries[scene_first_entry].transition = frames / fps
 
         # Dialogue scenes: v1 assembles them visually and says so — no
         # transcript matching, no fake precision (that is monteur assembly).
@@ -948,4 +1376,10 @@ def assemble_movie(
         "scene lengths estimated from the script — trim in Resolve",
     ]
     notes.extend(scene_notes)
-    return timeline, notes
+    film_plan = MontagePlan(
+        music_path="",  # a film keeps set sound — audio mode "original"
+        duration=timeline.duration / fps,
+        entries=film_entries,
+        notes=list(notes),
+    )
+    return timeline, notes, film_plan

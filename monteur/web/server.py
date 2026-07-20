@@ -24,8 +24,8 @@ API (all JSON):
 * ``POST /api/create/revise`` {"plan_json", "folder", "brief",
   "pins"?, "fps"?, "audio"?, "canvas"?, "format"?,
   "elements"?}                                                  -> {"job": id}
-* ``POST /api/create/direct`` {"plan_json", "folder", "music"?,
-  "notes"?}                                                     -> {"job": id}
+* ``POST /api/create/direct`` {"plan_json", "folder" |
+  "folders": [..], "music"?, "notes"?}                          -> {"job": id}
 * ``POST /api/create/direct/apply`` {"plan_json", "folder",
   "review", "fps"?, "audio"?, "canvas"?, "format"?}             -> {"job": id}
 * ``POST /api/create/distill`` {"timeline": {"filename",
@@ -139,10 +139,12 @@ revisions chain) and the parser's ``"rationale"`` line.
 
 ``/api/create/direct`` is the Studio's Director's-notes button
 (:mod:`monteur.director`): the browser sends the current ``"plan_json"``
-plus optional ``"notes"`` context, the job re-sifts the folder through
-the same scan cache, re-analyzes the plan's own music (or the payload's
-``"music"`` override) for the dossier, and asks Claude for a structured
-review of the cut against editing craft. Text-only — it runs over the
+plus optional ``"notes"`` context, the job re-sifts the folder — or every
+folder in a ``"folders"`` list; the Movie card sends its assigned scene
+folders and the SCREENPLAY as the notes context — through the same scan
+cache, re-analyzes the plan's own music (or the payload's ``"music"``
+override) for the dossier, and asks Claude for a structured review of
+the cut against editing craft. Text-only — it runs over the
 user's Claude connection (Claude Code = no extra API cost) and is
 sharpest when a "Let Claude watch" scan annotated the footage. Unlike
 vision this IS a gate: a ``MonteurAIError`` fails the job with its own
@@ -386,20 +388,35 @@ plan_chapters` chapter lines starting at 0:00, tags from
 
 The ``/api/movie/*`` endpoints drive the Studio's Movie view on top of
 :mod:`monteur.movie`. ``load`` and ``assign`` are instant (no job; both
-return the project dict plus its shooting progress). ``new`` drafts a whole
-blueprint with Claude as a ``"movie"`` job — unlike vision this IS a gate: a
-screenplay cannot degrade to offline, so a ``MonteurAIError`` fails the job
-with its message. ``check`` sifts a scene's assigned folder (through the
-same scan cache as build/pick/kit) as a ``"scene-check"`` job, optionally
-lets Claude vision label it (``"see"``, soft-fail as above), and holds the
-footage against the scene text with
+return the project dict, its shooting progress AND the deterministic
+``"shoot_plan"`` — :func:`monteur.movie.shoot_plan`, the scene-aware
+"what still has to be filmed" aggregation the Movie view's Shoot-plan
+panel renders). ``new`` drafts a whole blueprint with Claude as a
+``"movie"`` job — unlike vision this IS a gate: a screenplay cannot
+degrade to offline, so a ``MonteurAIError`` fails the job with its
+message. ``check`` sifts a scene's assigned folder (through the same
+scan cache as build/pick/kit) as a ``"scene-check"`` job, optionally
+lets Claude vision label it (``"see"``, soft-fail as above), and holds
+the footage against the scene text with
 :func:`monteur.movie.check_scene_footage` — honest hints, not verdicts.
-``assemble`` cuts the whole film along the screenplay as a
-``"movie-assemble"`` job (:func:`monteur.movie.assemble_movie`): scenes
-without footage are skipped (noted, never fatal — only a project with NO
-assigned scene fails the job), the per-scene sifts run through the same
-scan cache, and the finished timeline comes back serialized as FCPXML or
-EDL exactly like a build result.
+The check is PERSISTED on its scene slot in movie.json
+(:func:`monteur.movie.record_scene_check`; best-effort — an unwritable
+folder becomes ``"persist_error"``, never a job error) so the shoot plan
+can say checked-ok/checked-weak across restarts, and the job result
+carries the refreshed ``"shoot_plan"``. ``assemble`` cuts the whole film
+along the screenplay as a ``"movie-assemble"`` job
+(:func:`monteur.movie.assemble_movie`): scenes without footage are
+skipped (noted, never fatal — only a project with NO assigned scene
+fails the job), the per-scene sifts run through the same scan cache, and
+the finished timeline comes back serialized as FCPXML or EDL exactly
+like a build result. The result ALSO carries the assembled film as
+``"plan_json"`` (one no-music MontagePlan whose entries sit at absolute
+film positions — assemble_movie rule 9) plus ``"fps"``, ``"canvas"``,
+``"title"`` and the ``"scenes"`` marker list, which is what feeds the
+movie result card the same plan-based toolchain the Create card has:
+``/api/create/preview``, ``/api/thumb`` storyboard, ``/api/create/
+export-video``, ``/api/create/resolve``, ``/api/create/direct`` (with
+``"folders"`` + the screenplay as notes) and ``/api/youtube/*``.
 """
 
 from __future__ import annotations
@@ -1418,9 +1435,11 @@ def _run_direct_job(job: dict, payload: dict) -> None:
     """Daemon-thread body for POST /api/create/direct (director's notes).
 
     Mirrors ``monteur direct`` (cli.cmd_direct): rebuild the plan from the
-    browser's ``"plan_json"``, re-sift the folder through the same scan
-    cache as build/revise (a cache hit after a see-scan carries the vision
-    annotations, which is exactly what makes the review sharp), re-analyze
+    browser's ``"plan_json"``, re-sift the folder — or every folder in a
+    ``"folders"`` list (the Movie card sends its assigned scene folders) —
+    through the same scan cache as build/revise (a cache hit after a
+    see-scan carries the vision annotations, which is exactly what makes
+    the review sharp), re-analyze
     the plan's own music — the payload's ``"music"`` wins when set — and
     ask :func:`monteur.director.direct_cut` for the review. The review is
     a GATE like the movie blueprint: a ``MonteurAIError`` fails the job
@@ -1442,9 +1461,18 @@ def _run_direct_job(job: dict, payload: dict) -> None:
         if not plan.entries:
             raise ValueError("the plan has no entries — nothing to review")
 
-        reports, _cached = _sift_or_cached(job, payload.get("folder", ""))
-        if job["cancel"].is_set():
-            raise SiftCancelled("cancelled")
+        # One folder (the Create card) or several (the Movie card sends
+        # every assigned scene folder): sift each once, concatenate the
+        # reports — the dossier needs all clips the plan cuts from.
+        folders = [
+            str(f).strip() for f in (payload.get("folders") or []) if str(f).strip()
+        ] or [payload.get("folder", "")]
+        reports = []
+        for folder in dict.fromkeys(folders):  # de-duped, order kept
+            folder_reports, _cached = _sift_or_cached(job, folder)
+            reports.extend(folder_reports)
+            if job["cancel"].is_set():
+                raise SiftCancelled("cancelled")
 
         music = None
         music_path = payload.get("music") or plan.music_path
@@ -1840,10 +1868,14 @@ def _movie_module():
 
 
 def _movie_payload(movie, project) -> dict:
-    """The response body every movie endpoint shares: project + progress."""
+    """The response body every movie endpoint shares: project + progress
+    + the deterministic shoot plan (:func:`monteur.movie.shoot_plan` —
+    no AI, no sifting, so it rides along for free and the Movie view's
+    Shoot-plan panel refreshes with every load/assign)."""
     return {
         "project": movie.project_to_dict(project),
         "progress": movie.project_progress(project),
+        "shoot_plan": movie.shoot_plan(project),
     }
 
 
@@ -1926,6 +1958,18 @@ def _run_scene_check_job(job: dict, payload: dict) -> None:
             {"name": Path(r.path).name, "usable_ratio": r.usable_ratio}
             for r in reports
         ]
+        # Persist the check on its scene slot (movie.json) so the shoot
+        # plan can read checked-ok/checked-weak across restarts. Best
+        # effort: an unwritable project folder must not fail a check that
+        # already produced its result.
+        movie.record_scene_check(project, scene.number, result["check"])
+        try:
+            movie.save_project(project, payload.get("project_dir", ""))
+        except OSError as exc:
+            result["persist_error"] = (
+                f"could not remember this check in movie.json: {exc}"
+            )
+        result["shoot_plan"] = movie.shoot_plan(project)
         job["result"] = result
         job["state"] = "done"
     except SiftCancelled:
@@ -1992,10 +2036,12 @@ def _run_movie_assemble_job(job: dict, payload: dict) -> None:
             with _JOBS_LOCK:
                 job["progress"].append(entry)
 
-        timeline, notes = movie.assemble_movie(
+        fps = float(payload.get("fps") or 25)
+        canvas = payload.get("canvas") or "uhd"
+        timeline, notes, film_plan = movie.assemble_movie(
             project,
-            fps=float(payload.get("fps") or 25),
-            canvas=payload.get("canvas") or "uhd",
+            fps=fps,
+            canvas=canvas,
             progress=progress,
             sift_cache=sift_cache,
         )
@@ -2016,17 +2062,37 @@ def _run_movie_assemble_job(job: dict, payload: dict) -> None:
             content, ext = write_fcpxml(timeline), "fcpxml"
         # The engine drops one "Scene N: ..." marker per scene that actually
         # made it into the film (skipped scenes get a note, not a marker).
-        scenes_used = sum(
-            1
+        scene_markers = [
+            marker
             for marker in timeline.markers
             if str(getattr(marker, "name", "")).startswith("Scene ")
-        )
+        ]
+        from monteur.montage import plan_to_dict
+
         job["result"] = {
             "filename": f"{_title_slug(project.title)}.{ext}",
             "content": content,
             "notes": list(notes),
             "duration_seconds": timeline.duration_seconds,
-            "scenes_used": scenes_used,
+            "scenes_used": len(scene_markers),
+            # The assembled film as one plan (movie.assemble_movie rule 9):
+            # this is what plugs the result card into every plan-based
+            # engine — preview, storyboard thumbs, direct export, Resolve
+            # build, director's notes, YouTube prefill.
+            "plan_json": plan_to_dict(film_plan),
+            "fps": fps,
+            "canvas": canvas,
+            "title": project.title,
+            # Scene starts for the storyboard's scene chips (the plan
+            # itself carries no scene structure — the markers do).
+            "scenes": [
+                {
+                    "name": str(marker.name),
+                    "start_seconds": marker.frame / fps,
+                    "note": str(getattr(marker, "note", "") or ""),
+                }
+                for marker in scene_markers
+            ],
         }
         job["state"] = "done"
     except SiftCancelled:
@@ -2728,7 +2794,16 @@ class MonteurHandler(BaseHTTPRequestHandler):
 
     def _create_direct(self) -> None:
         payload = self._read_json()
-        if not payload.get("folder"):
+        folders = payload.get("folders")
+        if folders is not None and not (
+            isinstance(folders, list)
+            and folders
+            and all(str(f or "").strip() for f in folders)
+        ):
+            raise ApiError(
+                400, "'folders' must be a non-empty list of footage folders"
+            )
+        if not payload.get("folder") and not folders:
             raise ApiError(400, "missing 'folder' (path to your footage)")
         if not isinstance(payload.get("plan_json"), dict):
             raise ApiError(

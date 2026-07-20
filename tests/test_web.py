@@ -4016,3 +4016,322 @@ class TestYouTubeApi:
         export_result = source.index('id="cre-export-result"')
         yt_x = source.index('id="yt-x-block"')
         assert render_result < yt_r < export_result < yt_x
+
+
+# --- the shoot plan on the movie endpoints --------------------------------------
+
+
+class TestMovieShootPlanApi:
+    """Every movie payload carries monteur.movie.shoot_plan — deterministic,
+    so load/assign stay instant endpoints."""
+
+    def test_load_carries_the_shoot_plan(self, server, tmp_path):
+        project_dir = _write_movie_project(tmp_path / "proj", folders=["/f1"])
+        data = _post(f"{server}/api/movie/load", {"project_dir": project_dir})
+        sp = data["shoot_plan"]
+        assert sp["counts"]["scenes"] == 3
+        assert sp["percent"] == 33
+        assert [s["status"] for s in sp["scenes"]] == [
+            "assigned", "unshot", "unshot",
+        ]
+        assert [u["scene"] for u in sp["unshot"]] == [2, 3]
+        # the unshot cards carry the scene's shooting tips inline
+        assert sp["unshot"][0]["tips"] == ["Kamera tief halten", "2 Takes"]
+        assert sp["reshoot"] == [] and sp["thin"] == []
+
+    def test_assign_refreshes_the_shoot_plan(self, server, tmp_path):
+        project_dir = _write_movie_project(tmp_path / "proj")
+        data = _post(
+            f"{server}/api/movie/assign",
+            {"project_dir": project_dir, "scene": 2, "folder": "/footage"},
+        )
+        sp = data["shoot_plan"]
+        assert sp["percent"] == 33
+        assert sp["scenes"][1]["status"] == "assigned"
+        assert [u["scene"] for u in sp["unshot"]] == [1, 3]
+
+    def test_thin_scene_shows_up(self, server, tmp_path):
+        footage = tmp_path / "takes"
+        footage.mkdir()
+        (footage / "S01_T01.mp4").touch()
+        project_dir = _write_movie_project(tmp_path / "proj")
+        data = _post(
+            f"{server}/api/movie/assign",
+            {"project_dir": project_dir, "scene": 1, "folder": str(footage)},
+        )
+        sp = data["shoot_plan"]
+        assert sp["scenes"][0]["takes"] == 1
+        assert [t["scene"] for t in sp["thin"]] == [1]
+        assert "S01_T##" in sp["thin"][0]["why"]
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_app_has_the_shoot_plan_panel(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            'id="mov-shootplan"',
+            ">Shoot plan<",
+            'id="mov-sp-line"',
+            'id="mov-sp-fill"',
+            'id="mov-sp-cards"',
+            'id="mov-sp-empty"',
+            # the cards reuse the coverage MUST-card look and scroll to
+            # their scene slot
+            'movSpCard("Unshot", "must"',
+            'movSpCard("Reshoot", "must"',
+            'movSpCard("Thin", "nice"',
+            '"mov-scene-" + item.scene',
+            "Go to scene",
+            # refreshed by load/assign responses and finished checks
+            "movApplyShootPlan(data.shoot_plan)",
+            "movApplyShootPlan(result.shoot_plan)",
+            "movRefreshShootPlan()",
+        ):
+            assert needle in source, needle
+
+
+class TestMovieCheckPersistsApi:
+    """A finished check is remembered on its scene slot (movie.json)."""
+
+    DEMO = str(_DEMO_FOOTAGE)
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+        _clear_scan_cache()
+
+    def test_check_persists_and_carries_the_shoot_plan(self, server, tmp_path):
+        project_dir = _write_movie_project(tmp_path / "proj", folders=[self.DEMO])
+        data = _post(
+            f"{server}/api/movie/check", {"project_dir": project_dir, "scene": 1}
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        result = job["result"]
+        assert "persist_error" not in result
+        # the refreshed shoot plan rides along: demo footage sifts clean,
+        # so the technical-only check reads as checked-ok
+        sp = result["shoot_plan"]
+        assert sp["scenes"][0]["status"] == "checked-ok"
+        assert sp["counts"]["checked_ok"] == 1
+
+        # ... and it survived on disk: a fresh load reads the same state
+        loaded = _post(f"{server}/api/movie/load", {"project_dir": project_dir})
+        stored = loaded["project"]["scenes"][0]["last_check"]
+        assert stored["clips"] == 4
+        assert stored["folder"] == self.DEMO
+        assert loaded["shoot_plan"]["scenes"][0]["status"] == "checked-ok"
+
+    def test_reassigning_makes_the_stored_check_stale(self, server, tmp_path):
+        project_dir = _write_movie_project(tmp_path / "proj", folders=[self.DEMO])
+        data = _post(
+            f"{server}/api/movie/check", {"project_dir": project_dir, "scene": 1}
+        )
+        assert _wait_for_job(server, data["job"])["state"] == "done"
+        moved = _post(
+            f"{server}/api/movie/assign",
+            {"project_dir": project_dir, "scene": 1, "folder": "/elsewhere"},
+        )
+        # the check no longer matches the assigned folder — back to assigned
+        assert moved["shoot_plan"]["scenes"][0]["status"] == "assigned"
+
+
+# --- movie result parity: the assembled film gets the full toolchain -----------
+
+
+class TestMovieResultParityApi:
+    """The movie-assemble result carries the film as plan_json, and that
+    plan feeds the SAME plan-based endpoints the Create card uses."""
+
+    DEMO = str(_DEMO_FOOTAGE)
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+        _clear_scan_cache()
+
+    def _film(self, server, tmp_path, **extra):
+        project_dir = _write_movie_project(
+            tmp_path / "proj", n_scenes=2, folders=[self.DEMO, self.DEMO]
+        )
+        data = _post(
+            f"{server}/api/movie/assemble", {"project_dir": project_dir, **extra}
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        return job["result"]
+
+    def test_assemble_result_carries_the_film_plan(self, server, tmp_path):
+        from monteur.montage import plan_from_dict
+
+        result = self._film(server, tmp_path)
+        plan = plan_from_dict(result["plan_json"])  # must load cleanly
+        assert plan.entries
+        assert plan.music_path == ""  # set sound — audio mode "original"
+        assert plan.duration == pytest.approx(
+            result["duration_seconds"], abs=0.05
+        )
+        assert result["fps"] == 25.0
+        assert result["canvas"] == "uhd"
+        assert result["title"] == "Nachtfahrt"
+        scenes = result["scenes"]
+        assert [s["name"] for s in scenes] == [
+            "Scene 1: INT. AUTO - NIGHT", "Scene 2: EXT. WALDWEG - NIGHT",
+        ]
+        assert scenes[0]["start_seconds"] == 0
+        assert 0 < scenes[1]["start_seconds"] < result["duration_seconds"]
+        # every entry sits inside the film and points at real demo media
+        for entry in plan.entries:
+            assert Path(entry.clip_path).is_file()
+            assert 0 <= entry.record_start < entry.record_end
+
+    def test_movie_plan_previews_end_to_end(self, server, tmp_path):
+        result = self._film(server, tmp_path)
+        data = _post(
+            f"{server}/api/create/preview",
+            {"plan_json": result["plan_json"], "audio": "original", "width": 320},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        status, headers, body = _get_raw(f"{server}{job['result']['url']}")
+        assert status == 200
+        assert headers["Content-Type"] == "video/mp4"
+        assert b"ftyp" in body[:16]
+
+    def test_movie_plan_exports_with_original_audio(
+        self, server, tmp_path, monkeypatch
+    ):
+        import monteur.preview as preview_module
+
+        result = self._film(server, tmp_path)
+        calls = []
+
+        def fake_export(plan, out_path, *, canvas, fps, audio, quality,
+                        progress=None, size=None):
+            calls.append(
+                {"entries": len(plan.entries), "canvas": canvas,
+                 "fps": fps, "audio": audio, "out_path": out_path}
+            )
+            return {"path": out_path, "duration": plan.duration,
+                    "seconds": 1.0, "notes": []}
+
+        monkeypatch.setattr(preview_module, "render_export", fake_export)
+        target = str(tmp_path / "export")
+        data = _post(
+            f"{server}/api/create/export-video",
+            {
+                "plan_json": result["plan_json"],
+                "target_dir": target,
+                "name": "mein-film",
+                "canvas": result["canvas"],
+                "fps": result["fps"],
+                "audio": "original",  # what the movie card always sends
+            },
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert calls and calls[0]["audio"] == "original"
+        assert calls[0]["canvas"] == "uhd"
+        assert calls[0]["out_path"].endswith("mein-film.mp4")
+        assert calls[0]["entries"] == len(result["plan_json"]["entries"])
+
+    def test_youtube_prefill_accepts_the_movie_plan(self, server, tmp_path):
+        result = self._film(server, tmp_path)
+        meta = _post(
+            f"{server}/api/youtube/prefill",
+            {"plan_json": result["plan_json"], "name": result["title"]},
+        )
+        assert meta["title"] == "Nachtfahrt"
+
+    def test_direct_reviews_the_film_from_its_scene_folders(
+        self, server, tmp_path, monkeypatch
+    ):
+        import monteur.director as director_module
+
+        result = self._film(server, tmp_path)
+        seen = {}
+        review = {"score": 71, "verdict": "solide", "praise": [],
+                  "issues": [], "summary": "ok"}
+
+        def fake_direct_cut(plan, reports, music=None, notes=""):
+            seen["entries"] = len(plan.entries)
+            seen["clips"] = sorted(Path(r.path).name for r in reports)
+            seen["notes"] = notes
+            return dict(review)
+
+        monkeypatch.setattr(director_module, "direct_cut", fake_direct_cut)
+        screenplay = "Screenplay: Nachtfahrt\nScene 1 (INT. AUTO - NIGHT): ..."
+        data = _post(
+            f"{server}/api/create/direct",
+            {
+                "plan_json": result["plan_json"],
+                "folders": [self.DEMO, self.DEMO],  # de-duped server-side
+                "notes": screenplay,
+            },
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert job["result"]["review"] == review
+        assert job["result"]["applied"] is False
+        # the dossier saw every clip of the (single, de-duped) scene folder
+        assert seen["clips"] == [
+            "clip_A.mp4", "clip_B.mp4", "clip_C.mp4", "clip_D.mp4",
+        ]
+        # ... and judged against the screenplay the movie card sends
+        assert seen["notes"] == screenplay
+        assert seen["entries"] == len(result["plan_json"]["entries"])
+
+    def test_direct_folders_must_be_a_nonempty_list(self, server):
+        for bad in ([], [""], "not-a-list"):
+            with pytest.raises(urllib.error.HTTPError) as exc_info:
+                _post(
+                    f"{server}/api/create/direct",
+                    {"plan_json": _preview_plan_dict(), "folders": bad},
+                )
+            assert exc_info.value.code == 400
+            assert "folders" in json.loads(exc_info.value.read())["error"]
+
+    def test_direct_without_folder_or_folders_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/create/direct",
+                {"plan_json": _preview_plan_dict()},
+            )
+        assert exc_info.value.code == 400
+        assert "folder" in json.loads(exc_info.value.read())["error"]
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_app_movie_result_card_has_the_full_toolchain(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            # preview player
+            'id="mov-preview-btn"',
+            'id="mov-preview-video"',
+            # storyboard with scene chips
+            'id="mov-storyboard"',
+            'id="mov-sb-board"',
+            "sbEntryCard(entry, i, true)",
+            # Build in DaVinci Resolve
+            'id="mov-resolve-btn"',
+            # Export video + YouTube upload
+            'id="mov-export-block"',
+            'id="mov-export-dir"',
+            'id="mov-export-name"',
+            'id="mov-export-btn"',
+            'id="yt-m-block"',
+            'id="yt-m-btn"',
+            '"yt-m"',
+            # director's notes against the screenplay
+            'id="mov-dir-btn"',
+            'id="mov-dir-result"',
+            "movScreenplayContext",
+            'renderDirectorReview((result && result.review) || {}, "mov-dir")',
+            # the film plan always plays its own sound
+            'audio: "original"',
+        ):
+            assert needle in source, needle
+        # the movie result card keeps the download button as its last act
+        card = source.index('id="mov-asm-result"')
+        download = source.index('id="mov-asm-download"')
+        assert card < download

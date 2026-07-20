@@ -1767,10 +1767,114 @@ svg text.axis {
               <h3 id="mov-asm-result-title" tabindex="-1">Your film is ready</h3>
               <div class="result-stats" id="mov-asm-summary"></div>
               <ul class="plan-notes" id="mov-asm-notes"></ul>
-              <button class="btn primary" id="mov-asm-download" type="button">Download timeline<span class="spin" aria-hidden="true"></span></button>
+
+              <div class="preview-block" id="mov-preview">
+                <div class="path-row">
+                  <button class="btn" id="mov-preview-btn" type="button">Preview this film<span class="spin" aria-hidden="true"></span></button>
+                  <span class="help-small">A small real render of the assembled film — scene sound included, right here in the browser.</span>
+                </div>
+                <div id="mov-preview-panel"></div>
+                <p class="scan-note" id="mov-preview-msg" role="status" hidden></p>
+                <video class="preview-player" id="mov-preview-video" controls preload="metadata" hidden></video>
+              </div>
+
+              <div class="kit-block" id="mov-storyboard" hidden>
+                <p class="seg-heading">Storyboard</p>
+                <p class="help-small">Every assembled take in film order — scene markers show where each screenplay scene starts.</p>
+                <div class="sb-board" id="mov-sb-board"></div>
+              </div>
+
+              <div class="path-row" style="margin-top: 14px;">
+                <button class="btn primary" id="mov-resolve-btn" type="button">Build in DaVinci Resolve<span class="spin" aria-hidden="true"></span></button>
+                <span class="help-small">Puts the film into your open Resolve project as a real timeline — grade and fine-cut there. Scene markers live in the downloaded file.</span>
+              </div>
+              <div id="mov-resolve-panel"></div>
+              <p class="scan-note" id="mov-resolve-msg" role="status" hidden></p>
+              <p class="scan-note" id="mov-resolve-done" role="status" hidden></p>
+
+              <div class="render-block" id="mov-export-block">
+                <p class="seg-heading">Export video</p>
+                <p class="help-small">The finished film as an MP4 from Monteur&rsquo;s own engine — no Resolve needed. Scene sound stays as recorded.</p>
+                <div class="path-row">
+                  <label class="sr-only" for="mov-export-dir">Folder for the finished video</label>
+                  <input type="text" id="mov-export-dir" placeholder="/Users/you/Movies/mein-film/monteur-export" spellcheck="false" autocomplete="off">
+                  <button class="btn ghost mov-browse" id="mov-browse-export" type="button">Browse&hellip;</button>
+                </div>
+                <div class="export-bar" aria-label="Export video">
+                  <label class="export-field">File name
+                    <input type="text" id="mov-export-name" spellcheck="false" autocomplete="off">
+                  </label>
+                  <div class="export-field">
+                    <span id="mov-export-quality-label">Quality</span>
+                    <select id="mov-export-quality" aria-labelledby="mov-export-quality-label">
+                      <option value="high" selected>High (upload master)</option>
+                      <option value="medium">Medium (smaller file)</option>
+                    </select>
+                  </div>
+                  <button class="btn primary" id="mov-export-btn" type="button">Export video<span class="spin" aria-hidden="true"></span></button>
+                </div>
+                <div id="mov-export-panel"></div>
+                <p class="scan-note" id="mov-export-msg" role="status" hidden></p>
+                <div id="mov-export-result" hidden>
+                  <p class="render-ready" id="mov-export-done" role="status"></p>
+                  <ul class="plan-notes" id="mov-export-notes"></ul>
+                  <div class="render-block yt-upload" id="yt-m-block">
+                    <p class="seg-heading">Upload to YouTube</p>
+                    <p class="help-small" id="yt-m-hint" hidden>Not connected yet &mdash; <a href="#" id="yt-m-settings">Connect in settings &rarr;</a></p>
+                    <div id="yt-m-form" hidden>
+                      <label class="yt-label" for="yt-m-title">Title</label>
+                      <input type="text" class="yt-text" id="yt-m-title" spellcheck="false" autocomplete="off">
+                      <label class="yt-label" for="yt-m-desc">Description</label>
+                      <textarea class="yt-text" id="yt-m-desc" rows="4" spellcheck="false"></textarea>
+                      <label class="yt-label" for="yt-m-tags">Tags (comma-separated)</label>
+                      <input type="text" class="yt-text" id="yt-m-tags" spellcheck="false" autocomplete="off">
+                      <div class="export-bar">
+                        <div class="export-field">
+                          <span id="yt-m-privacy-label">Visibility</span>
+                          <select id="yt-m-privacy" aria-labelledby="yt-m-privacy-label">
+                            <option value="private" selected>Private (review first)</option>
+                            <option value="unlisted">Unlisted</option>
+                          </select>
+                        </div>
+                        <button class="btn primary" id="yt-m-btn" type="button">Upload to YouTube<span class="spin" aria-hidden="true"></span></button>
+                      </div>
+                      <div class="job-bar" id="yt-m-bar" hidden><span></span></div>
+                      <p class="scan-note" id="yt-m-msg" role="status" hidden></p>
+                      <p class="render-ready" id="yt-m-done" role="status" hidden></p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="kit-block" id="mov-direct">
+                <p class="seg-heading">Director&rsquo;s notes — Claude reviews the film</p>
+                <p class="help-small">Claude reviews the assembled film against your SCREENPLAY — scene by scene, craft first, honest about what to reshoot or trim.</p>
+                <div class="path-row">
+                  <button class="btn" id="mov-dir-btn" type="button">Get director&rsquo;s notes<span class="spin" aria-hidden="true"></span></button>
+                </div>
+                <div id="mov-dir-panel"></div>
+                <p class="scan-note" id="mov-dir-msg" role="status" hidden></p>
+                <div id="mov-dir-result" hidden>
+                  <div class="result-stats dir-score" id="mov-dir-scorebox"></div>
+                  <p class="rev-rationale" id="mov-dir-verdict"></p>
+                  <ul class="plan-notes" id="mov-dir-praise"></ul>
+                  <div id="mov-dir-issues"></div>
+                  <p class="help-small" id="mov-dir-summary" style="margin-top: 8px;"></p>
+                </div>
+              </div>
+
+              <button class="btn primary" id="mov-asm-download" type="button" style="margin-top: 14px;">Download timeline<span class="spin" aria-hidden="true"></span></button>
               <p class="help-small">Import it in Resolve via File → Import → Timeline… and point Resolve at your footage folders.</p>
             </div>
           </div>
+        </section>
+        <section class="card" id="mov-shootplan" hidden aria-labelledby="mov-sp-h">
+          <h3 class="seg-heading" id="mov-sp-h">Shoot plan</h3>
+          <p class="help-small">What still has to be filmed — the screenplay is the soll-list, your footage checks are the ist-state.</p>
+          <p class="cov-label" id="mov-sp-line" role="status"></p>
+          <div class="meter"><span id="mov-sp-fill"></span></div>
+          <p class="help-small" id="mov-sp-empty" hidden>Nothing left to shoot — every scene has footage that holds up. Assemble the film above.</p>
+          <div class="cov-cards" id="mov-sp-cards"></div>
         </section>
         <div id="mov-scenes"></div>
       </div>
@@ -5092,7 +5196,10 @@ function sbDipCard(dipIndex, dip, titles) {
   return card;
 }
 
-function sbEntryCard(entry, i) {
+/* `noPin` (optional) renders the card without the pin toggle — the Movie
+   storyboard shows the assembled film, which has no revision loop to pin
+   for. The Create board keeps its pins untouched. */
+function sbEntryCard(entry, i, noPin) {
   var card = el("div", "sb-card");
   var wrap = el("div", "sb-thumb-wrap");
   var img = document.createElement("img");
@@ -5111,6 +5218,10 @@ function sbEntryCard(entry, i) {
   var meta = el("div", "sb-meta");
   meta.appendChild(el("span", "sb-name", baseName(entry.clip_path)));
   if (entry.label) meta.appendChild(el("span", "sb-label", String(entry.label)));
+  if (noPin) {
+    card.appendChild(meta);
+    return card;
+  }
   var stamp = revPinStamp(entry);
   var pinned = rev.pins.indexOf(stamp) !== -1;
   card.classList.toggle("pinned", pinned);
@@ -5325,22 +5436,27 @@ function resetDirectorNotes() {
   $("cre-dir-msg").hidden = true;
 }
 
-function renderDirectorReview(review) {
-  dnotes.review = review || {};
-  var box = $("cre-dir-scorebox");
+/* renders a director's review into a "<prefix>-*" block. The default is the
+   Create card ("cre-dir" — the only block with an Apply button, so only
+   there the review is remembered as the apply payload); the Movie card
+   passes "mov-dir" and shares everything else unchanged. */
+function renderDirectorReview(review, prefix) {
+  prefix = prefix || "cre-dir";
+  if (prefix === "cre-dir") dnotes.review = review || {};
+  var box = $(prefix + "-scorebox");
   clear(box);
   var stat = el("div", "result-stat");
   stat.appendChild(el("div", "rs-num", String(Math.round(review.score || 0))));
   stat.appendChild(el("div", "rs-label", "of 100"));
   box.appendChild(stat);
-  $("cre-dir-verdict").textContent = String(review.verdict || "");
-  $("cre-dir-verdict").hidden = !review.verdict;
-  var praise = $("cre-dir-praise");
+  $(prefix + "-verdict").textContent = String(review.verdict || "");
+  $(prefix + "-verdict").hidden = !review.verdict;
+  var praise = $(prefix + "-praise");
   clear(praise);
   (review.praise || []).forEach(function (line) {
     praise.appendChild(el("li", null, String(line)));
   });
-  var host = $("cre-dir-issues");
+  var host = $(prefix + "-issues");
   clear(host);
   var replacements = 0;
   (review.issues || []).forEach(function (issue) {
@@ -5360,10 +5476,11 @@ function renderDirectorReview(review) {
   if (!(review.issues || []).length) {
     host.appendChild(el("p", "help-small", "No issues — Claude would ship this cut as it is."));
   }
-  $("cre-dir-summary").textContent = String(review.summary || "");
-  $("cre-dir-summary").hidden = !review.summary;
-  $("cre-dir-apply").hidden = replacements === 0;
-  $("cre-dir-result").hidden = false;
+  $(prefix + "-summary").textContent = String(review.summary || "");
+  $(prefix + "-summary").hidden = !review.summary;
+  var applyBtn = $(prefix + "-apply"); // the Movie block reviews only — no apply
+  if (applyBtn) applyBtn.hidden = replacements === 0;
+  $(prefix + "-result").hidden = false;
 }
 
 $("cre-dir-btn").addEventListener("click", function () {
@@ -5719,8 +5836,11 @@ function ytEls(prefix) {
 }
 
 /* called when a success card renders: remember the finished file's path,
-   show connect-hint or form, and prefill empty fields from the plan */
-function initYouTubeUpload(prefix, path) {
+   show connect-hint or form, and prefill empty fields from the plan.
+   `source` (optional) overrides where the prefill reads from: {planJson,
+   name} — the Create blocks default to the wizard's current plan + draft
+   name, the Movie block passes the assembled film's plan and title. */
+function initYouTubeUpload(prefix, path, source) {
   var els = ytEls(prefix);
   ytState[prefix] = ytState[prefix] || {};
   ytState[prefix].path = path || "";
@@ -5729,11 +5849,13 @@ function initYouTubeUpload(prefix, path) {
   els.msg.hidden = true;
   els.done.hidden = true;
   els.bar.hidden = true;
+  var planJson = source ? source.planJson : rev.planJson;
+  var name = source ? String(source.name || "") : $("cre-draft-name").value.trim();
   api("/api/youtube/status").then(function (s) {
     els.hint.hidden = !!s.connected;
     els.form.hidden = !s.connected;
-    if (!s.connected || !rev.planJson) return;
-    var body = { plan_json: rev.planJson, name: $("cre-draft-name").value.trim() };
+    if (!s.connected || !planJson) return;
+    var body = { plan_json: planJson, name: name };
     api("/api/youtube/prefill", { method: "POST", body: body }).then(function (meta) {
       if (!els.title.value.trim()) els.title.value = meta.title || "";
       if (!els.desc.value.trim()) els.desc.value = meta.description || "";
@@ -5833,7 +5955,7 @@ function startYouTubeUpload(prefix) {
   });
 }
 
-["yt-x", "yt-r"].forEach(function (prefix) {
+["yt-x", "yt-r", "yt-m"].forEach(function (prefix) {
   $(prefix + "-btn").addEventListener("click", function () {
     startYouTubeUpload(prefix);
   });
@@ -6030,13 +6152,59 @@ function setMovCheckBusy(entry, on) {
 var movAsm = {
   busy: false,
   format: "fcpxml",  // download format, like the Create wizard's toggle
-  result: null       // {data, format} from the last finished assemble job
+  result: null,      // {data, format} from the last finished assemble job
+  planJson: null,    // the assembled film's MontagePlan (result.plan_json)
+  scenes: [],        // scene markers [{name, start_seconds, note}] for the board
+  fps: 25,           // what the film was assembled at (preview/export/Resolve)
+  canvas: "uhd",
+  title: ""
 };
 
 var movAsmPanel = makeJobPanel("mov-asm-panel", {
   starting: "Starting the assemble…",
   working: "Assembling your film…"
 });
+
+/* the movie result card's plan-based toolchain — same endpoints as the
+   Create card (preview/export-video/resolve/direct), fed by the assemble
+   result's plan_json instead of the wizard's rev.planJson */
+var movPreviewPanel = makeJobPanel("mov-preview-panel", {
+  starting: "Starting the preview render…",
+  working: "Rendering the preview…"
+});
+var movExportPanel = makeJobPanel("mov-export-panel", {
+  starting: "Starting the export…",
+  working: "Rendering your film…"
+});
+var movResolvePanel = makeJobPanel("mov-resolve-panel", {
+  starting: "Talking to DaVinci Resolve…",
+  working: "Building the timeline in Resolve…"
+});
+var movDirPanel = makeJobPanel("mov-dir-panel", {
+  starting: "Preparing the dossier…",
+  working: "Claude is reviewing your film…"
+});
+
+function setMovPreviewBusy(on) {
+  var btn = $("mov-preview-btn");
+  btn.classList.toggle("busy", on);
+  btn.disabled = on;
+}
+function setMovExportBusy(on) {
+  var btn = $("mov-export-btn");
+  btn.classList.toggle("busy", on);
+  btn.disabled = on;
+}
+function setMovResolveBusy(on) {
+  var btn = $("mov-resolve-btn");
+  btn.classList.toggle("busy", on);
+  btn.disabled = on;
+}
+function setMovDirBusy(on) {
+  var btn = $("mov-dir-btn");
+  btn.classList.toggle("busy", on);
+  btn.disabled = on;
+}
 
 /* the button needs >= 1 assigned scene AND no running assemble */
 function movUpdateAssemble() {
@@ -6065,6 +6233,66 @@ function setMovFormat(fmt) {
 $("mov-fmt-edl").addEventListener("click", function () { setMovFormat("edl"); });
 $("mov-fmt-fcpxml").addEventListener("click", function () { setMovFormat("fcpxml"); });
 
+/* reset the plan-based blocks (preview/storyboard/export/Resolve/notes) —
+   called before a new assemble and when another project opens */
+function movResetResultTools() {
+  if (movPreviewPanel.running()) { movPreviewPanel.stop(); setMovPreviewBusy(false); }
+  if (movExportPanel.running()) { movExportPanel.stop(); setMovExportBusy(false); }
+  if (movResolvePanel.running()) { movResolvePanel.stop(); setMovResolveBusy(false); }
+  if (movDirPanel.running()) { movDirPanel.stop(); setMovDirBusy(false); }
+  var video = $("mov-preview-video");
+  try { video.pause(); } catch (e) { /* not loaded yet — nothing to pause */ }
+  video.removeAttribute("src");
+  video.load();
+  video.hidden = true;
+  $("mov-preview-btn").hidden = false;
+  $("mov-preview-msg").hidden = true;
+  clear($("mov-sb-board"));
+  $("mov-storyboard").hidden = true;
+  $("mov-export-msg").hidden = true;
+  $("mov-export-result").hidden = true;
+  $("mov-resolve-msg").hidden = true;
+  $("mov-resolve-done").hidden = true;
+  $("mov-dir-msg").hidden = true;
+  $("mov-dir-result").hidden = true;
+}
+
+/* the movie storyboard: the Create board's cards (sbEntryCard, no pin) in
+   film order, with a scene chip wherever a screenplay scene starts */
+function movRenderStoryboard() {
+  var board = $("mov-sb-board");
+  clear(board);
+  var plan = movAsm.planJson || {};
+  var entries = ((plan.entries || []).slice()).sort(function (a, b) {
+    return (a.record_start || 0) - (b.record_start || 0);
+  });
+  var scenes = (movAsm.scenes || []).slice().sort(function (a, b) {
+    return (a.start_seconds || 0) - (b.start_seconds || 0);
+  });
+  var sceneIndex = 0;
+  entries.forEach(function (entry, i) {
+    while (sceneIndex < scenes.length &&
+           (scenes[sceneIndex].start_seconds || 0) <= (entry.record_start || 0) + 0.001) {
+      var chip = el("div", "sb-act", String(scenes[sceneIndex].name || ""));
+      if (scenes[sceneIndex].note) chip.title = String(scenes[sceneIndex].note);
+      board.appendChild(chip);
+      sceneIndex += 1;
+    }
+    board.appendChild(sbEntryCard(entry, i, true));
+  });
+  $("mov-storyboard").hidden = entries.length === 0;
+}
+
+/* fill the export row's defaults once a film is assembled */
+function movPrepareExportRow() {
+  if (!$("mov-export-dir").value.trim() && mov.dir) {
+    $("mov-export-dir").value = joinFolder(mov.dir, "monteur-export");
+  }
+  if (!$("mov-export-name").value.trim()) {
+    $("mov-export-name").value = sanitizeFileName(movAsm.title || "monteur_film");
+  }
+}
+
 function movRenderAssembleResult(data) {
   var summary = $("mov-asm-summary");
   clear(summary);
@@ -6083,6 +6311,8 @@ function movRenderAssembleResult(data) {
   (data.notes || []).forEach(function (note) {
     notes.appendChild(el("li", null, String(note)));
   });
+  movRenderStoryboard();
+  movPrepareExportRow();
   $("mov-asm-result").hidden = false;
 }
 
@@ -6097,13 +6327,20 @@ function startMovAssemble(andThen) {
   rememberFps(body.fps);
   $("mov-asm-msg").hidden = true;
   $("mov-asm-result").hidden = true;
+  movResetResultTools(); // a new film makes preview/export/review stale
   setMovAsmBusy(true);
   api("/api/movie/assemble", { method: "POST", body: body }).then(function (data) {
     movAsmPanel.start(data.job, {
       onDone: function (result) {
         setMovAsmBusy(false);
         movAsm.result = { data: result || {}, format: body.format };
+        movAsm.planJson = (result && result.plan_json) || null;
+        movAsm.scenes = (result && result.scenes) || [];
+        movAsm.fps = (result && result.fps) || body.fps;
+        movAsm.canvas = (result && result.canvas) || body.canvas;
+        movAsm.title = (result && result.title) || "";
         movRenderAssembleResult(result || {});
+        movRefreshShootPlan(); // folder contents may have changed since load
         $("mov-asm-result-title").focus();
         if (andThen) andThen(result || {});
       },
@@ -6140,6 +6377,269 @@ $("mov-asm-download").addEventListener("click", function () {
   });
 });
 
+/* ---- the film's toolchain: preview / export / Resolve / director ------
+   All four feed the assemble result's plan_json into the SAME plan-based
+   endpoints the Create card uses. A film plan carries no music, so the
+   audio mode is always "original" — the scenes' own sound. */
+
+function movPreviewFilm() {
+  if (movPreviewPanel.running() || movAsm.busy) return;
+  if (!movAsm.planJson) return;
+  var body = { plan_json: movAsm.planJson, audio: "original", width: 640 };
+  $("mov-preview-msg").hidden = true;
+  setMovPreviewBusy(true);
+  api("/api/create/preview", { method: "POST", body: body }).then(function (data) {
+    movPreviewPanel.start(data.job, {
+      onDone: function (result) {
+        setMovPreviewBusy(false);
+        var url = (result && result.url) || null;
+        if (!url) {
+          creNote("mov-preview-msg", "The preview rendered but returned no file — try again.", true);
+          return;
+        }
+        var video = $("mov-preview-video");
+        video.src = url;
+        video.hidden = false;
+        $("mov-preview-btn").hidden = true;
+      },
+      onCancelled: function () {
+        setMovPreviewBusy(false);
+        creNote("mov-preview-msg", "Preview cancelled — your film is untouched.");
+      },
+      onError: function (message) {
+        setMovPreviewBusy(false);
+        creNote("mov-preview-msg", message, true);
+      }
+    });
+  }).catch(function (err) {
+    setMovPreviewBusy(false);
+    creNote("mov-preview-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+$("mov-preview-btn").addEventListener("click", movPreviewFilm);
+
+function movExportFilm() {
+  if (movExportPanel.running() || movAsm.busy) return;
+  if (!movAsm.planJson) {
+    creNote("mov-export-msg", "Assemble your film first — the export renders the finished plan.", true);
+    return;
+  }
+  var dir = $("mov-export-dir").value.trim();
+  if (!dir) {
+    creNote("mov-export-msg", "Pick a folder for the finished video first — Browse… or paste its path.", true);
+    $("mov-export-dir").focus();
+    return;
+  }
+  var body = {
+    plan_json: movAsm.planJson,
+    target_dir: dir,
+    name: sanitizeFileName($("mov-export-name").value.trim() || movAsm.title || "monteur_film"),
+    quality: $("mov-export-quality").value,
+    canvas: movAsm.canvas,   // the film renders at the shape it was assembled for
+    fps: movAsm.fps,
+    audio: "original"
+  };
+  $("mov-export-msg").hidden = true;
+  $("mov-export-result").hidden = true;
+  setMovExportBusy(true);
+  api("/api/create/export-video", { method: "POST", body: body }).then(function (data) {
+    movExportPanel.start(data.job, {
+      onDone: function (result) {
+        setMovExportBusy(false);
+        $("mov-export-done").textContent = "Your film is ready: " + String((result && result.path) || dir);
+        var notes = $("mov-export-notes");
+        clear(notes);
+        ((result && result.notes) || []).forEach(function (note) {
+          notes.appendChild(el("li", null, String(note)));
+        });
+        $("mov-export-result").hidden = false;
+        initYouTubeUpload("yt-m", String((result && result.path) || ""), {
+          planJson: movAsm.planJson,
+          name: movAsm.title
+        });
+        toast("Film exported with Monteur's own engine.", "success");
+      },
+      onCancelled: function () {
+        setMovExportBusy(false);
+        creNote("mov-export-msg", "Export cancelled — your film is untouched.");
+      },
+      onError: function (message) {
+        setMovExportBusy(false);
+        creNote("mov-export-msg", message, true);
+      }
+    });
+  }).catch(function (err) {
+    setMovExportBusy(false);
+    creNote("mov-export-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+$("mov-export-btn").addEventListener("click", movExportFilm);
+$("mov-browse-export").addEventListener("click", function () {
+  browsePath("folder", "mov-export-dir", "mov-browse-export");
+});
+
+function movBuildFilmInResolve() {
+  if (movResolvePanel.running() || movAsm.busy) return;
+  if (!movAsm.planJson) return;
+  var body = {
+    plan_json: movAsm.planJson,
+    fps: movAsm.fps,
+    canvas: movAsm.canvas,
+    audio: "original"
+  };
+  $("mov-resolve-msg").hidden = true;
+  $("mov-resolve-done").hidden = true;
+  setMovResolveBusy(true);
+  api("/api/create/resolve", { method: "POST", body: body }).then(function (data) {
+    movResolvePanel.start(data.job, {
+      onDone: function (result) {
+        setMovResolveBusy(false);
+        creNote("mov-resolve-done", "Timeline “" +
+          String((result && result.timeline) || movAsm.title || "Monteur Movie") +
+          "” is now in your open Resolve project — switch over and press play.");
+        toast("Film built in DaVinci Resolve.", "success");
+      },
+      onCancelled: function () {
+        setMovResolveBusy(false);
+        creNote("mov-resolve-msg", "Resolve build cancelled.");
+      },
+      onError: function (message) {
+        setMovResolveBusy(false);
+        var text = String(message);
+        if (!/Preferences/i.test(text)) {
+          text += " Make sure DaVinci Resolve is running with scripting enabled " +
+            "(Preferences > System > General > External scripting using: Local) — " +
+            "or use the file download below.";
+        }
+        creNote("mov-resolve-msg", text, true);
+      }
+    });
+  }).catch(function (err) {
+    setMovResolveBusy(false);
+    creNote("mov-resolve-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+$("mov-resolve-btn").addEventListener("click", movBuildFilmInResolve);
+
+/* the review context: the screenplay itself — logline plus every scene's
+   slugline and summary, so Claude judges the film against the script */
+function movScreenplayContext() {
+  var p = mov.project;
+  if (!p) return "";
+  var lines = ["Screenplay: " + (p.title || "Untitled")];
+  if (p.logline) lines.push("Logline: " + p.logline);
+  (p.scenes || []).forEach(function (scene) {
+    var line = "Scene " + scene.number + " (" + scene.heading + ")";
+    if (scene.summary) line += ": " + scene.summary;
+    lines.push(line);
+  });
+  return lines.join("\n");
+}
+
+function movDirectorNotes() {
+  if (movDirPanel.running() || movAsm.busy) return;
+  if (!movAsm.planJson) return;
+  var folders = [];
+  ((mov.project && mov.project.scenes) || []).forEach(function (scene) {
+    var folder = String(scene.folder || "").trim();
+    if (folder && folders.indexOf(folder) === -1) folders.push(folder);
+  });
+  if (!folders.length) return;
+  var body = {
+    plan_json: movAsm.planJson,
+    folders: folders,
+    notes: movScreenplayContext()
+  };
+  $("mov-dir-msg").hidden = true;
+  $("mov-dir-result").hidden = true;
+  setMovDirBusy(true);
+  api("/api/create/direct", { method: "POST", body: body }).then(function (data) {
+    movDirPanel.start(data.job, {
+      onDone: function (result) {
+        setMovDirBusy(false);
+        renderDirectorReview((result && result.review) || {}, "mov-dir");
+      },
+      onCancelled: function () {
+        setMovDirBusy(false);
+        creNote("mov-dir-msg", "Review cancelled — your film is untouched.");
+      },
+      onError: function (message) {
+        setMovDirBusy(false);
+        creNote("mov-dir-msg", message, true);
+      }
+    });
+  }).catch(function (err) {
+    setMovDirBusy(false);
+    creNote("mov-dir-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+$("mov-dir-btn").addEventListener("click", movDirectorNotes);
+
+/* ---- the shoot plan panel (deterministic — refreshed by every
+   load/assign response and by every finished check) ---- */
+
+function movSpCard(kind, badgeClass, item) {
+  var card = el("div", "cov-card " + badgeClass);
+  var top = el("div", null);
+  top.appendChild(el("span", "cov-badge " + badgeClass, kind));
+  top.appendChild(el("span", "cov-shot", "Scene " + item.scene + " — " + String(item.heading || "")));
+  card.appendChild(top);
+  var why = item.why || item.summary;
+  if (why) card.appendChild(el("div", "cov-why", String(why)));
+  (item.tips || []).forEach(function (tip) {
+    card.appendChild(el("div", "cov-tip", "Shoot: " + String(tip)));
+  });
+  var jump = el("button", "link-btn", "Go to scene " + item.scene + " →");
+  jump.type = "button";
+  jump.addEventListener("click", function () {
+    var target = $("mov-scene-" + item.scene);
+    if (!target) return;
+    target.scrollIntoView({ block: "center" });
+    var input = $("mov-folder-" + item.scene);
+    if (input) input.focus();
+  });
+  card.appendChild(jump);
+  return card;
+}
+
+function movApplyShootPlan(sp) {
+  mov.shootPlan = sp || null;
+  var panel = $("mov-shootplan");
+  if (!sp || !mov.project) { panel.hidden = true; return; }
+  var counts = sp.counts || {};
+  var parts = [];
+  if (counts.unshot) parts.push(counts.unshot + " unshot");
+  if (counts.checked_weak) parts.push(counts.checked_weak + " to reshoot");
+  if (counts.thin) parts.push(counts.thin + " thin");
+  if (counts.checked_ok) parts.push(counts.checked_ok + " checked ok");
+  $("mov-sp-line").textContent =
+    (sp.percent || 0) + "% of scenes have footage" +
+    (parts.length ? " · " + parts.join(" · ") : "");
+  $("mov-sp-fill").style.width = Math.max(0, Math.min(100, sp.percent || 0)) + "%";
+  var cards = $("mov-sp-cards");
+  clear(cards);
+  (sp.unshot || []).forEach(function (item) { cards.appendChild(movSpCard("Unshot", "must", item)); });
+  (sp.reshoot || []).forEach(function (item) { cards.appendChild(movSpCard("Reshoot", "must", item)); });
+  (sp.thin || []).forEach(function (item) { cards.appendChild(movSpCard("Thin", "nice", item)); });
+  var open = (sp.unshot || []).length + (sp.reshoot || []).length + (sp.thin || []).length;
+  $("mov-sp-empty").hidden = open !== 0;
+  panel.hidden = false;
+}
+
+/* re-pull the project (and with it the shoot plan) without rebuilding the
+   scene cards — used after an assemble, when checks may have persisted */
+function movRefreshShootPlan() {
+  if (!mov.dir) return;
+  api("/api/movie/load", { method: "POST", body: { project_dir: mov.dir } })
+    .then(function (data) {
+      mov.project = data.project;
+      mov.progress = data.progress;
+      movRenderProgress();
+      movApplyShootPlan(data.shoot_plan);
+    })
+    .catch(function () { /* the panel is a convenience — never an error state */ });
+}
+
 var MOV_CANVASES = [
   ["uhd", "Wide 16:9 · 4K"],
   ["hd", "Wide 16:9 · HD"],
@@ -6163,6 +6663,10 @@ movUpdateAssemble();
 function movStopJobs() {
   if (movNewPanel.running()) { movNewPanel.stop(); setMovNewBusy(false); }
   if (movAsmPanel.running()) { movAsmPanel.stop(); setMovAsmBusy(false); }
+  if (movPreviewPanel.running()) { movPreviewPanel.stop(); setMovPreviewBusy(false); }
+  if (movExportPanel.running()) { movExportPanel.stop(); setMovExportBusy(false); }
+  if (movResolvePanel.running()) { movResolvePanel.stop(); setMovResolveBusy(false); }
+  if (movDirPanel.running()) { movDirPanel.stop(); setMovDirBusy(false); }
   Object.keys(mov.scenes).forEach(function (n) {
     var entry = mov.scenes[n];
     if (entry.panel && entry.panel.running()) {
@@ -6219,6 +6723,7 @@ function movApplyProject(data, sceneNumber) {
   mov.project = data.project;
   mov.progress = data.progress;
   movRenderProgress();
+  movApplyShootPlan(data.shoot_plan);
   var entry = mov.scenes[sceneNumber];
   if (!entry) return;
   for (var i = 0; i < data.project.scenes.length; i++) {
@@ -6296,6 +6801,8 @@ function movCheck(entry) {
       onDone: function (result) {
         setMovCheckBusy(entry, false);
         movRenderCheckResult(entry, result || {});
+        // the server persisted the check — the shoot plan rides along
+        if (result && result.shoot_plan) movApplyShootPlan(result.shoot_plan);
       },
       onCancelled: function () {
         setMovCheckBusy(entry, false);
@@ -6318,6 +6825,7 @@ function movCheck(entry) {
 function movBuildSceneCard(scene) {
   var entry = { scene: scene, msgId: "mov-check-msg-" + scene.number };
   var card = el("section", "card scene-card");
+  card.id = "mov-scene-" + scene.number; // the shoot plan's "Go to scene" target
   card.setAttribute("aria-label", "Scene " + scene.number);
 
   var head = el("div", "scene-head");
@@ -6467,9 +6975,16 @@ function movOpenProjectData(dir, data) {
   mov.progress = data.progress;
   // a different (or reloaded) project makes the last assemble stale
   movAsm.result = null;
+  movAsm.planJson = null;
+  movAsm.scenes = [];
+  movAsm.title = "";
   $("mov-asm-msg").hidden = true;
   $("mov-asm-result").hidden = true;
+  movResetResultTools();
+  $("mov-export-dir").value = "";
+  $("mov-export-name").value = "";
   movShowProject();
+  movApplyShootPlan(data.shoot_plan);
   movRenderScenes();
 }
 
