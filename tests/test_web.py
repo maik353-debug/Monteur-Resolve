@@ -1698,6 +1698,112 @@ class TestDirectorApi:
         assert "Let Claude watch your clips" in html
 
 
+class TestAiCutApi:
+    """Claude composes the cut (monteur.compose) behind "ai_cut": true.
+
+    ``compose_montage`` is resolved at CALL time inside the job thread, so
+    monkeypatching it on monteur.compose is enough — no AI backend runs.
+    """
+
+    DEMO = str(_DEMO_FOOTAGE)
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+
+    def _payload(self, **extra):
+        return {
+            "folder": self.DEMO,
+            "music": f"{self.DEMO}/song.wav",
+            "format": "fcpxml",
+            **extra,
+        }
+
+    def test_build_with_ai_cut_composes(self, server, monkeypatch):
+        from monteur.montage import plan_montage
+
+        calls = []
+
+        def fake_compose(reports, music, **kwargs):
+            calls.append(kwargs)
+            plan = plan_montage(
+                reports, music,
+                style=kwargs.get("style", "auto"),
+                order=kwargs.get("order", "chronological"),
+            )
+            plan.notes.append("story: ein Sommer in drei Akten")
+            plan.notes.append("act 1: still beginnen")
+            return plan
+
+        monkeypatch.setattr("monteur.compose.compose_montage", fake_compose)
+        data = _post(
+            f"{server}/api/create/build",
+            self._payload(ai_cut=True, brief="Alpen mit Freunden", style="travel"),
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+
+        # the composer ran in Studio mode: strict (no silent downgrade),
+        # with the wizard's brief
+        assert len(calls) == 1
+        assert calls[0]["strict"] is True
+        assert calls[0]["brief"] == "Alpen mit Freunden"
+        assert calls[0]["style"] == "travel"
+        # the story and act notes surface on the result card
+        notes = job["result"]["plan"]["notes"]
+        assert "story: ein Sommer in drei Akten" in notes
+        assert "act 1: still beginnen" in notes
+        # a "compose" progress stage told the user what was happening
+        assert any(p["stage"] == "compose" for p in job["progress"])
+
+        # brief and ai_cut ride into the autosaved draft settings
+        auto = _get(f"{server}/api/drafts/autosave")
+        assert auto["settings"]["ai_cut"] is True
+        assert auto["settings"]["brief"] == "Alpen mit Freunden"
+
+    def test_explicit_ai_cut_failure_is_job_error(self, server, monkeypatch):
+        from monteur.ai import MonteurAIError
+
+        def fail_compose(reports, music, **kwargs):
+            raise MonteurAIError(
+                "No way to reach Claude found. Set ANTHROPIC_API_KEY or "
+                "install Claude Code."
+            )
+
+        monkeypatch.setattr("monteur.compose.compose_montage", fail_compose)
+        data = _post(f"{server}/api/create/build", self._payload(ai_cut=True))
+        job = _wait_for_job(server, data["job"])
+        # the user explicitly asked for the AI cut: no silent heuristic
+        # downgrade — the job fails with the actionable AI message
+        assert job["state"] == "error"
+        assert "No way to reach Claude" in job["message"]
+        assert job["result"] is None
+
+    def test_build_without_ai_cut_never_composes(self, server, monkeypatch):
+        def fail_compose(reports, music, **kwargs):  # pragma: no cover
+            raise AssertionError("compose_montage must not run without ai_cut")
+
+        monkeypatch.setattr("monteur.compose.compose_montage", fail_compose)
+        data = _post(f"{server}/api/create/build", self._payload())
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert not any(p["stage"] == "compose" for p in job["progress"])
+
+    def test_app_has_the_composer_controls(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        # the step-2 context textarea and the composer toggle
+        assert 'id="cre-brief"' in html
+        assert 'id="cre-ai-cut"' in html
+        assert "Claude composes the cut" in html
+        assert "What is this video?" in html
+        # the payload carries both, and drafts restore them
+        assert "ai_cut: $(\"cre-ai-cut\").checked" in html
+        assert '"ai_cut", "brief"' in html
+        # the auto-suggest reads the scan's vision annotations
+        assert "scanHasVision" in html
+
+
 def _write_vision_cache(folder, entries):
     """Write a real .monteur-vision.json next to dummy clips.
 

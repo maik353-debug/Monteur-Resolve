@@ -755,11 +755,12 @@ svg text.axis {
 #movie { max-width: 980px; margin: 0 auto; padding: 18px 22px 48px; }
 .mov-entry-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: start; }
 @media (max-width: 900px) { .mov-entry-grid { grid-template-columns: 1fr; } }
-#mov-brief {
+#mov-brief, #cre-brief {
   display: block; width: 100%; min-height: 88px; resize: vertical; margin-bottom: 8px;
   padding: 7px 10px; border: 1px solid var(--border); border-radius: 3px;
   background: var(--input-bg); color: var(--ink); font: inherit; font-size: 12.5px;
 }
+#cre-brief { min-height: 58px; max-width: 620px; }
 .mov-head-side { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
 .scene-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
 .scene-num { font-weight: 650; font-size: 13.5px; white-space: nowrap; }
@@ -1240,6 +1241,15 @@ svg text.axis {
             <p class="help-small">Not sure? 25 is a safe default in Europe, 30 in the US — it just needs to match your project in Resolve.</p>
           </div>
         </div>
+        <h3 class="fgroup-title">Tell Claude the story</h3>
+        <label class="sr-only" for="cre-brief">What is this video?</label>
+        <textarea id="cre-brief" rows="3" spellcheck="false" placeholder="What is this video? Who is it for, how should it feel &mdash; e.g. &ldquo;Alps motorcycle trip with three friends, fast and epic, end on the summit.&rdquo;"></textarea>
+        <p class="help-small" style="max-width: 620px;">Optional, one or two sentences. Claude reads it when composing the cut, and it doubles as the default context for Director&rsquo;s notes in step 3.</p>
+        <label class="see-check">
+          <input type="checkbox" id="cre-ai-cut">
+          <span>Claude composes the cut</span>
+        </label>
+        <p class="help-small" style="max-width: 620px; margin-bottom: 14px;">Claude reads the vision labels and your description, writes a story arc, casts every slot and titles the act breaks &mdash; the engine keeps every cut locked on the music. Runs over your Claude connection (with Claude Code: no extra cost). Sharpest when &ldquo;Let Claude watch your clips&rdquo; ran in step 1 &mdash; Monteur suggests it automatically after a labeled scan.</p>
         <details class="fine-tune" id="cre-finetune">
           <summary>Fine-tune — clip order, cut timing, repeats</summary>
           <div class="ft-body">
@@ -3163,7 +3173,8 @@ var cre = {
   transitions: "auto",    // "auto" | "cuts" | "dissolves" | "smash"
   order: "chronological", // "chronological" | "best_first"
   format: "fcpxml",       // download format
-  draftId: null           // the saved draft this cut updates on re-save (null = new)
+  draftId: null,          // the saved draft this cut updates on re-save (null = new)
+  aiCutTouched: false     // has the user decided about "Claude composes the cut"?
 };
 
 var SEG_COLORS = { usable: "var(--series-1)", dark: "var(--seg-dark)", blurry: "var(--seg-blurry)", shaky: "var(--seg-shaky)" };
@@ -3514,6 +3525,17 @@ $("cre-see").addEventListener("change", function () {
 });
 function seeEnabled() { return $("cre-see").checked; }
 
+/* "Claude composes the cut" — auto-suggested ON after a scan that carried
+   vision annotations (never hard-disabled); a manual toggle always wins */
+$("cre-ai-cut").addEventListener("change", function () { cre.aiCutTouched = true; });
+function scanHasVision(clips) {
+  return (clips || []).some(function (clip) {
+    return (clip.moments || []).some(function (m) {
+      return Boolean(m.label || m.role || m.group || (m.hero || 0) > 0 || (m.tags || []).length);
+    });
+  });
+}
+
 /* the scan's vision extras: notes under the clip cards + a calm inline
    notice when Claude could not watch (the scan itself still worked) */
 function renderVisionExtras(result) {
@@ -3560,6 +3582,8 @@ function scanFolder() {
         cre.clips = (result && result.clips) || [];
         renderClips();
         renderVisionExtras(result);
+        // a labeled scan is what makes the composed cut sharp — suggest it
+        if (!cre.aiCutTouched) $("cre-ai-cut").checked = scanHasVision(cre.clips);
         updateSuggestion();
         toast("Scanned " + cre.clips.length + (cre.clips.length === 1 ? " clip." : " clips."), "success");
         if (cre.clips.length) $("cre-next-1").focus();
@@ -4002,7 +4026,9 @@ function creBuildBody() {
     fps: fpsFrom($("cre-fps")),
     format: cre.format,
     allow_repeats: $("cre-repeats").checked,
-    sfx: $("cre-sfx").checked
+    sfx: $("cre-sfx").checked,
+    ai_cut: $("cre-ai-cut").checked,
+    brief: $("cre-brief").value.trim()
   };
   if (seeEnabled()) body.see = true;
   var music = $("cre-music").value.trim();
@@ -4238,7 +4264,8 @@ function draftSettingsFromState() {
   var body = creBuildBody();
   var settings = {};
   ["audio", "order", "style", "canvas", "transitions", "fps", "format",
-   "max_duration", "pace", "allow_repeats", "sfx", "cut_lead", "see"].forEach(function (key) {
+   "max_duration", "pace", "allow_repeats", "sfx", "cut_lead", "see",
+   "ai_cut", "brief"].forEach(function (key) {
     if (body[key] !== undefined) settings[key] = body[key];
   });
   return settings;
@@ -4300,6 +4327,11 @@ function restoreWizardFromDraft(draft) {
   }
   if (typeof s.allow_repeats === "boolean") $("cre-repeats").checked = s.allow_repeats;
   if (typeof s.sfx === "boolean") $("cre-sfx").checked = s.sfx;
+  if (typeof s.brief === "string") $("cre-brief").value = s.brief;
+  if (typeof s.ai_cut === "boolean") {
+    $("cre-ai-cut").checked = s.ai_cut;
+    cre.aiCutTouched = true; // a restored decision beats the scan suggestion
+  }
   var lead = parseFloat(s.cut_lead);
   if (isFinite(lead) && lead >= 0) $("cre-cutlead").value = String(lead);
   var pace = parseFloat(s.pace);
@@ -4713,7 +4745,9 @@ $("cre-dir-btn").addEventListener("click", function () {
   var body = {
     plan_json: rev.planJson,
     folder: built.folder || $("cre-folder").value.trim(),
-    notes: $("cre-dir-notes").value.trim()
+    // step 2's "What is this video?" text is the default review context;
+    // anything typed here wins over it
+    notes: $("cre-dir-notes").value.trim() || $("cre-brief").value.trim()
   };
   if (built.music) body.music = built.music;
   resetDirectorNotes();

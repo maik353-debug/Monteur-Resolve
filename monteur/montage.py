@@ -198,7 +198,8 @@ exactly as before.
 Plan persistence & revision
 ---------------------------
 :func:`plan_to_dict` / :func:`plan_from_dict` round-trip a full plan
-through JSON (every field, entries, dips, SFX cues, notes) under a
+through JSON (every field, entries, dips, SFX cues, notes, and — when a
+composer set them — the ``title_texts`` for the dips) under a
 ``"monteur_plan"`` schema version — the save format behind ``monteur
 create --save-plan`` and the input to the revision loop
 (:mod:`monteur.revise`). :func:`pin_entry` is the revision's pinning
@@ -433,6 +434,11 @@ class MontagePlan:
     dips: list[tuple[float, float]] = field(default_factory=list)
     # Planned sound-design cues (plan_montage(..., sfx=True); empty otherwise).
     sfx: list["SfxCue"] = field(default_factory=list)
+    # Composed act-title texts, aligned with ``dips`` by index ("" = no text
+    # for that dip). Filled by :mod:`monteur.compose` when Claude composes
+    # the cut; :func:`monteur.resolve.titles_from_plan` prefers these over
+    # its derived texts. Empty list (the default) = no override anywhere.
+    title_texts: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1796,7 +1802,9 @@ def montage_to_timeline(
     V1 and drops a "Title slot" marker on each gap. Entries with a vision
     ``label`` carry it as clip metadata (``"label"``); when the entry right
     after a dip has one, the marker's note names it ("0.4s of black —
-    next: <label>") instead of the generic title reminder.
+    next: <label>") instead of the generic title reminder. A composed act
+    title (``plan.title_texts``, from :mod:`monteur.compose`) wins over
+    both: the marker then reads "0.4s of black — title: <text>".
 
     Entries with a dissolve (``transition`` > 0) carry it in the video
     clip's metadata (``"transition"`` = ``"dissolve"``,
@@ -1932,9 +1940,15 @@ def montage_to_timeline(
             )
         )
         timeline.markers.append(Marker(frame=0, name=f"Cut to {music_stem}"))
-    for dip_start, dip_len in plan.dips:
-        # When the vision pass labeled the shot that hits out of the black,
-        # the title-slot marker says what comes next — a real title cue.
+    for dip_index, (dip_start, dip_len) in enumerate(plan.dips):
+        # A composed act title (monteur.compose) names the marker outright;
+        # otherwise, when the vision pass labeled the shot that hits out of
+        # the black, the title-slot marker says what comes next.
+        composed = (
+            plan.title_texts[dip_index].strip()
+            if dip_index < len(plan.title_texts)
+            else ""
+        )
         incoming = next(
             (
                 e
@@ -1943,7 +1957,9 @@ def montage_to_timeline(
             ),
             None,
         )
-        if incoming is not None and incoming.label:
+        if composed:
+            note = f"{dip_len:g}s of black — title: {composed}"
+        elif incoming is not None and incoming.label:
             note = f"{dip_len:g}s of black — next: {incoming.label}"
         else:
             note = f"{dip_len:g}s of black — drop a title here"
@@ -1984,9 +2000,11 @@ def plan_to_dict(plan: MontagePlan) -> dict:
     field, the entries, the smash-to-black dips, the SFX cues and the notes.
     The ``"monteur_plan"`` key carries :data:`PLAN_FORMAT_VERSION` so a
     future Monteur can refuse (or migrate) old files instead of misreading
-    them.
+    them. ``title_texts`` (the composed act titles, :mod:`monteur.compose`)
+    is written only when set, so plans without it serialize exactly as
+    before; :func:`plan_from_dict` tolerates its absence.
     """
-    return {
+    data = {
         "monteur_plan": PLAN_FORMAT_VERSION,
         "music_path": plan.music_path,
         "duration": plan.duration,
@@ -1999,6 +2017,9 @@ def plan_to_dict(plan: MontagePlan) -> dict:
         "dips": [[start, length] for start, length in plan.dips],
         "sfx": [asdict(cue) for cue in plan.sfx],
     }
+    if plan.title_texts:
+        data["title_texts"] = [str(text) for text in plan.title_texts]
+    return data
 
 
 def plan_from_dict(data: dict) -> MontagePlan:
@@ -2031,6 +2052,9 @@ def plan_from_dict(data: dict) -> MontagePlan:
             notes=list(data.get("notes", [])),
             dips=[(float(start), float(length)) for start, length in data.get("dips", [])],
             sfx=[SfxCue(**cue) for cue in data.get("sfx", [])],
+            # Version-tolerant: plans saved before the composer existed (and
+            # plans without composed titles) simply have no such key.
+            title_texts=[str(text) for text in data.get("title_texts", [])],
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"malformed plan JSON: {exc}") from exc

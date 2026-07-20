@@ -9,6 +9,7 @@ Workflow overview::
     monteur papercut render cut.md -o rough_cut.fcpxml
     monteur convert cut.edl cut.fcpxml --fps 25
     monteur create clips song.mp3 -o cut.fcpxml --save-plan plan.json
+    monteur create clips song.mp3 -o cut.fcpxml --style trailer --see --ai-cut
     monteur revise plan.json clips -o cut_v2.fcpxml --brief "zweite Hälfte ruhiger"
     monteur direct plan.json clips --apply -o cut_v3.fcpxml
     monteur resolve status
@@ -615,12 +616,27 @@ def cmd_create(args: argparse.Namespace) -> None:
         # scene groups); plan_montage picks the annotations up by itself.
         _run_vision(reports, max_moments=args.max_moments)
     try:
-        plan = plan_montage(
-            reports, music, order=args.order, max_duration=args.max_duration,
-            style=args.style, allow_repeats=args.allow_repeats,
-            cut_lead=args.cut_lead, pace=args.pace,
-            transitions=args.transitions, sfx=args.sfx,
-        )
+        if args.ai_cut:
+            # Claude composes the cut (monteur.compose): the engine still
+            # builds the exact grid plan_montage would, then one Claude
+            # completion casts the slots and titles the act breaks. The CLI
+            # keeps the graceful fallback (strict=False): an unreachable
+            # backend degrades to the heuristic cut with a printed note.
+            from monteur.compose import compose_montage
+
+            plan = compose_montage(
+                reports, music, style=args.style, brief=args.brief,
+                order=args.order, max_duration=args.max_duration,
+                allow_repeats=args.allow_repeats, cut_lead=args.cut_lead,
+                pace=args.pace, transitions=args.transitions, sfx=args.sfx,
+            )
+        else:
+            plan = plan_montage(
+                reports, music, order=args.order, max_duration=args.max_duration,
+                style=args.style, allow_repeats=args.allow_repeats,
+                cut_lead=args.cut_lead, pace=args.pace,
+                transitions=args.transitions, sfx=args.sfx,
+            )
     except ValueError as exc:
         _fail(str(exc))
     if not plan.entries:
@@ -1135,7 +1151,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--brief", default="",
         help='natural-language brief, e.g. "90 Sekunden, energiegeladen" — '
-             "sets style/order/max-duration; explicit flags win over the brief",
+             "sets style/order/max-duration; explicit flags win over the "
+             "brief. With --ai-cut the same text also briefs the composer",
+    )
+    p.add_argument(
+        "--ai-cut", action="store_true",
+        help="let Claude compose the cut: the engine locks the beat grid, "
+             "dips and durations, Claude casts every slot, writes the act "
+             "titles and a story arc (runs over your Claude connection — "
+             "Claude Code costs nothing extra; falls back to the heuristic "
+             "cut with a note when Claude is unreachable; sharpest with "
+             "--see)",
     )
     p.add_argument(
         "--save-plan", default="", metavar="PATH.json",

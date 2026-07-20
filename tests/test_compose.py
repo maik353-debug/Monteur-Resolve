@@ -1,0 +1,482 @@
+"""Tests for the Claude composer (monteur.compose).
+
+The AI seam (monteur.ai.complete) is always monkeypatched — these tests
+exercise the engine side of the contract: grid parity with plan_montage,
+the dossier/prompt content, cast validation with per-slot fallback, the
+graceful/strict failure semantics and the title round-trip.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from monteur import ai
+from monteur import compose
+from monteur.ai import MonteurAIError
+from monteur.compose import COMPOSE_SCHEMA, CRAFT_BRIEFS, compose_montage
+from monteur.montage import (
+    montage_to_timeline,
+    plan_from_dict,
+    plan_montage,
+    plan_to_dict,
+)
+from monteur.music import MusicAnalysis, MusicSection
+from monteur.sift import ClipReport, Moment
+
+
+def make_music() -> MusicAnalysis:
+    """24 beats at 0.5s spacing (120 bpm) over 12s; low/mid/high sections."""
+    return MusicAnalysis(
+        path="/music/song.wav",
+        duration=12.0,
+        tempo=120.0,
+        beats=[i * 0.5 for i in range(24)],
+        sections=[
+            MusicSection(0.0, 4.0, 0.2, "low"),
+            MusicSection(4.0, 8.0, 0.5, "mid"),
+            MusicSection(8.0, 12.0, 0.9, "high"),
+        ],
+    )
+
+
+def make_arc_music(drops: list[float] | None = None) -> MusicAnalysis:
+    """40s track: beats every 0.5s, downbeats every 2s, phrases every 8s."""
+    return MusicAnalysis(
+        path="/music/track.wav",
+        duration=40.0,
+        tempo=120.0,
+        beats=[i * 0.5 for i in range(80)],
+        sections=[MusicSection(0.0, 40.0, 0.5, "mid")],
+        downbeats=[i * 2.0 for i in range(20)],
+        phrases=[i * 8.0 for i in range(5)],
+        drops=drops or [],
+    )
+
+
+def make_reports(vision: bool = False) -> list[ClipReport]:
+    """Two clips with plenty of 5s moments, so every slot can be cast."""
+    reports = []
+    for name, base_score in (("a", 0.8), ("b", 0.7)):
+        moments = [
+            Moment(i * 10.0, i * 10.0 + 5.0, base_score - i * 0.01)
+            for i in range(8)
+        ]
+        reports.append(
+            ClipReport(path=f"/footage/{name}.mp4", duration=90.0, moments=moments)
+        )
+    if vision:
+        first = reports[0].moments[0]
+        first.label = "sunrise over the pass"
+        first.tags = ["sunrise", "mountains"]
+        first.role = "opener"
+        reports[1].moments[1].hero = 0.9
+        reports[1].moments[1].group = "summit"
+    return reports
+
+
+def fake_complete(reply, calls=None):
+    """A monteur.ai.complete stand-in returning ``reply`` (dict or str)."""
+
+    def _complete(prompt, *, system="", json_schema=None, **kwargs):
+        if calls is not None:
+            calls.append(
+                {"prompt": prompt, "system": system, "json_schema": json_schema}
+            )
+        return reply if isinstance(reply, str) else json.dumps(reply)
+
+    return _complete
+
+
+def empty_reply() -> dict:
+    return {"story": "", "cast": [], "titles": [], "why": []}
+
+
+def entry_tuple(entry):
+    return (
+        entry.clip_path,
+        entry.source_start,
+        entry.source_end,
+        entry.record_start,
+        entry.record_end,
+    )
+
+
+# --- grid parity & failure semantics ------------------------------------------
+
+
+def test_ai_error_falls_back_to_plan_montage_byte_identical(monkeypatch):
+    def boom(*args, **kwargs):
+        raise MonteurAIError("no way to reach Claude")
+
+    monkeypatch.setattr(ai, "complete", boom)
+    baseline = plan_to_dict(
+        plan_montage(make_reports(), make_music(), style="auto", cut_lead=0.0)
+    )
+    composed = plan_to_dict(
+        compose_montage(make_reports(), make_music(), style="auto", cut_lead=0.0)
+    )
+    note = composed["notes"][-1]
+    assert note == "composer unavailable: no way to reach Claude; heuristic cut"
+    composed["notes"] = composed["notes"][:-1]
+    assert composed == baseline
+
+
+def test_unparseable_reply_falls_back_with_note(monkeypatch):
+    monkeypatch.setattr(ai, "complete", fake_complete("this is not JSON"))
+    plan = compose_montage(make_reports(), make_music(), cut_lead=0.0)
+    assert plan.entries
+    assert any(n.startswith("composer unavailable:") for n in plan.notes)
+    assert any("heuristic cut" in n for n in plan.notes)
+
+
+def test_strict_raises_on_ai_error(monkeypatch):
+    def boom(*args, **kwargs):
+        raise MonteurAIError("backend down")
+
+    monkeypatch.setattr(ai, "complete", boom)
+    with pytest.raises(MonteurAIError, match="backend down"):
+        compose_montage(make_reports(), make_music(), strict=True)
+
+
+def test_strict_raises_on_unparseable_reply(monkeypatch):
+    monkeypatch.setattr(ai, "complete", fake_complete("not json"))
+    with pytest.raises(MonteurAIError, match="unparseable JSON"):
+        compose_montage(make_reports(), make_music(), strict=True)
+
+
+def test_grid_is_identical_to_plan_montage_when_cast_applies(monkeypatch):
+    reply = empty_reply()
+    reply["cast"] = [{"slot": 0, "clip": "b.mp4", "start": 10.0}]
+    monkeypatch.setattr(ai, "complete", fake_complete(reply))
+    baseline = plan_montage(
+        make_reports(), make_arc_music(drops=[20.0]), style="trailer", cut_lead=0.0
+    )
+    composed = compose_montage(
+        make_reports(), make_arc_music(drops=[20.0]), style="trailer", cut_lead=0.0
+    )
+    # The grid — record windows, dips, fades, dissolves — is the engine's.
+    assert [
+        (e.record_start, e.record_end, e.transition) for e in composed.entries
+    ] == [(e.record_start, e.record_end, e.transition) for e in baseline.entries]
+    assert composed.dips == baseline.dips
+    assert (composed.fade_in, composed.fade_out) == (
+        baseline.fade_in,
+        baseline.fade_out,
+    )
+    assert composed.duration == baseline.duration
+
+
+def test_empty_plan_skips_the_ai_call(monkeypatch):
+    def boom(*args, **kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("ai.complete must not be called for empty plans")
+
+    monkeypatch.setattr(ai, "complete", boom)
+    plan = compose_montage([], make_music())
+    assert not plan.entries
+
+
+# --- the prompt dossier ---------------------------------------------------------
+
+
+def test_prompt_carries_grammar_brief_slots_dips_and_inventory(monkeypatch):
+    calls: list[dict] = []
+    monkeypatch.setattr(ai, "complete", fake_complete(empty_reply(), calls))
+    plan = compose_montage(
+        make_reports(),
+        make_arc_music(drops=[20.0]),
+        style="trailer",
+        brief="Motorradtour über die Alpen, episch",
+        cut_lead=0.0,
+    )
+    assert plan.dips  # the trailer smashes to black — the dossier needs dips
+    assert len(calls) == 1
+    prompt = calls[0]["prompt"]
+    assert calls[0]["json_schema"] == COMPOSE_SCHEMA
+    # the style's craft grammar, verbatim
+    assert CRAFT_BRIEFS["trailer"] in prompt
+    # the editor's brief
+    assert "Motorradtour über die Alpen, episch" in prompt
+    # the dossier: slots with phases/durations, dips, the full inventory
+    context = json.loads(prompt[prompt.index("{") : prompt.rindex("}") + 1])
+    assert context["style"] == "trailer"
+    assert len(context["slots"]) == len(plan.entries)
+    assert all("seconds" in s for s in context["slots"])
+    assert {s.get("phase") for s in context["slots"]} >= {"opening", "climax"}
+    assert len(context["dips"]) == len(plan.dips)
+    assert len(context["inventory"]) == 16
+    assert {i["clip"] for i in context["inventory"]} == {"a.mp4", "b.mp4"}
+    # a drop-aligned climax marks its slot
+    assert any(s.get("drop") for s in context["slots"])
+    # dip-following slots hit out of black
+    assert any(s.get("after_dip") for s in context["slots"])
+
+
+def test_prompt_says_when_vision_is_missing_and_notes_recommend_it(monkeypatch):
+    calls: list[dict] = []
+    monkeypatch.setattr(ai, "complete", fake_complete(empty_reply(), calls))
+    plan = compose_montage(make_reports(), make_music(), cut_lead=0.0)
+    assert "No vision labels are available" in calls[0]["prompt"]
+    assert any("Let Claude watch your clips" in n for n in plan.notes)
+
+
+def test_prompt_carries_vision_annotations_when_present(monkeypatch):
+    calls: list[dict] = []
+    monkeypatch.setattr(ai, "complete", fake_complete(empty_reply(), calls))
+    plan = compose_montage(make_reports(vision=True), make_music(), cut_lead=0.0)
+    prompt = calls[0]["prompt"]
+    assert "No vision labels are available" not in prompt
+    assert "sunrise over the pass" in prompt
+    assert '"role": "opener"' in prompt
+    assert '"hero": 0.9' in prompt
+    assert '"group": "summit"' in prompt
+    assert not any("Let Claude watch your clips" in n for n in plan.notes)
+
+
+# --- casting -----------------------------------------------------------------------
+
+
+def test_happy_compose_applies_the_cast_and_the_story(monkeypatch):
+    reply = {
+        "story": "from first light to the summit",
+        "cast": [
+            {"slot": 0, "clip": "b.mp4", "start": 10.0},
+            {"slot": 1, "clip": "a.mp4", "start": 20.5},
+        ],
+        "titles": [],
+        "why": ["open wide to establish", "then tighten the rhythm"],
+    }
+    monkeypatch.setattr(ai, "complete", fake_complete(reply))
+    baseline = plan_montage(make_reports(), make_music(), cut_lead=0.0)
+    plan = compose_montage(make_reports(), make_music(), cut_lead=0.0)
+
+    first, second = plan.entries[0], plan.entries[1]
+    assert first.clip_path == "/footage/b.mp4"
+    slot_len = first.record_end - first.record_start
+    assert first.source_start == pytest.approx(10.0)
+    assert first.source_end == pytest.approx(10.0 + slot_len)
+    assert second.clip_path == "/footage/a.mp4"
+    assert second.source_start == pytest.approx(20.5)
+    # the record grid stayed the engine's
+    assert [e.record_start for e in plan.entries] == [
+        e.record_start for e in baseline.entries
+    ]
+    assert "story: from first light to the summit" in plan.notes
+    assert "act 1: open wide to establish" in plan.notes
+    assert "act 2: then tighten the rhythm" in plan.notes
+    assert any(
+        n.startswith(f"composed by Claude: 2 of {len(plan.entries)} slots cast")
+        for n in plan.notes
+    )
+
+
+def test_invalid_picks_fall_back_per_slot(monkeypatch):
+    reply = empty_reply()
+    reply["cast"] = [
+        {"slot": 0, "clip": "nope.mp4", "start": 0.0},  # unknown clip
+        {"slot": 1, "clip": "a.mp4", "start": 7.0},  # outside every moment
+        {"slot": 2, "clip": "b.mp4", "start": 30.0},  # valid
+        # slot 3+ missing entirely
+    ]
+    monkeypatch.setattr(ai, "complete", fake_complete(reply))
+    baseline = plan_montage(make_reports(), make_music(), cut_lead=0.0)
+    plan = compose_montage(make_reports(), make_music(), cut_lead=0.0)
+
+    # invalid and missing slots keep the heuristic entries verbatim
+    assert entry_tuple(plan.entries[0]) == entry_tuple(baseline.entries[0])
+    assert entry_tuple(plan.entries[1]) == entry_tuple(baseline.entries[1])
+    assert entry_tuple(plan.entries[3]) == entry_tuple(baseline.entries[3])
+    # the valid pick landed
+    assert plan.entries[2].clip_path == "/footage/b.mp4"
+    assert plan.entries[2].source_start == pytest.approx(30.0)
+    # ...and each fallback is noted
+    assert any(
+        "slot 1 kept the heuristic pick" in n and "nope.mp4" in n
+        for n in plan.notes
+    )
+    assert any(
+        "slot 2 kept the heuristic pick" in n and "outside every good moment" in n
+        for n in plan.notes
+    )
+    assert any("slot 4 kept the heuristic pick" in n for n in plan.notes)
+    assert any(
+        n.startswith(f"composed by Claude: 1 of {len(plan.entries)} slots cast")
+        for n in plan.notes
+    )
+
+
+def test_out_of_range_start_snaps_into_the_moment(monkeypatch):
+    reply = empty_reply()
+    # 14.2 overlaps a.mp4's 10-15 moment but leaves too little tail: the
+    # window snaps back so the slot still gets its full duration.
+    reply["cast"] = [{"slot": 0, "clip": "a.mp4", "start": 14.2}]
+    monkeypatch.setattr(ai, "complete", fake_complete(reply))
+    plan = compose_montage(make_reports(), make_music(), cut_lead=0.0)
+    entry = plan.entries[0]
+    slot_len = entry.record_end - entry.record_start
+    assert entry.clip_path == "/footage/a.mp4"
+    assert entry.source_end - entry.source_start == pytest.approx(slot_len)
+    assert entry.source_start == pytest.approx(15.0 - slot_len)
+
+
+def test_explicit_reuse_is_allowed_and_noted(monkeypatch):
+    reply = empty_reply()
+    reply["cast"] = [
+        {"slot": 0, "clip": "a.mp4", "start": 10.0},
+        {"slot": 1, "clip": "a.mp4", "start": 10.0},
+    ]
+    monkeypatch.setattr(ai, "complete", fake_complete(reply))
+    plan = compose_montage(make_reports(), make_music(), cut_lead=0.0)
+    assert plan.entries[0].clip_path == plan.entries[1].clip_path == "/footage/a.mp4"
+    assert any("reused material in 1 slot" in n for n in plan.notes)
+    assert any("same-clip cut" in n and "Claude's explicit choice" in n
+               for n in plan.notes)
+
+
+# --- titles ------------------------------------------------------------------------
+
+
+def compose_trailer(monkeypatch, titles):
+    reply = empty_reply()
+    reply["titles"] = titles
+    monkeypatch.setattr(ai, "complete", fake_complete(reply))
+    return compose_montage(
+        make_reports(), make_arc_music(drops=[20.0]), style="trailer", cut_lead=0.0
+    )
+
+
+def test_titles_land_on_the_plan_and_in_titles_from_plan(monkeypatch):
+    plan = compose_trailer(
+        monkeypatch,
+        [
+            {"dip": 0, "text": "EIN SOMMER"},
+            {"dip": 1, "text": "DREI FREUNDE"},
+        ],
+    )
+    assert len(plan.dips) >= 2
+    assert plan.title_texts[0] == "EIN SOMMER"
+    assert plan.title_texts[1] == "DREI FREUNDE"
+    assert len(plan.title_texts) == len(plan.dips)
+    assert any("act title" in n for n in plan.notes)
+
+    from monteur.resolve import titles_from_plan
+
+    titles = titles_from_plan(plan)
+    assert titles[0]["text"] == "EIN SOMMER"
+    assert titles[1]["text"] == "DREI FREUNDE"
+    # explicit texts still win over the plan-carried ones
+    explicit = titles_from_plan(plan, texts=["X"])
+    assert explicit[0]["text"] == "X"
+
+
+def test_bad_title_indexes_are_ignored(monkeypatch):
+    plan = compose_trailer(
+        monkeypatch,
+        [
+            {"dip": 99, "text": "LOST"},
+            {"dip": -1, "text": "ALSO LOST"},
+            {"dip": 0, "text": "  KEPT  "},
+            "not a dict",
+        ],
+    )
+    assert plan.title_texts[0] == "KEPT"
+    assert all(t in ("", "KEPT") for t in plan.title_texts)
+
+
+def test_titles_round_trip_through_plan_json(monkeypatch):
+    plan = compose_trailer(monkeypatch, [{"dip": 0, "text": "ACT ONE"}])
+    data = json.loads(json.dumps(plan_to_dict(plan)))
+    assert data["title_texts"][0] == "ACT ONE"
+    restored = plan_from_dict(data)
+    assert restored.title_texts == plan.title_texts
+
+    # a plan without composed titles serializes exactly as before...
+    plain = plan_montage(make_reports(), make_music(), cut_lead=0.0)
+    assert "title_texts" not in plan_to_dict(plain)
+    # ...and old JSON without the key loads with the tolerant default
+    old = plan_to_dict(plain)
+    assert plan_from_dict(old).title_texts == []
+
+
+def test_composed_title_names_the_timeline_marker(monkeypatch):
+    plan = compose_trailer(monkeypatch, [{"dip": 0, "text": "EIN SOMMER"}])
+    timeline = montage_to_timeline(plan, fps=25.0)
+    slots = [m for m in timeline.markers if m.name == "Title slot"]
+    assert slots and "title: EIN SOMMER" in slots[0].note
+    # dips without a composed text keep the old derivation
+    assert all("title: EIN SOMMER" not in m.note for m in slots[1:])
+
+
+# --- the CLI surface -----------------------------------------------------------------
+
+
+def test_create_parses_ai_cut_flag():
+    from monteur.cli import build_parser, cmd_create
+
+    args = build_parser().parse_args(
+        ["create", "clips", "song.mp3", "-o", "out.fcpxml", "--ai-cut"]
+    )
+    assert args.ai_cut is True
+    assert args.func is cmd_create
+
+
+def test_create_ai_cut_defaults_off():
+    from monteur.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["create", "clips", "song.mp3", "-o", "out.fcpxml"]
+    )
+    assert args.ai_cut is False
+
+
+def test_cmd_create_routes_through_compose(tmp_path, monkeypatch, capsys):
+    """--ai-cut sends the planning through compose_montage (monkeypatched)
+    and prints the composer's story/act notes with the other plan notes."""
+    import monteur.brief
+    import monteur.music
+    import monteur.sift
+    from monteur.cli import build_parser
+
+    reports = make_reports()
+    music = make_music()
+    monkeypatch.setattr(monteur.sift, "list_media", lambda folder: ["a.mp4", "b.mp4"])
+    monkeypatch.setattr(
+        monteur.sift, "sift_directory", lambda folder, progress=None: reports
+    )
+    monkeypatch.setattr(monteur.music, "analyze_music", lambda path: music)
+    # --brief normally also derives style/order/length (possibly via the AI
+    # backend) — stub it so this test only exercises the compose routing.
+    monkeypatch.setattr(
+        monteur.brief,
+        "resolve_brief",
+        lambda text: monteur.brief.BriefSettings(rationale="stubbed"),
+    )
+
+    calls = []
+
+    def fake_compose(reports_, music_, **kwargs):
+        calls.append(kwargs)
+        plan = plan_montage(reports_, music_, cut_lead=0.0)
+        plan.notes.append("story: ein Sommer in drei Akten")
+        plan.notes.append("act 1: still beginnen")
+        return plan
+
+    monkeypatch.setattr("monteur.compose.compose_montage", fake_compose)
+
+    out = tmp_path / "cut.fcpxml"
+    args = build_parser().parse_args(
+        [
+            "create", str(tmp_path), "song.mp3", "-o", str(out),
+            "--ai-cut", "--brief", "Alpen, episch, schnell",
+        ]
+    )
+    args.func(args)
+
+    assert len(calls) == 1
+    assert calls[0]["brief"] == "Alpen, episch, schnell"
+    assert calls[0]["style"] == "auto"
+    assert out.exists()
+    printed = capsys.readouterr().out
+    assert "story: ein Sommer in drei Akten" in printed
+    assert "act 1: still beginnen" in printed

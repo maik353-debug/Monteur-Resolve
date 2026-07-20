@@ -2446,13 +2446,21 @@ def titles_from_plan(plan, texts: list[str] | None = None) -> list[dict]:
     start and ``duration`` is ``max(dip length, MIN_TITLE_SECONDS)`` — the
     dip itself is too short for a readable title, so the title deliberately
     overlaps the incoming clip (titles usually sit over picture). The text is
-    ``texts[i]`` when given (and non-empty); otherwise the vision ``label``
-    of the entry that starts right after the dip; otherwise ``"Title"``.
-    Plans without dips yield ``[]``.
+    ``texts[i]`` when given (and non-empty); otherwise the plan's own
+    ``title_texts[i]`` (the composed act titles from :mod:`monteur.compose`,
+    when the plan carries any); otherwise the vision ``label`` of the entry
+    that starts right after the dip; otherwise ``"Title"``. Plans without
+    dips yield ``[]``.
     """
     dips = list(getattr(plan, "dips", []) or [])
     if not dips:
         return []
+    if texts is None:
+        # Plan-carried override: a Claude-composed plan brings its own act
+        # titles along (older/duck-typed plans simply have no such field).
+        carried = [str(t) for t in getattr(plan, "title_texts", None) or []]
+        if any(t.strip() for t in carried):
+            texts = carried
     entries = sorted(plan.entries, key=lambda e: e.record_start)
     titles: list[dict] = []
     for index, (start, length) in enumerate(dips):

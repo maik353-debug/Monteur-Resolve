@@ -16,7 +16,8 @@ API (all JSON):
 * ``GET  /api/resolve/status``                                  -> {"connected", ...}
 * ``POST /api/resolve/analyze`` {"timeline"?, "save"?}          -> {"stats", "version"?}
 * ``POST /api/create/scan``   {"folder", "see"?}                -> {"job": id}
-* ``POST /api/create/build``  {"folder", "music"?, "see"?, ...} -> {"job": id}
+* ``POST /api/create/build``  {"folder", "music"?, "see"?,
+  "ai_cut"?, "brief"?, ...}                                     -> {"job": id}
 * ``POST /api/create/pick``   {"folder", "music_dir",
   "max_duration"?}                                              -> {"job": id}
 * ``POST /api/create/kit``    {build payload + "kit_dir"}       -> {"job": id}
@@ -79,6 +80,21 @@ base64 so the browser can show them.
 label the good moments after the sift. Vision is an upgrade, not a gate: a
 missing anthropic package or API key (``MonteurVisionError``) never fails the
 job — the result simply carries ``"vision_error"`` instead of annotations.
+
+``"ai_cut": true`` on build/kit routes the planning through
+:func:`monteur.compose.compose_montage` — Claude composes the cut: the
+engine still builds the exact beat grid, dips and durations a plain build
+would, then ONE Claude completion casts every slot, writes the act titles
+for the black dips and a story arc into the plan notes ("story: ...",
+"act 1: ..."). ``"brief"`` (the wizard's "What is this video?" text) is
+handed to the composer as the editor's brief. Text-only, so it runs over
+the user's Claude connection (Claude Code = no extra API cost) and is
+sharpest after a "Let Claude watch" scan annotated the moments. Unlike
+vision this IS a gate: the user explicitly asked for the AI cut, so a
+``MonteurAIError`` fails the job with its own actionable message instead
+of silently downgrading to the heuristic cut (the CLI's ``--ai-cut``
+keeps the graceful fallback with a printed note). Both keys ride into the
+draft autosave settings like every other wizard control.
 
 ``/api/create/revise`` is the Studio's revision loop
 (:mod:`monteur.revise`): the build result carries the full plan as
@@ -666,7 +682,28 @@ def _plan_from_payload(job: dict, payload: dict):
         plan_kwargs["pace"] = float(payload["pace"])
     if payload.get("transitions"):
         plan_kwargs["transitions"] = payload["transitions"]
-    plan = plan_montage(reports, music, **plan_kwargs)
+    if payload.get("ai_cut"):
+        # Claude composes the cut (monteur.compose): the engine still builds
+        # the exact grid plan_montage would, then ONE Claude completion casts
+        # the slots and titles the act breaks. The user explicitly asked for
+        # the AI cut, so strict=True — a MonteurAIError propagates and fails
+        # the job with its own actionable message (no silent downgrade; the
+        # CLI's --ai-cut keeps the graceful fallback instead).
+        from monteur.compose import compose_montage
+
+        with _JOBS_LOCK:
+            job["progress"].append(
+                {"stage": "compose", "name": "Claude is composing the cut"}
+            )
+        plan = compose_montage(
+            reports,
+            music,
+            brief=str(payload.get("brief") or ""),
+            strict=True,
+            **plan_kwargs,
+        )
+    else:
+        plan = plan_montage(reports, music, **plan_kwargs)
     if not plan.entries:
         raise ValueError("no usable material found — check the scan results")
     return plan, reports, music, vision
@@ -677,6 +714,7 @@ def _plan_from_payload(job: dict, payload: dict):
 _DRAFT_SETTING_KEYS = (
     "audio", "order", "style", "canvas", "transitions", "fps", "format",
     "max_duration", "pace", "allow_repeats", "sfx", "cut_lead", "see",
+    "ai_cut", "brief",
 )
 
 
@@ -721,6 +759,7 @@ def _autosave_draft(payload: dict, result: dict) -> None:
 
 def _run_build_job(job: dict, payload: dict) -> None:
     """Daemon-thread body for POST /api/create/build."""
+    from monteur.ai import MonteurAIError
     from monteur.media import MonteurMediaError
     from monteur.montage import montage_to_timeline, plan_to_dict
     from monteur.sift import SiftCancelled
@@ -763,7 +802,10 @@ def _run_build_job(job: dict, payload: dict) -> None:
         job["state"] = "done"
     except SiftCancelled:
         job["state"] = "cancelled"
-    except (MonteurMediaError, ValueError) as exc:
+    except (MonteurAIError, MonteurMediaError, ValueError) as exc:
+        # MonteurAIError only ever escapes here when "ai_cut" was explicitly
+        # requested — the user asked for the AI cut and must see why it
+        # failed instead of getting a silent heuristic downgrade.
         job["message"] = str(exc)
         job["state"] = "error"
     except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
@@ -838,6 +880,7 @@ _KIT_MAX_THUMBS = 6
 
 def _run_kit_job(job: dict, payload: dict) -> None:
     """Daemon-thread body for POST /api/create/kit (plan + publish kit)."""
+    from monteur.ai import MonteurAIError
     from monteur.media import MonteurMediaError
     from monteur.sift import SiftCancelled
 
@@ -889,7 +932,9 @@ def _run_kit_job(job: dict, payload: dict) -> None:
         job["state"] = "done"
     except SiftCancelled:
         job["state"] = "cancelled"
-    except (MonteurMediaError, ValueError) as exc:
+    except (MonteurAIError, MonteurMediaError, ValueError) as exc:
+        # MonteurAIError: the kit plans exactly like a build, so an explicit
+        # "ai_cut" failure surfaces here with its actionable message too.
         job["message"] = str(exc)
         job["state"] = "error"
     except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
