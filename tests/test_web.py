@@ -1699,6 +1699,121 @@ class TestDirectorApi:
         assert "Let Claude watch your clips" in html
 
 
+class TestCoverageApi:
+    """POST /api/coverage — the pre-cut shot list (monteur.coverage).
+
+    ``missing_shots`` is resolved at CALL time inside the job thread, so
+    monkeypatching it on monteur.coverage is enough — no AI backend runs.
+    """
+
+    DEMO = str(_DEMO_FOOTAGE)
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+        _clear_scan_cache()
+
+    def test_coverage_missing_folder_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/coverage", {"style": "trailer"})
+        assert exc_info.value.code == 400
+        assert "folder" in json.loads(exc_info.value.read())["error"]
+
+    def test_coverage_happy_path(self, server, monkeypatch):
+        canned = {
+            "verdict": "thin on people", "coverage_score": 61,
+            "have": ["road action"],
+            "missing": [
+                {"shot": "calm wide opener", "why": "the opener",
+                 "priority": "must", "tip": "tripod, 10s hold"},
+            ],
+            "summary": "film the opener", "basics": {"vision": False},
+            "notes": [],
+        }
+        calls: dict = {}
+
+        def fake_missing_shots(reports, style="auto", brief="",
+                               target_seconds=None):
+            calls.update(reports=len(reports), style=style, brief=brief,
+                         target=target_seconds)
+            return canned
+
+        monkeypatch.setattr("monteur.coverage.missing_shots", fake_missing_shots)
+        data = _post(
+            f"{server}/api/coverage",
+            {"folder": self.DEMO, "style": "trailer",
+             "brief": "epic alps trailer", "target": 45},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert job["kind"] == "coverage"
+        assert job["result"] == {"coverage": canned}
+        # the wizard's inputs are forwarded verbatim
+        assert calls["style"] == "trailer"
+        assert calls["brief"] == "epic alps trailer"
+        assert calls["target"] == 45.0
+        assert calls["reports"] > 0
+        assert any(p["stage"] == "coverage" for p in job["progress"])
+
+    def test_coverage_defaults_without_style_brief_target(self, server, monkeypatch):
+        calls: dict = {}
+
+        def fake_missing_shots(reports, style="auto", brief="",
+                               target_seconds=None):
+            calls.update(style=style, brief=brief, target=target_seconds)
+            return {"verdict": "", "coverage_score": 50, "have": [],
+                    "missing": [], "summary": "", "basics": {}, "notes": []}
+
+        monkeypatch.setattr("monteur.coverage.missing_shots", fake_missing_shots)
+        data = _post(f"{server}/api/coverage", {"folder": self.DEMO})
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert calls == {"style": "auto", "brief": "", "target": None}
+
+    def test_coverage_ai_error_is_job_error(self, server, monkeypatch):
+        from monteur.ai import MonteurAIError
+
+        def boom(*args, **kwargs):
+            raise MonteurAIError("no way to reach Claude found")
+
+        monkeypatch.setattr("monteur.coverage.missing_shots", boom)
+        data = _post(f"{server}/api/coverage", {"folder": self.DEMO})
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "no way to reach Claude" in job["message"]
+        assert job["result"] is None
+
+    def test_coverage_bad_target_is_job_error(self, server):
+        data = _post(
+            f"{server}/api/coverage", {"folder": self.DEMO, "target": "soon"}
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "target" in job["message"]
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_app_has_the_coverage_block(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert 'id="cre-coverage"' in html
+        assert "Shot list — what's still missing?" in html
+        assert 'id="cre-cov-brief"' in html
+        assert 'id="cre-cov-btn"' in html
+        assert "/api/coverage" in html
+        # the MUST/NICE cards and the badge accents
+        assert "cov-card must" in html
+        assert "cov-card nice" in html
+        assert "cov-badge must" in html
+        assert "cov-badge nice" in html
+        # one brief, two homes: the coverage input mirrors #cre-brief
+        assert "setBriefText" in html
+        # the calm after-the-list line pointing back at the rescan
+        assert "Add the new clips to the same folder, then " in html
+        # the help copy: runs over the Claude connection, sharpest with vision
+        assert "no extra cost" in html
+        assert "Let Claude watch your clips" in html
+
+
 class TestAiCutApi:
     """Claude composes the cut (monteur.compose) behind "ai_cut": true.
 

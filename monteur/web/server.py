@@ -48,6 +48,8 @@ API (all JSON):
 * ``POST /api/resolve/render`` {"timeline"?, "target_dir",
   "name"?, "preset"?}                                           -> {"job": id}
 * ``POST /api/find``      {"folder", "query", "limit"?}         -> {"shots"} | {"error"}
+* ``POST /api/coverage``  {"folder", "style"?, "brief"?,
+  "target"?}                                                    -> {"job": id}
 * ``POST /api/movie/load``    {"project_dir"}                   -> {"project", "progress"}
 * ``POST /api/movie/new``     {"project_dir", "brief",
   "genre"?}                                                     -> {"job": id}
@@ -151,6 +153,21 @@ pure plan surgery, no AI, record grid untouched) and returns the
 standard build-result shape (fresh timeline file + the improved
 ``"plan_json"`` + the applied notes), so the Studio's result card
 replaces in place exactly like a revision does.
+
+``/api/coverage`` is the Studio's pre-cut shot list — "what's still
+missing?" (:mod:`monteur.coverage`): the browser sends the footage
+``"folder"`` plus optional ``"style"`` (the step-2 selection), ``"brief"``
+(the wizard's "What should this video become?" text) and ``"target"``
+(seconds). A ``"coverage"`` job sifts through the same scan cache as
+build/pick/kit (a cache hit after a see-scan carries the vision
+annotations — exactly what makes the shot list sharp) and asks
+:func:`monteur.coverage.missing_shots` for the gap list. Text-only, so
+it runs over the user's Claude connection (Claude Code = no extra API
+cost). Like Director's Notes this IS a gate: the user explicitly asked
+for the coverage check, so a ``MonteurAIError`` fails the job with its
+own actionable message. The result is ``{"coverage": {verdict,
+coverage_score, have, missing, summary, basics, notes}}``; re-running
+simply replaces the previous result in the UI.
 
 ``/api/find`` answers instantly (no job) from the ``.monteur-vision.json``
 sidecar that a "Let Claude watch" scan leaves next to the footage
@@ -750,7 +767,7 @@ def _run_export_video_job(job: dict, payload: dict) -> None:
 def _new_job(kind: str) -> dict:
     job = {
         "id": secrets.token_hex(4),
-        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "direct" | "direct-apply" | "distill" | "preview" | "export-video" | "resolve-build" | "resolve-render" | "resolve-detect" | "movie" | "scene-check" | "movie-assemble" | "ai-test" | "youtube-upload"
+        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "direct" | "direct-apply" | "coverage" | "distill" | "preview" | "export-video" | "resolve-build" | "resolve-render" | "resolve-detect" | "movie" | "scene-check" | "movie-assemble" | "ai-test" | "youtube-upload"
         "state": "running",  # -> "done" | "error" | "cancelled"
         "progress": [],  # dicts: {"index","total","name","stage"[,"usable_ratio"]}
         "message": "",  # human-readable reason when state == "error"
@@ -1457,6 +1474,60 @@ def _run_direct_job(job: dict, payload: dict) -> None:
             "plan_json": plan_to_dict(plan),
             "applied": False,
         }
+        job["state"] = "done"
+    except SiftCancelled:
+        job["state"] = "cancelled"
+    except (MonteurAIError, MonteurMediaError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
+def _run_coverage_job(job: dict, payload: dict) -> None:
+    """Daemon-thread body for POST /api/coverage (the pre-cut shot list).
+
+    Mirrors ``monteur missing`` (cli.cmd_missing): sift the folder through
+    the same scan cache as build/pick/kit (a cache hit after a see-scan
+    carries the vision annotations, which is exactly what makes the shot
+    list sharp), then ask :func:`monteur.coverage.missing_shots` which
+    shots are still missing. Like Director's Notes this is a GATE: the
+    user explicitly asked for the coverage check, so a ``MonteurAIError``
+    fails the job with its own actionable message.
+
+    ``missing_shots`` is resolved at CALL time via the ``from``-import
+    below, so tests can monkeypatch it on :mod:`monteur.coverage` without
+    any AI backend.
+    """
+    from monteur.ai import MonteurAIError
+    from monteur.media import MonteurMediaError
+    from monteur.sift import SiftCancelled
+
+    try:
+        try:
+            target_raw = payload.get("target")
+            target = float(target_raw) if target_raw else None
+        except (TypeError, ValueError):
+            raise ValueError("'target' must be a number of seconds")
+
+        reports, _cached = _sift_or_cached(job, payload.get("folder", ""))
+        if job["cancel"].is_set():
+            raise SiftCancelled("cancelled")
+
+        with _JOBS_LOCK:
+            job["progress"].append(
+                {"stage": "coverage", "name": "Claude is checking your coverage"}
+            )
+        from monteur.coverage import missing_shots
+
+        result = missing_shots(
+            reports,
+            style=str(payload.get("style") or "auto"),
+            brief=str(payload.get("brief") or ""),
+            target_seconds=target,
+        )
+        job["result"] = {"coverage": result}
         job["state"] = "done"
     except SiftCancelled:
         job["state"] = "cancelled"
@@ -2354,6 +2425,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("GET", "/api/drafts"): self._drafts_list,
             ("POST", "/api/drafts"): self._drafts_save,
             ("POST", "/api/find"): self._find,
+            ("POST", "/api/coverage"): self._coverage,
             ("POST", "/api/movie/load"): self._movie_load,
             ("POST", "/api/movie/new"): self._movie_new,
             ("POST", "/api/movie/assign"): self._movie_assign,
@@ -2667,6 +2739,19 @@ class MonteurHandler(BaseHTTPRequestHandler):
             target=_run_direct_job,
             args=(job, payload),
             name=f"monteur-direct-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _coverage(self) -> None:
+        payload = self._read_json()
+        if not payload.get("folder"):
+            raise ApiError(400, "missing 'folder' (path to your footage)")
+        job = _new_job("coverage")
+        threading.Thread(
+            target=_run_coverage_job,
+            args=(job, payload),
+            name=f"monteur-coverage-{job['id']}",
             daemon=True,
         ).start()
         self._send_json({"job": job["id"]})

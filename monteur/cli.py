@@ -16,6 +16,7 @@ Workflow overview::
     monteur preview plan.json -o preview.mp4
     monteur export plan.json -o video.mp4 --canvas uhd --quality high
     monteur upload video.mp4 --title "Alpen im Herbst" --tags travel,alps
+    monteur missing clips --style trailer --target 60
     monteur direct plan.json clips --apply -o cut_v3.fcpxml
     monteur resolve status
     monteur resolve render --out renders --preset 2160p
@@ -392,6 +393,79 @@ def cmd_find(args: argparse.Namespace) -> None:
         print(line)
         if shot.tags:
             print(f"      tags: {', '.join(shot.tags)}")
+
+
+def cmd_missing(args: argparse.Namespace) -> None:
+    """Pre-cut coverage check: which shots are still missing?
+
+    Mirrors cmd_sift's plumbing (plain sift of the folder — the vision
+    annotations ride along when 'monteur see' cached them and the reports
+    carry labels), then asks :func:`monteur.coverage.missing_shots` for
+    the gap list and prints it: score, what the material already has,
+    and the shots to film grouped by priority, each with a filming tip.
+    """
+    from monteur.ai import MonteurAIError
+    from monteur.coverage import missing_shots
+    from monteur.media import MonteurMediaError
+    from monteur.sift import list_media, sift_directory
+
+    try:
+        count = len(list_media(args.folder))
+    except MonteurMediaError as exc:
+        _fail(str(exc))
+    if not count:
+        _fail(f"no video files found in {args.folder}")
+    print(
+        f"Scanning {count} clips in {args.folder} — this decodes each clip, "
+        f"so it can take a few seconds per clip.",
+        flush=True,
+    )
+    try:
+        reports = sift_directory(args.folder, progress=_sift_progress)
+    except MonteurMediaError as exc:
+        _fail(str(exc))
+    if not reports:
+        _fail(f"no video files found in {args.folder}")
+
+    print("Asking Claude what's still missing ...", flush=True)
+    try:
+        result = missing_shots(
+            reports, style=args.style, brief=args.brief,
+            target_seconds=args.target,
+        )
+    except MonteurAIError as exc:
+        _fail(str(exc))
+
+    basics = result.get("basics") or {}
+    print(f"\nCoverage: {result['coverage_score']}/100"
+          + (f" — {result['verdict']}" if result["verdict"] else ""))
+    line = f"Material: {basics.get('usable_seconds', 0):.0f}s usable"
+    if basics.get("target_seconds"):
+        line += f" for a {basics['target_seconds']:.0f}s target"
+    print(line)
+    for finding in basics.get("findings") or []:
+        print(f"  ! {finding}")
+    if result["have"]:
+        print("You have:")
+        for item in result["have"]:
+            print(f"  + {item}")
+    missing = result["missing"]
+    if missing:
+        musts = [m for m in missing if m["priority"] == "must"]
+        nices = [m for m in missing if m["priority"] != "must"]
+        print(f"Still missing ({len(musts)} must, {len(nices)} nice):")
+        for entry in musts + nices:
+            print(f"  {entry['priority'].upper():<4}  {entry['shot']}")
+            if entry["why"]:
+                print(f"        why: {entry['why']}")
+            if entry["tip"]:
+                print(f"        tip: {entry['tip']}")
+    else:
+        print("Still missing: nothing — Claude would start cutting.")
+    if result["summary"]:
+        print(f"\n{result['summary']}")
+    for note in result.get("notes") or []:
+        print(f"  {note}")
 
 
 def cmd_distill(args: argparse.Namespace) -> None:
@@ -1657,6 +1731,30 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("query", help='what to look for, e.g. "kurve überholen"')
     p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_find)
+
+    p = sub.add_parser(
+        "missing",
+        help="pre-cut coverage check: which shots are still missing — a "
+             "concrete list to film BEFORE you cut (free over Claude Code; "
+             "sharpest after 'monteur see')",
+    )
+    p.add_argument("folder", help="directory with your video clips")
+    p.add_argument(
+        "--style", default="auto",
+        help="what the video should become: auto, travel, wedding, "
+             "music_video, trailer (the craft brief the coverage is judged "
+             "against)",
+    )
+    p.add_argument(
+        "--brief", default="",
+        help='what the video should become, in your own words — e.g. '
+             '"epic alps trailer, end on the summit"',
+    )
+    p.add_argument(
+        "--target", type=float, default=None,
+        help="planned cut length in seconds — coverage is judged against it",
+    )
+    p.set_defaults(func=cmd_missing)
 
     p = sub.add_parser(
         "distill",

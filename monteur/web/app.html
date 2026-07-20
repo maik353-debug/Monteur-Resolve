@@ -686,6 +686,32 @@ svg text.axis {
 .rank-reasons { margin: 6px 0 8px; padding-left: 18px; font-size: 11.5px; color: var(--ink-2); }
 .rank-reasons li { margin-top: 2px; }
 
+/* coverage check (step 1: "Shot list — what's still missing?") */
+.cov-score { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.cov-verdict { flex: 1; min-width: 0; font-weight: 650; font-size: 12.5px; overflow-wrap: anywhere; }
+.cov-have { font-size: 12.5px; color: var(--ink-2); margin-top: 8px; line-height: 1.5; }
+.cov-have b { font-weight: 650; }
+.cov-cards { display: grid; gap: 8px; margin-top: 10px; }
+.cov-card { background: var(--input-bg); border: 1px solid var(--border); border-radius: 3px; padding: 9px 11px; font-size: 12.5px; }
+.cov-card.must { box-shadow: inset 3px 0 0 var(--accent); }
+.cov-badge {
+  flex: none; font-size: 9.5px; font-weight: 700; letter-spacing: 0.07em;
+  text-transform: uppercase; border-radius: 2px; padding: 1px 6px 2px;
+  margin-right: 8px; white-space: nowrap;
+}
+.cov-badge.must { background: var(--row-wash); color: var(--accent); }
+.cov-badge.nice { background: var(--surface-2); color: var(--ink-muted); }
+.cov-shot { font-weight: 650; overflow-wrap: anywhere; }
+.cov-why { color: var(--ink-2); margin-top: 4px; overflow-wrap: anywhere; }
+.cov-tip { color: var(--ink-muted); margin-top: 3px; font-size: 11.5px; overflow-wrap: anywhere; }
+.cov-summary { font-size: 12.5px; color: var(--ink-2); margin-top: 10px; line-height: 1.5; }
+.cov-rescan { margin-top: 10px; }
+.link-btn {
+  background: none; border: none; padding: 0; color: var(--accent);
+  font: inherit; cursor: pointer; text-decoration: underline;
+}
+.link-btn:hover { color: var(--accent-soft); }
+
 /* send to Resolve (result card) */
 .resolve-send { margin: 4px 0 2px; }
 .resolve-send .help-small { margin-top: 8px; max-width: 620px; }
@@ -1204,6 +1230,20 @@ svg text.axis {
             <p class="help-small">Searches the labels Claude wrote during a &ldquo;Let Claude watch&rdquo; scan — offline and instant, no API call. Try &ldquo;hero&rdquo; for the money shots.</p>
             <p class="scan-note" id="cre-find-msg" role="status" hidden></p>
             <div id="cre-find-results"></div>
+          </div>
+        </details>
+        <details class="fine-tune rank-details" id="cre-coverage" style="margin-top: 14px;">
+          <summary>Shot list — what's still missing?</summary>
+          <div class="rank-body">
+            <label class="sr-only" for="cre-cov-brief">What should this video become?</label>
+            <div class="path-row">
+              <input type="text" id="cre-cov-brief" placeholder="What should this video become? e.g. &ldquo;epic alps trailer, end on the summit&rdquo;" spellcheck="false" autocomplete="off">
+              <button class="btn" id="cre-cov-btn" type="button">Check my coverage<span class="spin" aria-hidden="true"></span></button>
+            </div>
+            <p class="help-small">Claude reads your scan and lists the shots you still need to film — before you cut anything. Style and target length come from step 2; the description here and step 2&rsquo;s &ldquo;What is this video?&rdquo; are the same text. Runs over your Claude connection (with Claude Code: no extra cost) — sharpest after &ldquo;Let Claude watch your clips&rdquo;.</p>
+            <div id="cre-cov-panel"></div>
+            <p class="scan-note" id="cre-cov-msg" role="status" hidden></p>
+            <div id="cre-cov-results"></div>
           </div>
         </details>
         <div class="wiz-nav">
@@ -3607,6 +3647,7 @@ var rankPanel = makeJobPanel("cre-rank-panel", { starting: "Starting the ranking
 var kitPanel = makeJobPanel("cre-kit-panel", { starting: "Starting the publish kit…", working: "Writing the publish kit…" });
 var revisePanel = makeJobPanel("cre-rev-panel", { starting: "Starting the revision…", working: "Revising your cut…" });
 var directPanel = makeJobPanel("cre-dir-panel", { starting: "Sending the cut to Claude…", working: "Claude is reviewing your cut…" });
+var coveragePanel = makeJobPanel("cre-cov-panel", { starting: "Sending your scan to Claude…", working: "Claude is checking your coverage…" });
 var resolveBuildPanel = makeJobPanel("cre-resolve-panel", { starting: "Contacting DaVinci Resolve…", working: "Building the timeline in Resolve…" });
 var renderPanel = makeJobPanel("cre-render-panel", { starting: "Contacting DaVinci Resolve…", working: "Rendering in Resolve…" });
 var distillPanel = makeJobPanel("cre-dst-panel", { starting: "Starting the distillation…", working: "Distilling your trailer…" });
@@ -3652,6 +3693,12 @@ function setDirectBusy(on) {
   btn.disabled = on;
   $("cre-dir-notes").disabled = on;
   $("cre-dir-apply").disabled = on || $("cre-dir-apply").classList.contains("busy");
+}
+function setCoverageBusy(on) {
+  var btn = $("cre-cov-btn");
+  btn.classList.toggle("busy", on);
+  btn.disabled = on;
+  $("cre-cov-brief").disabled = on;
 }
 function setDirectApplyBusy(on) {
   var btn = $("cre-dir-apply");
@@ -3704,6 +3751,7 @@ function creStopJobs() {
   if (kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
   if (revisePanel.running()) { revisePanel.stop(); setReviseBusy(false); }
   if (directPanel.running()) { directPanel.stop(); setDirectBusy(false); setDirectApplyBusy(false); }
+  if (coveragePanel.running()) { coveragePanel.stop(); setCoverageBusy(false); }
   if (resolveBuildPanel.running()) { resolveBuildPanel.stop(); setResolveBuildBusy(false); }
   if (renderPanel.running()) { renderPanel.stop(); setRenderBusy(false); }
   if (distillPanel.running()) { distillPanel.stop(); setDistillBusy(false); }
@@ -3720,6 +3768,7 @@ function creNote(id, message, isError) {
 
 function creShowStep(n, focusHeading) {
   if (n !== 1 && scanPanel.running()) { scanPanel.stop(); setScanBusy(false); }
+  if (n !== 1 && coveragePanel.running()) { coveragePanel.stop(); setCoverageBusy(false); }
   if (n !== 2 && rankPanel.running()) { rankPanel.stop(); setRankBusy(false); }
   if (n !== 3 && buildPanel.running()) { buildPanel.stop(); setBuildBusy(false); }
   if (n !== 3 && kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
@@ -4610,7 +4659,7 @@ function restoreWizardFromDraft(draft) {
     $("cre-elements").value = s.elements;
     if (s.elements) $("cre-sfx").checked = true; // the folder implies the layer
   }
-  if (typeof s.brief === "string") $("cre-brief").value = s.brief;
+  if (typeof s.brief === "string") setBriefText(s.brief); // both homes of the one brief
   if (typeof s.ai_cut === "boolean") {
     $("cre-ai-cut").checked = s.ai_cut;
     cre.aiCutTouched = true; // a restored decision beats the scan suggestion
@@ -4828,6 +4877,128 @@ function findShots() {
 $("cre-find-btn").addEventListener("click", findShots);
 $("cre-find-query").addEventListener("keydown", function (e) {
   if (e.key === "Enter") { e.preventDefault(); findShots(); }
+});
+
+/* ---- step 1: coverage check (monteur.coverage — the pre-cut shot list) ----
+   POST /api/coverage runs a "coverage" job: sift (through the server's
+   scan cache, so a "Let Claude watch" scan's labels ride along) plus ONE
+   Claude completion. Style and target length come from the step-2
+   controls; the brief is the ONE shared text below. Re-running replaces
+   the previous result. */
+
+/* one brief, two homes: this panel's "What should this video become?"
+   and step 2's "What is this video?" edit the SAME text. #cre-brief
+   stays the single source the build payload (and the drafts'
+   settings.brief) reads, so persistence is untouched — the coverage
+   input is a mirror, synced both ways. */
+function setBriefText(text) {
+  $("cre-brief").value = text;
+  $("cre-cov-brief").value = text;
+}
+$("cre-brief").addEventListener("input", function () { $("cre-cov-brief").value = this.value; });
+$("cre-cov-brief").addEventListener("input", function () { $("cre-brief").value = this.value; });
+
+function renderCoverage(cov) {
+  var host = $("cre-cov-results");
+  clear(host);
+  var basics = cov.basics || {};
+
+  var head = el("div", "cov-score");
+  head.appendChild(el("span", "rank-score", String(cov.coverage_score || 0) + "/100"));
+  if (cov.verdict) head.appendChild(el("span", "cov-verdict", String(cov.verdict)));
+  host.appendChild(head);
+
+  if (typeof basics.usable_seconds === "number") {
+    var facts = Math.round(basics.usable_seconds) + "s of usable material";
+    if (basics.target_seconds) facts += " for a " + Math.round(basics.target_seconds) + "s target";
+    host.appendChild(el("p", "help-small", facts));
+  }
+  (basics.findings || []).forEach(function (finding) {
+    host.appendChild(el("p", "help-small", "! " + String(finding)));
+  });
+
+  var have = (cov.have || []).map(String).filter(Boolean);
+  if (have.length) {
+    var haveP = el("p", "cov-have");
+    haveP.appendChild(el("b", null, "You have: "));
+    haveP.appendChild(document.createTextNode(have.join(" · ")));
+    host.appendChild(haveP);
+  }
+
+  var missing = cov.missing || [];
+  if (missing.length) {
+    var cards = el("div", "cov-cards");
+    missing.filter(function (m) { return m.priority === "must"; })
+      .concat(missing.filter(function (m) { return m.priority !== "must"; }))
+      .forEach(function (m) {
+        var isMust = m.priority === "must";
+        var card = el("div", isMust ? "cov-card must" : "cov-card nice");
+        var top = el("div", null);
+        top.appendChild(el("span", isMust ? "cov-badge must" : "cov-badge nice", isMust ? "Must" : "Nice"));
+        top.appendChild(el("span", "cov-shot", String(m.shot || "")));
+        card.appendChild(top);
+        if (m.why) card.appendChild(el("div", "cov-why", String(m.why)));
+        if (m.tip) card.appendChild(el("div", "cov-tip", "How: " + String(m.tip)));
+        cards.appendChild(card);
+      });
+    host.appendChild(cards);
+  } else {
+    host.appendChild(el("p", "cov-summary", "Nothing missing — this footage can carry the cut."));
+  }
+  if (cov.summary) host.appendChild(el("p", "cov-summary", String(cov.summary)));
+  (cov.notes || []).forEach(function (note) {
+    host.appendChild(el("p", "help-small", String(note)));
+  });
+
+  var rescan = el("p", "help-small cov-rescan");
+  rescan.appendChild(document.createTextNode("Add the new clips to the same folder, then "));
+  var link = el("button", "link-btn", "Rescan");
+  link.type = "button";
+  link.addEventListener("click", function () {
+    $("cre-scan-btn").scrollIntoView({ block: "center" });
+    $("cre-scan-btn").focus();
+  });
+  rescan.appendChild(link);
+  rescan.appendChild(document.createTextNode(" — Monteur picks them up and you can check again."));
+  host.appendChild(rescan);
+}
+
+function checkCoverage() {
+  if (coveragePanel.running()) return;
+  var folder = $("cre-folder").value.trim();
+  if (!folder) {
+    creNote("cre-cov-msg", "Add your footage folder above first — the check reads its scan.", true);
+    $("cre-folder").focus();
+    return;
+  }
+  $("cre-cov-msg").hidden = true;
+  clear($("cre-cov-results"));
+  setCoverageBusy(true);
+  var body = { folder: folder, style: cre.style, brief: $("cre-brief").value.trim() };
+  if (cre.lenMode === "target" && targetLen()) body.target = targetLen();
+  api("/api/coverage", { method: "POST", body: body }).then(function (data) {
+    coveragePanel.start(data.job, {
+      onDone: function (result) {
+        setCoverageBusy(false);
+        renderCoverage((result && result.coverage) || {});
+      },
+      onCancelled: function () {
+        setCoverageBusy(false);
+        creNote("cre-cov-msg", "Coverage check cancelled — check again whenever you're ready.");
+      },
+      onError: function (message) {
+        setCoverageBusy(false);
+        creNote("cre-cov-msg", message, true);
+      }
+    });
+  }).catch(function (err) {
+    setCoverageBusy(false);
+    creNote("cre-cov-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+$("cre-cov-btn").addEventListener("click", checkCoverage);
+$("cre-cov-brief").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); checkCoverage(); }
 });
 
 /* ---- step 3: the revision loop (monteur.revise) ----------------------
