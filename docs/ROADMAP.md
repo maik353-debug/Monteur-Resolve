@@ -85,6 +85,15 @@ Craft templates:
 - [ ] Watch mode: new footage auto-sifted overnight, report ready in the
       morning
 - [ ] Change list between versions for sound/VFX handoffs
+- [x] Claude composes the cut (`--ai-cut`, Studio toggle): the engine
+      builds the beat grid, phases and dips; Claude casts every slot
+      from the vision-labeled moment inventory following a per-style
+      craft brief, writes the act titles and a story line; the engine
+      validates every pick and falls back per slot
+- [x] Director's Notes (`monteur direct`, Studio block): Claude reviews
+      the planned cut against editing craft — verdict, score, issues
+      with concrete replacements from the unused bench, one-click apply
+      that leaves the beat grid untouched
 - [x] Claude Code as an AI backend: with no ANTHROPIC_API_KEY but an
       installed `claude` CLI, every writing feature (movie blueprint,
       brief, publish kit, selects/notes) runs on the user's Claude
