@@ -25,7 +25,8 @@ API (all JSON):
 * ``POST /api/create/distill`` {"timeline": {"filename",
   "content", "fps"?}, "music"?, "target"?, "style"?,
   "canvas"?, "audio"?, "format"?}                               -> {"job": id}
-* ``POST /api/create/resolve`` {"plan_json", "fps"?, "name"?}   -> {"job": id}
+* ``POST /api/create/resolve`` {"plan_json", "fps"?, "name"?,
+  "canvas"?}                                                    -> {"job": id}
 * ``POST /api/find``      {"folder", "query", "limit"?}         -> {"shots"} | {"error"}
 * ``POST /api/movie/load``    {"project_dir"}                   -> {"project", "progress"}
 * ``POST /api/movie/new``     {"project_dir", "brief",
@@ -103,11 +104,15 @@ with the loader's message) and hands it to
 :func:`monteur.resolve.build_plan_isolated` — crash-safe by contract:
 Resolve scripting runs in a disposable child process (honoring
 ``MONTEUR_RESOLVE_PYTHON``) and NEVER raises. Title specs come from
-:func:`monteur.resolve.titles_from_plan` when the plan has dips. A
-failure dict (Resolve not running, scripting disabled, incompatible
-Python, native crash, timeout) fails the job with the worker's own error
-message verbatim — it already explains the fix. Success carries the
-created ``"timeline"`` name plus any non-fatal title ``"warnings"``.
+:func:`monteur.resolve.titles_from_plan` when the plan has dips. An
+optional ``"canvas"`` (a :data:`monteur.montage.CANVASES` preset key —
+the UI sends the wizard's selected shape) sizes the Resolve timeline
+like the file download would; cinemascope presets also set "scale full
+frame with crop" on the footage. A failure dict (Resolve not running,
+scripting disabled, incompatible Python, native crash, timeout) fails
+the job with the worker's own error message verbatim — it already
+explains the fix. Success carries the created ``"timeline"`` name plus
+any non-fatal title/canvas ``"warnings"``.
 
 The ``/api/settings`` endpoints manage how Monteur reaches Claude — the end
 user has a finished application, not a CLI, so the backend choice and the
@@ -939,7 +944,10 @@ def _run_resolve_build_job(job: dict, payload: dict) -> None:
     ``into_resolve`` path: the plan is rebuilt from the browser's
     ``"plan_json"`` (bad input -> ValueError -> job error), title specs are
     derived from the plan's own dips (:func:`monteur.resolve.
-    titles_from_plan` — plans without dips pass ``None``), and the build
+    titles_from_plan` — plans without dips pass ``None``), the optional
+    ``"canvas"`` preset key is forwarded so the Resolve timeline gets the
+    wizard's chosen resolution (cine presets also auto-set the crop
+    scaling), and the build
     runs through :func:`monteur.resolve.build_plan_isolated`, which NEVER
     raises: Resolve scripting lives in a disposable child process, so even
     a native crash comes back as a graceful ``{"ok": False}`` dict. Its
@@ -959,12 +967,15 @@ def _run_resolve_build_job(job: dict, payload: dict) -> None:
             raise ValueError("the plan has no entries — nothing to build")
         fps = float(payload.get("fps") or 25)
         name = str(payload.get("name") or "Monteur Montage")
+        canvas = payload.get("canvas") or None
         titles = titles_from_plan(plan) if plan.dips else None
         with _JOBS_LOCK:
             job["progress"].append(
                 {"stage": "resolve", "name": "building the timeline in Resolve"}
             )
-        built = build_plan_isolated(plan, fps=fps, name=name, titles=titles)
+        built = build_plan_isolated(
+            plan, fps=fps, name=name, titles=titles, canvas=canvas
+        )
         if not built.get("ok"):
             # Never raises by contract — a failure dict carries the worker's
             # user-ready message (Resolve not running, scripting disabled,

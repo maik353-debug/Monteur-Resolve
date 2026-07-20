@@ -1192,6 +1192,7 @@ def build_plan_isolated(
     fps: float,
     name: str = "Monteur Montage",
     titles: list[dict] | None = None,
+    canvas: str | None = None,
     timeout: float = 180.0,
 ) -> dict:
     """Build a montage timeline in Resolve from a child process; never raises.
@@ -1209,11 +1210,16 @@ def build_plan_isolated(
 
     ``titles`` (optional, ``[{"start": s, "duration": s, "text": ...}]`` in
     plan-time seconds, e.g. from :func:`titles_from_plan`) are inserted after
-    the build, exactly as ``build_timeline_from_plan`` does.
+    the build, exactly as ``build_timeline_from_plan`` does. ``canvas``
+    (optional, a :data:`monteur.montage.CANVASES` preset key) sizes the
+    built timeline like the file exports do — cinemascope presets also set
+    "scale full frame with crop" on the footage; see
+    :meth:`ResolveBridge.build_timeline_from_plan`.
 
     Returns ``{"ok": True, "timeline": <created name>, "warnings": [...]}``
-    — ``warnings`` are :meth:`ResolveBridge.add_titles`' non-fatal title
-    placement messages — or ``{"ok": False, "error": <message>}``. When the
+    — ``warnings`` are the non-fatal messages from
+    :meth:`ResolveBridge.add_titles` (title placement) and the canvas
+    application — or ``{"ok": False, "error": <message>}``. When the
     worker died of an uncatchable native crash the failure additionally
     carries ``"reason": "native-crash"`` and the error explains the fix: set
     MONTEUR_RESOLVE_PYTHON to a Resolve-compatible interpreter (roughly
@@ -1230,6 +1236,7 @@ def build_plan_isolated(
         "fps": float(fps),
         "name": name,
         "titles": titles,
+        "canvas": canvas,
     }
     ok, payload = _run_worker("build_plan", timeout, request=request)
     if not ok:
@@ -1609,6 +1616,7 @@ class ResolveBridge:
         fps: float,
         name: str = "Monteur Montage",
         titles: list[dict] | None = None,
+        canvas: str | None = None,
         warnings: list[str] | None = None,
     ) -> str:
         """Build a montage timeline in Resolve from a MontagePlan.
@@ -1631,6 +1639,20 @@ class ResolveBridge:
         (see add_titles); pass a ``warnings`` list to collect add_titles'
         human-readable messages (it is only ever appended to).
 
+        ``canvas`` (optional, a :data:`monteur.montage.CANVASES` preset key
+        such as ``"uhd"`` or ``"cine-uhd"``; an unknown key raises
+        ValueError before any Resolve work) sizes the built timeline like
+        the file exports do. Applied after the build (and titles): the
+        timeline resolution is set via timeline-level custom settings
+        (``SetSetting("useCustomSettings", "1")`` then the
+        ``timelineResolution*`` keys, string values), falling back to the
+        project-level ``SetSetting`` when the timeline refuses; and for the
+        cinemascope presets (``cine*``) every video-track-1 clip gets
+        ``SetProperty("Scaling", 1)`` — "scale full frame with crop" — so
+        16:9 footage fills the 2.39:1 frame instead of showing side bars.
+        Both steps are defensive: refusals are summarized into ``warnings``
+        (one message per step, never per clip) and the build still succeeds.
+
         Limitation: plans with ``dips`` (the trailer's smash-to-black title
         slots) are appended back-to-back too — the black gaps themselves only
         exist in the FCPXML/EDL exports, so import the file when you want
@@ -1642,6 +1664,17 @@ class ResolveBridge:
         matching via ``GetName()``. An unmapped path raises
         MonteurResolveError.
         """
+        if canvas is not None:
+            # Lazy import: monteur.montage pulls in numpy, and this module
+            # must stay importable by the stdlib-only worker bootstrap.
+            from monteur.montage import CANVASES
+
+            if canvas not in CANVASES:
+                valid = ", ".join(sorted(CANVASES))
+                raise ValueError(
+                    f"unknown canvas {canvas!r}; valid canvases: {valid}"
+                )
+            canvas_size = CANVASES[canvas]
         entries = sorted(plan.entries, key=lambda e: e.record_start)
         paths: list[str] = []
         for entry in entries:
@@ -1708,7 +1741,111 @@ class ResolveBridge:
                 titles, list(getattr(plan, "dips", []) or [])
             )
             self.add_titles(shifted, fps, warnings=warnings)
+        if canvas is not None:
+            self._apply_canvas(
+                timeline, canvas, canvas_size,
+                warnings if warnings is not None else [],
+            )
         return timeline_name
+
+    def _apply_canvas(
+        self,
+        timeline: Any,
+        canvas: str,
+        size: tuple[int, int],
+        warnings: list[str],
+    ) -> None:
+        """Size a freshly built timeline to a canvas preset, defensively.
+
+        Resolution first: timeline-level custom settings
+        (``SetSetting("useCustomSettings", "1")`` then the
+        ``timelineResolutionWidth``/``Height`` keys — Resolve's SetSetting
+        takes STRING values), falling back to the project-level
+        ``SetSetting`` when the timeline refuses (older Resolve versions
+        return False there). Then, for the cinemascope presets (``cine*``),
+        every clip on video track 1 gets ``SetProperty("Scaling", 1)`` —
+        "scale full frame with crop". Every refusal is non-fatal: each step
+        contributes at most ONE summarized message to ``warnings``.
+        """
+        width, height = size
+        if not _set_timeline_resolution(timeline, width, height):
+            if not _set_project_resolution(self._project(), width, height):
+                warnings.append(
+                    f"could not set the timeline resolution to "
+                    f"{width}x{height} for the {canvas!r} canvas (Resolve "
+                    "refused both the timeline-level custom settings and the "
+                    "project setting) — set Project Settings > Timeline "
+                    "resolution by hand."
+                )
+        if canvas.startswith("cine"):
+            failed, total = _set_crop_scaling(timeline)
+            if failed:
+                warnings.append(
+                    f"could not set 'scale full frame with crop' on {failed} "
+                    f"of {total} clips — for the cinemascope look, set "
+                    "Project Settings > Image Scaling > 'Scale full frame "
+                    "with crop' by hand."
+                )
+
+
+# --- Canvas (resolution + cinemascope crop) -------------------------------------
+
+
+def _set_timeline_resolution(timeline: Any, width: int, height: int) -> bool:
+    """Try the timeline-level resolution; True only when Resolve took it all.
+
+    Per the scripting API, a per-timeline resolution needs
+    ``SetSetting("useCustomSettings", "1")`` first; values are strings.
+    A missing SetSetting, an exception, or ANY False return yields False so
+    the caller can fall back to the project-level setting.
+    """
+    setter = getattr(timeline, "SetSetting", None)
+    if not callable(setter):
+        return False
+    try:
+        ok_custom = setter("useCustomSettings", "1")
+        ok_width = setter("timelineResolutionWidth", str(width))
+        ok_height = setter("timelineResolutionHeight", str(height))
+    except Exception:  # noqa: BLE001 - a refusing API is a fallback, not a crash
+        return False
+    return bool(ok_custom and ok_width and ok_height)
+
+
+def _set_project_resolution(project: Any, width: int, height: int) -> bool:
+    """Project-level resolution fallback; True when both keys were accepted."""
+    setter = getattr(project, "SetSetting", None)
+    if not callable(setter):
+        return False
+    try:
+        ok_width = setter("timelineResolutionWidth", str(width))
+        ok_height = setter("timelineResolutionHeight", str(height))
+    except Exception:  # noqa: BLE001 - a refusing API becomes a warning upstream
+        return False
+    return bool(ok_width and ok_height)
+
+
+def _set_crop_scaling(timeline: Any) -> tuple[int, int]:
+    """``SetProperty("Scaling", 1)`` (= "scale full frame with crop") on every
+    video-track-1 item. Returns ``(failed, total)`` — per-item failures are
+    counted, never raised, so the caller can emit ONE summarized warning."""
+    try:
+        if int(timeline.GetTrackCount("video") or 0) < 1:
+            return 0, 0
+        items = list(timeline.GetItemListInTrack("video", 1) or [])
+    except Exception:  # noqa: BLE001 - enumeration refused: nothing to crop
+        return 0, 0
+    failed = 0
+    for item in items:
+        setter = getattr(item, "SetProperty", None)
+        ok = False
+        if callable(setter):
+            try:
+                ok = bool(setter("Scaling", 1))
+            except Exception:  # noqa: BLE001 - one bad item must not stop the rest
+                ok = False
+        if not ok:
+            failed += 1
+    return failed, len(items)
 
 
 # --- Fusion Text+ titles --------------------------------------------------------

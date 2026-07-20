@@ -481,7 +481,10 @@ def create_montage(
     "auto" (the style's habits — the trailer smashes to black at act
     changes with "Title slot" markers), "cuts", "dissolves" or "smash".
     ``canvas`` = "hd"/"uhd" 16:9, "vertical"/"vertical-uhd" 9:16,
-    "cine"/"cine-uhd" 2.39:1. ``allow_repeats`` lifts the cap that stops
+    "cine"/"cine-uhd" 2.39:1 — it applies to the direct Resolve build
+    too (the timeline is sized to the preset, and the cine presets
+    auto-set "scale full frame with crop" on the footage), not just the
+    file export. ``allow_repeats`` lifts the cap that stops
     footage repeating beyond 1.5x the unique material. ``cut_lead``
     places cuts that many seconds before the beat. ``see=True`` asks
     Claude vision to label the moments first (needs the anthropic
@@ -597,7 +600,7 @@ def create_montage(
         from monteur.resolve import build_plan_isolated, titles_from_plan
 
         titles = titles_from_plan(plan) if plan.dips else None
-        built = build_plan_isolated(plan, fps=fps, titles=titles)
+        built = build_plan_isolated(plan, fps=fps, titles=titles, canvas=canvas)
         if not built.get("ok"):
             return {
                 "error": built.get("error", "Resolve build failed"),

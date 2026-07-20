@@ -155,6 +155,9 @@ class FakeTimeline:
         self._markers = markers or {}
         self.added_markers: list[tuple] = []
         self.fail_marker_frames: set[int] = set()
+        # --- canvas behavior knobs (build_timeline_from_plan tests) ---
+        self.settings_set: list[tuple[str, str]] = []  # recorded SetSetting calls
+        self.set_setting_result = True  # False = Resolve refuses the setting
         # --- Fusion title behavior knobs (add_titles tests) ---
         self.inserted_fusion_titles: list[str] = []
         self.created_title_items: list = []
@@ -212,6 +215,10 @@ class FakeTimeline:
         assert key == "timelineFrameRate"
         return self._fps
 
+    def SetSetting(self, key: str, value: str) -> bool:
+        self.settings_set.append((key, value))
+        return self.set_setting_result
+
     def GetStartFrame(self) -> int:
         return self._start_frame
 
@@ -223,6 +230,23 @@ class FakeTimeline:
 
     def GetMarkers(self) -> dict:
         return self._markers
+
+
+class FakeTimelineClip:
+    """A timeline item that AppendToTimeline lands on the created timeline.
+
+    Records SetProperty calls so the canvas tests can assert the cine
+    presets set Scaling=1 ("scale full frame with crop") per clip.
+    """
+
+    def __init__(self, info: dict, set_property_result: bool = True) -> None:
+        self.info = info
+        self.properties: list[tuple[str, object]] = []
+        self.set_property_result = set_property_result
+
+    def SetProperty(self, key: str, value) -> bool:
+        self.properties.append((key, value))
+        return self.set_property_result
 
 
 class FakePoolClip:
@@ -252,6 +276,8 @@ class FakeMediaPool:
         self.fail_append = False
         self.appended: list[dict] = []
         self.created_timeline_names: list[str] = []
+        # False = the appended clips' SetProperty refuses (canvas crop tests)
+        self.append_clip_property_result = True
 
     def ImportTimelineFromFile(self, path: str):
         if self.fail_timeline_import:
@@ -278,6 +304,20 @@ class FakeMediaPool:
         if self.fail_append:
             return None
         self.appended.extend(clip_infos)
+        # Like Resolve: the appended clips become items on the current
+        # timeline — video (mediaType 1, the default) on video track 1,
+        # audio (mediaType 2) on audio track 1.
+        current = self._project._current if self._project is not None else None
+        if current is not None:
+            for info in clip_infos:
+                kind = "audio" if info.get("mediaType") == 2 else "video"
+                if not current._tracks[kind]:
+                    current._tracks[kind].append([])
+                current._tracks[kind][0].append(
+                    FakeTimelineClip(
+                        info, set_property_result=self.append_clip_property_result
+                    )
+                )
         return list(clip_infos)
 
 
@@ -295,9 +335,15 @@ class FakeProject:
         )
         self.media_pool = FakeMediaPool(self)
         self.set_current_calls: list[FakeTimeline] = []
+        self.settings_set: list[tuple[str, str]] = []  # project-level SetSetting
+        self.set_setting_result = True
 
     def GetName(self) -> str:
         return self._name
+
+    def SetSetting(self, key: str, value: str) -> bool:
+        self.settings_set.append((key, value))
+        return self.set_setting_result
 
     def GetTimelineCount(self) -> int:
         return len(self._timelines)
@@ -680,6 +726,139 @@ def test_build_timeline_append_failure_raises() -> None:
     with pytest.raises(MonteurResolveError) as excinfo:
         bridge.build_timeline_from_plan(make_plan(), fps=24.0)
     assert "append" in str(excinfo.value)
+
+
+# --- build_timeline_from_plan: canvas (resolution + cinemascope crop) -----------
+
+
+def test_build_timeline_canvas_cine_sets_resolution_and_crop() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    warnings: list[str] = []
+    name = bridge.build_timeline_from_plan(
+        make_plan(), fps=24.0, canvas="cine-uhd", warnings=warnings
+    )
+    assert name == "Monteur Montage"
+    created = project._timelines[-1]
+    # Timeline-level custom settings, in order, with STRING values.
+    assert created.settings_set == [
+        ("useCustomSettings", "1"),
+        ("timelineResolutionWidth", "3840"),
+        ("timelineResolutionHeight", "1608"),
+    ]
+    # The timeline took the settings, so the project level is never touched.
+    assert project.settings_set == []
+    # Every video-track-1 clip got Scaling=1 ("scale full frame with crop").
+    video_items = created._tracks["video"][0]
+    assert len(video_items) == 3
+    assert all(item.properties == [("Scaling", 1)] for item in video_items)
+    # The music item is audio — no Scaling there.
+    audio_items = created._tracks["audio"][0]
+    assert len(audio_items) == 1
+    assert audio_items[0].properties == []
+    assert warnings == []
+
+
+def test_build_timeline_canvas_uhd_sets_resolution_without_crop() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    warnings: list[str] = []
+    bridge.build_timeline_from_plan(
+        make_plan(), fps=24.0, canvas="uhd", warnings=warnings
+    )
+    created = project._timelines[-1]
+    assert created.settings_set == [
+        ("useCustomSettings", "1"),
+        ("timelineResolutionWidth", "3840"),
+        ("timelineResolutionHeight", "2160"),
+    ]
+    # 16:9 canvases never touch the clips' scaling.
+    for item in created._tracks["video"][0]:
+        assert item.properties == []
+    assert warnings == []
+
+
+def test_build_timeline_without_canvas_touches_no_settings() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+    created = project._timelines[-1]
+    assert created.settings_set == []
+    assert project.settings_set == []
+    for item in created._tracks["video"][0]:
+        assert item.properties == []
+
+
+def test_build_timeline_unknown_canvas_raises_before_any_resolve_work() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    with pytest.raises(ValueError) as excinfo:
+        bridge.build_timeline_from_plan(make_plan(), fps=24.0, canvas="imax")
+    message = str(excinfo.value)
+    assert "unknown canvas 'imax'" in message
+    assert "cine-uhd" in message  # the valid presets are listed
+    # Validated up front: nothing was imported, no timeline was created.
+    assert project.media_pool.import_calls == []
+    assert project.media_pool.created_timeline_names == []
+
+
+def test_build_timeline_canvas_falls_back_to_project_setting() -> None:
+    class RefusesSettingsPool(FakeMediaPool):
+        def CreateEmptyTimeline(self, name):
+            timeline = super().CreateEmptyTimeline(name)
+            timeline.set_setting_result = False  # timeline level refuses
+            return timeline
+
+    bridge, project = make_bridge([standard_timeline()])
+    project.media_pool = RefusesSettingsPool(project)
+    warnings: list[str] = []
+    bridge.build_timeline_from_plan(
+        make_plan(), fps=24.0, canvas="hd", warnings=warnings
+    )
+    # The project-level fallback took the resolution — no warning.
+    assert project.settings_set == [
+        ("timelineResolutionWidth", "1920"),
+        ("timelineResolutionHeight", "1080"),
+    ]
+    assert warnings == []
+
+
+def test_build_timeline_canvas_refused_everywhere_warns_and_succeeds() -> None:
+    class RefusesSettingsPool(FakeMediaPool):
+        def CreateEmptyTimeline(self, name):
+            timeline = super().CreateEmptyTimeline(name)
+            timeline.set_setting_result = False
+            return timeline
+
+    bridge, project = make_bridge([standard_timeline()])
+    project.media_pool = RefusesSettingsPool(project)
+    project.set_setting_result = False  # project level refuses too
+    warnings: list[str] = []
+    name = bridge.build_timeline_from_plan(
+        make_plan(), fps=24.0, canvas="cine-uhd", warnings=warnings
+    )
+    assert name == "Monteur Montage"  # non-fatal by design
+    resolution_warnings = [w for w in warnings if "3840x1608" in w]
+    assert len(resolution_warnings) == 1
+    assert "'cine-uhd'" in resolution_warnings[0]
+    assert "Timeline resolution" in resolution_warnings[0]
+    # The crop step still ran despite the resolution refusal.
+    created = project._timelines[-1]
+    assert all(
+        item.properties == [("Scaling", 1)]
+        for item in created._tracks["video"][0]
+    )
+
+
+def test_build_timeline_canvas_crop_failures_warn_once_summarized() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    project.media_pool.append_clip_property_result = False  # items refuse
+    warnings: list[str] = []
+    name = bridge.build_timeline_from_plan(
+        make_plan(), fps=24.0, canvas="cine", warnings=warnings
+    )
+    assert name == "Monteur Montage"
+    # ONE summarized warning for all 3 refusing clips, not one per clip.
+    crop_warnings = [w for w in warnings if "crop" in w]
+    assert len(crop_warnings) == 1
+    assert "3 of 3 clips" in crop_warnings[0]
+    assert "Scale full frame with crop" in crop_warnings[0]
 
 
 # --- add_titles -------------------------------------------------------------------
@@ -2333,10 +2512,14 @@ class _FakeBuildBridge:
         self.calls: list[dict] = []
 
     def build_timeline_from_plan(
-        self, plan, fps, name="Monteur Montage", titles=None, warnings=None
+        self, plan, fps, name="Monteur Montage", titles=None, canvas=None,
+        warnings=None,
     ):
         self.calls.append(
-            {"plan": plan, "fps": fps, "name": name, "titles": titles}
+            {
+                "plan": plan, "fps": fps, "name": name, "titles": titles,
+                "canvas": canvas,
+            }
         )
         if warnings is not None:
             warnings.extend(self.warn)
@@ -2351,6 +2534,7 @@ def build_plan_request(plan=None, **overrides) -> dict:
         "fps": 24.0,
         "name": "Monteur Montage",
         "titles": None,
+        "canvas": None,
     }
     request.update(overrides)
     return request
@@ -2441,6 +2625,74 @@ def test_worker_handle_build_plan_records_titles_arg(monkeypatch) -> None:
     ]
 
 
+def test_worker_handle_build_plan_forwards_canvas(monkeypatch) -> None:
+    from monteur import _resolve_worker
+
+    fake = _FakeBuildBridge()
+    monkeypatch.setattr(resolve, "connect", lambda app=None: fake)
+    response = _resolve_worker.handle(
+        "build_plan", build_plan_request(canvas="cine-uhd")
+    )
+    assert response["ok"] is True
+    assert fake.calls[0]["canvas"] == "cine-uhd"
+
+
+def test_worker_handle_build_plan_canvas_defaults_to_none(monkeypatch) -> None:
+    # Old callers' payloads (no "canvas" key) keep working: canvas=None.
+    from monteur import _resolve_worker
+
+    fake = _FakeBuildBridge()
+    monkeypatch.setattr(resolve, "connect", lambda app=None: fake)
+    request = build_plan_request()
+    del request["canvas"]
+    response = _resolve_worker.handle("build_plan", request)
+    assert response["ok"] is True
+    assert fake.calls[0]["canvas"] is None
+
+
+def test_worker_handle_build_plan_unknown_canvas_is_clean(monkeypatch) -> None:
+    # The real bridge raises ValueError for an unknown preset; the worker
+    # answers with a clean ok:false payload, never a crash-looking exit.
+    from monteur import _resolve_worker
+
+    bridge, _ = make_bridge([standard_timeline()])
+    monkeypatch.setattr(resolve, "connect", lambda app=None: bridge)
+    response = _resolve_worker.handle(
+        "build_plan", build_plan_request(canvas="imax")
+    )
+    assert response["ok"] is False
+    assert "unknown canvas 'imax'" in response["error"]
+    assert "cine-uhd" in response["error"]
+
+
+def test_worker_main_build_plan_canvas_wire_round_trip(monkeypatch, capsys) -> None:
+    # The real wire with a canvas: stdin JSON -> real fake bridge -> the
+    # created timeline got the resolution AND the cine crop scaling.
+    from monteur import _resolve_worker
+
+    bridge, project = make_bridge([standard_timeline()])
+    monkeypatch.setattr(resolve, "connect", lambda app=None: bridge)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(json.dumps(build_plan_request(canvas="cine-uhd"))),
+    )
+    code = _resolve_worker.main(["build_plan"])
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data == {"ok": True, "timeline": "Monteur Montage", "warnings": []}
+    created = project._timelines[-1]
+    assert created.settings_set == [
+        ("useCustomSettings", "1"),
+        ("timelineResolutionWidth", "3840"),
+        ("timelineResolutionHeight", "1608"),
+    ]
+    assert all(
+        item.properties == [("Scaling", 1)]
+        for item in created._tracks["video"][0]
+    )
+
+
 def test_worker_handle_build_plan_bad_plan_is_clean(monkeypatch) -> None:
     from monteur import _resolve_worker
 
@@ -2523,6 +2775,7 @@ def test_build_plan_isolated_success(monkeypatch) -> None:
     assert sent["fps"] == 24.0
     assert sent["name"] == "Monteur Montage"
     assert sent["titles"] is None
+    assert sent["canvas"] is None
     # The serialized plan is a faithful plan_to_dict payload.
     rebuilt = plan_from_dict(sent["plan"])
     assert [e.clip_path for e in rebuilt.entries] == [
@@ -2561,6 +2814,19 @@ def test_build_plan_isolated_sends_titles(monkeypatch) -> None:
         {"start": 2.6, "duration": 2.0, "text": "the mountain pass"},
         {"start": 5.0, "duration": 2.0, "text": "Title"},
     ]
+
+
+def test_build_plan_isolated_sends_canvas(monkeypatch) -> None:
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["input"] = kwargs.get("input")
+        return _completed(0, json.dumps({"ok": True, "timeline": "T", "warnings": []}))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    resolve.build_plan_isolated(make_plan(), fps=25.0, canvas="cine-uhd")
+    sent = json.loads(captured["input"])
+    assert sent["canvas"] == "cine-uhd"
 
 
 def test_build_plan_isolated_worker_clean_error(monkeypatch) -> None:
@@ -2621,7 +2887,7 @@ def test_build_plan_isolated_bad_output(monkeypatch) -> None:
 # --- CLI: create --into-resolve uses the isolated path ----------------------------
 
 
-def _run_cmd_create_into_resolve(monkeypatch, plan, build_result):
+def _run_cmd_create_into_resolve(monkeypatch, plan, build_result, extra_args=()):
     """Run ``monteur create <folder> song.mp3 --into-resolve`` with the whole
     pipeline faked out; returns the recorded build_plan_isolated calls."""
     import types
@@ -2645,12 +2911,21 @@ def _run_cmd_create_into_resolve(monkeypatch, plan, build_result):
     )
     calls: list[dict] = []
 
-    def fake_build(plan, fps, name="Monteur Montage", titles=None, timeout=180.0):
-        calls.append({"plan": plan, "fps": fps, "name": name, "titles": titles})
+    def fake_build(
+        plan, fps, name="Monteur Montage", titles=None, canvas=None, timeout=180.0
+    ):
+        calls.append(
+            {
+                "plan": plan, "fps": fps, "name": name, "titles": titles,
+                "canvas": canvas,
+            }
+        )
         return build_result
 
     monkeypatch.setattr(resolve, "build_plan_isolated", fake_build)
-    args = build_parser().parse_args(["create", "clips", "song.mp3", "--into-resolve"])
+    args = build_parser().parse_args(
+        ["create", "clips", "song.mp3", "--into-resolve", *extra_args]
+    )
     cmd_create(args)
     return calls
 
@@ -2671,9 +2946,22 @@ def test_cli_into_resolve_uses_isolated_build_with_titles(monkeypatch, capsys) -
     assert calls[0]["fps"] == 25.0  # the create default
     # The plan has dips, so titles are derived via titles_from_plan.
     assert calls[0]["titles"] == resolve.titles_from_plan(plan)
+    # --canvas was not given, so the create default rides along.
+    assert calls[0]["canvas"] == "uhd"
     out = capsys.readouterr().out
     assert "3 cuts -> Resolve timeline 'Monteur Montage' (8.0s at 25 fps)" in out
     assert "drag it onto the black gap at 4.6s." in out  # warnings are printed
+
+
+def test_cli_into_resolve_forwards_chosen_canvas(monkeypatch, capsys) -> None:
+    plan = trailer_plan()
+    calls = _run_cmd_create_into_resolve(
+        monkeypatch,
+        plan,
+        {"ok": True, "timeline": "Monteur Montage", "warnings": []},
+        extra_args=["--canvas", "cine-uhd"],
+    )
+    assert calls[0]["canvas"] == "cine-uhd"
 
 
 def test_cli_into_resolve_no_dips_passes_no_titles(monkeypatch, capsys) -> None:

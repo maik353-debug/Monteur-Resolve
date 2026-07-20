@@ -1169,7 +1169,7 @@ svg text.axis {
               <span class="help-small" id="cre-res-note">3840&thinsp;×&thinsp;2160</span>
             </div>
             <p class="help-small">Your footage keeps its own aspect ratio — reframe vertical or cinemascope shots in Resolve after import.</p>
-            <p class="help-small" id="cre-cine-note" hidden>Cinemascope heads-up: 16:9 footage shows bars on the SIDES at first — for the classic cinema look, set Resolve&rsquo;s Project Settings &gt; Image Scaling &gt; &ldquo;Scale full frame with crop&rdquo;.</p>
+            <p class="help-small" id="cre-cine-note" hidden>Cinemascope heads-up: 16:9 footage shows bars on the SIDES at first — for the classic cinema look, set Resolve&rsquo;s Project Settings &gt; Image Scaling &gt; &ldquo;Scale full frame with crop&rdquo;. When you use &ldquo;Build in DaVinci Resolve&rdquo;, Monteur applies that crop setting for you — the manual step is only for downloaded files you import yourself.</p>
           </div>
           <div>
             <h3 class="fgroup-title">Length</h3>
@@ -4284,7 +4284,10 @@ function buildInResolve() {
   var built = (cre.result && cre.result.body) || {};
   var body = {
     plan_json: rev.planJson,
-    fps: built.fps || fpsFrom($("cre-fps"))
+    fps: built.fps || fpsFrom($("cre-fps")),
+    // the wizard's canvas choice: the build's recorded key, else the
+    // current selection — so the Resolve timeline matches the download
+    canvas: built.canvas || canvasKey()
   };
   $("cre-resolve-msg").hidden = true;
   $("cre-resolve-result").hidden = true;

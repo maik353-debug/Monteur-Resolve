@@ -614,7 +614,9 @@ def cmd_create(args: argparse.Namespace) -> None:
         from monteur.resolve import build_plan_isolated, titles_from_plan
 
         titles = titles_from_plan(plan) if plan.dips else None
-        result = build_plan_isolated(plan, fps=args.fps, titles=titles)
+        result = build_plan_isolated(
+            plan, fps=args.fps, titles=titles, canvas=args.canvas
+        )
         if not result.get("ok"):
             _fail(result.get("error", "Resolve build failed."))
         name = result["timeline"]

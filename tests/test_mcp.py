@@ -210,6 +210,65 @@ def test_importing_module_does_not_start_server():
     assert 'if __name__ == "__main__":' in source
 
 
+def test_create_montage_into_resolve_forwards_canvas(tmp_path, monkeypatch):
+    """The into_resolve branch hands the canvas preset to the isolated build.
+
+    The pipeline (sift/music/plan) is faked out at its import sites — the
+    tool body does from-imports at CALL time, so monkeypatching the source
+    modules is a complete hook. ``build_plan_isolated`` records its kwargs.
+    """
+    import types
+
+    import monteur.montage
+    import monteur.music
+    import monteur.resolve
+    import monteur.sift
+    from monteur.montage import MontageEntry, MontagePlan
+
+    plan = MontagePlan(
+        music_path="/music/song.wav",
+        duration=2.0,
+        entries=[
+            MontageEntry(
+                clip_path="/media/a.mov", source_start=0.0, source_end=2.0,
+                record_start=0.0, record_end=2.0, score=1.0,
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        monteur.sift, "sift_directory", lambda folder: [object()]
+    )
+    monkeypatch.setattr(
+        monteur.music,
+        "analyze_music",
+        lambda path: types.SimpleNamespace(tempo=100.0, beats=[], duration=8.0),
+    )
+    monkeypatch.setattr(
+        monteur.montage, "plan_montage", lambda reports, song, **kwargs: plan
+    )
+    calls = []
+
+    def fake_build(
+        plan, fps, name="Monteur Montage", titles=None, canvas=None, timeout=180.0
+    ):
+        calls.append({"plan": plan, "fps": fps, "titles": titles, "canvas": canvas})
+        return {"ok": True, "timeline": "Monteur Montage", "warnings": ["w1"]}
+
+    monkeypatch.setattr(monteur.resolve, "build_plan_isolated", fake_build)
+    result = mcp_server.create_montage(
+        folder=str(tmp_path),
+        music=str(tmp_path / "song.mp3"),
+        into_resolve=True,
+        canvas="cine-uhd",
+    )
+    assert "error" not in result
+    assert result["resolve_timeline"] == "Monteur Montage"
+    assert result["resolve_warnings"] == ["w1"]
+    assert len(calls) == 1
+    assert calls[0]["plan"] is plan
+    assert calls[0]["canvas"] == "cine-uhd"
+
+
 def test_create_montage_no_music_needs_original_audio(tmp_path):
     result = mcp_server.create_montage(
         folder=str(tmp_path), output=str(tmp_path / "out.fcpxml")

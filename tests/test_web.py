@@ -1499,8 +1499,16 @@ class TestResolveBuildApi:
 
         calls = []
 
-        def fake_build(plan, fps, name="Monteur Montage", titles=None, timeout=180.0):
-            calls.append({"plan": plan, "fps": fps, "name": name, "titles": titles})
+        def fake_build(
+            plan, fps, name="Monteur Montage", titles=None, canvas=None,
+            timeout=180.0,
+        ):
+            calls.append(
+                {
+                    "plan": plan, "fps": fps, "name": name, "titles": titles,
+                    "canvas": canvas,
+                }
+            )
             return dict(result)
 
         monkeypatch.setattr(resolve_module, "build_plan_isolated", fake_build)
@@ -1533,6 +1541,30 @@ class TestResolveBuildApi:
         assert call["fps"] == 30.0
         assert call["name"] == "Monteur Montage"  # the default timeline name
         assert call["titles"] is None  # no dips -> no titles
+        assert call["canvas"] is None  # not sent -> project default
+
+    def test_resolve_build_forwards_canvas(self, server, monkeypatch):
+        # The UI sends the wizard's selected canvas key (buildInResolve's
+        # body.canvas); the endpoint forwards it to build_plan_isolated so
+        # the Resolve timeline is sized (and cine-cropped) like the file
+        # download would be.
+        calls = self._patch_build(
+            monkeypatch, {"ok": True, "timeline": "Monteur Montage", "warnings": []}
+        )
+        job = self._resolve(
+            server, plan_json=self._plan_json(), canvas="cine-uhd"
+        )
+        assert job["state"] == "done"
+        assert calls[0]["canvas"] == "cine-uhd"
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_app_sends_canvas_with_resolve_build(self):
+        # No JS harness here, so assert on the source: buildInResolve's
+        # request body carries the wizard's canvas, and the cine help note
+        # tells users the Resolve build applies the crop for them.
+        source = _APP_HTML.read_text(encoding="utf-8")
+        assert "canvas: built.canvas || canvasKey()" in source
+        assert "Monteur applies that crop setting for you" in source
 
     def test_resolve_build_dips_plan_sends_titles_and_warnings(
         self, server, monkeypatch
