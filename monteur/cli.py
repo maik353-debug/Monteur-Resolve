@@ -13,6 +13,7 @@ Workflow overview::
     monteur elements sfx_library
     monteur create clips song.mp3 -o cut.fcpxml --elements sfx_library
     monteur revise plan.json clips -o cut_v2.fcpxml --brief "zweite Hälfte ruhiger"
+    monteur preview plan.json -o preview.mp4
     monteur direct plan.json clips --apply -o cut_v3.fcpxml
     monteur resolve status
     monteur resolve render --out renders --preset 2160p
@@ -870,6 +871,49 @@ def cmd_revise(args: argparse.Namespace) -> None:
         print(f"  {note}")
 
 
+def cmd_preview(args: argparse.Namespace) -> None:
+    """Render a saved plan to a small real MP4 — Monteur's own engine, no
+    Resolve.
+
+    A thin wrapper over :func:`monteur.preview.render_preview`: the same
+    source ranges, record gaps (black dips) and music offset the Resolve
+    timeline would get, encoded small and fast. Per-segment progress prints
+    in the same sequential-line style as the other long-running commands.
+    """
+    from monteur.media import MonteurMediaError
+    from monteur.preview import render_preview
+
+    plan = _load_plan(args.plan)
+    if not plan.entries:
+        _fail("the plan has no entries — nothing to preview")
+    audio = args.audio or ("music" if plan.music_path else "original")
+    if not plan.music_path and audio != "original":
+        _fail(f"the plan has no music; audio mode {audio!r} needs a song")
+
+    def progress(done: int, total: int, label: str) -> None:
+        print(f"[{done}/{total}] {label}", flush=True)
+
+    print(
+        f"Rendering the preview with Monteur's own engine ({audio} audio) ...",
+        flush=True,
+    )
+    try:
+        result = render_preview(
+            plan, args.output, width=args.width, fps=args.fps, audio=audio,
+            progress=progress,
+        )
+    except (MonteurMediaError, ValueError) as exc:
+        _fail(str(exc))
+    print(
+        f"\nPreview -> {args.output} ({result['duration']:.1f}s, "
+        f"{result['width']}px wide, {result['segments']} segments)"
+    )
+    print(
+        "  Rough pixels, real cut — dissolves show as hard cuts here; "
+        "the Resolve build stays the reference."
+    )
+
+
 def _load_plan(path: str):
     """Read a saved plan JSON (create/revise --save-plan) or fail cleanly."""
     from monteur.montage import plan_from_dict
@@ -1304,6 +1348,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="save the revised plan as JSON for the next iteration",
     )
     p.set_defaults(func=cmd_revise)
+
+    p = sub.add_parser(
+        "preview",
+        help="watch a saved plan as a small real MP4 — rendered by Monteur's "
+             "own engine in seconds, no Resolve needed",
+    )
+    p.add_argument("plan", help="plan JSON from 'monteur create --save-plan' (or a revise)")
+    p.add_argument("-o", "--output", required=True, help="output .mp4")
+    p.add_argument(
+        "--width", type=int, default=640,
+        help="preview width in pixels (default 640; height follows the footage)",
+    )
+    p.add_argument(
+        "--audio", choices=["music", "mix", "original"], default=None,
+        help="what plays under the pictures (default: music when the plan "
+             "has a song, original otherwise)",
+    )
+    p.add_argument("--fps", type=float, default=25.0)
+    p.set_defaults(func=cmd_preview)
 
     p = sub.add_parser(
         "direct",

@@ -6,6 +6,7 @@ import threading
 import time
 import types
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -2828,3 +2829,302 @@ class TestSoundElements:
         finetune = source.split('id="cre-finetune"', 1)[1].split("</details>", 1)[0]
         assert 'id="cre-sfx"' in finetune
         assert 'id="cre-elements"' in finetune
+
+
+# --- "Sehen ohne Resolve": storyboard thumbnails + the preview player --------
+
+
+def _get_raw(url, headers=None):
+    """A raw GET for binary endpoints: (status, headers dict, body bytes).
+
+    HTTPError responses (the thumb placeholder 404, the preview 416) are
+    returned like any other — their status/headers/body ARE the contract.
+    """
+    request = urllib.request.Request(url, headers=headers or {})
+    try:
+        with urllib.request.urlopen(request) as response:
+            return response.status, dict(response.headers), response.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, dict(exc.headers), exc.read()
+
+
+def _quote(value):
+    return urllib.parse.quote(str(value), safe="")
+
+
+def _preview_plan_dict(music=True):
+    """A tiny real plan over the demo footage, in the plan_json save format:
+    three entries with one 0.4 s record gap (a black dip) — the same shape
+    monteur.preview's own tests render."""
+    from monteur.montage import MontageEntry, MontagePlan, plan_to_dict
+
+    demo = _DEMO_FOOTAGE
+    entries = [
+        MontageEntry(
+            clip_path=str(demo / "clip_A.mp4"),
+            source_start=1.0, source_end=3.0,
+            record_start=0.0, record_end=2.0, score=1.0,
+        ),
+        MontageEntry(
+            clip_path=str(demo / "clip_C.mp4"),
+            source_start=2.0, source_end=4.0,
+            record_start=2.4, record_end=4.4, score=0.9,
+        ),
+        MontageEntry(
+            clip_path=str(demo / "clip_D.mp4"),
+            source_start=0.5, source_end=2.1,
+            record_start=4.4, record_end=6.0, score=0.8,
+        ),
+    ]
+    plan = MontagePlan(
+        music_path=str(demo / "song.wav") if music else "",
+        duration=6.0,
+        music_start=8.0 if music else 0.0,
+        entries=entries,
+        dips=[(2.0, 0.4)],
+    )
+    return plan_to_dict(plan)
+
+
+class TestThumbApi:
+    DEMO = str(_DEMO_FOOTAGE)
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+
+    def _url(self, server, clip, t=1.0, w=160):
+        return f"{server}/api/thumb?clip={_quote(clip)}&t={t}&w={w}"
+
+    def test_thumb_serves_a_jpeg_with_long_cache_headers(self, server):
+        status, headers, body = _get_raw(
+            self._url(server, f"{self.DEMO}/clip_A.mp4")
+        )
+        assert status == 200
+        assert headers["Content-Type"] == "image/jpeg"
+        assert body[:3] == b"\xff\xd8\xff"  # real JPEG bytes, not a stub
+        assert len(body) > 1000
+        assert int(headers["Content-Length"]) == len(body)
+        # long client-side cache: the URL's frame never changes for an
+        # unchanged clip (the server key includes the file's mtime)
+        assert "max-age=31536000" in headers["Cache-Control"]
+        assert "immutable" in headers["Cache-Control"]
+
+    def test_thumb_second_request_is_a_cache_hit(self, server):
+        from monteur.web import server as web_server
+
+        url = self._url(server, f"{self.DEMO}/clip_C.mp4", t=2.5, w=144)
+        cache_dir = Path(web_server._thumb_dir())
+        before = set(cache_dir.glob("*.jpg"))
+        status, _, first = _get_raw(url)
+        assert status == 200
+        created = set(cache_dir.glob("*.jpg")) - before
+        assert len(created) == 1  # exactly one new cache file for this key
+        cached_file = created.pop()
+        stamp = cached_file.stat().st_mtime_ns
+
+        status, _, second = _get_raw(url)
+        assert status == 200
+        assert second == first  # byte-identical repeat
+        # instant repeat: the frame was NOT re-extracted (same file, same
+        # mtime, no new cache entries)
+        assert cached_file.stat().st_mtime_ns == stamp
+        assert set(cache_dir.glob("*.jpg")) - before == {cached_file}
+
+    def test_thumb_width_is_part_of_the_cache_key(self, server):
+        from monteur.web import server as web_server
+
+        cache_dir = Path(web_server._thumb_dir())
+        before = set(cache_dir.glob("*.jpg"))
+        for w in (96, 128):
+            status, _, _body = _get_raw(
+                self._url(server, f"{self.DEMO}/clip_D.mp4", t=1.0, w=w)
+            )
+            assert status == 200
+        assert len(set(cache_dir.glob("*.jpg")) - before) == 2
+
+    def test_thumb_bad_path_is_404_with_a_placeholder_image(self, server):
+        status, headers, body = _get_raw(
+            self._url(server, f"{self.DEMO}/no_such_clip.mp4")
+        )
+        assert status == 404
+        # the body is a tiny image the UI can render as a quiet gray tile
+        assert headers["Content-Type"] == "image/png"
+        assert body[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_thumb_missing_clip_param_is_404_placeholder(self, server):
+        status, headers, _body = _get_raw(f"{server}/api/thumb?t=1&w=160")
+        assert status == 404
+        assert headers["Content-Type"] == "image/png"
+
+    def test_thumb_malformed_numbers_are_404_placeholder(self, server):
+        status, _, _body = _get_raw(
+            f"{server}/api/thumb?clip={_quote(self.DEMO + '/clip_A.mp4')}"
+            f"&t=abc&w=xyz"
+        )
+        assert status == 404
+
+
+class TestPreviewApi:
+    DEMO = str(_DEMO_FOOTAGE)
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+
+    def _render(self, server, payload=None):
+        body = {"plan_json": _preview_plan_dict()}
+        body.update(payload or {})
+        data = _post(f"{server}/api/create/preview", body)
+        job = _wait_for_job(server, data["job"])
+        return job
+
+    def test_preview_job_happy_path_and_range_serving(self, server):
+        job = self._render(server, {"audio": "music"})
+        assert job["state"] == "done"
+        assert job["kind"] == "preview"
+
+        result = job["result"]
+        import re as re_mod
+
+        assert re_mod.fullmatch(
+            r"/api/preview/[0-9a-f]{16}\.mp4", result["url"]
+        )
+        assert result["duration"] == pytest.approx(6.0, abs=0.3)
+        assert result["width"] == 640
+
+        # the engine's per-segment progress flowed into the job entries
+        stages = [p["stage"] for p in job["progress"]]
+        assert stages and set(stages) == {"preview"}
+        last = job["progress"][-1]
+        assert last["index"] == last["total"]  # counted all the way through
+
+        # full GET: a real MP4, range-capable
+        url = f"{server}{result['url']}"
+        status, headers, body = _get_raw(url)
+        assert status == 200
+        assert headers["Content-Type"] == "video/mp4"
+        assert headers["Accept-Ranges"] == "bytes"
+        assert int(headers["Content-Length"]) == len(body)
+        assert b"ftyp" in body[:16]  # MP4 container magic
+        size = len(body)
+
+        # Range GET: <video> seeking needs true 206 partial responses
+        status, headers, part = _get_raw(url, headers={"Range": "bytes=0-99"})
+        assert status == 206
+        assert headers["Content-Range"] == f"bytes 0-99/{size}"
+        assert len(part) == 100
+        assert part == body[:100]
+
+        status, headers, tail = _get_raw(url, headers={"Range": "bytes=100-"})
+        assert status == 206
+        assert headers["Content-Range"] == f"bytes 100-{size - 1}/{size}"
+        assert tail == body[100:]
+
+        # unsatisfiable range: 416 with the total size
+        status, headers, _body = _get_raw(
+            url, headers={"Range": f"bytes={size}-"}
+        )
+        assert status == 416
+        assert headers["Content-Range"] == f"bytes */{size}"
+
+    def test_second_preview_replaces_the_first(self, server):
+        first = self._render(server)
+        assert first["state"] == "done"
+        first_url = f"{server}{first['result']['url']}"
+        status, _, _body = _get_raw(first_url)
+        assert status == 200
+
+        second = self._render(server)
+        assert second["state"] == "done"
+        assert second["result"]["url"] != first["result"]["url"]
+        # the previews dir is capped at the latest: the old file is gone...
+        status, _, _body = _get_raw(first_url)
+        assert status == 404
+        # ...and the new one serves
+        status, _, _body = _get_raw(f"{server}{second['result']['url']}")
+        assert status == 200
+
+    def test_preview_defaults_to_original_audio_without_music(self, server):
+        job = self._render(server, {"plan_json": _preview_plan_dict(music=False)})
+        assert job["state"] == "done"
+
+    def test_preview_music_mode_without_music_is_a_job_error(self, server):
+        job = self._render(
+            server,
+            {"plan_json": _preview_plan_dict(music=False), "audio": "music"},
+        )
+        assert job["state"] == "error"
+        assert "no music" in job["message"]
+
+    def test_preview_missing_plan_json_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/preview", {"audio": "music"})
+        assert exc_info.value.code == 400
+        assert "plan_json" in json.loads(exc_info.value.read())["error"]
+
+    def test_preview_bad_plan_is_a_job_error(self, server):
+        data = _post(
+            f"{server}/api/create/preview", {"plan_json": {"nonsense": True}}
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "not a Monteur plan" in job["message"]
+
+    def test_preview_empty_plan_is_a_job_error(self, server):
+        plan = _preview_plan_dict()
+        plan["entries"] = []
+        data = _post(f"{server}/api/create/preview", {"plan_json": plan})
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "no entries" in job["message"]
+
+    def test_unknown_preview_token_is_404(self, server):
+        status, _, _body = _get_raw(f"{server}/api/preview/{'0' * 16}.mp4")
+        assert status == 404
+        status, _, _body = _get_raw(f"{server}/api/preview/evil.txt")
+        assert status == 404
+
+
+class TestStoryboardAndPreviewUi:
+    """Static asserts on app.html: the storyboard + preview player markup."""
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_app_has_the_storyboard(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            'id="cre-storyboard"',
+            'id="cre-sb-board"',
+            'id="cre-sb-story"',
+            "/api/thumb?clip=",       # storyboard thumbs come from the API
+            'loading = "lazy"',       # thumbs lazy-load as cards scroll in
+            "pin-btn sb-pin",         # THE pin toggle lives on the card
+            "sb-dip",                 # dip markers render between cards
+            "sbActTitles",            # composer act labels degrade gracefully
+        ):
+            assert needle in source, needle
+        # the storyboard replaced the old revise pin list completely
+        assert "cre-rev-entries" not in source
+        assert "renderReviseEntries" not in source
+        # pins still feed the same revise state (rev.pins) — one pin UI
+        assert "rev.pins.indexOf(stamp)" in source
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_app_has_the_preview_player(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            'id="cre-preview-btn"',
+            'id="cre-preview-video"',
+            "/api/create/preview",
+            'p.stage === "preview"',
+            "Rendered by Monteur&rsquo;s own engine in seconds",
+            "Dissolves show as hard cuts here; the Resolve build stays the reference.",
+        ):
+            assert needle in source, needle
+        # the preview row sits at the TOP of the result card — before the
+        # "Build in DaVinci Resolve" block
+        assert source.index('id="cre-preview-btn"') < source.index('id="cre-resolve-btn"')
+        # a new build/revise/apply/resume invalidates the player
+        assert source.count("resetPreview()") >= 5

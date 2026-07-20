@@ -709,6 +709,76 @@ svg text.axis {
   border-radius: 0 0 3px 3px;
 }
 
+/* ---------- "Sehen ohne Resolve": preview player + storyboard ----------- */
+.preview-block { margin: 6px 0 12px; }
+.preview-row { display: flex; align-items: flex-start; gap: 12px; }
+.preview-row .btn { flex: none; }
+.preview-row .help-small { margin: 5px 0 0; }
+.preview-player {
+  display: block; width: 100%; max-width: 640px; margin-top: 10px;
+  background: #000; border: 1px solid var(--border); border-radius: 3px;
+}
+
+/* storyboard: one dense flat card per shot, dip markers between them */
+.sb-story {
+  border-left: 2px solid var(--accent); background: var(--row-wash);
+  border-radius: 3px; padding: 7px 11px; margin: 8px 0 2px; font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.sb-board {
+  display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px;
+  margin: 10px 0 8px;
+}
+.sb-card {
+  width: 148px; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 3px;
+}
+.sb-card.pinned { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.sb-thumb-wrap { position: relative; background: #000; aspect-ratio: 16 / 9; }
+.sb-thumb { display: block; width: 100%; height: 100%; object-fit: cover; }
+.sb-badge {
+  position: absolute; padding: 1px 5px; border-radius: 2px;
+  background: rgba(0, 0, 0, 0.72); color: #e8e9ee;
+  font-family: var(--mono); font-size: 10px; line-height: 1.5;
+}
+.sb-slot { top: 3px; left: 3px; }
+.sb-dur { bottom: 3px; right: 3px; }
+.sb-meta {
+  flex: 1; display: flex; flex-direction: column; gap: 2px;
+  padding: 5px 7px 6px;
+}
+.sb-name {
+  font-family: var(--mono); font-size: 10px; color: var(--ink-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sb-label {
+  font-size: 10.5px; line-height: 1.35; color: var(--ink-muted);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.sb-pin { align-self: flex-start; margin-top: auto; padding: 1px 8px; font-size: 10.5px; }
+.sb-dip {
+  width: 52px; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 4px; padding: 6px 5px; text-align: center;
+  background: #000; border: 1px solid var(--border); border-radius: 3px;
+  color: #d3d4dc;
+}
+.sb-dip-title {
+  font-size: 9.5px; line-height: 1.3; font-weight: 600;
+  letter-spacing: 0.04em; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.sb-dip-dur { font-family: var(--mono); font-size: 9px; color: #8a8b95; }
+.sb-act {
+  align-self: stretch; display: flex; align-items: center; padding: 4px 3px;
+  writing-mode: vertical-rl; transform: rotate(180deg);
+  border-right: 2px solid var(--accent); color: var(--ink-2);
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; max-height: 116px; overflow: hidden;
+}
+
 /* job progress panel */
 .job-panel {
   border: 1px solid var(--border); border-radius: 3px; background: var(--input-bg);
@@ -731,7 +801,6 @@ svg text.axis {
   border-radius: 3px; padding: 8px 11px; margin: 8px 0 10px; font-size: 12px;
   overflow-wrap: anywhere;
 }
-.rev-entries { max-height: 260px; overflow-y: auto; }
 /* director's notes: the big score + one card per issue */
 .dir-score .rs-num { font-size: 34px; }
 .dir-issue {
@@ -1309,6 +1378,15 @@ svg text.axis {
           <p class="rev-rationale" id="cre-rev-rationale" role="status" hidden></p>
           <div class="result-stats" id="cre-summary"></div>
           <ul class="plan-notes" id="cre-notes"></ul>
+          <div class="preview-block" id="cre-preview">
+            <div class="preview-row">
+              <button class="btn" id="cre-preview-btn" type="button">Preview this cut<span class="spin" aria-hidden="true"></span></button>
+              <p class="help-small">Rendered by Monteur&rsquo;s own engine in seconds &mdash; rough pixels, real cut. Dissolves show as hard cuts here; the Resolve build stays the reference.</p>
+            </div>
+            <div id="cre-preview-panel"></div>
+            <p class="scan-note" id="cre-preview-msg" role="status" hidden></p>
+            <video class="preview-player" id="cre-preview-video" controls preload="metadata" hidden></video>
+          </div>
           <div class="resolve-send">
             <button class="btn primary" id="cre-resolve-btn" type="button">Build in DaVinci Resolve<span class="spin" aria-hidden="true"></span></button>
             <p class="help-small">One click, no file: builds this cut as a timeline directly in the Resolve project you have open — cuts at their true positions, act titles as real Text+, black title gaps, canvas and cine crop applied. Dissolves and the black fade-in/out are the one thing Resolve's scripting cannot create: those live in the downloaded file below (import it when you want them), or drag a quick fade in Resolve by hand.</p>
@@ -1368,10 +1446,15 @@ svg text.axis {
             <li>When Resolve asks where the media lives, point it at your footage folder.</li>
             <li>Press play — then fine-tune from there. FCPXML relinks most easily.</li>
           </ol>
+          <div class="kit-block" id="cre-storyboard" hidden>
+            <p class="seg-heading">Storyboard</p>
+            <p class="sb-story" id="cre-sb-story" hidden></p>
+            <div class="sb-board" id="cre-sb-board"></div>
+            <p class="help-small">One card per shot in record order; black cards mark where the cut dips to black for a title. Pin the shots you love — pinned shots survive every revision exactly where they are.</p>
+          </div>
           <div class="kit-block" id="cre-revise" hidden>
             <p class="seg-heading">Revise this cut</p>
-            <p class="help-small">Watch the cut, then say what bothers you in one sentence — German or English. Pin the shots you love first: they stay exactly where they are.</p>
-            <ul class="seg-list" id="cre-rev-entries"></ul>
+            <p class="help-small">Watch the cut, then say what bothers you in one sentence — German or English. Pin the shots you love in the storyboard above first: they stay exactly where they are.</p>
             <label class="sr-only" for="cre-rev-brief">Revision instruction</label>
             <div class="path-row" style="margin-top: 10px;">
               <input type="text" id="cre-rev-brief" placeholder="zweite Hälfte ruhiger" spellcheck="false" autocomplete="off">
@@ -3239,12 +3322,14 @@ function makeJobPanel(hostId, texts) {
   function renderProgress(progress) {
     var total = 0, done = 0, cached = 0;
     var renderPct = null; // resolve-render jobs stream {"stage":"render","percent":N}
+    var previewProg = null; // preview jobs stream {"stage":"preview","index","total"}
     var lines = [];
     progress.forEach(function (p) {
-      // vision entries count MOMENTS, song entries count SONGS and scene
-      // entries count SCENES, not clips — keep them out of the "x / y
-      // clips" total so the bar keeps meaning clips.
-      if (p.stage !== "vision" && p.stage !== "song" && p.stage !== "scene" && p.total > total) total = p.total;
+      // vision entries count MOMENTS, song entries count SONGS, scene
+      // entries count SCENES and preview entries count SEGMENTS, not clips
+      // — keep them out of the "x / y clips" total so the bar keeps
+      // meaning clips.
+      if (p.stage !== "vision" && p.stage !== "song" && p.stage !== "scene" && p.stage !== "preview" && p.total > total) total = p.total;
       if (p.stage === "done" || p.stage === "cache") {
         done += 1;
         if (p.stage === "cache") cached += 1;
@@ -3275,6 +3360,11 @@ function makeJobPanel(hostId, texts) {
         lines.push(String(p.name || "building the timeline in Resolve") + "…");
       } else if (p.stage === "render") {
         if (typeof p.percent === "number") renderPct = p.percent;
+      } else if (p.stage === "preview") {
+        if (typeof p.index === "number" && typeof p.total === "number") {
+          previewProg = { done: p.index, total: p.total };
+        }
+        lines.push("▸ " + String(p.name || "segment"));
       } else if (p.stage === "movie") {
         lines.push("Claude · " + String(p.name || "drafting the screenplay") + "…");
       } else if (p.stage === "scene") {
@@ -3293,6 +3383,7 @@ function makeJobPanel(hostId, texts) {
     else if (last && last.stage === "song") status.textContent = "Listening to your songs…";
     else if (last && last.stage === "elements") status.textContent = "Rating your sound elements…";
     else if (last && last.stage === "kit") status.textContent = "Writing the publish kit…";
+    else if (last && last.stage === "preview") status.textContent = "Rendering the preview…";
     else if (last && last.stage === "resolve") status.textContent = "Building the timeline in Resolve…";
     else if (last && last.stage === "movie") status.textContent = "Claude is writing your screenplay…";
     else if (last && last.stage === "scene") status.textContent = "Assembling scene " + (typeof last.index === "number" ? last.index : "") + (typeof last.total === "number" && last.total > 0 ? " of " + last.total : "") + "…";
@@ -3305,6 +3396,15 @@ function makeJobPanel(hostId, texts) {
       fill.style.width = pctDone + "%";
       bar.setAttribute("aria-valuenow", String(pctDone));
       bar.setAttribute("aria-label", texts.working + " " + done + " of " + total + " clips done");
+    }
+    if (previewProg && previewProg.total > 0) {
+      // A preview job's per-segment progress from Monteur's own engine.
+      count.textContent = previewProg.done + " / " + previewProg.total + " segments";
+      bar.classList.remove("indet");
+      var pvPct = Math.round(previewProg.done / previewProg.total * 100);
+      fill.style.width = pvPct + "%";
+      bar.setAttribute("aria-valuenow", String(pvPct));
+      bar.setAttribute("aria-label", texts.working + " " + previewProg.done + " of " + previewProg.total + " segments done");
     }
     if (renderPct !== null) {
       // A render job's live percent: Resolve's own Deliver progress.
@@ -3380,6 +3480,7 @@ var directPanel = makeJobPanel("cre-dir-panel", { starting: "Sending the cut to 
 var resolveBuildPanel = makeJobPanel("cre-resolve-panel", { starting: "Contacting DaVinci Resolve…", working: "Building the timeline in Resolve…" });
 var renderPanel = makeJobPanel("cre-render-panel", { starting: "Contacting DaVinci Resolve…", working: "Rendering in Resolve…" });
 var distillPanel = makeJobPanel("cre-dst-panel", { starting: "Starting the distillation…", working: "Distilling your trailer…" });
+var previewPanel = makeJobPanel("cre-preview-panel", { starting: "Starting the preview render…", working: "Rendering the preview…" });
 
 function setScanBusy(on) {
   var btn = $("cre-scan-btn");
@@ -3441,6 +3542,11 @@ function setRenderBusy(on) {
   $("cre-render-name").disabled = on;
   $("cre-render-preset").disabled = on;
 }
+function setPreviewBusy(on) {
+  var btn = $("cre-preview-btn");
+  btn.classList.toggle("busy", on);
+  btn.disabled = on;
+}
 function setDistillBusy(on) {
   var btn = $("cre-dst-btn");
   btn.classList.toggle("busy", on);
@@ -3461,6 +3567,7 @@ function creStopJobs() {
   if (resolveBuildPanel.running()) { resolveBuildPanel.stop(); setResolveBuildBusy(false); }
   if (renderPanel.running()) { renderPanel.stop(); setRenderBusy(false); }
   if (distillPanel.running()) { distillPanel.stop(); setDistillBusy(false); }
+  if (previewPanel.running()) { previewPanel.stop(); setPreviewBusy(false); }
 }
 
 function creNote(id, message, isError) {
@@ -3479,6 +3586,7 @@ function creShowStep(n, focusHeading) {
   if (n !== 3 && directPanel.running()) { directPanel.stop(); setDirectBusy(false); setDirectApplyBusy(false); }
   if (n !== 3 && resolveBuildPanel.running()) { resolveBuildPanel.stop(); setResolveBuildBusy(false); }
   if (n !== 3 && renderPanel.running()) { renderPanel.stop(); setRenderBusy(false); }
+  if (n !== 3 && previewPanel.running()) { previewPanel.stop(); setPreviewBusy(false); }
   cre.step = n;
   var names = { 1: "Your footage", 2: "Music & options", 3: "Your cut" };
   $("wiz-progress").textContent = "Step " + n + " of 3 — " + names[n];
@@ -4120,8 +4228,9 @@ function startBuild(andThen) {
         rev.lastBody = null;
         $("cre-rev-rationale").hidden = true;
         $("cre-rev-msg").hidden = true;
-        renderReviseEntries();
+        renderStoryboard();
         resetDirectorNotes(); // a fresh cut makes any previous review stale
+        resetPreview();       // ...and any previous preview shows the old cut
         renderCreResult(result);
         $("cre-result-title").focus();
         if (andThen) andThen(result);
@@ -4422,8 +4531,9 @@ function resumeDraft(draftId, btn) {
         $("cre-build-msg").hidden = true;
         $("cre-resolve-msg").hidden = true;
         $("cre-resolve-result").hidden = true;
-        renderReviseEntries();
+        renderStoryboard();
         resetDirectorNotes();
+        resetPreview(); // the restored plan renders fresh — the button is back
         if (draft.review) renderDirectorReview(draft.review);
         renderCreResult(result);
         if (!draft.autosave && draft.name) $("cre-draft-name").value = String(draft.name);
@@ -4587,7 +4697,9 @@ function creResetRevise() {
   rev.planJson = null;
   rev.pins = [];
   rev.lastBody = null;
-  clear($("cre-rev-entries"));
+  clear($("cre-sb-board"));
+  $("cre-storyboard").hidden = true;
+  $("cre-sb-story").hidden = true;
   $("cre-revise").hidden = true;
   $("cre-rev-rationale").hidden = true;
   $("cre-rev-msg").hidden = true;
@@ -4595,42 +4707,209 @@ function creResetRevise() {
   $("cre-resolve-result").hidden = true;
   $("cre-direct").hidden = true;
   resetDirectorNotes();
+  resetPreview();
 }
 
 /* a pin stamp must land INSIDE [record_start, record_end) — the midpoint is
    safely inside for any non-degenerate slot */
 function revPinStamp(entry) { return (entry.record_start + entry.record_end) / 2; }
 
-function renderReviseEntries() {
-  var host = $("cre-rev-entries");
-  clear(host);
-  host.classList.add("rev-entries");
-  var entries = (rev.planJson && rev.planJson.entries) || [];
-  entries.forEach(function (entry, i) {
-    var li = el("li", "seg-item");
-    li.appendChild(el("span", "seg-time", (i + 1) + "."));
-    li.appendChild(el("span", "seg-time", fmtClock(entry.record_start || 0) + "–" + fmtClock(entry.record_end || 0)));
-    li.appendChild(el("span", "seg-take", baseName(entry.clip_path)));
-    li.appendChild(el("span", "seg-label", String(entry.label || "")));
-    var stamp = revPinStamp(entry);
-    var pinned = rev.pins.indexOf(stamp) !== -1;
-    var pin = el("button", "pin-btn", pinned ? "Pinned" : "Pin");
-    pin.type = "button";
-    pin.setAttribute("aria-pressed", String(pinned));
-    pin.setAttribute("aria-label", "Pin shot " + (i + 1) + " — keep it exactly where it is");
-    pin.addEventListener("click", function () {
-      var at = rev.pins.indexOf(stamp);
-      var on = at === -1;
-      if (on) rev.pins.push(stamp); else rev.pins.splice(at, 1);
-      pin.setAttribute("aria-pressed", String(on));
-      pin.textContent = on ? "Pinned" : "Pin";
-    });
-    li.appendChild(pin);
-    host.appendChild(li);
+/* ---- step 3: storyboard (the primary pin UI) --------------------------
+   One flat card per plan entry — thumbnail (the source range's midpoint
+   frame via /api/thumb), slot number, duration, clip name, vision label,
+   and THE pin toggle (same rev.pins state the revise request sends). Dip
+   markers (thin black cards, with the composed act title when the plan
+   carries one) sit between cards exactly where plan.dips fall; a
+   composer's "story:" note shows above the board and its "act N:" notes
+   as inline labels where the acts change (acts = between dips). */
+
+/* thumbnails load as the cards scroll in (plus loading="lazy" as belt) */
+var sbObserver = window.IntersectionObserver ? new IntersectionObserver(function (hits) {
+  hits.forEach(function (hit) {
+    if (!hit.isIntersecting) return;
+    var img = hit.target;
+    if (img.dataset.src) { img.src = img.dataset.src; delete img.dataset.src; }
+    sbObserver.unobserve(img);
   });
+}, { rootMargin: "300px" }) : null;
+
+function sbThumbUrl(entry) {
+  var mid = ((entry.source_start || 0) + (entry.source_end || 0)) / 2;
+  return "/api/thumb?clip=" + encodeURIComponent(String(entry.clip_path || "")) +
+    "&t=" + mid.toFixed(3) + "&w=320";
+}
+
+/* the composer's story arc note ("story: ...") — "" when absent */
+function sbStoryLine(notes) {
+  for (var i = 0; i < notes.length; i++) {
+    var m = /^story:\s*(.+)$/i.exec(String(notes[i]));
+    if (m) return m[1];
+  }
+  return "";
+}
+
+/* the composer's act notes ("act 2: ...") as {2: "..."} — {} when absent */
+function sbActTitles(notes) {
+  var acts = {};
+  notes.forEach(function (note) {
+    var m = /^act\s+(\d+):\s*(.+)$/i.exec(String(note));
+    if (m) acts[parseInt(m[1], 10)] = m[2];
+  });
+  return acts;
+}
+
+function sbActChip(number, text) {
+  var chip = el("div", "sb-act", "Act " + number + (text ? " — " + text : ""));
+  chip.title = "Act " + number + (text ? ": " + text : "");
+  return chip;
+}
+
+function sbDipCard(dipIndex, dip, titles) {
+  var card = el("div", "sb-dip");
+  var title = String((titles && titles[dipIndex]) || "").trim();
+  card.appendChild(el("span", "sb-dip-title", title || "to black"));
+  card.appendChild(el("span", "sb-dip-dur", fmt1(dip[1] || 0) + "s"));
+  card.title = title ? "Title card: “" + title + "”" : "Dip to black";
+  return card;
+}
+
+function sbEntryCard(entry, i) {
+  var card = el("div", "sb-card");
+  var wrap = el("div", "sb-thumb-wrap");
+  var img = document.createElement("img");
+  img.className = "sb-thumb";
+  img.alt = "Shot " + (i + 1) + " — " + baseName(entry.clip_path);
+  img.loading = "lazy";
+  img.decoding = "async";
+  var url = sbThumbUrl(entry);
+  if (sbObserver) { img.dataset.src = url; sbObserver.observe(img); }
+  else { img.src = url; }
+  wrap.appendChild(img);
+  wrap.appendChild(el("span", "sb-badge sb-slot", String(i + 1)));
+  var length = (entry.record_end || 0) - (entry.record_start || 0);
+  wrap.appendChild(el("span", "sb-badge sb-dur", fmt1(length) + "s"));
+  card.appendChild(wrap);
+  var meta = el("div", "sb-meta");
+  meta.appendChild(el("span", "sb-name", baseName(entry.clip_path)));
+  if (entry.label) meta.appendChild(el("span", "sb-label", String(entry.label)));
+  var stamp = revPinStamp(entry);
+  var pinned = rev.pins.indexOf(stamp) !== -1;
+  card.classList.toggle("pinned", pinned);
+  var pin = el("button", "pin-btn sb-pin", pinned ? "Pinned" : "Pin");
+  pin.type = "button";
+  pin.setAttribute("aria-pressed", String(pinned));
+  pin.setAttribute("aria-label", "Pin shot " + (i + 1) + " — keep it exactly where it is");
+  pin.addEventListener("click", function () {
+    var at = rev.pins.indexOf(stamp);
+    var on = at === -1;
+    if (on) rev.pins.push(stamp); else rev.pins.splice(at, 1);
+    pin.setAttribute("aria-pressed", String(on));
+    pin.textContent = on ? "Pinned" : "Pin";
+    card.classList.toggle("pinned", on);
+  });
+  meta.appendChild(pin);
+  card.appendChild(meta);
+  return card;
+}
+
+function renderStoryboard() {
+  var board = $("cre-sb-board");
+  clear(board);
+  var plan = rev.planJson || {};
+  var entries = ((plan.entries || []).slice()).sort(function (a, b) {
+    return (a.record_start || 0) - (b.record_start || 0);
+  });
+  var dips = ((plan.dips || []).slice()).sort(function (a, b) {
+    return (a[0] || 0) - (b[0] || 0);
+  });
+  var notes = plan.notes || [];
+  var story = sbStoryLine(notes);
+  $("cre-sb-story").textContent = story ? "Story — " + story : "";
+  $("cre-sb-story").hidden = !story;
+  var acts = sbActTitles(notes);
+  var act = 1;
+  if (entries.length && acts[act]) board.appendChild(sbActChip(act, acts[act]));
+  var dipIndex = 0;
+  entries.forEach(function (entry, i) {
+    // dips are record gaps — every dip starting at/before this entry's
+    // start sits between the previous card and this one
+    while (dipIndex < dips.length && (dips[dipIndex][0] || 0) <= (entry.record_start || 0) + 0.001) {
+      board.appendChild(sbDipCard(dipIndex, dips[dipIndex], plan.title_texts));
+      dipIndex += 1;
+      act += 1;
+      if (acts[act]) board.appendChild(sbActChip(act, acts[act]));
+    }
+    board.appendChild(sbEntryCard(entry, i));
+  });
+  for (; dipIndex < dips.length; dipIndex++) {
+    board.appendChild(sbDipCard(dipIndex, dips[dipIndex], plan.title_texts));
+  }
+  $("cre-storyboard").hidden = entries.length === 0;
   $("cre-revise").hidden = entries.length === 0;
   $("cre-direct").hidden = entries.length === 0;
 }
+
+/* ---- step 3: preview player (monteur.preview — Sehen ohne Resolve) ----
+   POST /api/create/preview renders the CURRENT plan (rev.planJson) to a
+   small real MP4 with Monteur's own engine — same source ranges, dips and
+   music offset the Resolve timeline gets, in seconds. The served file
+   supports Range requests, so the <video> can seek. Any new build, revise,
+   apply or draft resume invalidates the player: the plan it showed is
+   gone, so the Preview button comes back. */
+
+var pv = { url: null }; // the currently playing preview's URL (null = none)
+
+function resetPreview() {
+  pv.url = null;
+  if (previewPanel.running()) { previewPanel.stop(); setPreviewBusy(false); }
+  var video = $("cre-preview-video");
+  try { video.pause(); } catch (e) { /* not loaded yet — nothing to pause */ }
+  video.removeAttribute("src");
+  video.load();
+  video.hidden = true;
+  $("cre-preview-btn").hidden = false;
+  $("cre-preview-msg").hidden = true;
+}
+
+function renderPreviewCut() {
+  if (previewPanel.running() || buildPanel.running() || revisePanel.running() || directPanel.running()) return;
+  if (!rev.planJson) return;
+  var built = (cre.result && cre.result.body) || {};
+  // quality is fixed at 640 px for v1; the audio mode follows the build's
+  // (a plan without music can only play its clips' own sound)
+  var audio = rev.planJson.music_path ? (built.audio || cre.audio || "music") : "original";
+  var body = { plan_json: rev.planJson, audio: audio, width: 640 };
+  $("cre-preview-msg").hidden = true;
+  setPreviewBusy(true);
+  api("/api/create/preview", { method: "POST", body: body }).then(function (data) {
+    previewPanel.start(data.job, {
+      onDone: function (result) {
+        setPreviewBusy(false);
+        pv.url = (result && result.url) || null;
+        if (!pv.url) {
+          creNote("cre-preview-msg", "The preview rendered but returned no file — try again.", true);
+          return;
+        }
+        var video = $("cre-preview-video");
+        video.src = pv.url;
+        video.hidden = false;
+        $("cre-preview-btn").hidden = true;
+      },
+      onCancelled: function () {
+        setPreviewBusy(false);
+        creNote("cre-preview-msg", "Preview cancelled — your cut is untouched.");
+      },
+      onError: function (message) {
+        setPreviewBusy(false);
+        creNote("cre-preview-msg", message, true);
+      }
+    });
+  }).catch(function (err) {
+    setPreviewBusy(false);
+    creNote("cre-preview-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+$("cre-preview-btn").addEventListener("click", renderPreviewCut);
 
 function startRevise(body, andThen) {
   if (revisePanel.running() || buildPanel.running() || directPanel.running()) return;
@@ -4652,8 +4931,9 @@ function startRevise(body, andThen) {
           body: (cre.result && cre.result.body) || null, kind: "revise"
         };
         renderCreResult(result);
-        renderReviseEntries();
+        renderStoryboard();
         resetDirectorNotes(); // the reviewed plan is gone — review the new one
+        resetPreview();       // the previewed plan is gone too
         if (result && result.rationale) {
           $("cre-rev-rationale").textContent = "How your instruction was read — " + String(result.rationale);
           $("cre-rev-rationale").hidden = false;
@@ -4825,7 +5105,8 @@ function startDirectApply(body, andThen) {
           body: (cre.result && cre.result.body) || null, kind: "direct-apply"
         };
         renderCreResult(result);
-        renderReviseEntries();
+        renderStoryboard();
+        resetPreview(); // the previewed plan is gone — the improved one replaced it
         // the review was applied; the improved plan deserves a fresh one
         dnotes.review = null;
         $("cre-dir-result").hidden = true;

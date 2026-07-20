@@ -33,6 +33,10 @@ API (all JSON):
   "canvas"?, "audio"?, "format"?}                               -> {"job": id}
 * ``POST /api/create/export`` {"plan_json", "fps"?, "audio"?,
   "canvas"?, "format"?}                                         -> build-result shape
+* ``GET  /api/thumb?clip=&t=&w=``                                -> JPEG bytes
+* ``POST /api/create/preview`` {"plan_json", "audio"?,
+  "width"?}                                                     -> {"job": id}
+* ``GET  /api/preview/<token>.mp4``                              -> MP4 bytes (Range-capable)
 * ``GET  /api/drafts``                                          -> {"drafts": [...]}
 * ``GET  /api/drafts/<id>``                                     -> the full draft
 * ``POST /api/drafts``    the draft record                      -> the stored record
@@ -162,6 +166,40 @@ WITHOUT re-planning the cut. The response is the standard build-result
 shape (``filename``/``content``/``plan``/``plan_json``; ``tempo`` is 0 —
 the music is not re-analyzed). A bad or empty plan is a 400 with the
 loader's message.
+
+``/api/thumb`` and the ``/api/create/preview`` + ``/api/preview/<token>.mp4``
+pair are the "Sehen ohne Resolve" surface on top of :mod:`monteur.preview`.
+``GET /api/thumb?clip=<abs path>&t=<seconds>&w=<px, default 320>`` returns one
+JPEG frame for the Studio's storyboard: frames are extracted once into a
+per-server-run temp cache directory (``tempfile.mkdtemp``; keyed by the
+clip's absolute path + mtime + time + width, so an unchanged clip never gets
+extracted twice) and served with long ``Cache-Control`` headers. Like every
+other endpoint here the clip is an absolute local path — Studio is a local
+single-user tool. ANY failure (missing/bad params, unreadable clip, ffmpeg
+missing) is a 404 carrying a tiny placeholder PNG, so a broken thumbnail
+stays a gray tile in the UI instead of an error state.
+
+``POST /api/create/preview`` renders the browser's current ``"plan_json"``
+to a small real MP4 as a ``"preview"`` job (:func:`monteur.preview.
+render_preview` — same source ranges, record gaps and music offset the
+Resolve timeline would get; ~sub-second for short cuts). ``"audio"``
+defaults like revise: the plan's music when it has a song, else
+``"original"``. ``"width"`` defaults to 640. Per-segment engine progress
+arrives as ``{"stage": "preview", "index", "total", "name"}`` job entries.
+Finished previews live in one per-server-run temp directory, capped at THE
+LATEST preview: after a successful render every older preview file is
+deleted, so iterating on a cut never accumulates videos on disk (the fresh
+job result simply carries a new URL). The result is ``{"url":
+"/api/preview/<token>.mp4", "duration", "width"}``.
+
+``GET /api/preview/<token>.mp4`` serves that file WITH HTTP Range support —
+``<video>`` seeking needs 206 partial responses: a valid ``Range:
+bytes=a-b`` (also ``a-`` and ``-suffix`` forms; first range only) gets a
+206 with ``Content-Range: bytes a-b/total`` and ``Accept-Ranges: bytes``,
+an unsatisfiable range gets a 416 with ``Content-Range: bytes */total``,
+no/malformed Range header gets the whole file as a plain 200. Tokens are
+validated against the server's own naming (hex + ``.mp4``) so the route
+can never serve anything but its own preview directory.
 
 The ``/api/drafts`` endpoints are the Studio's WIP memory
 (:mod:`monteur.drafts`, ``~/.monteur/drafts.json``): the Create wizard's
@@ -448,6 +486,132 @@ _SCAN_CACHE_LOCK = threading.Lock()
 
 # One native file dialog at a time; Tk lives entirely inside a dedicated thread.
 _PICK_LOCK = threading.Lock()
+
+# --- "Sehen ohne Resolve": storyboard thumbnails + preview MP4s ---------------
+#
+# Both caches are per-server-run temp directories (tempfile.mkdtemp, created
+# lazily on first use, left to the OS temp cleanup like the sift's own work
+# dirs). The thumbnail cache is keyed by (absolute clip path, mtime, time,
+# width) so repeats are instant; the preview dir is capped at the latest
+# preview — every successful render deletes the older files.
+
+_THUMB_DIR: str | None = None
+_THUMB_LOCK = threading.Lock()
+
+_PREVIEW_DIR: str | None = None
+_PREVIEW_LOCK = threading.Lock()
+
+# A preview file name is exactly what _run_preview_job writes: hex token + .mp4.
+_PREVIEW_NAME_RE = re.compile(r"[0-9a-f]{16}\.mp4")
+
+# 1x1 gray PNG — the body of every thumbnail 404, so a broken thumb renders
+# as a quiet gray tile instead of a broken-image icon.
+_THUMB_PLACEHOLDER = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc```\xf8\x0f"
+    b"\x00\x01\x04\x01\x00}\xb4Q\xe9\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
+def _thumb_dir() -> str:
+    """The per-run thumbnail cache directory (created on first use)."""
+    global _THUMB_DIR
+    with _THUMB_LOCK:
+        if _THUMB_DIR is None or not os.path.isdir(_THUMB_DIR):
+            import tempfile
+
+            _THUMB_DIR = tempfile.mkdtemp(prefix="monteur-thumbs-")
+        return _THUMB_DIR
+
+
+def _preview_dir() -> str:
+    """The per-run preview directory (created on first use)."""
+    global _PREVIEW_DIR
+    with _PREVIEW_LOCK:
+        if _PREVIEW_DIR is None or not os.path.isdir(_PREVIEW_DIR):
+            import tempfile
+
+            _PREVIEW_DIR = tempfile.mkdtemp(prefix="monteur-previews-")
+        return _PREVIEW_DIR
+
+
+def _thumb_cache_path(clip: str, time_s: float, width: int) -> str:
+    """Cache file for one (path, mtime, t, w) thumbnail request.
+
+    The mtime is part of the key, so editing/replacing a clip naturally
+    invalidates its cached frames. Raises OSError when the clip is gone.
+    """
+    import hashlib
+
+    clip_abs = os.path.abspath(clip)
+    mtime_ns = os.stat(clip_abs).st_mtime_ns
+    key = f"{clip_abs}|{mtime_ns}|{time_s:.3f}|{width}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+    return os.path.join(_thumb_dir(), f"{digest}.jpg")
+
+
+def _run_preview_job(job: dict, payload: dict) -> None:
+    """Daemon-thread body for POST /api/create/preview (plan -> small MP4).
+
+    Pure plan -> pixels through :func:`monteur.preview.render_preview`: no
+    sift, no music analysis, no AI — just the ffmpeg passes, so even the
+    job overhead is mostly ceremony. Audio defaults exactly like revise
+    (the plan's music when it has a song, else "original"); the engine's
+    per-segment progress callback feeds ``{"stage": "preview"}`` entries.
+    On success the previous previews are deleted (the directory holds one
+    finished preview at a time — the latest); a FAILED render deletes
+    nothing, so the last good preview keeps playing.
+    """
+    from monteur.media import MonteurMediaError
+    from monteur.montage import plan_from_dict
+
+    try:
+        plan = plan_from_dict(payload.get("plan_json") or {})  # bad -> ValueError
+        if not plan.entries:
+            raise ValueError("the plan has no entries — nothing to preview")
+        audio = payload.get("audio") or ("music" if plan.music_path else "original")
+        if not plan.music_path and audio != "original":
+            raise ValueError(f"the plan has no music; audio mode {audio!r} needs a song")
+        try:
+            width = int(payload.get("width") or 640)
+        except (TypeError, ValueError):
+            raise ValueError("'width' must be a number of pixels")
+        width = max(160, min(1920, width))
+
+        def progress(done: int, total: int, label: str) -> None:
+            entry = {"stage": "preview", "index": done, "total": total, "name": label}
+            with _JOBS_LOCK:
+                job["progress"].append(entry)
+
+        # Resolved at CALL time so tests can monkeypatch monteur.preview.
+        from monteur.preview import render_preview
+
+        directory = _preview_dir()
+        token = secrets.token_hex(8)
+        out_path = os.path.join(directory, f"{token}.mp4")
+        result = render_preview(
+            plan, out_path, width=width, audio=audio, progress=progress
+        )
+        # Cap the directory at THE latest preview: the fresh file replaces
+        # every older one (best-effort — a locked file loses us nothing).
+        for name in os.listdir(directory):
+            if name != f"{token}.mp4" and _PREVIEW_NAME_RE.fullmatch(name):
+                try:
+                    os.remove(os.path.join(directory, name))
+                except OSError:
+                    pass
+        job["result"] = {
+            "url": f"/api/preview/{token}.mp4",
+            "duration": result["duration"],
+            "width": result["width"],
+        }
+        job["state"] = "done"
+    except (MonteurMediaError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
 
 
 def _new_job(kind: str) -> dict:
@@ -1916,6 +2080,8 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/create/direct/apply"): self._create_direct_apply,
             ("POST", "/api/create/distill"): self._create_distill,
             ("POST", "/api/create/export"): self._create_export,
+            ("POST", "/api/create/preview"): self._create_preview,
+            ("GET", "/api/thumb"): self._thumb,
             ("POST", "/api/create/resolve"): self._create_resolve,
             ("GET", "/api/drafts"): self._drafts_list,
             ("POST", "/api/drafts"): self._drafts_save,
@@ -1932,6 +2098,10 @@ class MonteurHandler(BaseHTTPRequestHandler):
         }
         if (method, path) in routes:
             return routes[(method, path)]
+        if path.startswith("/api/preview/") and method == "GET":
+            name = path[len("/api/preview/"):]
+            if name and "/" not in name:
+                return lambda: self._preview_file(name)
         if path.startswith("/api/versions/"):
             tail = path.rsplit("/", 1)[1]
             if tail.isdigit():
@@ -2333,6 +2503,150 @@ class MonteurHandler(BaseHTTPRequestHandler):
                 "plan_json": plan_to_dict(plan),
             }
         )
+
+    # -- "Sehen ohne Resolve": thumbnails + preview player -------------------
+
+    def _send_bytes(
+        self, body: bytes, content_type: str, status: int = 200, headers=None
+    ) -> None:
+        """Send raw bytes (images/video) — the binary sibling of _send_json."""
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
+            self.end_headers()
+            self.wfile.write(body)
+        except _CLIENT_GONE:
+            pass  # client closed the socket mid-response — nothing to do
+
+    def _thumb(self) -> None:
+        """GET /api/thumb?clip=<abs path>&t=<seconds>&w=<px> — one JPEG frame.
+
+        Cache-first: the frame for (clip path, clip mtime, t, w) is extracted
+        once into the per-run cache dir and re-served from disk afterwards,
+        with long client cache headers on top. EVERY failure — missing or
+        malformed params, a clip that doesn't exist, ffmpeg unavailable — is
+        a 404 with a tiny placeholder PNG the UI can render as a quiet gray
+        tile; a thumbnail must never surface as an error state.
+        """
+        from urllib.parse import parse_qs, urlsplit
+
+        query = parse_qs(urlsplit(self.path).query)
+
+        def param(name: str) -> str:
+            values = query.get(name) or [""]
+            return values[0]
+
+        def placeholder() -> None:
+            self._send_bytes(
+                _THUMB_PLACEHOLDER, "image/png", status=404,
+                headers={"Cache-Control": "no-store"},
+            )
+
+        clip = param("clip").strip()
+        if not clip:
+            placeholder()
+            return
+        try:
+            time_s = max(0.0, float(param("t") or 0.0))
+            width = max(16, min(1920, int(float(param("w") or 320))))
+        except (TypeError, ValueError):
+            placeholder()
+            return
+        try:
+            cache_path = _thumb_cache_path(clip, time_s, width)  # OSError: gone
+            if not os.path.isfile(cache_path):
+                # Resolved at CALL time so tests can monkeypatch
+                # monteur.preview.extract_thumbnail.
+                from monteur.media import MonteurMediaError
+                from monteur.preview import extract_thumbnail
+
+                # Extract to a private name, then move into place atomically:
+                # two concurrent requests for one frame can't serve halves.
+                partial = f"{cache_path}.{secrets.token_hex(4)}.part.jpg"
+                try:
+                    extract_thumbnail(clip, time_s, partial, width=width)
+                    os.replace(partial, cache_path)
+                except MonteurMediaError:
+                    placeholder()
+                    return
+                finally:
+                    if os.path.exists(partial):
+                        try:
+                            os.remove(partial)
+                        except OSError:
+                            pass
+            body = Path(cache_path).read_bytes()
+        except OSError:
+            placeholder()
+            return
+        self._send_bytes(
+            body, "image/jpeg",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
+
+    def _create_preview(self) -> None:
+        payload = self._read_json()
+        if not isinstance(payload.get("plan_json"), dict):
+            raise ApiError(
+                400, "missing 'plan_json' (the plan a build result carries)"
+            )
+        job = _new_job("preview")
+        threading.Thread(
+            target=_run_preview_job,
+            args=(job, payload),
+            name=f"monteur-preview-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _preview_file(self, name: str) -> None:
+        """GET /api/preview/<token>.mp4 — serve a finished preview with Range.
+
+        ``<video>`` seeking needs 206 partial responses, so this implements
+        single-range byte serving by hand (the stdlib handler has none):
+        ``bytes=a-b`` / ``bytes=a-`` / ``bytes=-suffix`` get a 206 with
+        ``Content-Range``, an unsatisfiable range gets a 416, anything
+        malformed falls back to the full 200 (per RFC 7233 an unparseable
+        Range header may be ignored). The name must match the server's own
+        token naming — this route can only ever serve the preview dir.
+        """
+        if not _PREVIEW_NAME_RE.fullmatch(name):
+            raise ApiError(404, f"no preview {name!r}")
+        path = Path(_preview_dir()) / name
+        try:
+            data = path.read_bytes()
+        except OSError:
+            raise ApiError(
+                404,
+                "this preview is gone — it was replaced by a newer one; "
+                "render the preview again",
+            )
+        size = len(data)
+        headers = {"Accept-Ranges": "bytes", "Cache-Control": "no-store"}
+        range_header = (self.headers.get("Range") or "").strip()
+        match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header)
+        if match and (match.group(1) or match.group(2)):
+            if match.group(1):
+                start = int(match.group(1))
+                end = min(int(match.group(2)), size - 1) if match.group(2) else size - 1
+            else:  # suffix form: the last N bytes
+                start = max(0, size - int(match.group(2)))
+                end = size - 1
+            if start >= size or start > end:
+                self._send_bytes(
+                    b"", "video/mp4", status=416,
+                    headers={"Content-Range": f"bytes */{size}", **headers},
+                )
+                return
+            headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+            self._send_bytes(
+                data[start:end + 1], "video/mp4", status=206, headers=headers
+            )
+            return
+        self._send_bytes(data, "video/mp4", headers=headers)
 
     # -- drafts (the Create wizard's WIP memory — monteur.drafts) -----------
 
