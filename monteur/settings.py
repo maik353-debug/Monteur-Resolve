@@ -17,6 +17,13 @@ Keys currently in use:
   ~3.6–3.11); ``""`` = unset. Normally written by Studio's "Find a
   compatible Python" button, not by hand. ``MONTEUR_RESOLVE_PYTHON``
   still overrides it (see :func:`monteur.resolve._worker_python`).
+* ``youtube_client_id`` / ``youtube_client_secret`` — the OAuth
+  "Desktop app" client of the user's OWN Google Cloud project
+  (:mod:`monteur.youtube`); ``""`` = not configured.
+* ``youtube_refresh_token`` — the long-lived token from "Connect
+  YouTube"; ``""`` = not connected. Another secret, hence the 0600 mode.
+* ``youtube_channel`` — the channel title of the last upload, a pure
+  display hint (written from the upload response, never fetched).
 
 Why plain JSON: Monteur is a local single-user tool, the settings must be
 trivially inspectable and hand-editable, and the stdlib parses it. The file
@@ -105,6 +112,32 @@ def api_key() -> str:
     """The stored Anthropic API key, or ``""`` when none is saved."""
     value = load_settings().get("api_key", "")
     return value.strip() if isinstance(value, str) else ""
+
+
+def _string_setting(key: str) -> str:
+    """A stripped string setting, ``""`` for missing/non-string values."""
+    value = load_settings().get(key, "")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def youtube_client_id() -> str:
+    """The stored Google OAuth Desktop-app client id (``""`` = unset)."""
+    return _string_setting("youtube_client_id")
+
+
+def youtube_client_secret() -> str:
+    """The stored Google OAuth Desktop-app client secret (``""`` = unset)."""
+    return _string_setting("youtube_client_secret")
+
+
+def youtube_refresh_token() -> str:
+    """The stored YouTube refresh token (``""`` = not connected)."""
+    return _string_setting("youtube_refresh_token")
+
+
+def youtube_channel() -> str:
+    """The channel title hint from the last upload (``""`` = unknown)."""
+    return _string_setting("youtube_channel")
 
 
 def resolve_python() -> str:

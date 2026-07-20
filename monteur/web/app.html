@@ -830,6 +830,14 @@ svg text.axis {
   background: var(--input-bg); color: var(--ink); font: inherit; font-size: 12.5px;
 }
 #cre-brief { min-height: 58px; max-width: 620px; }
+.yt-upload .yt-label { font-size: 10.5px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-muted); display: block; margin-top: 8px; }
+.yt-upload .yt-text {
+  display: block; width: 100%; max-width: 620px; resize: vertical; min-height: 58px;
+  margin: 4px 0 2px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 3px;
+  background: var(--input-bg); color: var(--ink); font: inherit; font-size: 12.5px;
+}
+.yt-upload input.yt-text { min-height: 0; resize: none; }
+.yt-upload .job-bar { max-width: 620px; }
 .mov-head-side { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
 .scene-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
 .scene-num { font-weight: 650; font-size: 13.5px; white-space: nowrap; }
@@ -1421,6 +1429,32 @@ svg text.axis {
                 <div id="cre-render-result" hidden>
                   <p class="render-ready" id="cre-render-done" role="status"></p>
                   <p class="help-small">The render ran through Resolve&rsquo;s own Deliver engine — the same quality you&rsquo;d get exporting by hand.</p>
+                  <div class="render-block yt-upload" id="yt-r-block">
+                    <p class="seg-heading">Upload to YouTube</p>
+                    <p class="help-small" id="yt-r-hint" hidden>Not connected yet &mdash; <a href="#" id="yt-r-settings">Connect in settings &rarr;</a></p>
+                    <div id="yt-r-form" hidden>
+                      <label class="yt-label" for="yt-r-title">Title</label>
+                      <input type="text" class="yt-text" id="yt-r-title" spellcheck="false" autocomplete="off">
+                      <label class="yt-label" for="yt-r-desc">Description</label>
+                      <textarea class="yt-text" id="yt-r-desc" rows="4" spellcheck="false"></textarea>
+                      <label class="yt-label" for="yt-r-tags">Tags (comma-separated)</label>
+                      <input type="text" class="yt-text" id="yt-r-tags" spellcheck="false" autocomplete="off">
+                      <div class="export-bar">
+                        <div class="export-field">
+                          <span id="yt-r-privacy-label">Visibility</span>
+                          <select id="yt-r-privacy" aria-labelledby="yt-r-privacy-label">
+                            <option value="private" selected>Private draft</option>
+                            <option value="unlisted">Unlisted</option>
+                          </select>
+                        </div>
+                        <button class="btn primary" id="yt-r-btn" type="button">Upload to YouTube<span class="spin" aria-hidden="true"></span></button>
+                      </div>
+                      <p class="help-small">Uploads from personal Google Cloud projects arrive as private drafts &mdash; review everything in YouTube Studio before it goes live (~6 uploads/day).</p>
+                      <div class="job-bar" id="yt-r-bar" hidden><span></span></div>
+                      <p class="scan-note" id="yt-r-msg" role="status" hidden></p>
+                      <p class="render-ready" id="yt-r-done" role="status" hidden></p>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1453,6 +1487,32 @@ svg text.axis {
               <p class="render-ready" id="cre-export-done" role="status"></p>
               <ul class="plan-notes" id="cre-export-notes"></ul>
               <p class="help-small">This render comes from Monteur&rsquo;s own engine &mdash; Resolve stays the path for grading and fine-tuning.</p>
+              <div class="render-block yt-upload" id="yt-x-block">
+                <p class="seg-heading">Upload to YouTube</p>
+                <p class="help-small" id="yt-x-hint" hidden>Not connected yet &mdash; <a href="#" id="yt-x-settings">Connect in settings &rarr;</a></p>
+                <div id="yt-x-form" hidden>
+                  <label class="yt-label" for="yt-x-title">Title</label>
+                  <input type="text" class="yt-text" id="yt-x-title" spellcheck="false" autocomplete="off">
+                  <label class="yt-label" for="yt-x-desc">Description</label>
+                  <textarea class="yt-text" id="yt-x-desc" rows="4" spellcheck="false"></textarea>
+                  <label class="yt-label" for="yt-x-tags">Tags (comma-separated)</label>
+                  <input type="text" class="yt-text" id="yt-x-tags" spellcheck="false" autocomplete="off">
+                  <div class="export-bar">
+                    <div class="export-field">
+                      <span id="yt-x-privacy-label">Visibility</span>
+                      <select id="yt-x-privacy" aria-labelledby="yt-x-privacy-label">
+                        <option value="private" selected>Private draft</option>
+                        <option value="unlisted">Unlisted</option>
+                      </select>
+                    </div>
+                    <button class="btn primary" id="yt-x-btn" type="button">Upload to YouTube<span class="spin" aria-hidden="true"></span></button>
+                  </div>
+                  <p class="help-small">Uploads from personal Google Cloud projects arrive as private drafts &mdash; review everything in YouTube Studio before it goes live (~6 uploads/day).</p>
+                  <div class="job-bar" id="yt-x-bar" hidden><span></span></div>
+                  <p class="scan-note" id="yt-x-msg" role="status" hidden></p>
+                  <p class="render-ready" id="yt-x-done" role="status" hidden></p>
+                </div>
+              </div>
             </div>
           </div>
           <div class="export-bar">
@@ -1782,6 +1842,39 @@ svg text.axis {
           <button class="btn ghost small" id="set-rv-clear" type="button"><span class="spin" aria-hidden="true"></span>Clear</button>
         </div>
         <p class="help-small">&ldquo;Find a compatible Python&rdquo; normally fills this in for you &mdash; set it by hand only if you keep a special Python somewhere.</p>
+      </div>
+    </div>
+
+    <div class="set-section" id="set-yt-section">
+      <h3 id="set-yt-title">YouTube &mdash; upload connection</h3>
+      <p class="set-status" id="set-yt-status" role="status">Not configured</p>
+      <p class="help-small">Monteur uploads straight to your channel through your own (free) Google Cloud project &mdash; no Monteur cloud in between. Uploads from personal projects arrive as <strong>private drafts</strong> &mdash; exactly right for reviewing in YouTube Studio before publishing &mdash; and the default quota covers about 6 uploads a day.</p>
+      <details class="set-probed" id="set-yt-help">
+        <summary>One-time setup (~10 minutes)</summary>
+        <ol class="howto">
+          <li>Open <a href="https://console.cloud.google.com" target="_blank" rel="noopener">console.cloud.google.com</a> and create a new project (free).</li>
+          <li>Enable &ldquo;YouTube Data API v3&rdquo; (APIs &amp; Services &rarr; Library).</li>
+          <li>Set up the OAuth consent screen: External, Testing &mdash; and add yourself as a test user.</li>
+          <li>Credentials &rarr; Create credentials &rarr; OAuth client ID &rarr; <strong>Desktop app</strong> &mdash; then paste the client ID and client secret here.</li>
+        </ol>
+      </details>
+      <div class="set-key-block">
+        <label class="set-key-label" for="set-yt-id">Google OAuth client ID</label>
+        <div class="set-key-row">
+          <input type="text" id="set-yt-id" placeholder="1234&hellip;.apps.googleusercontent.com" autocomplete="off" spellcheck="false">
+        </div>
+        <label class="set-key-label" for="set-yt-secret">Client secret</label>
+        <div class="set-key-row">
+          <input type="password" id="set-yt-secret" placeholder="GOCSPX-&hellip;" autocomplete="off" spellcheck="false">
+          <button class="btn small" id="set-yt-save" type="button"><span class="spin" aria-hidden="true"></span>Save</button>
+          <button class="btn ghost small" id="set-yt-clear" type="button"><span class="spin" aria-hidden="true"></span>Clear</button>
+        </div>
+        <p class="help-small">Stored only on this computer (~/.monteur/settings.json), sent only to Google.</p>
+      </div>
+      <div class="set-test-row">
+        <button class="btn small" id="set-yt-connect" type="button"><span class="spin" aria-hidden="true"></span>Connect YouTube</button>
+        <button class="btn ghost small" id="set-yt-disconnect" type="button"><span class="spin" aria-hidden="true"></span>Disconnect</button>
+        <span class="help-small set-test-result" id="set-yt-result" role="status" aria-live="polite"></span>
       </div>
     </div>
 
@@ -5328,6 +5421,7 @@ function renderVideo() {
         setRenderBusy(false);
         $("cre-render-done").textContent = "Your video is ready: " + String((result && result.path) || dir);
         $("cre-render-result").hidden = false;
+        initYouTubeUpload("yt-r", String((result && result.path) || ""));
         toast("Video rendered through Resolve.", "success");
       },
       onCancelled: function () {
@@ -5411,6 +5505,7 @@ function exportVideo() {
           notes.appendChild(el("li", null, String(note)));
         });
         $("cre-export-result").hidden = false;
+        initYouTubeUpload("yt-x", String((result && result.path) || ""));
         toast("Video exported with Monteur's own engine.", "success");
       },
       onCancelled: function () {
@@ -5428,6 +5523,154 @@ function exportVideo() {
   });
 }
 $("cre-export-btn").addEventListener("click", exportVideo);
+
+/* ---- Upload to YouTube (both success states share this logic) ----------
+   The finished file (Direct Export or Resolve render) goes up as a
+   PRIVATE draft via POST /api/youtube/upload — a "youtube-upload" job
+   whose byte progress arrives as {"stage":"upload","sent","total"}
+   entries. Metadata is prefilled from the CURRENT plan through POST
+   /api/youtube/prefill: deterministic and offline — title from the
+   draft name or the composed story line, description from the story +
+   the chapter lines, tags mined from the vision labels. Not connected
+   yet -> a "Connect in settings" link that opens the settings modal at
+   the YouTube section. */
+
+var ytState = {}; // per block ("yt-x"/"yt-r"): {path, busy}
+
+function ytEls(prefix) {
+  return {
+    block: $(prefix + "-block"), hint: $(prefix + "-hint"),
+    form: $(prefix + "-form"), title: $(prefix + "-title"),
+    desc: $(prefix + "-desc"), tags: $(prefix + "-tags"),
+    privacy: $(prefix + "-privacy"), btn: $(prefix + "-btn"),
+    bar: $(prefix + "-bar"), msg: $(prefix + "-msg"), done: $(prefix + "-done")
+  };
+}
+
+/* called when a success card renders: remember the finished file's path,
+   show connect-hint or form, and prefill empty fields from the plan */
+function initYouTubeUpload(prefix, path) {
+  var els = ytEls(prefix);
+  ytState[prefix] = ytState[prefix] || {};
+  ytState[prefix].path = path || "";
+  els.block.hidden = !path;
+  if (!path) return;
+  els.msg.hidden = true;
+  els.done.hidden = true;
+  els.bar.hidden = true;
+  api("/api/youtube/status").then(function (s) {
+    els.hint.hidden = !!s.connected;
+    els.form.hidden = !s.connected;
+    if (!s.connected || !rev.planJson) return;
+    var body = { plan_json: rev.planJson, name: $("cre-draft-name").value.trim() };
+    api("/api/youtube/prefill", { method: "POST", body: body }).then(function (meta) {
+      if (!els.title.value.trim()) els.title.value = meta.title || "";
+      if (!els.desc.value.trim()) els.desc.value = meta.description || "";
+      if (!els.tags.value.trim()) els.tags.value = (meta.tags || []).join(", ");
+    }).catch(function () {}); // the prefill is a convenience, never an error state
+  }).catch(function () {
+    els.hint.hidden = false;
+    els.form.hidden = true;
+  });
+}
+
+function ytSetBusy(prefix, busy) {
+  var els = ytEls(prefix);
+  ytState[prefix].busy = busy;
+  els.btn.classList.toggle("busy", busy);
+  els.btn.disabled = busy;
+}
+
+function ytMB(bytes) { return (bytes / 1000000).toFixed(1); }
+
+function startYouTubeUpload(prefix) {
+  var els = ytEls(prefix);
+  var state = ytState[prefix] || {};
+  if (!state.path || state.busy) return;
+  var title = els.title.value.trim();
+  if (!title) {
+    creNote(prefix + "-msg", "Give the video a title first — YouTube needs one.", true);
+    els.title.focus();
+    return;
+  }
+  var body = {
+    path: state.path,
+    title: title,
+    description: els.desc.value,
+    tags: els.tags.value,
+    privacy: els.privacy.value
+  };
+  els.msg.hidden = true;
+  els.done.hidden = true;
+  els.bar.hidden = false;
+  els.bar.querySelector("span").style.width = "0%";
+  ytSetBusy(prefix, true);
+
+  function finishError(message) {
+    ytSetBusy(prefix, false);
+    els.bar.hidden = true;
+    creNote(prefix + "-msg", message, true);
+  }
+
+  api("/api/youtube/upload", { method: "POST", body: body }).then(function (data) {
+    (function poll() {
+      api("/api/jobs/" + data.job).then(function (job) {
+        var last = null;
+        (job.progress || []).forEach(function (p) {
+          if (p.stage === "upload") last = p;
+        });
+        if (last && last.total > 0) {
+          var pct = Math.min(100, Math.round(last.sent / last.total * 100));
+          els.bar.querySelector("span").style.width = pct + "%";
+          els.btn.title = ytMB(last.sent) + " / " + ytMB(last.total) + " MB";
+        }
+        if (job.state === "running") { window.setTimeout(poll, 700); return; }
+        if (job.state !== "done") {
+          finishError(job.message ? String(job.message) : "Something went wrong.");
+          return;
+        }
+        ytSetBusy(prefix, false);
+        els.bar.querySelector("span").style.width = "100%";
+        var r = job.result || {};
+        clear(els.done);
+        var wording = (r.privacy === "unlisted")
+          ? "Uploaded (unlisted) — manage it in YouTube Studio: "
+          : "Uploaded as a private draft — review and publish in YouTube Studio: ";
+        els.done.appendChild(el("span", null, wording));
+        var studio = el("a", null, "open in Studio");
+        studio.href = r.url || "#";
+        studio.target = "_blank";
+        studio.rel = "noopener";
+        els.done.appendChild(studio);
+        els.done.appendChild(el("span", null, " · "));
+        var watch = el("a", null, "watch link");
+        watch.href = r.watch_url || "#";
+        watch.target = "_blank";
+        watch.rel = "noopener";
+        els.done.appendChild(watch);
+        (r.notes || []).forEach(function (note) {
+          els.done.appendChild(el("span", null, " — " + String(note)));
+        });
+        els.done.hidden = false;
+        toast("Uploaded to YouTube — it stays private until you publish it.", "success");
+      }).catch(function (err) {
+        finishError(err && err.message ? err.message : String(err));
+      });
+    })();
+  }).catch(function (err) {
+    finishError(err && err.message ? err.message : String(err));
+  });
+}
+
+["yt-x", "yt-r"].forEach(function (prefix) {
+  $(prefix + "-btn").addEventListener("click", function () {
+    startYouTubeUpload(prefix);
+  });
+  $(prefix + "-settings").addEventListener("click", function (e) {
+    e.preventDefault();
+    openSettings("youtube");
+  });
+});
 
 /* ---- distill a trailer from a finished cut (monteur.distill) ---------- */
 
@@ -6196,21 +6439,25 @@ function saveSettings(body) {
   return api("/api/settings", { method: "POST", body: body }).then(renderSettings);
 }
 
-function openSettings(scrollToResolve) {
+function openSettings(scrollTo) {
   var out = $("set-test-result");
   out.textContent = "";
   out.classList.remove("ok");
   $("set-key").value = "";
   $("set-rv-detect-result").textContent = "";
   $("set-rv-detect-result").classList.remove("ok");
+  $("set-yt-result").textContent = "";
+  $("set-yt-result").classList.remove("ok");
   // the Store hint only makes sense on the machine Studio runs on = this one
   $("set-rv-store").hidden = !/win/i.test(navigator.platform || navigator.userAgent || "");
   refreshResolveDiagnosis();
+  refreshYouTubeStatus();
   api("/api/settings").then(function (s) {
     renderSettings(s);
     $("settings-modal").hidden = false;
     $("settings-close").focus();
-    if (scrollToResolve) $("set-resolve-section").scrollIntoView({ block: "start" });
+    if (scrollTo === "youtube") $("set-yt-section").scrollIntoView({ block: "start" });
+    else if (scrollTo) $("set-resolve-section").scrollIntoView({ block: "start" });
   }).catch(function (err) {
     toast(err && err.message ? err.message : String(err), "error");
   });
@@ -6531,6 +6778,129 @@ $("set-rv-clear").addEventListener("click", function () {
   }).then(function () {
     // busy() re-enables its button; re-apply "nothing saved -> Clear disabled".
     if (settingsState) renderResolveSettings(settingsState);
+  });
+});
+
+/* ---- settings: YouTube — upload connection ----------------------------
+   Status comes from GET /api/youtube/status ({configured, connected,
+   channel}); the Desktop-app client pair goes to POST
+   /api/youtube/credentials ('' for both clears them and disconnects);
+   "Connect YouTube" starts the loopback OAuth flow — POST
+   /api/youtube/connect returns the Google consent URL whose redirect
+   points back at THIS server's /api/youtube/callback, so a new tab
+   opens, the user consents, the tab closes itself and we simply poll
+   the status until the refresh token has landed. */
+
+var ytSettingsState = null;
+
+function renderYouTubeStatus(s) {
+  ytSettingsState = s;
+  var status = $("set-yt-status");
+  if (s.connected) {
+    status.textContent = "Connected" + (s.channel ? " — " + s.channel : "") +
+      " — uploads arrive as private drafts on your channel.";
+  } else if (s.configured) {
+    status.textContent = "Configured, not connected — click “Connect YouTube”.";
+  } else {
+    status.textContent = "Not configured — a one-time Google Cloud setup (see below).";
+  }
+  status.classList.toggle("off", !s.connected);
+  if (!s.configured) $("set-yt-help").open = true; // first visit: show the steps
+  $("set-yt-connect").disabled = !s.configured;
+  $("set-yt-disconnect").disabled = !s.connected;
+  $("set-yt-clear").disabled = !s.configured;
+}
+
+function refreshYouTubeStatus() {
+  return api("/api/youtube/status").then(renderYouTubeStatus).catch(function () {});
+}
+
+$("set-yt-save").addEventListener("click", function () {
+  var id = $("set-yt-id").value.trim();
+  var secret = $("set-yt-secret").value.trim();
+  if (!id || !secret) {
+    toast("Paste both the client ID and the client secret — Google hands them out as a pair.", "error");
+    (id ? $("set-yt-secret") : $("set-yt-id")).focus();
+    return;
+  }
+  busy($("set-yt-save"), function () {
+    return api("/api/youtube/credentials", {
+      method: "POST", body: { client_id: id, client_secret: secret }
+    }).then(function (s) {
+      renderYouTubeStatus(s);
+      $("set-yt-secret").value = "";
+      toast("Google credentials saved — now click “Connect YouTube”.", "success");
+    });
+  }).then(function () {
+    if (ytSettingsState) renderYouTubeStatus(ytSettingsState);
+  });
+});
+
+$("set-yt-clear").addEventListener("click", function () {
+  busy($("set-yt-clear"), function () {
+    return api("/api/youtube/credentials", {
+      method: "POST", body: { client_id: "", client_secret: "" }
+    }).then(function (s) {
+      renderYouTubeStatus(s);
+      $("set-yt-id").value = "";
+      $("set-yt-secret").value = "";
+      toast("Google credentials removed — the YouTube connection is cleared too.", "success");
+    });
+  }).then(function () {
+    if (ytSettingsState) renderYouTubeStatus(ytSettingsState);
+  });
+});
+
+var ytConnectPoll = null;
+
+$("set-yt-connect").addEventListener("click", function () {
+  var btn = $("set-yt-connect");
+  if (btn.classList.contains("busy")) return;
+  var out = $("set-yt-result");
+  out.classList.remove("ok");
+  out.textContent = "Opening Google’s consent page…";
+  btn.classList.add("busy");
+  btn.disabled = true;
+  function finish(text, ok) {
+    btn.classList.remove("busy");
+    btn.disabled = !(ytSettingsState && ytSettingsState.configured);
+    out.textContent = text;
+    out.classList.toggle("ok", !!ok);
+    if (ytConnectPoll) { window.clearTimeout(ytConnectPoll); ytConnectPoll = null; }
+  }
+  api("/api/youtube/connect", { method: "POST", body: {} }).then(function (data) {
+    window.open(data.auth_url, "_blank", "noopener");
+    out.textContent = "Waiting for Google — finish the consent in the new tab…";
+    var deadline = Date.now() + 3 * 60 * 1000;
+    (function poll() {
+      api("/api/youtube/status").then(function (s) {
+        if (s.connected) {
+          renderYouTubeStatus(s);
+          finish("Connected — uploads land on your channel as private drafts.", true);
+          return;
+        }
+        if (Date.now() > deadline) {
+          finish("Still not connected — finish the Google consent tab, then try again.", false);
+          return;
+        }
+        ytConnectPoll = window.setTimeout(poll, 1500);
+      }).catch(function () {
+        ytConnectPoll = window.setTimeout(poll, 1500);
+      });
+    })();
+  }).catch(function (err) {
+    finish(err && err.message ? err.message : String(err), false);
+  });
+});
+
+$("set-yt-disconnect").addEventListener("click", function () {
+  busy($("set-yt-disconnect"), function () {
+    return api("/api/youtube/disconnect", { method: "POST", body: {} }).then(function (s) {
+      renderYouTubeStatus(s);
+      toast("YouTube disconnected — the credentials stay for a one-click reconnect.", "success");
+    });
+  }).then(function () {
+    if (ytSettingsState) renderYouTubeStatus(ytSettingsState);
   });
 });
 

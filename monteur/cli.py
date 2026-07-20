@@ -15,6 +15,7 @@ Workflow overview::
     monteur revise plan.json clips -o cut_v2.fcpxml --brief "zweite Hälfte ruhiger"
     monteur preview plan.json -o preview.mp4
     monteur export plan.json -o video.mp4 --canvas uhd --quality high
+    monteur upload video.mp4 --title "Alpen im Herbst" --tags travel,alps
     monteur direct plan.json clips --apply -o cut_v3.fcpxml
     monteur resolve status
     monteur resolve render --out renders --preset 2160p
@@ -968,6 +969,95 @@ def cmd_export(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_upload(args: argparse.Namespace) -> None:
+    """Upload a finished video to YouTube as a private draft.
+
+    Uses the connection stored by Monteur Studio (Settings → YouTube:
+    the user's own Google Cloud Desktop-app client + one "Connect
+    YouTube" click); :mod:`monteur.youtube` does the OAuth refresh and
+    the resumable upload. Byte progress redraws one ``\\r`` line like the
+    Resolve render does; the typed errors (quota/daily cap, expired
+    connection) exit 1 with their friendly messages.
+    """
+    from monteur import youtube
+    from monteur.settings import (
+        youtube_client_id,
+        youtube_client_secret,
+        youtube_refresh_token,
+    )
+
+    if not Path(args.video).is_file():
+        _fail(f"there is no video file at {args.video!r}")
+    title = args.title.strip()
+    if not title:
+        _fail("--title must not be empty")
+    description = ""
+    if args.description_file:
+        try:
+            description = Path(args.description_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            _fail(f"could not read --description-file: {exc}")
+    tags = [t.strip() for t in (args.tags or "").split(",") if t.strip()]
+    client_id = youtube_client_id()
+    client_secret = youtube_client_secret()
+    refresh_token = youtube_refresh_token()
+    if not (client_id and client_secret and refresh_token):
+        _fail(
+            "YouTube is not connected — run 'monteur ui', open Settings → "
+            "YouTube and do the one-time setup (your own Google Cloud "
+            "project + Connect YouTube)"
+        )
+
+    def progress(sent: int, total: int) -> None:
+        percent = sent / total * 100 if total else 100.0
+        print(
+            f"\rUploading… {sent / 1_000_000:.1f} / {total / 1_000_000:.1f} MB "
+            f"({percent:.0f}%)",
+            end="",
+            flush=True,
+        )
+
+    try:
+        token = youtube.refresh_access_token(client_id, client_secret, refresh_token)
+        print(f"Uploading {args.video} to YouTube ({args.privacy}) …", flush=True)
+        try:
+            uploaded = youtube.upload_video(
+                token, args.video, title=title, description=description,
+                tags=tags, privacy=args.privacy, progress=progress,
+            )
+        except youtube.TokenExpired:
+            # One refresh + retry; a second failure exits with the message.
+            token = youtube.refresh_access_token(
+                client_id, client_secret, refresh_token
+            )
+            uploaded = youtube.upload_video(
+                token, args.video, title=title, description=description,
+                tags=tags, privacy=args.privacy, progress=progress,
+            )
+    except youtube.TokenExpired:
+        print(flush=True)
+        _fail("your YouTube connection expired — reconnect in Monteur's settings")
+    except youtube.MonteurYouTubeError as exc:  # QuotaExceeded included
+        print(flush=True)
+        _fail(str(exc))
+    print(flush=True)  # end the \r progress line
+    if args.thumbnail:
+        note = youtube.set_thumbnail(token, uploaded["video_id"], args.thumbnail)
+        if note:
+            print(f"  {note}")
+    video_id = uploaded["video_id"]
+    channel = f" on {uploaded['channel']}" if uploaded.get("channel") else ""
+    if args.privacy == "private":
+        print(
+            f"Uploaded as a private draft{channel} — review and publish "
+            "in YouTube Studio:"
+        )
+    else:
+        print(f"Uploaded as unlisted{channel}:")
+    print(f"  Studio: https://studio.youtube.com/video/{video_id}/edit")
+    print(f"  Watch:  https://www.youtube.com/watch?v={video_id}")
+
+
 def _load_plan(path: str):
     """Read a saved plan JSON (create/revise --save-plan) or fail cleanly."""
     from monteur.montage import plan_from_dict
@@ -1454,6 +1544,30 @@ def build_parser() -> argparse.ArgumentParser:
              "of the canvas preset (e.g. 480x270)",
     )
     p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser(
+        "upload",
+        help="upload a finished video to YouTube as a private draft "
+             "(one-time connection via Monteur Studio's settings)",
+    )
+    p.add_argument("video", help="the finished video file (e.g. the export's .mp4)")
+    p.add_argument("--title", required=True, help="video title on YouTube")
+    p.add_argument(
+        "--description-file", default="", metavar="FILE",
+        help="text file with the description (e.g. drafted from the publish kit)",
+    )
+    p.add_argument("--tags", default="", help="comma-separated tags")
+    p.add_argument(
+        "--privacy", choices=["private", "unlisted"], default="private",
+        help="private (default) is also all an unverified personal Google "
+             "Cloud project may upload — exactly the review-then-publish "
+             "draft workflow",
+    )
+    p.add_argument(
+        "--thumbnail", default="",
+        help="thumbnail image (jpg/png) — set best-effort after the upload",
+    )
+    p.set_defaults(func=cmd_upload)
 
     p = sub.add_parser(
         "direct",

@@ -65,6 +65,15 @@ API (all JSON):
 * ``POST /api/settings/test``                                   -> {"job": id}
 * ``GET  /api/resolve/diagnose``                                -> monteur.resolve.diagnose()
 * ``POST /api/resolve/detect``                                  -> {"job": id}
+* ``GET  /api/youtube/status``                                  -> {"configured", "connected", "channel"}
+* ``POST /api/youtube/credentials`` {"client_id",
+  "client_secret"}                                              -> the status view
+* ``POST /api/youtube/connect``                                 -> {"auth_url", "redirect_uri"}
+* ``GET  /api/youtube/callback?code&state``                      -> a tiny HTML page
+* ``POST /api/youtube/disconnect``                              -> the status view
+* ``POST /api/youtube/upload`` {"path", "title",
+  "description"?, "tags"?, "privacy"?, "thumbnail"?}            -> {"job": id}
+* ``POST /api/youtube/prefill`` {"plan_json", "name"?}          -> {"title", "description", "tags"}
 
 Timeline content is passed as text (EDL/FCPXML are text formats); ``fps`` is
 required for EDL files.
@@ -316,6 +325,47 @@ and the job result carries ``{"found", "connected", "version", "probed",
 "verdict"}`` with a FRESH post-save diagnosis verdict. Finding nothing is
 information, not an error: the job still succeeds with ``"found": null``
 and the probe report, and the UI shows the guided python.org install help.
+
+The ``/api/youtube/*`` endpoints are the "Publish to YouTube" surface on
+top of :mod:`monteur.youtube` (stdlib OAuth + resumable upload; the module
+docstring carries the whole story — user-owned Google Cloud project,
+private-only uploads from unverified projects, ~6 uploads/day quota).
+``status`` reports ``configured`` (client id + secret saved), ``connected``
+(refresh token saved) and the ``channel`` hint. ``credentials`` saves the
+Desktop-app client pair (both stripped and non-empty, 400 otherwise;
+sending both as ``""`` clears them AND disconnects — a new project makes
+the old token meaningless). ``connect`` starts the RFC 8252 loopback flow:
+the server generates a single-use ``state``, remembers it (module-level,
+one Studio serves one user), and answers with the Google consent
+``auth_url`` whose ``redirect_uri`` points back at THIS server —
+``http://127.0.0.1:<own port>/api/youtube/callback`` (Google's desktop-app
+clients accept any 127.0.0.1 port, so the running Studio IS the loopback
+target; no second server, no copy-pasted codes). The ``callback`` GET is
+opened by the BROWSER, not the app, so it answers with tiny HTML pages:
+state mismatch/stale link -> a readable error page (400), a Google error
+-> the error text, success -> the code is exchanged for tokens
+(:func:`monteur.youtube.exchange_code`), the refresh token is saved to
+settings, and a self-closing "YouTube connected — you can close this tab"
+page renders. ``disconnect`` clears the refresh token (the credentials
+stay — reconnecting is one click).
+
+``upload`` validates up front (missing path/title, file not found, bad
+privacy, not connected -> 400) and runs a ``"youtube-upload"`` job: a
+fresh access token is minted from the stored refresh token, the file goes
+up through the resumable protocol with byte progress as ``{"stage":
+"upload", "sent", "total"}`` entries, a mid-upload ``TokenExpired`` gets
+exactly ONE refresh+retry (still failing -> job error "reconnect in
+settings"), and a ``QuotaExceeded`` fails the job with its friendly
+daily-limit message verbatim. An optional ``thumbnail`` is set
+best-effort — its failure is a result note, never a job error. The result
+is ``{"video_id", "url" (the studio.youtube.com/video/<id>/edit review
+link), "watch_url", "privacy", "channel", "notes"}``; the channel title
+from the upload response is remembered in settings as the status hint.
+``prefill`` is synchronous and offline (the AI-assisted path stays the
+publish kit): title from the draft ``name`` or the plan's composed
+"story:" note, description = story + the :func:`monteur.publish.
+plan_chapters` chapter lines starting at 0:00, tags from
+:func:`monteur.publish.plan_tags` — all deterministic, nothing invented.
 
 The ``/api/movie/*`` endpoints drive the Studio's Movie view on top of
 :mod:`monteur.movie`. ``load`` and ``assign`` are instant (no job; both
@@ -700,7 +750,7 @@ def _run_export_video_job(job: dict, payload: dict) -> None:
 def _new_job(kind: str) -> dict:
     job = {
         "id": secrets.token_hex(4),
-        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "direct" | "direct-apply" | "distill" | "preview" | "export-video" | "resolve-build" | "resolve-render" | "resolve-detect" | "movie" | "scene-check" | "movie-assemble" | "ai-test"
+        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "direct" | "direct-apply" | "distill" | "preview" | "export-video" | "resolve-build" | "resolve-render" | "resolve-detect" | "movie" | "scene-check" | "movie-assemble" | "ai-test" | "youtube-upload"
         "state": "running",  # -> "done" | "error" | "cancelled"
         "progress": [],  # dicts: {"index","total","name","stage"[,"usable_ratio"]}
         "message": "",  # human-readable reason when state == "error"
@@ -1918,6 +1968,140 @@ def _run_movie_assemble_job(job: dict, payload: dict) -> None:
         job["state"] = "error"
 
 
+# --- YouTube upload connection (monteur.youtube) -------------------------------
+#
+# The OAuth loopback handshake needs one piece of server-side memory: the
+# single-use `state` (CSRF guard) and the exact redirect_uri the consent URL
+# was built with (the token exchange must repeat it verbatim). Module-level
+# like the job registry — one Studio process serves one user.
+
+_YT_OAUTH: dict = {"state": "", "redirect_uri": ""}
+_YT_OAUTH_LOCK = threading.Lock()
+
+
+def _youtube_status_view() -> dict:
+    """The JSON view GET status and the credential/disconnect POSTs share.
+
+    Never contains the client secret or any token — only whether they are
+    set, plus the channel-title hint remembered from the last upload.
+    """
+    from monteur.settings import (
+        youtube_channel,
+        youtube_client_id,
+        youtube_client_secret,
+        youtube_refresh_token,
+    )
+
+    return {
+        "configured": bool(youtube_client_id() and youtube_client_secret()),
+        "connected": bool(youtube_refresh_token()),
+        "channel": youtube_channel(),
+    }
+
+
+def _run_youtube_upload_job(job: dict, payload: dict) -> None:
+    """Daemon-thread body for POST /api/youtube/upload (file -> private draft).
+
+    Mints a fresh access token from the stored refresh token, uploads with
+    byte progress (``{"stage": "upload", "sent", "total"}`` entries), and
+    honours the typed errors of :mod:`monteur.youtube`: a mid-upload
+    ``TokenExpired`` gets exactly one refresh+retry, ``QuotaExceeded``
+    fails the job with the friendly daily-limit message verbatim. The
+    optional thumbnail is best-effort — its note lands in the result, a
+    failure never fails the upload that already succeeded.
+
+    ``monteur.youtube``'s functions are resolved at CALL time via the
+    module attribute below, so tests monkeypatch them without any Google.
+    """
+    from monteur import youtube
+    from monteur.settings import (
+        save_settings,
+        youtube_client_id,
+        youtube_client_secret,
+        youtube_refresh_token,
+    )
+
+    try:
+        path = str(payload.get("path") or "")
+        title = str(payload.get("title") or "").strip()
+        description = str(payload.get("description") or "")
+        tags = [str(t).strip() for t in (payload.get("tags") or []) if str(t).strip()]
+        privacy = str(payload.get("privacy") or "private")
+        thumbnail = str(payload.get("thumbnail") or "").strip()
+        client_id, client_secret = youtube_client_id(), youtube_client_secret()
+        refresh_token = youtube_refresh_token()
+
+        def fresh_token() -> str:
+            with _JOBS_LOCK:
+                job["progress"].append(
+                    {"stage": "auth", "name": "refreshing the YouTube connection"}
+                )
+            return youtube.refresh_access_token(
+                client_id, client_secret, refresh_token
+            )
+
+        def progress(sent: int, total: int) -> None:
+            entry = {
+                "stage": "upload",
+                "sent": int(sent),
+                "total": int(total),
+                "name": Path(path).name,
+            }
+            with _JOBS_LOCK:
+                job["progress"].append(entry)
+
+        def upload(token: str) -> dict:
+            return youtube.upload_video(
+                token, path, title=title, description=description,
+                tags=tags, privacy=privacy, progress=progress,
+            )
+
+        token = fresh_token()
+        try:
+            uploaded = upload(token)
+        except youtube.TokenExpired:
+            # One refresh + retry by contract; a second TokenExpired falls
+            # through to the "reconnect in settings" handler below.
+            token = fresh_token()
+            uploaded = upload(token)
+
+        notes: list[str] = []
+        if thumbnail:
+            note = youtube.set_thumbnail(token, uploaded["video_id"], thumbnail)
+            if note:
+                notes.append(note)  # best-effort by contract — never fatal
+        if uploaded.get("channel"):
+            try:  # a pure display hint — failing to save it loses nothing
+                save_settings({"youtube_channel": str(uploaded["channel"])})
+            except OSError:
+                pass
+        video_id = uploaded["video_id"]
+        job["result"] = {
+            "video_id": video_id,
+            # The review link is the point: the upload is a PRIVATE draft.
+            "url": f"https://studio.youtube.com/video/{video_id}/edit",
+            "watch_url": f"https://www.youtube.com/watch?v={video_id}",
+            "privacy": privacy,
+            "channel": str(uploaded.get("channel") or ""),
+            "notes": notes,
+        }
+        job["state"] = "done"
+    except youtube.QuotaExceeded as exc:
+        job["message"] = str(exc)  # the friendly daily-limit wording, verbatim
+        job["state"] = "error"
+    except youtube.TokenExpired:
+        job["message"] = (
+            "your YouTube connection expired — reconnect in Monteur's settings"
+        )
+        job["state"] = "error"
+    except (youtube.MonteurYouTubeError, OSError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
 # --- AI connection settings (backend choice + API key, managed in the UI) ------
 
 
@@ -2179,6 +2363,13 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("GET", "/api/settings"): self._settings_get,
             ("POST", "/api/settings"): self._settings_set,
             ("POST", "/api/settings/test"): self._settings_test,
+            ("GET", "/api/youtube/status"): self._youtube_status,
+            ("POST", "/api/youtube/credentials"): self._youtube_credentials,
+            ("POST", "/api/youtube/connect"): self._youtube_connect,
+            ("GET", "/api/youtube/callback"): self._youtube_callback,
+            ("POST", "/api/youtube/disconnect"): self._youtube_disconnect,
+            ("POST", "/api/youtube/upload"): self._youtube_upload,
+            ("POST", "/api/youtube/prefill"): self._youtube_prefill,
         }
         if (method, path) in routes:
             return routes[(method, path)]
@@ -2972,6 +3163,264 @@ class MonteurHandler(BaseHTTPRequestHandler):
             daemon=True,
         ).start()
         self._send_json({"job": job["id"]})
+
+    # -- YouTube upload connection (monteur.youtube) --------------------------
+
+    def _youtube_status(self) -> None:
+        self._send_json(_youtube_status_view())
+
+    def _youtube_credentials(self) -> None:
+        """POST /api/youtube/credentials — save (or clear) the OAuth client.
+
+        Both values stripped; both must be non-empty together — or both
+        empty, which clears them AND disconnects (a token minted for the
+        old Google project is meaningless under a new one).
+        """
+        from monteur.settings import save_settings
+
+        payload = self._read_json()
+        raw_id = payload.get("client_id")
+        raw_secret = payload.get("client_secret")
+        if not isinstance(raw_id, str) or not isinstance(raw_secret, str):
+            raise ApiError(
+                400,
+                "'client_id' and 'client_secret' must be strings "
+                "('' for both clears them)",
+            )
+        client_id, client_secret = raw_id.strip(), raw_secret.strip()
+        if bool(client_id) != bool(client_secret):
+            raise ApiError(
+                400,
+                "paste BOTH the client id and the client secret — Google's "
+                "Desktop-app credentials come as a pair (send both empty "
+                "to clear them)",
+            )
+        updates = {
+            "youtube_client_id": client_id,
+            "youtube_client_secret": client_secret,
+        }
+        if not client_id:  # clearing the project disconnects the channel too
+            updates["youtube_refresh_token"] = ""
+            updates["youtube_channel"] = ""
+        save_settings(updates)
+        self._send_json(_youtube_status_view())
+
+    def _youtube_connect(self) -> None:
+        """POST /api/youtube/connect — start the loopback OAuth flow.
+
+        The running server IS the loopback target (RFC 8252): the consent
+        URL redirects to this server's own port on 127.0.0.1, which
+        Google's desktop-app clients accept without pre-registration. The
+        single-use state (and the redirect_uri the exchange must repeat)
+        are remembered module-side until the callback arrives.
+        """
+        from monteur import youtube
+        from monteur.settings import youtube_client_id, youtube_client_secret
+
+        client_id, client_secret = youtube_client_id(), youtube_client_secret()
+        if not (client_id and client_secret):
+            raise ApiError(
+                400,
+                "add your Google OAuth client id and secret first — "
+                "Settings → YouTube explains the one-time setup",
+            )
+        state = secrets.token_urlsafe(16)
+        redirect_uri = (
+            f"http://127.0.0.1:{self.server.server_address[1]}"
+            "/api/youtube/callback"
+        )
+        with _YT_OAUTH_LOCK:
+            _YT_OAUTH["state"] = state
+            _YT_OAUTH["redirect_uri"] = redirect_uri
+        self._send_json(
+            {
+                "auth_url": youtube.auth_url(client_id, redirect_uri, state),
+                "redirect_uri": redirect_uri,
+            }
+        )
+
+    def _youtube_html(self, heading: str, text: str, status: int = 200,
+                      close: bool = False) -> None:
+        """A tiny self-contained HTML page — the callback talks to a browser
+        tab Google opened, not to the app's fetch()."""
+        script = "<script>window.close();</script>" if close else ""
+        body = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            f"<title>{heading}</title></head>"
+            "<body style='font-family: system-ui, sans-serif; margin: 3em;"
+            " max-width: 36em;'>"
+            f"<h1 style='font-size: 1.2em;'>{heading}</h1><p>{text}</p>"
+            f"{script}</body></html>"
+        )
+        self._send_bytes(
+            body.encode("utf-8"), "text/html; charset=utf-8", status=status
+        )
+
+    def _youtube_callback(self) -> None:
+        """GET /api/youtube/callback?code&state — Google's loopback redirect.
+
+        Validates the single-use state, exchanges the code for tokens,
+        stores the refresh token, and renders a self-closing page. Every
+        failure renders a plain readable page instead of JSON — the only
+        reader is a human in a browser tab.
+        """
+        from urllib.parse import parse_qs, urlsplit
+
+        query = parse_qs(urlsplit(self.path).query)
+
+        def param(name: str) -> str:
+            return (query.get(name) or [""])[0]
+
+        if param("error"):
+            self._youtube_html(
+                "YouTube not connected",
+                f"Google reported: {param('error')}. You can close this tab "
+                "and try again from Monteur's settings.",
+                status=400,
+            )
+            return
+        code, state = param("code"), param("state")
+        with _YT_OAUTH_LOCK:
+            expected = _YT_OAUTH.get("state") or ""
+            redirect_uri = _YT_OAUTH.get("redirect_uri") or ""
+            matched = bool(code) and bool(expected) and state == expected
+            if matched:
+                _YT_OAUTH["state"] = ""  # single use — a replay must fail
+        if not matched:
+            self._youtube_html(
+                "YouTube not connected",
+                "This sign-in link is stale or did not come from this "
+                "Monteur. Start again from Settings → Connect YouTube.",
+                status=400,
+            )
+            return
+        from monteur import youtube
+        from monteur.settings import (
+            save_settings,
+            youtube_client_id,
+            youtube_client_secret,
+        )
+
+        try:
+            tokens = youtube.exchange_code(
+                youtube_client_id(), youtube_client_secret(), code, redirect_uri
+            )
+        except youtube.MonteurYouTubeError as exc:
+            self._youtube_html("YouTube not connected", str(exc), status=502)
+            return
+        refresh_token = str(tokens.get("refresh_token") or "")
+        if not refresh_token:
+            self._youtube_html(
+                "YouTube not connected",
+                "Google returned no refresh token. Remove Monteur's access "
+                "at myaccount.google.com/permissions, then connect again.",
+                status=502,
+            )
+            return
+        save_settings({"youtube_refresh_token": refresh_token})
+        self._youtube_html(
+            "YouTube connected",
+            "YouTube connected — you can close this tab and go back "
+            "to Monteur Studio.",
+            close=True,
+        )
+
+    def _youtube_disconnect(self) -> None:
+        from monteur.settings import save_settings
+
+        save_settings({"youtube_refresh_token": "", "youtube_channel": ""})
+        self._send_json(_youtube_status_view())
+
+    def _youtube_upload(self) -> None:
+        """POST /api/youtube/upload — validate, then a "youtube-upload" job.
+
+        400s live here (missing path/title, file not found, bad privacy,
+        not connected); the upload itself runs in
+        :func:`_run_youtube_upload_job`.
+        """
+        from monteur.settings import (
+            youtube_client_id,
+            youtube_client_secret,
+            youtube_refresh_token,
+        )
+
+        payload = self._read_json()
+        path = str(payload.get("path") or "").strip()
+        if not path:
+            raise ApiError(400, "missing 'path' (the finished video file)")
+        title = str(payload.get("title") or "").strip()
+        if not title:
+            raise ApiError(
+                400, "missing 'title' (the video needs a name on YouTube)"
+            )
+        if not os.path.isfile(path):
+            raise ApiError(400, f"there is no video file at {path!r}")
+        privacy = str(payload.get("privacy") or "private")
+        if privacy not in ("private", "unlisted"):
+            raise ApiError(400, "'privacy' must be 'private' or 'unlisted'")
+        if not (youtube_client_id() and youtube_client_secret()
+                and youtube_refresh_token()):
+            raise ApiError(
+                400,
+                "YouTube is not connected — open Settings → YouTube and "
+                "connect your channel first",
+            )
+        tags = payload.get("tags")
+        if isinstance(tags, str):  # the UI's comma field, pre-split for the job
+            payload["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
+        elif tags is not None and not isinstance(tags, list):
+            raise ApiError(400, "'tags' must be a list or a comma-separated string")
+        payload["path"], payload["title"], payload["privacy"] = path, title, privacy
+        job = _new_job("youtube-upload")
+        threading.Thread(
+            target=_run_youtube_upload_job,
+            args=(job, payload),
+            name=f"monteur-youtube-upload-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _youtube_prefill(self) -> None:
+        """POST /api/youtube/prefill — deterministic metadata suggestions.
+
+        Synchronous and offline (the AI-assisted copy stays the publish
+        kit's job): title from the draft name or the plan's composed
+        "story:" note, description = story + the plan's own chapter lines
+        (starting 0:00, nothing invented), tags mined by
+        :func:`monteur.publish.plan_tags`.
+        """
+        from monteur.montage import plan_from_dict
+        from monteur.publish import plan_chapters, plan_tags
+
+        payload = self._read_json()
+        if not isinstance(payload.get("plan_json"), dict):
+            raise ApiError(
+                400, "missing 'plan_json' (the plan a build result carries)"
+            )
+        plan = plan_from_dict(payload["plan_json"])  # bad -> ValueError -> 400
+        story = ""
+        for note in plan.notes:
+            if isinstance(note, str) and note.lower().startswith("story:"):
+                story = note[len("story:"):].strip()
+                break
+        name = str(payload.get("name") or "").strip()
+        chapters = plan_chapters(plan)
+        chapter_lines = [
+            f"{int(c.start) // 60}:{int(c.start) % 60:02d} {c.title}"
+            for c in chapters
+        ]
+        parts = []
+        if story:
+            parts.append(story)
+        if chapter_lines:
+            parts.append("\n".join(chapter_lines))
+        self._send_json(
+            {
+                "title": (name or story)[:100],  # YouTube's title limit
+                "description": "\n\n".join(parts),
+                "tags": plan_tags(plan),
+            }
+        )
 
     def _resolve_status(self) -> None:
         # Isolated in a child process: Resolve's native module can hard-crash

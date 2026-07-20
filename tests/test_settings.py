@@ -20,6 +20,10 @@ from monteur.settings import (
     resolve_python,
     save_settings,
     settings_path,
+    youtube_channel,
+    youtube_client_id,
+    youtube_client_secret,
+    youtube_refresh_token,
 )
 
 
@@ -158,3 +162,74 @@ def test_resolve_python_non_string_reads_as_empty(settings_file):
 def test_resolve_python_is_stripped_on_read(settings_file):
     settings_file.write_text(json.dumps({"resolve_python": "  /opt/py/bin/python3.11 \n"}))
     assert resolve_python() == "/opt/py/bin/python3.11"
+
+
+def test_youtube_keys_default_to_empty(settings_file):
+    assert youtube_client_id() == ""
+    assert youtube_client_secret() == ""
+    assert youtube_refresh_token() == ""
+    assert youtube_channel() == ""
+
+
+def test_youtube_keys_round_trip(settings_file):
+    save_settings(
+        {
+            "youtube_client_id": "cid.apps.googleusercontent.com",
+            "youtube_client_secret": "GOCSPX-secret",
+            "youtube_refresh_token": "1//refresh",
+            "youtube_channel": "My Channel",
+        }
+    )
+    assert youtube_client_id() == "cid.apps.googleusercontent.com"
+    assert youtube_client_secret() == "GOCSPX-secret"
+    assert youtube_refresh_token() == "1//refresh"
+    assert youtube_channel() == "My Channel"
+
+
+def test_youtube_keys_clear_with_empty_strings(settings_file):
+    save_settings(
+        {
+            "youtube_client_id": "cid",
+            "youtube_client_secret": "cs",
+            "youtube_refresh_token": "rt",
+            "youtube_channel": "C",
+        }
+    )
+    save_settings(
+        {
+            "youtube_client_id": "",
+            "youtube_client_secret": "",
+            "youtube_refresh_token": "",
+            "youtube_channel": "",
+        }
+    )
+    assert youtube_client_id() == ""
+    assert youtube_client_secret() == ""
+    assert youtube_refresh_token() == ""
+    assert youtube_channel() == ""
+    # Clearing keeps the file itself intact (merge-and-write semantics).
+    on_disk = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert on_disk["youtube_refresh_token"] == ""
+
+
+def test_youtube_keys_are_stripped_and_type_safe(settings_file):
+    settings_file.write_text(
+        json.dumps(
+            {
+                "youtube_client_id": "  cid  ",
+                "youtube_client_secret": ["not", "a", "string"],
+                "youtube_refresh_token": 42,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert youtube_client_id() == "cid"
+    assert youtube_client_secret() == ""
+    assert youtube_refresh_token() == ""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file permissions")
+def test_youtube_tokens_keep_owner_only_mode(settings_file):
+    # The refresh token is a secret like the API key — same 0600 contract.
+    save_settings({"youtube_refresh_token": "1//secret"})
+    assert stat.S_IMODE(settings_file.stat().st_mode) == 0o600

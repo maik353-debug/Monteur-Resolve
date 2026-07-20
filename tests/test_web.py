@@ -3344,3 +3344,560 @@ class TestExportVideoApi:
         export_block = source.index('id="cre-export-block"')
         download_bar = source.index('id="cre-fmt-label"')
         assert resolve_block < render_row < export_block < download_bar
+
+
+# --- YouTube upload connection (monteur.youtube behind the server) -----------
+
+
+def _story_plan_dict():
+    """A hand-made plan for the prefill tests: three labelled entries whose
+    clip changes 15 s apart (-> three chapters) plus a composed story note.
+    Prefill never touches the files, so the paths don't need to exist."""
+    from monteur.montage import MontageEntry, MontagePlan, plan_to_dict
+
+    entries = [
+        MontageEntry(
+            clip_path="/footage/ride.mp4", source_start=0.0, source_end=10.0,
+            record_start=0.0, record_end=15.0, score=1.0,
+            label="Overtake in a left curve",
+        ),
+        MontageEntry(
+            clip_path="/footage/summit.mp4", source_start=0.0, source_end=10.0,
+            record_start=15.0, record_end=30.0, score=0.9,
+            label="Summit sunrise",
+        ),
+        MontageEntry(
+            clip_path="/footage/camp.mp4", source_start=0.0, source_end=10.0,
+            record_start=30.0, record_end=45.0, score=0.8,
+            label="Camp fire evening",
+        ),
+    ]
+    plan = MontagePlan(
+        music_path="", duration=45.0, entries=entries,
+        notes=["story: Three friends ride over the Alps.", "act 1: departure"],
+    )
+    return plan_to_dict(plan)
+
+
+class TestYouTubeApi:
+    """The /api/youtube/* surface: status/credentials, the loopback OAuth
+    handshake, the upload job and the offline prefill. All Google traffic
+    is monkeypatched on monteur.youtube (the server resolves its functions
+    at call time), so no test leaves the process."""
+
+    def _connect_settings(self):
+        from monteur.settings import save_settings
+
+        save_settings(
+            {
+                "youtube_client_id": "cid",
+                "youtube_client_secret": "cs",
+                "youtube_refresh_token": "1//rt",
+            }
+        )
+
+    # -- status + credentials ------------------------------------------------
+
+    def test_status_starts_unconfigured(self, server):
+        assert _get(f"{server}/api/youtube/status") == {
+            "configured": False, "connected": False, "channel": "",
+        }
+
+    def test_credentials_save_and_clear(self, server):
+        data = _post(
+            f"{server}/api/youtube/credentials",
+            {"client_id": " cid ", "client_secret": " cs "},
+        )
+        assert data == {"configured": True, "connected": False, "channel": ""}
+        from monteur.settings import youtube_client_id, youtube_client_secret
+
+        assert youtube_client_id() == "cid"  # stripped
+        assert youtube_client_secret() == "cs"
+
+        # Clearing the project also disconnects — the old token belongs
+        # to the old Google project.
+        from monteur.settings import save_settings, youtube_refresh_token
+
+        save_settings({"youtube_refresh_token": "1//rt", "youtube_channel": "C"})
+        data = _post(
+            f"{server}/api/youtube/credentials",
+            {"client_id": "", "client_secret": ""},
+        )
+        assert data == {"configured": False, "connected": False, "channel": ""}
+        assert youtube_refresh_token() == ""
+
+    def test_credentials_must_come_as_a_pair(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/youtube/credentials",
+                {"client_id": "cid", "client_secret": ""},
+            )
+        assert exc_info.value.code == 400
+        assert "pair" in json.loads(exc_info.value.read())["error"]
+
+    def test_credentials_must_be_strings(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/youtube/credentials",
+                {"client_id": 42, "client_secret": "cs"},
+            )
+        assert exc_info.value.code == 400
+
+    # -- the loopback OAuth flow ----------------------------------------------
+
+    def test_connect_needs_credentials_first(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/youtube/connect", {})
+        assert exc_info.value.code == 400
+        assert "client id" in json.loads(exc_info.value.read())["error"]
+
+    def test_connect_points_the_redirect_at_this_server(self, server):
+        _post(
+            f"{server}/api/youtube/credentials",
+            {"client_id": "cid", "client_secret": "cs"},
+        )
+        data = _post(f"{server}/api/youtube/connect", {})
+        port = int(server.rsplit(":", 1)[1])
+        assert data["redirect_uri"] == (
+            f"http://127.0.0.1:{port}/api/youtube/callback"
+        )
+        query = dict(
+            urllib.parse.parse_qsl(urllib.parse.urlsplit(data["auth_url"]).query)
+        )
+        assert query["client_id"] == "cid"
+        assert query["redirect_uri"] == data["redirect_uri"]
+        assert query["scope"].endswith("youtube.upload")
+        assert query["access_type"] == "offline"
+        assert query["prompt"] == "consent"
+        assert query["state"]
+
+    def _read_page(self, url):
+        try:
+            with urllib.request.urlopen(url) as response:
+                return response.status, response.headers, response.read().decode()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.headers, exc.read().decode()
+
+    def test_callback_state_mismatch_renders_an_error_page(self, server):
+        _post(
+            f"{server}/api/youtube/credentials",
+            {"client_id": "cid", "client_secret": "cs"},
+        )
+        _post(f"{server}/api/youtube/connect", {})
+        status, headers, body = self._read_page(
+            f"{server}/api/youtube/callback?code=abc&state=WRONG"
+        )
+        assert status == 400
+        assert "text/html" in headers.get("Content-Type", "")
+        assert "stale" in body
+        assert _get(f"{server}/api/youtube/status")["connected"] is False
+
+    def test_callback_happy_path_stores_the_refresh_token(self, server, monkeypatch):
+        _post(
+            f"{server}/api/youtube/credentials",
+            {"client_id": "cid", "client_secret": "cs"},
+        )
+        data = _post(f"{server}/api/youtube/connect", {})
+        query = dict(
+            urllib.parse.parse_qsl(urllib.parse.urlsplit(data["auth_url"]).query)
+        )
+        seen = {}
+
+        def fake_exchange(client_id, client_secret, code, redirect_uri, transport=None):
+            seen.update(
+                client_id=client_id, client_secret=client_secret,
+                code=code, redirect_uri=redirect_uri,
+            )
+            return {"access_token": "at", "refresh_token": "1//fresh"}
+
+        monkeypatch.setattr("monteur.youtube.exchange_code", fake_exchange)
+        status, headers, body = self._read_page(
+            f"{server}/api/youtube/callback?code=the-code&state={query['state']}"
+        )
+        assert status == 200
+        assert "YouTube connected" in body
+        assert "window.close" in body  # the tab closes itself
+        assert seen == {
+            "client_id": "cid", "client_secret": "cs", "code": "the-code",
+            "redirect_uri": data["redirect_uri"],
+        }
+        from monteur.settings import youtube_refresh_token
+
+        assert youtube_refresh_token() == "1//fresh"
+        assert _get(f"{server}/api/youtube/status")["connected"] is True
+
+        # The state is single-use: replaying the same callback must fail.
+        status, _headers, body = self._read_page(
+            f"{server}/api/youtube/callback?code=the-code&state={query['state']}"
+        )
+        assert status == 400 and "stale" in body
+
+    def test_callback_exchange_error_renders_readably(self, server, monkeypatch):
+        from monteur.youtube import MonteurYouTubeError
+
+        _post(
+            f"{server}/api/youtube/credentials",
+            {"client_id": "cid", "client_secret": "cs"},
+        )
+        data = _post(f"{server}/api/youtube/connect", {})
+        state = dict(
+            urllib.parse.parse_qsl(urllib.parse.urlsplit(data["auth_url"]).query)
+        )["state"]
+
+        def boom(*args, **kwargs):
+            raise MonteurYouTubeError("could not connect YouTube: invalid_grant")
+
+        monkeypatch.setattr("monteur.youtube.exchange_code", boom)
+        status, _headers, body = self._read_page(
+            f"{server}/api/youtube/callback?code=x&state={state}"
+        )
+        assert status == 502
+        assert "invalid_grant" in body
+
+    def test_callback_without_refresh_token_explains(self, server, monkeypatch):
+        _post(
+            f"{server}/api/youtube/credentials",
+            {"client_id": "cid", "client_secret": "cs"},
+        )
+        data = _post(f"{server}/api/youtube/connect", {})
+        state = dict(
+            urllib.parse.parse_qsl(urllib.parse.urlsplit(data["auth_url"]).query)
+        )["state"]
+        monkeypatch.setattr(
+            "monteur.youtube.exchange_code",
+            lambda *a, **k: {"access_token": "at"},  # no refresh_token
+        )
+        status, _headers, body = self._read_page(
+            f"{server}/api/youtube/callback?code=x&state={state}"
+        )
+        assert status == 502
+        assert "refresh token" in body
+
+    def test_callback_google_error_param_renders(self, server):
+        status, _headers, body = self._read_page(
+            f"{server}/api/youtube/callback?error=access_denied"
+        )
+        assert status == 400
+        assert "access_denied" in body
+
+    def test_disconnect_clears_the_token_but_keeps_credentials(self, server):
+        self._connect_settings()
+        data = _post(f"{server}/api/youtube/disconnect", {})
+        assert data == {"configured": True, "connected": False, "channel": ""}
+        from monteur.settings import youtube_refresh_token
+
+        assert youtube_refresh_token() == ""
+
+    # -- the upload job --------------------------------------------------------
+
+    def _upload_payload(self, tmp_path, **extra):
+        video = tmp_path / "final.mp4"
+        video.write_bytes(b"video-bytes" * 100)
+        return {"path": str(video), "title": "My Cut", **extra}
+
+    def test_upload_validates_up_front(self, server, tmp_path):
+        self._connect_settings()
+        for payload, needle in (
+            ({"title": "t"}, "path"),
+            ({"path": str(tmp_path / "f.mp4")}, "title"),
+            ({"path": str(tmp_path / "missing.mp4"), "title": "t"}, "no video file"),
+            (self._upload_payload(tmp_path, privacy="public"), "privacy"),
+        ):
+            with pytest.raises(urllib.error.HTTPError) as exc_info:
+                _post(f"{server}/api/youtube/upload", payload)
+            assert exc_info.value.code == 400
+            assert needle in json.loads(exc_info.value.read())["error"]
+
+    def test_upload_rejects_non_list_tags(self, server, tmp_path):
+        self._connect_settings()
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/youtube/upload",
+                self._upload_payload(tmp_path, tags={"not": "a list"}),
+            )
+        assert exc_info.value.code == 400
+        assert "tags" in json.loads(exc_info.value.read())["error"]
+
+    def test_upload_needs_a_connection(self, server, tmp_path):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/youtube/upload", self._upload_payload(tmp_path))
+        assert exc_info.value.code == 400
+        assert "not connected" in json.loads(exc_info.value.read())["error"]
+
+    def test_upload_job_happy_path(self, server, tmp_path, monkeypatch):
+        self._connect_settings()
+        seen = {}
+
+        def fake_refresh(client_id, client_secret, refresh_token, transport=None):
+            seen["refresh"] = (client_id, client_secret, refresh_token)
+            return "fresh-at"
+
+        def fake_upload(token, path, *, title, description, tags, privacy, progress):
+            seen["upload"] = {
+                "token": token, "path": path, "title": title,
+                "description": description, "tags": tags, "privacy": privacy,
+            }
+            progress(500, 1100)
+            progress(1100, 1100)
+            return {"video_id": "vid42", "channel": "My Channel"}
+
+        monkeypatch.setattr("monteur.youtube.refresh_access_token", fake_refresh)
+        monkeypatch.setattr("monteur.youtube.upload_video", fake_upload)
+        payload = self._upload_payload(
+            tmp_path, description="d", tags="travel, alps", privacy="private"
+        )
+        data = _post(f"{server}/api/youtube/upload", payload)
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert job["kind"] == "youtube-upload"
+        assert seen["refresh"] == ("cid", "cs", "1//rt")
+        assert seen["upload"]["token"] == "fresh-at"
+        assert seen["upload"]["tags"] == ["travel", "alps"]  # comma string split
+        assert seen["upload"]["privacy"] == "private"
+
+        result = job["result"]
+        assert result["video_id"] == "vid42"
+        assert result["url"] == "https://studio.youtube.com/video/vid42/edit"
+        assert result["watch_url"] == "https://www.youtube.com/watch?v=vid42"
+        assert result["privacy"] == "private"
+        assert result["channel"] == "My Channel"
+        assert result["notes"] == []
+
+        # Byte progress entries the UI turns into the bar.
+        uploads = [p for p in job["progress"] if p["stage"] == "upload"]
+        assert [(p["sent"], p["total"]) for p in uploads] == [
+            (500, 1100), (1100, 1100),
+        ]
+        assert any(p["stage"] == "auth" for p in job["progress"])
+
+        # The channel hint is remembered for the settings status line.
+        from monteur.settings import youtube_channel
+
+        assert youtube_channel() == "My Channel"
+        assert _get(f"{server}/api/youtube/status")["channel"] == "My Channel"
+
+    def test_upload_token_expired_refreshes_once_and_retries(
+        self, server, tmp_path, monkeypatch
+    ):
+        from monteur.youtube import TokenExpired
+
+        self._connect_settings()
+        calls = {"refresh": 0, "upload": 0}
+
+        def fake_refresh(*args, **kwargs):
+            calls["refresh"] += 1
+            return f"at-{calls['refresh']}"
+
+        def fake_upload(token, path, **kwargs):
+            calls["upload"] += 1
+            if calls["upload"] == 1:
+                raise TokenExpired("stale")
+            assert token == "at-2"  # the RETRY runs on the re-refreshed token
+            return {"video_id": "v2", "channel": ""}
+
+        monkeypatch.setattr("monteur.youtube.refresh_access_token", fake_refresh)
+        monkeypatch.setattr("monteur.youtube.upload_video", fake_upload)
+        data = _post(
+            f"{server}/api/youtube/upload", self._upload_payload(tmp_path)
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert calls == {"refresh": 2, "upload": 2}
+
+    def test_upload_still_expired_after_retry_says_reconnect(
+        self, server, tmp_path, monkeypatch
+    ):
+        from monteur.youtube import TokenExpired
+
+        self._connect_settings()
+        monkeypatch.setattr(
+            "monteur.youtube.refresh_access_token", lambda *a, **k: "at"
+        )
+
+        def always_expired(*args, **kwargs):
+            raise TokenExpired("stale")
+
+        monkeypatch.setattr("monteur.youtube.upload_video", always_expired)
+        data = _post(
+            f"{server}/api/youtube/upload", self._upload_payload(tmp_path)
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "reconnect" in job["message"]
+
+    def test_upload_quota_error_is_the_friendly_message(
+        self, server, tmp_path, monkeypatch
+    ):
+        from monteur.youtube import QUOTA_MESSAGE, QuotaExceeded
+
+        self._connect_settings()
+        monkeypatch.setattr(
+            "monteur.youtube.refresh_access_token", lambda *a, **k: "at"
+        )
+
+        def quota(*args, **kwargs):
+            raise QuotaExceeded(QUOTA_MESSAGE)
+
+        monkeypatch.setattr("monteur.youtube.upload_video", quota)
+        data = _post(
+            f"{server}/api/youtube/upload", self._upload_payload(tmp_path)
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert job["message"] == QUOTA_MESSAGE
+
+    def test_upload_refresh_failure_is_a_job_error(
+        self, server, tmp_path, monkeypatch
+    ):
+        from monteur.youtube import MonteurYouTubeError
+
+        self._connect_settings()
+
+        def bad_refresh(*args, **kwargs):
+            raise MonteurYouTubeError(
+                "your YouTube connection is no longer valid — reconnect in settings"
+            )
+
+        monkeypatch.setattr("monteur.youtube.refresh_access_token", bad_refresh)
+        data = _post(
+            f"{server}/api/youtube/upload", self._upload_payload(tmp_path)
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "reconnect in settings" in job["message"]
+
+    def test_upload_thumbnail_note_lands_in_the_result(
+        self, server, tmp_path, monkeypatch
+    ):
+        self._connect_settings()
+        thumb = tmp_path / "thumb.jpg"
+        thumb.write_bytes(b"jpg")
+        monkeypatch.setattr(
+            "monteur.youtube.refresh_access_token", lambda *a, **k: "at"
+        )
+        monkeypatch.setattr(
+            "monteur.youtube.upload_video",
+            lambda *a, **k: {"video_id": "v", "channel": ""},
+        )
+        monkeypatch.setattr(
+            "monteur.youtube.set_thumbnail",
+            lambda token, video_id, image_path, transport=None: (
+                "thumbnail not set: needs phone verification"
+            ),
+        )
+        data = _post(
+            f"{server}/api/youtube/upload",
+            self._upload_payload(tmp_path, thumbnail=str(thumb)),
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"  # a thumbnail note is never fatal
+        assert job["result"]["notes"] == [
+            "thumbnail not set: needs phone verification"
+        ]
+
+    # -- the offline prefill -----------------------------------------------------
+
+    def test_prefill_needs_a_plan(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/youtube/prefill", {"name": "x"})
+        assert exc_info.value.code == 400
+
+    def test_prefill_bad_plan_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/youtube/prefill", {"plan_json": {"nope": 1}})
+        assert exc_info.value.code == 400
+        assert "not a Monteur plan" in json.loads(exc_info.value.read())["error"]
+
+    def test_prefill_builds_deterministic_metadata(self, server):
+        data = _post(
+            f"{server}/api/youtube/prefill",
+            {"plan_json": _story_plan_dict(), "name": "Alps Draft"},
+        )
+        assert data["title"] == "Alps Draft"  # the draft name wins
+        lines = data["description"].split("\n")
+        # The story first, a blank line, then the chapter lines from 0:00.
+        assert lines[0] == "Three friends ride over the Alps."
+        assert lines[1] == ""
+        assert lines[2] == "0:00 Overtake in a left curve"
+        assert lines[3] == "0:15 Summit sunrise"
+        assert lines[4] == "0:30 Camp fire evening"
+        assert len(lines) == 5  # nothing else invented
+        # Tags mined from the vision labels, stopwords dropped.
+        assert "overtake" in data["tags"]
+        assert "summit" in data["tags"]
+        assert "sunrise" in data["tags"]
+        assert "the" not in data["tags"]
+
+    def test_prefill_title_falls_back_to_the_story(self, server):
+        data = _post(
+            f"{server}/api/youtube/prefill", {"plan_json": _story_plan_dict()}
+        )
+        assert data["title"] == "Three friends ride over the Alps."
+
+    def test_prefill_without_story_or_chapters_stays_honest(self, server):
+        plan = _story_plan_dict()
+        plan["notes"] = []
+        plan["entries"] = plan["entries"][:1]
+        data = _post(f"{server}/api/youtube/prefill", {"plan_json": plan})
+        assert data["title"] == ""
+        assert data["description"] == "0:00 Overtake in a left curve"
+
+    # -- the static UI --------------------------------------------------------------
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_app_has_the_youtube_settings_section(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            'id="set-yt-section"',
+            "YouTube &mdash; upload connection",
+            'id="set-yt-id"',
+            'id="set-yt-secret"',
+            'id="set-yt-connect"',
+            'id="set-yt-disconnect"',
+            # the honest setup + private-draft copy
+            "console.cloud.google.com",
+            "YouTube Data API v3",
+            "Desktop app",
+            "test user",
+            "private drafts",
+            "6 uploads a day",
+            '"/api/youtube/status"',
+            '"/api/youtube/credentials"',
+            '"/api/youtube/connect"',
+            '"/api/youtube/disconnect"',
+        ):
+            assert needle in source, needle
+        # the third settings section: AI, then Resolve, then YouTube
+        ai_section = source.index('id="settings-title"')
+        resolve_section = source.index('id="set-resolve-section"')
+        yt_section = source.index('id="set-yt-section"')
+        assert ai_section < resolve_section < yt_section
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_app_has_upload_blocks_in_both_success_states(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            'id="yt-x-block"', 'id="yt-r-block"',
+            'id="yt-x-title"', 'id="yt-r-title"',
+            'id="yt-x-desc"', 'id="yt-r-desc"',
+            'id="yt-x-tags"', 'id="yt-r-tags"',
+            'id="yt-x-privacy"', 'id="yt-r-privacy"',
+            'id="yt-x-btn"', 'id="yt-r-btn"',
+            'id="yt-x-bar"', 'id="yt-r-bar"',
+            ">Upload to YouTube<",
+            'value="private" selected',
+            'value="unlisted"',
+            "Connect in settings",
+            '"/api/youtube/upload"',
+            '"/api/youtube/prefill"',
+            "Uploaded as a private draft — review and publish in YouTube Studio",
+            'p.stage === "upload"',
+        ):
+            assert needle in source, needle
+        # yt-r lives inside the Resolve-render success block, yt-x inside
+        # the Direct-Export success block.
+        render_result = source.index('id="cre-render-result"')
+        yt_r = source.index('id="yt-r-block"')
+        export_result = source.index('id="cre-export-result"')
+        yt_x = source.index('id="yt-x-block"')
+        assert render_result < yt_r < export_result < yt_x

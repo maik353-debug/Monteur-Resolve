@@ -193,6 +193,34 @@ def _collect_tags(plan: MontagePlan, reports: list[ClipReport] | None) -> list[s
     return [t for t, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))][:12]
 
 
+# Filler words that make useless tags when tags are mined from the labels.
+_TAG_STOPWORDS = frozenset(
+    "the and with into onto from over under for its his her their a an "
+    "der die das und ein eine einem einen mit dem den auf aus bei durch".split()
+)
+
+
+def plan_tags(plan: MontagePlan, reports: list[ClipReport] | None = None) -> list[str]:
+    """Deterministic tag suggestions for a cut — the public prefill helper.
+
+    With sift reports at hand this is exactly :func:`_collect_tags` (the
+    frequency-ranked vision tags of the moments the cut used). Without
+    reports — the Studio's YouTube prefill only has the saved plan — the
+    tags are mined from the entries' own vision labels instead: lowercase
+    words, stopwords and short words dropped, frequency-ranked, capped at
+    12. Both paths are offline and deterministic.
+    """
+    if reports:
+        return _collect_tags(plan, reports)
+    counts: dict[str, int] = {}
+    for entry in plan.entries:
+        for word in re.findall(r"[a-z0-9äöüß]+", (entry.label or "").lower()):
+            if len(word) < 3 or word in _TAG_STOPWORDS:
+                continue
+            counts[word] = counts.get(word, 0) + 1
+    return [t for t, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))][:12]
+
+
 def _ai_copy(
     chapters: list[Chapter], tags: list[str], brief: str, duration: float
 ) -> str:
