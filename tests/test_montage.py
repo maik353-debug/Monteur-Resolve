@@ -1826,3 +1826,38 @@ def test_filed_cue_uses_the_probed_file_duration(tmp_path, monkeypatch):
     assert (clip.record_in, clip.record_out) == (50, 80)  # 1.2s, not 5s
     # the real duration feeds the writers, exactly like entries do
     assert clip.metadata["media_duration_seconds"] == 1.2
+
+
+def test_rhythm_holds_capped_in_absolute_seconds():
+    # Field bug: trailer at pace 4s / 122 BPM produced a 32-beat (~16s)
+    # establishing hold and slots longer than the source clips. Holds cap
+    # at ~6s and no generated cut may exceed ~8s — unless the phase's own
+    # base is already slower (a deliberately extreme pace still wins).
+    from monteur.montage import (
+        _MAX_CUT_SECONDS,
+        _MAX_HOLD_SECONDS,
+        _apply_pace,
+        _build_style_grid,
+        STYLES,
+    )
+
+    tempo = 122.0
+    beat = 60.0 / tempo
+    length = 36.0
+    beats = [i * beat for i in range(int(length / beat) + 2)]
+    music = MusicAnalysis(
+        path="/m/song.wav", duration=120.0, tempo=tempo, beats=beats,
+        sections=[MusicSection(start=0.0, end=length, energy=0.8, label="high")],
+        downbeats=beats[::4], phrases=beats[::16], drops=[24.0],
+    )
+    style, _steps, _note = _apply_pace(STYLES["trailer"], 4.0, beat)
+    cuts, phases, notes = _build_style_grid(music, length, style)
+    gaps = [b - a for a, b in zip(cuts, cuts[1:])]
+    # The opening BASE at pace 4s is ~16 beats (7.9s) — a deliberately
+    # slow pace wins, so the ceiling clamps the DOUBLING, not the base:
+    # the old bug held 32 beats (~16s), now the opener stays at its base.
+    opening_base_s = 16 * beat
+    assert gaps[0] <= opening_base_s + 4 * beat + 1e-6
+    assert gaps[0] < 10.0  # nothing balloons toward the old 16s hold
+    assert max(gaps) <= opening_base_s + 4 * beat + 1e-6  # downbeat slack
+    assert len(cuts) >= 8  # a 36s trailer is not 5 shots

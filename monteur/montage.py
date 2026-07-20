@@ -669,13 +669,17 @@ def _build_grid(
             label = _label_at(music.sections, cur)
             base = lookup.get(label, 2)
             sec_start, sec_end = _section_bounds_at(music.sections, cur, length)
+            beat_s = 60.0 / music.tempo if music.tempo > 0 else _PSEUDO_BEAT
             if (label, sec_start) != run_key:
                 run_key = (label, sec_start)
                 run_i = 0
                 lo = bisect.bisect_right(beats, cur + _EPS)
                 hi = bisect.bisect_right(beats, min(sec_end, length) + _EPS)
-                hold_cap = _opening_hold(base, hi - lo)
+                hold_cap = _cap_units(
+                    _opening_hold(base, hi - lo), base, beat_s, _MAX_HOLD_SECONDS
+                )
             step = max(1, round(_AUTO_PATTERN[run_i % len(_AUTO_PATTERN)] * base))
+            step = _cap_units(step, base, beat_s, _MAX_CUT_SECONDS)
             if run_i == 0:
                 step = min(step, max(1, hold_cap))  # section-opening hold, capped
             nxt = _nth_beat_after(beats, cur, step)
@@ -782,12 +786,30 @@ def _phase_steps(style: MontageStyle) -> list[int]:
 # phase" and every cut still lands on the musical grid.
 
 
+# Absolute ceilings in SECONDS. Beat-relative rhythm explodes on slow
+# paces: at pace 4s a trailer's opening base is already ~8 beats, and a
+# 2x establishing hold became a 16-second opener in the field ("build
+# ramps 32->8 beats"). Holds and cuts stay proportional on normal paces
+# and hit these walls on extreme ones — never below the phase's base,
+# so a deliberately slow pace still wins.
+_MAX_HOLD_SECONDS = 6.0
+_MAX_CUT_SECONDS = 8.0
+
+
+def _cap_units(value: int, base: int, unit_s: float, cap_s: float) -> int:
+    """Clamp a unit count to an absolute seconds ceiling (never below base)."""
+    if unit_s <= 0:
+        return value
+    return min(value, max(base, int(cap_s / unit_s)))
+
+
 def _opening_hold(base: int, n_units: int) -> int:
     """Units for the establishing hold: ~2x the base, capped by the phase.
 
     The cap (half the phase's units, never below the base) keeps the hold
     from eating the whole phase; when the phase is too short the hold
-    degrades to the plain base, i.e. no hold.
+    degrades to the plain base, i.e. no hold. Callers additionally cap by
+    :data:`_MAX_HOLD_SECONDS` via :func:`_cap_units`.
     """
     return min(2 * base, max(base, n_units // 2))
 
@@ -812,6 +834,7 @@ def _phase_cut_lengths(
     stutter: int = 0,
     decel: bool = False,
     phrase_units: tuple[int, ...] = (),
+    max_len: int = 0,
 ) -> list[int]:
     """Cut lengths (whole grid units) for one phase — the rhythm kernel.
 
@@ -834,6 +857,9 @@ def _phase_cut_lengths(
     * ``pattern`` (otherwise) cycles multipliers on ``base``; a phrase
       boundary (``phrase_units``: cumulative unit offsets) re-anchors the
       cycle so the pattern restarts with the music's own phrasing.
+    * ``max_len`` > 0 clamps every emitted length (and the decel's final
+      hold target) to that many units — the absolute-seconds ceiling
+      (:data:`_MAX_CUT_SECONDS`) translated by the caller.
     """
     if n_units <= 0:
         return []
@@ -847,8 +873,10 @@ def _phase_cut_lengths(
     if decel:
         remaining = n_units - consumed
         if remaining <= base:
-            return lengths  # the remainder slot IS the final hold
+            return _clamp_lengths(lengths, max_len)  # remainder IS the final hold
         last = min(2 * base, remaining)
+        if max_len > 0:
+            last = max(1, min(last, max_len))
         rest = remaining - last
         body = [base] * (rest // base)
         extra = rest % base
@@ -859,7 +887,7 @@ def _phase_cut_lengths(
                 body = [extra]
         # The final hold is never emitted as a cut: the remainder slot up
         # to the phase boundary IS the montage's longest, final shot.
-        return lengths + body
+        return _clamp_lengths(lengths + body, max_len)
     if ramp_from is not None and ramp_to is not None:
         span = n_units - consumed - max(0, stutter)
         done = 0
@@ -874,7 +902,7 @@ def _phase_cut_lengths(
             done += step
             consumed += step
         lengths.extend([1] * min(max(0, stutter), n_units - consumed))
-        return lengths
+        return _clamp_lengths(lengths, max_len)
     pat = tuple(pattern) or (1.0,)
     i = 1 % len(pat) if first_hold > 0 else 0
     while consumed < n_units:
@@ -886,7 +914,14 @@ def _phase_cut_lengths(
             i = 0  # a phrase boundary re-anchors the cycle
         else:
             i += 1
-    return lengths
+    return _clamp_lengths(lengths, max_len)
+
+
+def _clamp_lengths(lengths: list[int], max_len: int) -> list[int]:
+    """Apply the absolute ceiling to every emitted cut length (0 = off)."""
+    if max_len <= 0:
+        return lengths
+    return [max(1, min(x, max_len)) for x in lengths]
 
 
 def _style_rhythm_specs(
@@ -896,6 +931,7 @@ def _style_rhythm_specs(
     n_units_list: list[int],
     phrase_units_list: list[tuple[int, ...]],
     pinned: set[int],
+    unit_seconds_list: list[float] | None = None,
 ) -> tuple[list[dict], str]:
     """Per-arc-entry kwargs for :func:`_phase_cut_lengths`, plus a note.
 
@@ -908,8 +944,19 @@ def _style_rhythm_specs(
     phase's (with a stutter burst into a pinned climax when the ramp ends
     fast enough), drop hold on a pinned climax, per-style pattern texture,
     decelerando on a final outro. The note summarizes the rhythm in beats.
+
+    ``unit_seconds_list`` (seconds per grid unit, per entry) activates the
+    absolute ceilings: no hold beyond :data:`_MAX_HOLD_SECONDS`, no cut
+    beyond :data:`_MAX_CUT_SECONDS` — beat-relative rhythm must not
+    explode on slow paces (the 16-second-opener field bug).
     """
     labels = [lab for _, lab in style.arc]
+
+    def unit_s(k: int) -> float:
+        if not unit_seconds_list or k >= len(unit_seconds_list):
+            return 0.0
+        return float(unit_seconds_list[k])
+
     specs: list[dict] = []
     bits: list[str] = []
     stutter_used = False
@@ -928,12 +975,18 @@ def _style_rhythm_specs(
                 f0 = done / total
                 done += n_units_list[k]
                 f1 = done / total
+                k_base = max(1, round(steps[k] / factors[k]))
                 spec = {
                     "n_units": n_units_list[k],
-                    "base": max(1, round(steps[k] / factors[k])),
+                    "base": k_base,
                     "ramp_from": (rf + (rt - rf) * f0) / factors[k],
                     "ramp_to": (rf + (rt - rf) * f1) / factors[k],
                 }
+                if unit_s(k) > 0:
+                    cap = _cap_units(10**6, k_base, unit_s(k), _MAX_CUT_SECONDS)
+                    spec["max_len"] = cap
+                    spec["ramp_from"] = min(spec["ramp_from"], float(cap))
+                    spec["ramp_to"] = min(spec["ramp_to"], float(cap))
                 if (
                     k == j
                     and j + 1 < len(labels)
@@ -956,10 +1009,14 @@ def _style_rhythm_specs(
             "base": base,
             "pattern": tuple(style.rhythm.get(label, ())),
         }
+        if unit_s(i) > 0:
+            spec["max_len"] = _cap_units(10**6, base, unit_s(i), _MAX_CUT_SECONDS)
         if len(spec["pattern"]) > 1 and phrase_units_list[i]:
             spec["phrase_units"] = phrase_units_list[i]
         if label == "climax" and i in pinned:
-            spec["first_hold"] = _drop_hold(base)
+            spec["first_hold"] = _cap_units(
+                _drop_hold(base), base, unit_s(i), _MAX_HOLD_SECONDS
+            )
             bits.append(f"drop hold {spec['first_hold'] * factors[i]} beats")
         if label == "outro" and i == len(labels) - 1:
             spec["decel"] = True
@@ -967,6 +1024,7 @@ def _style_rhythm_specs(
         i += 1
     if specs and "first_hold" not in specs[0]:
         hold = _opening_hold(specs[0]["base"], specs[0]["n_units"])
+        hold = _cap_units(hold, specs[0]["base"], unit_s(0), _MAX_HOLD_SECONDS)
         if hold > specs[0]["base"]:
             specs[0]["first_hold"] = hold
             bits.insert(0, f"opening hold {hold * factors[0]} beats")
@@ -1100,8 +1158,10 @@ def _build_style_grid(
                     if p_start + _EPS < p < p_end - _EPS
                 )
             )
+        beat_s = 60.0 / music.tempo if music.tempo > 0 else _PSEUDO_BEAT
         specs, rhythm_note = _style_rhythm_specs(
-            style, steps, factors, n_units_list, phrase_units_list, pinned
+            style, steps, factors, n_units_list, phrase_units_list, pinned,
+            unit_seconds_list=[f * beat_s for f in factors],
         )
         for (p_start, p_end, _label), units, slow, spec in zip(
             phases, unit_lists, slow_flags, specs
@@ -1171,7 +1231,8 @@ def _build_pseudo_grid(
             int((p_end - p_start) / _PSEUDO_BEAT + _EPS) for p_start, p_end, _ in phases
         ]
         specs, rhythm_note = _style_rhythm_specs(
-            style, steps, [1] * len(steps), n_units_list, [()] * len(steps), set()
+            style, steps, [1] * len(steps), n_units_list, [()] * len(steps), set(),
+            unit_seconds_list=[_PSEUDO_BEAT] * len(steps),
         )
         for (p_start, p_end, _label), spec in zip(phases, specs):
             cur = cuts[-1]

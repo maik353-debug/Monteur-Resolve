@@ -4197,3 +4197,79 @@ def test_probe_312_is_probed_not_rejected(monkeypatch) -> None:
     result = resolve.probe_resolve_python("/py312")
     assert result["ok"] is True
     assert calls == ["info", "status"]  # 3.12 gets the real probe now
+
+
+# --- playhead-first title placement & SFX track creation --------------------------
+
+
+def test_add_titles_moves_playhead_before_insert() -> None:
+    # Resolve 21 field case: items cannot be repositioned via scripting,
+    # but Fusion titles insert AT the playhead — so the playhead must be
+    # moved to the title's spot BEFORE the insert.
+    timeline = standard_timeline()
+    calls: list[str] = []
+    timeline.SetCurrentTimecode = lambda tc: calls.append(f"tc:{tc}") or True
+    original_insert = timeline.InsertFusionTitleIntoTimeline
+    timeline.InsertFusionTitleIntoTimeline = (
+        lambda name: calls.append("insert") or original_insert(name)
+    )
+    bridge, _ = make_bridge([timeline])
+    warnings: list[str] = []
+    bridge.add_titles(title_specs(), fps=24.0, warnings=warnings)
+    # playhead move precedes each insert; absolute frames: 86400 + t*24
+    assert calls[0].startswith("tc:") and calls[1] == "insert"
+    assert calls[2].startswith("tc:") and calls[3] == "insert"
+    from monteur.model import format_timecode
+
+    assert calls[0] == f"tc:{format_timecode(86400 + 240, 24.0)}"
+    assert calls[2] == f"tc:{format_timecode(86400 + 480, 24.0)}"
+
+
+def test_add_titles_no_drag_warning_when_playhead_moved() -> None:
+    # Repositioning unavailable (no SetStart/SetEnd on the item) but the
+    # playhead was moved first: the title IS in place — no drag warning.
+    timeline = standard_timeline()
+    timeline.SetCurrentTimecode = lambda tc: True
+    timeline.title_items_queue = [
+        FakeTitleItemNoSetters(FakeComp([FakeTextTool()])),
+        FakeTitleItemNoSetters(FakeComp([FakeTextTool()])),
+    ]
+    bridge, _ = make_bridge([timeline])
+    warnings: list[str] = []
+    added = bridge.add_titles(title_specs(), fps=24.0, warnings=warnings)
+    assert added == 2
+    assert not any("drag" in w for w in warnings)
+
+
+def test_add_titles_drag_warning_without_playhead_support() -> None:
+    # Neither playhead moving nor repositioning: the honest warning stays.
+    timeline = standard_timeline()
+    timeline.title_items_queue = [
+        FakeTitleItemNoSetters(FakeComp([FakeTextTool()])),
+    ]
+    bridge, _ = make_bridge([timeline])
+    warnings: list[str] = []
+    bridge.add_titles(
+        [{"start": 9.6, "duration": 2.0, "text": "T"}], fps=24.0,
+        warnings=warnings,
+    )
+    assert any("drag" in w for w in warnings)
+
+
+def test_build_creates_the_sfx_audio_track() -> None:
+    # Field case: element clips silently missing because only A1 existed —
+    # an explicit trackIndex never creates the track.
+    bridge, project = make_bridge([standard_timeline()])
+    from monteur.montage import SfxCue
+
+    plan = make_plan()
+    plan.sfx = [
+        SfxCue(time=1.0, duration=0.5, kind="impact", query="hit",
+               note="drop", file="/sfx/hit.wav"),
+    ]
+    bridge.build_timeline_from_plan(plan, fps=24.0)
+    created = project._timelines[-1]
+    # One audio track existed (the music append created it); the SFX
+    # placement added the second.
+    assert "audio" in created.added_tracks
+    assert created.GetTrackCount("audio") >= 2

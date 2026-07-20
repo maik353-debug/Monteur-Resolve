@@ -99,7 +99,7 @@ import sys
 from types import ModuleType
 from typing import Any
 
-from monteur.model import AUDIO, VIDEO, Clip, Marker, Timeline
+from monteur.model import AUDIO, VIDEO, Clip, Marker, Timeline, format_timecode
 
 _MODULE_NAME = "DaVinciResolveScript"
 
@@ -1988,6 +1988,13 @@ class ResolveBridge:
                         f"{label}: invalid start/duration in {spec!r} — skipped."
                     )
                     continue
+                # Resolve inserts Fusion titles AT THE PLAYHEAD, and several
+                # builds (Resolve 21 among them) refuse to reposition
+                # timeline items afterwards — so move the playhead to the
+                # title's spot FIRST. The SetStart/SetEnd path below stays
+                # as a correction for builds that support it.
+                start_frame = int(record_start) + int(round(start * fps))
+                moved = _move_playhead(timeline, start_frame, fps)
                 before = _video_track_snapshot(timeline)
                 result = timeline.InsertFusionTitleIntoTimeline("Text+")
                 if not result:
@@ -2005,27 +2012,33 @@ class ResolveBridge:
                 if item is None:
                     item = _find_new_video_item(timeline, before)
                 if item is None:
-                    warnings.append(
-                        f"{label}: inserted, but Monteur could not locate the "
-                        "new timeline item — Resolve placed the title at the "
-                        "playhead; set its text and drag it onto the black "
-                        f"gap at {start:.1f}s."
-                    )
+                    if moved:
+                        warnings.append(
+                            f"{label}: inserted at {start:.1f}s (the "
+                            "playhead), but Monteur could not locate the new "
+                            "timeline item — set its text by hand."
+                        )
+                    else:
+                        warnings.append(
+                            f"{label}: inserted, but Monteur could not locate "
+                            "the new timeline item — Resolve placed the title "
+                            "at the playhead; set its text and drag it onto "
+                            f"the black gap at {start:.1f}s."
+                        )
                     continue
-                start_frame = int(record_start) + int(round(start * fps))
                 end_frame = start_frame + max(1, int(round(duration * fps)))
                 set_start = getattr(item, "SetStart", None)
                 set_end = getattr(item, "SetEnd", None)
                 if callable(set_start) and callable(set_end):
                     ok_start = set_start(start_frame)
                     ok_end = set_end(end_frame)
-                    if not (ok_start and ok_end):
+                    if not (ok_start and ok_end) and not moved:
                         warnings.append(
                             f"{label}: Resolve placed the title at the "
                             "playhead — drag it onto the black gap at "
                             f"{start:.1f}s."
                         )
-                else:
+                elif not moved:
                     warnings.append(
                         f"{label}: this Resolve version cannot reposition "
                         "timeline items via scripting — the title sits at the "
@@ -2333,8 +2346,13 @@ class ResolveBridge:
             )
             return
         # The SFX track index mirrors montage_to_timeline's layout: A3 in
-        # "mix" (song on A1 + camera sound on A2), A2 otherwise.
+        # "mix" (song on A1 + camera sound on A2), A2 otherwise. The track
+        # must EXIST first — an explicit trackIndex never creates it.
         track_index = 3 if audio == "mix" else 2
+        try:
+            _ensure_audio_tracks(self._current_timeline(), track_index)
+        except Exception:  # noqa: BLE001 - track creation is best-effort
+            pass
         element_paths: list[str] = []
         for cue in filed:
             if cue.file not in element_paths:
@@ -2434,6 +2452,47 @@ class ResolveBridge:
 
 
 # --- Canvas (resolution + cinemascope crop) -------------------------------------
+
+
+def _move_playhead(timeline: Any, frame: int, fps: float) -> bool:
+    """Move the playhead to an absolute timeline frame; True on success.
+
+    ``SetCurrentTimecode`` takes a timecode string. Fusion titles insert
+    at the playhead, and some Resolve builds cannot reposition items
+    afterwards — positioning the playhead FIRST is the reliable path.
+    """
+    setter = getattr(timeline, "SetCurrentTimecode", None)
+    if not callable(setter):
+        return False
+    try:
+        return bool(setter(format_timecode(int(frame), fps)))
+    except Exception:  # noqa: BLE001 - a refusing playhead is non-fatal
+        return False
+
+
+def _ensure_audio_tracks(timeline: Any, needed: int) -> None:
+    """``AddTrack("audio")`` until the timeline has ``needed`` audio tracks.
+
+    Appending with an explicit ``trackIndex`` does NOT create the track —
+    Resolve just refuses the append (the field case: element clips
+    silently missing because only A1 existed). Fully guarded; a refusing
+    AddTrack simply leaves the per-cue appends to fail into the caller's
+    summarized warning.
+    """
+    try:
+        count = int(timeline.GetTrackCount("audio") or 0)
+    except Exception:  # noqa: BLE001 - unreadable track count: nothing to do
+        return
+    add = getattr(timeline, "AddTrack", None)
+    if not callable(add):
+        return
+    while count < needed:
+        try:
+            if not add("audio"):
+                return
+        except Exception:  # noqa: BLE001 - refusal handled downstream
+            return
+        count += 1
 
 
 def _pin_timeline_fps(timeline: Any, fps: float, warnings) -> float:
