@@ -2070,21 +2070,28 @@ class ResolveBridge:
 
         Steps: import the distinct clip paths (plus the music) into the media
         pool, create an empty timeline (name uniquified with " 2", " 3", ...
-        on a clash), append one video clip per plan entry in record order
-        (Resolve appends back-to-back, matching the plan's gapless record
-        ranges), then append the music as one audio clip. Returns the created
+        on a clash), append one video clip per plan entry at its record
+        position (``recordFrame`` = timeline start + record seconds, so the
+        plan's smash-to-black dips exist as REAL black gaps), then append the
+        music as one audio clip at record 0. Source ranges are expressed in
+        each media pool item's OWN frame space — the clip's native frame
+        rate and its embedded start timecode (see :func:`_clip_native_fps` /
+        :func:`_clip_source_offset`); timeline-fps frames would make Resolve
+        clamp every cut to a sliver. When a Resolve build rejects positioned
+        placement, the build falls back to the old gapless append (dips then
+        only exist in the file exports; one warning). Returns the created
         timeline's name.
 
         ``titles`` (optional, ``[{"start": s, "duration": s, "text": ...}]``
         in plan-time seconds — e.g. from :func:`titles_from_plan`; the caller
         decides the texts, nothing is derived from the plan) are inserted via
-        :meth:`add_titles` after the montage is built. Because the entries
-        are appended back-to-back, any smash-to-black dips in the plan do not
-        exist on the Resolve timeline; title starts are shifted earlier by
-        the summed lengths of the dips before them so each title still lands
-        exactly on its act change. Title placement problems are non-fatal
-        (see add_titles); pass a ``warnings`` list to collect add_titles'
-        human-readable messages (it is only ever appended to).
+        :meth:`add_titles` after the montage is built, at their plan-time
+        positions (the black gaps are real). Only in the gapless fallback are
+        title starts shifted earlier by the summed lengths of the dips before
+        them, so each title still lands exactly on its act change. Title
+        placement problems are non-fatal (see add_titles); pass a
+        ``warnings`` list to collect the human-readable messages (it is only
+        ever appended to).
 
         ``canvas`` (optional, a :data:`monteur.montage.CANVASES` preset key
         such as ``"uhd"`` or ``"cine-uhd"``; an unknown key raises
@@ -2100,10 +2107,10 @@ class ResolveBridge:
         Both steps are defensive: refusals are summarized into ``warnings``
         (one message per step, never per clip) and the build still succeeds.
 
-        Limitation: plans with ``dips`` (the trailer's smash-to-black title
-        slots) are appended back-to-back too — the black gaps themselves only
-        exist in the FCPXML/EDL exports, so import the file when you want
-        real black between the acts.
+        Limitation: dissolves and the black fade-in/out cannot be created
+        here — Resolve's scripting API has no way to add transitions. Those
+        exist only in the FCPXML export; import the file (or drag a fade in
+        Resolve by hand) when you want them.
 
         Imported media-pool items are mapped back to file paths by, in order:
         ``GetClipProperty("File Path")``; positional order when Resolve
@@ -2159,35 +2166,88 @@ class ResolveBridge:
                 f"project {self.project_name()!r}."
             )
 
-        for entry in entries:
+        # AppendToTimeline addresses the SOURCE in the media pool item's own
+        # frame space: the clip's native frame rate (a 50 fps DJI file counts
+        # 50 frames per second no matter what the timeline runs at), anchored
+        # at the clip's embedded start timecode (action cams stamp
+        # time-of-day, so frame 0 may not exist in the clip at all). Getting
+        # either wrong makes Resolve clamp every cut to a sliver — the field
+        # bug that turned a 31 s montage into 67 uniform 0.1 s slivers.
+        # recordFrame places each entry at its true record position, so the
+        # plan's black gaps (trailer dips) exist for real on the timeline.
+        try:
+            record_base = int(timeline.GetStartFrame())
+        except Exception:  # noqa: BLE001 - older builds; positions then 0-based
+            record_base = 0
+        placed = True  # recordFrame placement accepted by this Resolve
+        for index, entry in enumerate(entries):
+            item = by_path[entry.clip_path]
+            clip_fps = _clip_native_fps(item, fps)
+            offset = _clip_source_offset(
+                item, getattr(entry, "media_start", 0.0) or 0.0, clip_fps
+            )
+            start = offset + int(round(entry.source_start * clip_fps))
+            end = max(start, offset + int(round(entry.source_end * clip_fps)) - 1)
             clip_info = {
-                "mediaPoolItem": by_path[entry.clip_path],
-                "startFrame": int(round(entry.source_start * fps)),
-                "endFrame": int(round(entry.source_end * fps)) - 1,
+                "mediaPoolItem": item,
+                "startFrame": start,
+                "endFrame": end,
                 "mediaType": 1,
             }
+            if placed:
+                clip_info["trackIndex"] = 1
+                clip_info["recordFrame"] = record_base + int(
+                    round(entry.record_start * fps)
+                )
             if not pool.AppendToTimeline([clip_info]):
+                if placed:
+                    # This Resolve rejects positioned placement — retry the
+                    # same clip gapless and stay gapless for the rest.
+                    placed = False
+                    clip_info.pop("recordFrame", None)
+                    clip_info.pop("trackIndex", None)
+                    if pool.AppendToTimeline([clip_info]):
+                        continue
                 raise MonteurResolveError(
                     f"Resolve failed to append {entry.clip_path!r} "
                     f"({entry.source_start:.2f}-{entry.source_end:.2f}s) to "
                     f"timeline {timeline_name!r}."
                 )
+        music_item = by_path[plan.music_path]
+        music_fps = _clip_native_fps(music_item, fps)
+        music_offset = _clip_source_offset(music_item, 0.0, music_fps)
         music_info = {
-            "mediaPoolItem": by_path[plan.music_path],
-            "startFrame": 0,
-            "endFrame": int(round(plan.duration * fps)) - 1,
+            "mediaPoolItem": music_item,
+            "startFrame": music_offset,
+            "endFrame": music_offset + int(round(plan.duration * music_fps)) - 1,
             "mediaType": 2,
         }
+        if placed:
+            music_info["trackIndex"] = 1
+            music_info["recordFrame"] = record_base
         if not pool.AppendToTimeline([music_info]):
-            raise MonteurResolveError(
-                f"Resolve failed to append the music {plan.music_path!r} to "
-                f"timeline {timeline_name!r}."
+            music_info.pop("recordFrame", None)
+            music_info.pop("trackIndex", None)
+            if not pool.AppendToTimeline([music_info]):
+                raise MonteurResolveError(
+                    f"Resolve failed to append the music {plan.music_path!r} "
+                    f"to timeline {timeline_name!r}."
+                )
+        dips = list(getattr(plan, "dips", []) or [])
+        if not placed and dips and warnings is not None:
+            warnings.append(
+                "this Resolve build ignored positioned placement, so the "
+                "clips were appended back-to-back — the black title gaps "
+                "only exist in the FCPXML export."
             )
         if titles:
-            shifted = _shift_titles_for_gapless_append(
-                titles, list(getattr(plan, "dips", []) or [])
-            )
-            self.add_titles(shifted, fps, warnings=warnings)
+            if placed:
+                # Real black gaps exist on the timeline — titles land at
+                # their plan-time positions unshifted.
+                self.add_titles(titles, fps, warnings=warnings)
+            else:
+                shifted = _shift_titles_for_gapless_append(titles, dips)
+                self.add_titles(shifted, fps, warnings=warnings)
         if canvas is not None:
             self._apply_canvas(
                 timeline, canvas, canvas_size,
@@ -2338,6 +2398,43 @@ def titles_from_plan(plan, texts: list[str] | None = None) -> list[dict]:
             }
         )
     return titles
+
+
+def _clip_native_fps(item, fallback: float) -> float:
+    """A media pool item's own frame rate, else ``fallback`` (timeline fps).
+
+    ``GetClipProperty("FPS")`` returns a string like ``"50"``/``"59.94"``
+    for video; audio-only items report 0 or nothing — then the timeline
+    rate is the only sensible frame currency.
+    """
+    try:
+        raw = item.GetClipProperty("FPS")
+    except Exception:  # noqa: BLE001 - never let a property probe kill a build
+        return fallback
+    try:
+        value = float(str(raw).strip() or 0)
+    except (TypeError, ValueError):
+        return fallback
+    return value if value > 0 else fallback
+
+
+def _clip_source_offset(item, media_start: float, clip_fps: float) -> int:
+    """First source frame of a pool item, in the clip's own frame numbering.
+
+    Resolve anchors AppendToTimeline's startFrame/endFrame at the clip's
+    embedded start timecode (``GetClipProperty("Start")``), not at zero —
+    action cams stamp time-of-day, so a clip's first frame can be in the
+    millions. Falls back to the plan's probed ``media_start`` seconds when
+    the property is missing or unparseable.
+    """
+    try:
+        raw = item.GetClipProperty("Start")
+    except Exception:  # noqa: BLE001 - never let a property probe kill a build
+        raw = None
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return int(round(media_start * clip_fps))
 
 
 def _shift_titles_for_gapless_append(

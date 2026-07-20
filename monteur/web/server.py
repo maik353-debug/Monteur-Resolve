@@ -98,8 +98,10 @@ given).
 
 ``/api/create/resolve`` builds the current cut as a real timeline in the
 OPEN DaVinci Resolve project (a ``"resolve-build"`` job) — no file, no
-import step, and the plan's black fades and act titles arrive as real
-Text+ instead of being lost in the FCPXML round-trip. The browser sends
+import step; clips land at their true record positions (black title gaps
+included) and the act titles arrive as real Text+ instead of being lost
+in the FCPXML round-trip. Dissolves and the black fade-in/out cannot be
+scripted in Resolve — those exist only in the downloaded file. The browser sends
 the ``"plan_json"`` a build/revise result carries; the job rebuilds it
 with :func:`monteur.montage.plan_from_dict` (a bad plan fails the job
 with the loader's message) and hands it to

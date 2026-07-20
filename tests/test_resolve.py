@@ -274,6 +274,9 @@ class FakeMediaPool:
         self.fail_timeline_import = False
         self.import_media_result: list | None | str = "default"
         self.fail_append = False
+        # True = this Resolve build rejects positioned placement: any
+        # clip_info carrying "recordFrame" returns None (gapless fallback).
+        self.reject_record_placement = False
         self.appended: list[dict] = []
         self.created_timeline_names: list[str] = []
         # False = the appended clips' SetProperty refuses (canvas crop tests)
@@ -302,6 +305,10 @@ class FakeMediaPool:
 
     def AppendToTimeline(self, clip_infos: list[dict]):
         if self.fail_append:
+            return None
+        if self.reject_record_placement and any(
+            "recordFrame" in info for info in clip_infos
+        ):
             return None
         self.appended.extend(clip_infos)
         # Like Resolve: the appended clips become items on the current
@@ -1174,7 +1181,7 @@ def test_titles_from_plan_minimum_duration() -> None:
     assert durations == [2.0, 3.5]  # short dips stretched, long dips kept
 
 
-def test_build_timeline_from_plan_inserts_titles_with_dip_shift() -> None:
+def test_build_timeline_from_plan_inserts_titles_at_plan_time() -> None:
     bridge, project = make_bridge([standard_timeline()])
     plan = trailer_plan()
     titles = resolve.titles_from_plan(plan, texts=["ONE", "TWO"])
@@ -1184,13 +1191,87 @@ def test_build_timeline_from_plan_inserts_titles_with_dip_shift() -> None:
     # A title track was added above the montage footage.
     assert created.added_tracks == ["video"]
     first, second = created.created_title_items
-    # Entries are appended back-to-back, so the dips do not exist in Resolve:
-    # title 1 stays at its own dip's start (2.6s -> frame 65); title 2 shifts
-    # left by dip 1's 0.4s (5.0 - 0.4 = 4.6s -> frame 115).
+    # recordFrame placement keeps the dips as REAL black gaps, so the titles
+    # land at their plan-time positions unshifted (2.6s -> 65, 5.0s -> 125).
     assert (first.start, first.end) == (65, 65 + 50)
-    assert (second.start, second.end) == (115, 115 + 50)
+    assert (second.start, second.end) == (125, 125 + 50)
     assert first._comp._tools[0].inputs["StyledText"] == "ONE"
     assert second._comp._tools[0].inputs["StyledText"] == "TWO"
+
+
+def test_build_timeline_gapless_fallback_shifts_titles_and_warns() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    project.media_pool.reject_record_placement = True
+    plan = trailer_plan()
+    titles = resolve.titles_from_plan(plan, texts=["ONE", "TWO"])
+    warnings: list[str] = []
+    bridge.build_timeline_from_plan(plan, fps=25.0, titles=titles, warnings=warnings)
+    # Every appended clip fell back to the gapless form (no recordFrame).
+    assert all("recordFrame" not in c for c in project.media_pool.appended)
+    created = project._timelines[-1]
+    first, second = created.created_title_items
+    # Gapless: title 1 stays at its own dip's start (2.6s -> 65); title 2
+    # shifts left by dip 1's 0.4s (5.0 - 0.4 = 4.6s -> frame 115).
+    assert (first.start, first.end) == (65, 65 + 50)
+    assert (second.start, second.end) == (115, 115 + 50)
+    assert any("black title gaps" in w for w in warnings)
+
+
+def test_build_timeline_uses_clip_native_frame_space() -> None:
+    # The field bug: DJI clips run 50 fps with a time-of-day start timecode.
+    # Source frames must be clip-fps frames anchored at the clip's Start
+    # property — timeline-fps frames made Resolve clamp every cut to a
+    # sliver (67 uniform 0.1s clips out of a 31s montage).
+    bridge, project = make_bridge([standard_timeline()])
+    pool = project.media_pool
+    dji_start = 2_803_200  # 15:34:24 time-of-day at 50 fps
+
+    def import_media(paths):
+        pool.import_calls.append(list(paths))
+        items = []
+        for path in paths:
+            item = FakePoolClip(path)
+            if path.endswith(".mov"):
+                props = {"FPS": "50", "Start": str(dji_start)}
+                item.GetClipProperty = lambda key, _p=props, _i=item: _p.get(
+                    key, _i.path if key == "File Path" else ""
+                )
+            items.append(item)
+        return items
+
+    pool.ImportMedia = import_media
+    bridge.build_timeline_from_plan(make_plan(), fps=25.0)
+    video = pool.appended[:3]
+    # 1.0-3.0s at 50 fps from the TC anchor; record positions at 25 fps.
+    assert (video[0]["startFrame"], video[0]["endFrame"]) == (
+        dji_start + 50, dji_start + 149,
+    )
+    assert (video[1]["startFrame"], video[1]["endFrame"]) == (
+        dji_start + 30, dji_start + 79,
+    )
+    assert [c["recordFrame"] for c in video] == [0, 50, 75]
+    assert all(c["trackIndex"] == 1 for c in video)
+    # The music has no FPS/Start properties: timeline-fps frames from zero.
+    music = pool.appended[3]
+    assert (music["startFrame"], music["endFrame"]) == (0, 99)
+    assert music["recordFrame"] == 0
+
+
+def test_build_timeline_record_base_uses_timeline_start_frame() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    pool = project.media_pool
+    original_create = pool.CreateEmptyTimeline
+
+    def create(name):
+        timeline = original_create(name)
+        timeline._start_frame = 90000  # 01:00:00:00 at 25 fps
+        return timeline
+
+    pool.CreateEmptyTimeline = create
+    bridge.build_timeline_from_plan(make_plan(), fps=25.0)
+    assert [c["recordFrame"] for c in pool.appended] == [
+        90000, 90050, 90075, 90000,
+    ]
 
 
 def test_build_timeline_from_plan_without_titles_adds_none() -> None:
