@@ -289,10 +289,7 @@ def test_see_footage_with_fake_vision(tmp_path, monkeypatch):
     import sys
     import types
 
-    demo = Path(
-        "/tmp/claude-0/-home-user-Fable-tool/"
-        "90401078-872b-52b4-9d55-214193ea4ea5/scratchpad/demo-footage"
-    )
+    from _demo import DEMO as demo
     if not demo.is_dir():
         pytest.skip("demo footage not generated in this environment")
 

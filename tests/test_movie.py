@@ -441,10 +441,7 @@ from pathlib import Path
 
 from monteur.movie import assemble_movie, parse_cut_intent, scene_duration_target
 
-DEMO = Path(
-    "/tmp/claude-0/-home-user-Fable-tool/90401078-872b-52b4-9d55-214193ea4ea5"
-    "/scratchpad/demo-footage"
-)
+from _demo import DEMO
 needs_demo = pytest.mark.skipif(not DEMO.is_dir(), reason="demo footage not available")
 
 

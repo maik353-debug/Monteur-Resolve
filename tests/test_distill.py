@@ -19,10 +19,7 @@ from monteur.montage import montage_to_timeline
 from monteur.music import MusicAnalysis, MusicSection
 
 FIXTURES = Path(__file__).parent / "fixtures"
-DEMO = Path(
-    "/tmp/claude-0/-home-user-Fable-tool/90401078-872b-52b4-9d55-214193ea4ea5"
-    "/scratchpad/demo-footage"
-)
+from _demo import DEMO
 
 
 def vclip(

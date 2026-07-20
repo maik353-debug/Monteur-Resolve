@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from monteur.montage import MontageEntry, MontagePlan
@@ -16,10 +14,7 @@ from monteur.publish import (
 )
 from monteur.sift import ClipReport, Moment
 
-DEMO = Path(
-    "/tmp/claude-0/-home-user-Fable-tool/"
-    "90401078-872b-52b4-9d55-214193ea4ea5/scratchpad/demo-footage"
-)
+from _demo import DEMO
 
 
 def entry(clip, s, e, rs, re_, score=0.5, label=""):

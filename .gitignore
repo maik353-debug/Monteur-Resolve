@@ -8,3 +8,4 @@ build/
 venv/
 .DS_Store
 *.html.report
+tests/.demo-footage/

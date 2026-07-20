@@ -10,10 +10,7 @@ from monteur.music import MusicAnalysis, MusicSection
 from monteur.pick import list_songs, rank_songs, rate_song
 from monteur.sift import ClipReport, Moment
 
-DEMO = Path(
-    "/tmp/claude-0/-home-user-Fable-tool/"
-    "90401078-872b-52b4-9d55-214193ea4ea5/scratchpad/demo-footage"
-)
+from _demo import DEMO
 
 
 def _music(
