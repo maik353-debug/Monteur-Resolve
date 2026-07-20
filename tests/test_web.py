@@ -28,11 +28,15 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 @pytest.fixture(autouse=True)
 def _isolated_settings(tmp_path, monkeypatch):
-    """Every web test gets a scratch settings file — the server reads
-    monteur.settings per request, and tests must never touch (or depend
-    on) the developer's real ~/.monteur/settings.json."""
+    """Every web test gets scratch settings AND drafts files — the server
+    reads monteur.settings per request and autosaves drafts after builds,
+    and tests must never touch (or depend on) the developer's real
+    ~/.monteur/settings.json or ~/.monteur/drafts.json."""
     monkeypatch.setenv(
         "MONTEUR_SETTINGS_PATH", str(tmp_path / "web-settings.json")
+    )
+    monkeypatch.setenv(
+        "MONTEUR_DRAFTS_PATH", str(tmp_path / "web-drafts.json")
     )
 
 
@@ -304,6 +308,65 @@ class TestCreateApi:
             _post(f"{server}/api/create/build", {"music": "song.wav"})
         assert exc_info.value.code == 400
 
+    def test_build_autosaves_the_draft_slot(self, server):
+        """A successful build fills the drafts autosave slot — the whole
+        point of reload-safety: after the browser comes back, GET
+        /api/drafts offers the last good cut, plan_json retrievable."""
+        data = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "style": "travel", "fps": 25, "canvas": "hd", "format": "fcpxml"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+
+        drafts = _get(f"{server}/api/drafts")["drafts"]
+        autos = [d for d in drafts if d.get("autosave")]
+        assert len(autos) == 1
+        auto = autos[0]
+        assert auto["id"] == "autosave"
+        assert auto["folder"] == self.DEMO
+        assert auto["music"] == f"{self.DEMO}/song.wav"
+        assert auto["settings"]["style"] == "travel"
+        assert auto["settings"]["canvas"] == "hd"
+        assert auto["summary"]["cuts"] == job["result"]["plan"]["cuts"]
+        assert auto["summary"]["style"] == "travel"
+        assert "plan_json" not in auto  # the list stays light
+
+        # The full record carries the plan — and it is the build's plan.
+        full = _get(f"{server}/api/drafts/autosave")
+        assert full["plan_json"] == job["result"]["plan_json"]
+
+        # The stored plan exports to a valid timeline WITHOUT re-planning.
+        exported = _post(
+            f"{server}/api/create/export",
+            {"plan_json": full["plan_json"], "fps": 25,
+             "audio": "music", "canvas": "hd", "format": "fcpxml"},
+        )
+        assert exported["filename"].endswith(".fcpxml")
+        assert "<fcpxml" in exported["content"]
+        assert exported["plan"]["cuts"] == job["result"]["plan"]["cuts"]
+        assert exported["plan_json"]["entries"] == full["plan_json"]["entries"]
+
+    def test_revise_autosaves_the_revised_plan(self, server):
+        build = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "format": "fcpxml"},
+        )
+        build_job = _wait_for_job(server, build["job"])
+        assert build_job["state"] == "done"
+        revise = _post(
+            f"{server}/api/create/revise",
+            {"plan_json": build_job["result"]["plan_json"],
+             "folder": self.DEMO, "brief": "calmer second half"},
+        )
+        revise_job = _wait_for_job(server, revise["job"])
+        assert revise_job["state"] == "done"
+        # The autosave slot now holds the REVISED plan, not the build's.
+        full = _get(f"{server}/api/drafts/autosave")
+        assert full["plan_json"] == revise_job["result"]["plan_json"]
+
 
 class TestJobsApi:
     def test_unknown_job_is_404(self, server):
@@ -321,6 +384,154 @@ class TestJobsApi:
         job = _wait_for_job(server, data["job"])
         assert job["state"] == "error"
         assert "not a directory" in job["message"]
+
+
+def _tiny_plan_json(style="travel"):
+    """A small but REAL plan dict, via the production serializer."""
+    from monteur.montage import MontageEntry, MontagePlan, plan_to_dict
+
+    plan = MontagePlan(
+        music_path=None,
+        duration=4.0,
+        entries=[
+            MontageEntry("a.mp4", 0.0, 2.0, 0.0, 2.0, 0.9),
+            MontageEntry("b.mp4", 1.0, 3.0, 2.0, 4.0, 0.8),
+        ],
+        notes=[f'style "{style}": Some style'],
+    )
+    return plan_to_dict(plan)
+
+
+def _delete(url):
+    request = urllib.request.Request(url, method="DELETE")
+    with urllib.request.urlopen(request) as response:
+        return json.loads(response.read())
+
+
+class TestDraftsApi:
+    """The /api/drafts endpoints — the Create wizard's WIP memory."""
+
+    def _record(self, **extra):
+        record = {
+            "name": "trip wip",
+            "folder": "/footage/trip",
+            "music": "/music/song.mp3",
+            "settings": {"style": "travel", "fps": 25, "canvas": "uhd"},
+            "plan_json": _tiny_plan_json(),
+            "pins": [1.0],
+        }
+        record.update(extra)
+        return record
+
+    def test_list_starts_empty(self, server):
+        assert _get(f"{server}/api/drafts") == {"drafts": []}
+
+    def test_save_list_load_delete_lifecycle(self, server):
+        stored = _post(f"{server}/api/drafts", self._record())
+        assert stored["id"] and stored["saved_at"]
+        assert stored["summary"] == {"duration": 4.0, "cuts": 2, "style": "travel"}
+
+        drafts = _get(f"{server}/api/drafts")["drafts"]
+        assert [d["id"] for d in drafts] == [stored["id"]]
+        assert "plan_json" not in drafts[0]  # the list stays light
+        assert drafts[0]["name"] == "trip wip"
+        assert drafts[0]["settings"]["canvas"] == "uhd"
+
+        full = _get(f"{server}/api/drafts/{stored['id']}")
+        assert full["plan_json"] == _tiny_plan_json()
+        assert full["pins"] == [1.0]
+
+        assert _delete(f"{server}/api/drafts/{stored['id']}") == {"deleted": True}
+        assert _get(f"{server}/api/drafts") == {"drafts": []}
+
+    def test_save_upserts_by_id(self, server):
+        stored = _post(f"{server}/api/drafts", self._record())
+        _post(f"{server}/api/drafts", self._record(id=stored["id"], name="renamed"))
+        drafts = _get(f"{server}/api/drafts")["drafts"]
+        assert [d["name"] for d in drafts] == ["renamed"]
+
+    def test_save_missing_folder_is_400(self, server):
+        record = self._record()
+        del record["folder"]
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/drafts", record)
+        assert exc_info.value.code == 400
+        assert "folder" in json.loads(exc_info.value.read())["error"]
+
+    def test_save_missing_plan_json_is_400(self, server):
+        record = self._record()
+        del record["plan_json"]
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/drafts", record)
+        assert exc_info.value.code == 400
+        assert "plan_json" in json.loads(exc_info.value.read())["error"]
+
+    def test_load_unknown_is_404(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _get(f"{server}/api/drafts/nope")
+        assert exc_info.value.code == 404
+
+    def test_delete_unknown_reports_false(self, server):
+        assert _delete(f"{server}/api/drafts/nope") == {"deleted": False}
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_app_has_the_draft_ui(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        # step 1: the "Continue where you left off" panel
+        assert 'id="cre-drafts"' in html
+        assert 'id="cre-drafts-list"' in html
+        assert "Continue where you left off" in html
+        # step 3: the Save-draft controls next to the download bar
+        assert 'id="cre-save-draft"' in html
+        assert 'id="cre-draft-name"' in html
+        assert "Save draft" in html
+        # the client speaks both new endpoints
+        assert "/api/drafts" in html
+        assert "/api/create/export" in html
+
+
+class TestCreateExportApi:
+    """POST /api/create/export — plan_json -> timeline file, synchronous."""
+
+    def test_export_fcpxml_from_plan(self, server):
+        data = _post(
+            f"{server}/api/create/export",
+            {"plan_json": _tiny_plan_json(), "fps": 25, "format": "fcpxml"},
+        )
+        assert data["filename"] == "monteur_montage.fcpxml"
+        assert "<fcpxml" in data["content"]
+        assert data["plan"]["cuts"] == 2
+        assert data["plan"]["duration"] == 4.0
+        assert data["plan"]["tempo"] == 0  # nothing re-listens to the song
+        assert data["plan_json"]["entries"] == _tiny_plan_json()["entries"]
+
+    def test_export_edl_and_canvas(self, server):
+        data = _post(
+            f"{server}/api/create/export",
+            {"plan_json": _tiny_plan_json(), "fps": 25,
+             "canvas": "vertical", "format": "edl"},
+        )
+        assert data["filename"] == "monteur_montage.edl"
+        assert data["content"].startswith("TITLE:")
+
+    def test_export_missing_plan_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/export", {"fps": 25})
+        assert exc_info.value.code == 400
+
+    def test_export_bad_plan_is_400_with_loader_message(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/export", {"plan_json": {"nope": 1}})
+        assert exc_info.value.code == 400
+        assert "monteur_plan" in json.loads(exc_info.value.read())["error"]
+
+    def test_export_music_audio_without_music_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/create/export",
+                {"plan_json": _tiny_plan_json(), "audio": "music"},
+            )
+        assert exc_info.value.code == 400
 
 
 def _fake_vision(fail_with=None):

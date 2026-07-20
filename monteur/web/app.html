@@ -1086,6 +1086,12 @@ svg text.axis {
             <p class="wiz-lead">Tell Monteur where your video clips live. It watches every clip and finds the good parts — your files are never moved or changed.</p>
           </div>
         </div>
+        <div class="card" id="cre-drafts" hidden style="margin: 0 0 18px; padding: 14px 16px;">
+          <p class="seg-heading" style="margin-top: 0;">Continue where you left off</p>
+          <p class="help-small">Your saved drafts and the last auto-saved build. Resume brings the finished cut back — no rebuilding, downloads and revisions work right away.</p>
+          <ul class="seg-list" id="cre-drafts-list"></ul>
+          <p class="scan-note" id="cre-drafts-msg" role="status" hidden></p>
+        </div>
         <label class="sr-only" for="cre-folder">Footage folder path</label>
         <div class="path-row">
           <input type="text" id="cre-folder" placeholder="/Users/you/Movies/my-trip" spellcheck="false" autocomplete="off">
@@ -1332,7 +1338,12 @@ svg text.axis {
               </div>
             </div>
             <button class="btn primary" id="cre-download" type="button">Download timeline<span class="spin" aria-hidden="true"></span></button>
+            <label class="export-field">Draft name
+              <input type="text" id="cre-draft-name" spellcheck="false" autocomplete="off">
+            </label>
+            <button class="btn" id="cre-save-draft" type="button">Save draft<span class="spin" aria-hidden="true"></span></button>
           </div>
+          <p class="scan-note" id="cre-draft-msg" role="status" hidden></p>
           <p class="seg-heading">Next: import into DaVinci Resolve</p>
           <ol class="howto">
             <li>In Resolve, choose File → Import → Timeline… and pick the downloaded file.</li>
@@ -2114,6 +2125,7 @@ var VIEWS = ["home", "create", "movie", "pacing", "assembly"];
 function setView(view) {
   if (state.view === "create" && view !== "create") creStopJobs(); // leaving the wizard stops its poll loops
   if (state.view === "movie" && view !== "movie") movStopJobs(); // leaving the movie view stops its poll loops
+  if (view === "create") refreshDrafts(); // the "Continue where you left off" panel stays current
   state.view = view;
   VIEWS.forEach(function (v) {
     $("tab-" + v).setAttribute("aria-pressed", String(view === v));
@@ -3150,7 +3162,8 @@ var cre = {
   pace: null,             // seconds per clip in the fastest phase; null = style default
   transitions: "auto",    // "auto" | "cuts" | "dissolves" | "smash"
   order: "chronological", // "chronological" | "best_first"
-  format: "fcpxml"        // download format
+  format: "fcpxml",       // download format
+  draftId: null           // the saved draft this cut updates on re-save (null = new)
 };
 
 var SEG_COLORS = { usable: "var(--series-1)", dark: "var(--seg-dark)", blurry: "var(--seg-blurry)", shaky: "var(--seg-shaky)" };
@@ -3527,6 +3540,7 @@ function scanFolder() {
   $("cre-vision-notes").hidden = true;
   cre.clips = null;
   cre.result = null; // footage changed — any previous build is stale
+  cre.draftId = null; // ...a re-save after this is a NEW draft, not an update
   creResetRevise(); // ...and so is any plan the revision loop still holds
   $("cre-result").hidden = true;
   $("cre-find-msg").hidden = true;
@@ -4021,6 +4035,9 @@ function renderCreResult(data) {
   if (data.vision_error) {
     creNote("cre-build-msg", "Claude couldn't watch the clips: " + String(data.vision_error) + " The cut still built without labels.");
   }
+  // a fresh result gets a fresh default draft name (editable before saving)
+  $("cre-draft-name").value = defaultDraftName(plan);
+  $("cre-draft-msg").hidden = true;
   $("cre-result").hidden = false;
 }
 
@@ -4047,6 +4064,8 @@ function startBuild(andThen) {
       onDone: function (result) {
         setBuildBusy(false);
         cre.result = { data: result, format: body.format, body: body, kind: "build" };
+        cre.draftId = null; // a fresh build is a new cut — re-save makes a new draft
+        refreshDrafts(); // the server just autosaved this build
         // a fresh build seeds the revision loop with its full plan
         rev.planJson = (result && result.plan_json) || null;
         rev.pins = [];
@@ -4116,8 +4135,247 @@ $("cre-download").addEventListener("click", function () {
     startDirectApply(againApply, deliver);
     return;
   }
+  // a resumed draft re-exports the SAME plan (pure plan -> file, instant,
+  // never a re-plan), so a format switch cannot change the resumed cut
+  if (cre.result.kind === "export" && cre.result.exportBody) {
+    var againExport = {};
+    Object.keys(cre.result.exportBody).forEach(function (key) { againExport[key] = cre.result.exportBody[key]; });
+    againExport.format = cre.format;
+    busy($("cre-download"), function () {
+      return api("/api/create/export", { method: "POST", body: againExport }).then(function (result) {
+        cre.result = { data: result, format: againExport.format, body: cre.result.body, kind: "export", exportBody: againExport };
+        deliver(result);
+      });
+    });
+    return;
+  }
   startBuild(deliver);
 });
+
+/* ---- drafts: save a cut as WIP, continue after a reload ---------------
+   The whole wizard state (folder, music, settings, the FULL plan_json,
+   pins, review) goes to POST /api/drafts; step 1's "Continue where you
+   left off" panel lists the saved drafts plus the server's autosave of
+   the last successful build/revise/apply. Resume restores the controls
+   and rebuilds the result card via POST /api/create/export — pure plan
+   -> file on the server, so nothing is ever re-planned. */
+
+function draftStyleOf(plan) {
+  var notes = (plan && plan.notes) || [];
+  for (var i = 0; i < notes.length; i++) {
+    var m = /^style "([a-z_]+)"/.exec(String(notes[i]));
+    if (m) return m[1];
+  }
+  return "";
+}
+
+function defaultDraftName(plan) {
+  var style = draftStyleOf(plan) || "cut";
+  var secs = Math.round((plan && plan.duration) || 0);
+  return style + " " + secs + "s — " + new Date().toISOString().slice(0, 10);
+}
+
+function relTime(iso) {
+  var t = Date.parse(String(iso || ""));
+  if (!isFinite(t)) return "";
+  var mins = Math.round((Date.now() - t) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + " min ago";
+  var hours = Math.round(mins / 60);
+  if (hours < 24) return hours + " h ago";
+  var days = Math.round(hours / 24);
+  if (days < 14) return days + " d ago";
+  return String(iso).slice(0, 10);
+}
+
+function draftSummaryText(draft) {
+  var s = draft.summary || {};
+  var parts = [fmtClock(s.duration || 0), (s.cuts || 0) + (s.cuts === 1 ? " cut" : " cuts")];
+  if (s.style && s.style !== "auto") parts.push(String(s.style));
+  return parts.join(" · ");
+}
+
+function renderDrafts(list) {
+  var host = $("cre-drafts-list");
+  clear(host);
+  $("cre-drafts").hidden = !list.length;
+  list.forEach(function (draft) {
+    var li = el("li", "seg-item");
+    li.appendChild(el("span", "seg-take", String(draft.name || "Draft")));
+    if (draft.autosave) li.appendChild(el("span", "sem-pill", "Auto-saved"));
+    li.appendChild(el("span", "seg-time", relTime(draft.saved_at)));
+    li.appendChild(el("span", "seg-label",
+      baseName(draft.folder || "") + " — " + draftSummaryText(draft)));
+    var resume = el("button", "btn small", "Resume");
+    resume.type = "button";
+    resume.setAttribute("aria-label", "Resume draft " + String(draft.name || ""));
+    resume.addEventListener("click", function () { resumeDraft(draft.id, resume); });
+    li.appendChild(resume);
+    var del = el("button", "btn ghost small", "Delete");
+    del.type = "button";
+    del.setAttribute("aria-label", "Delete draft " + String(draft.name || ""));
+    del.addEventListener("click", function () {
+      busy(del, function () {
+        return api("/api/drafts/" + encodeURIComponent(String(draft.id)), { method: "DELETE" }).then(function () {
+          refreshDrafts();
+        });
+      });
+    });
+    li.appendChild(del);
+    host.appendChild(li);
+  });
+}
+
+function refreshDrafts() {
+  api("/api/drafts").then(function (data) {
+    renderDrafts((data && data.drafts) || []);
+  }).catch(function () { /* the panel is a convenience — never an error state */ });
+}
+
+/* the current wizard controls as a draft's "settings" — the same keys a
+   build payload carries, so autosaved and hand-saved drafts restore alike */
+function draftSettingsFromState() {
+  var body = creBuildBody();
+  var settings = {};
+  ["audio", "order", "style", "canvas", "transitions", "fps", "format",
+   "max_duration", "pace", "allow_repeats", "sfx", "cut_lead", "see"].forEach(function (key) {
+    if (body[key] !== undefined) settings[key] = body[key];
+  });
+  return settings;
+}
+
+$("cre-save-draft").addEventListener("click", function () {
+  if (!cre.result || !rev.planJson) return;
+  var built = (cre.result && cre.result.body) || {};
+  var record = {
+    name: $("cre-draft-name").value.trim()
+      || defaultDraftName((cre.result.data && cre.result.data.plan) || {}),
+    folder: built.folder || $("cre-folder").value.trim(),
+    music: built.music || $("cre-music").value.trim(),
+    settings: draftSettingsFromState(),
+    plan_json: rev.planJson,
+    pins: rev.pins.slice(),
+    // export never re-listens to the song — remember the tempo for the card
+    tempo: (cre.result.data && cre.result.data.plan && cre.result.data.plan.tempo) || 0
+  };
+  if (cre.draftId) record.id = cre.draftId; // re-saving updates the same draft
+  if (dnotes.review) record.review = dnotes.review;
+  busy($("cre-save-draft"), function () {
+    return api("/api/drafts", { method: "POST", body: record }).then(function (stored) {
+      cre.draftId = (stored && stored.id) || null;
+      if (stored && stored.name) $("cre-draft-name").value = String(stored.name);
+      creNote("cre-draft-msg", "Draft saved. You'll find it under “Continue where you left off” in step 1 — it survives reloads.");
+      refreshDrafts();
+    });
+  });
+});
+$("cre-draft-name").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); $("cre-save-draft").click(); }
+});
+
+/* canvas key -> the wizard's shape + resolution controls (see CANVAS_KEYS) */
+var CANVAS_TO_SHAPE = {
+  "uhd": ["wide", "uhd"], "hd": ["wide", "hd"],
+  "vertical-uhd": ["vertical", "uhd"], "vertical": ["vertical", "hd"],
+  "cine-uhd": ["cine", "uhd"], "cine": ["cine", "hd"]
+};
+
+function restoreWizardFromDraft(draft) {
+  var s = draft.settings || {};
+  $("cre-folder").value = String(draft.folder || "");
+  if (draft.music) $("cre-music").value = String(draft.music);
+  if (s.audio && AUDIO_IDS[s.audio]) setAudio(s.audio);
+  if (s.style) setStyle(String(s.style));
+  if (s.order) setOrder(String(s.order));
+  if (s.transitions && TRANSITION_IDS[s.transitions]) setTransitions(s.transitions);
+  var shapeRes = CANVAS_TO_SHAPE[String(s.canvas || "")];
+  if (shapeRes) { setShape(shapeRes[0]); setRes(shapeRes[1]); }
+  if (s.max_duration) {
+    cre.lenTouched = true;
+    setLenMode("target");
+    $("cre-maxlen").value = String(s.max_duration);
+  } else if (draft.music) {
+    cre.lenTouched = true;
+    setLenMode("whole");
+  }
+  if (typeof s.allow_repeats === "boolean") $("cre-repeats").checked = s.allow_repeats;
+  if (typeof s.sfx === "boolean") $("cre-sfx").checked = s.sfx;
+  var lead = parseFloat(s.cut_lead);
+  if (isFinite(lead) && lead >= 0) $("cre-cutlead").value = String(lead);
+  var pace = parseFloat(s.pace);
+  if (isFinite(pace) && pace > 0) {
+    if (pace === 1 || pace === 2 || pace === 4) { setPace(pace); }
+    else {
+      cre.pace = pace;
+      $("cre-pace").value = String(pace);
+      PACE_PRESETS.forEach(function (p) { $(p[0]).setAttribute("aria-pressed", "false"); });
+    }
+  } else {
+    setPace(null);
+  }
+  var fps = parseFloat(s.fps);
+  if (isFinite(fps) && fps > 0) {
+    var select = $("cre-fps");
+    var matched = null;
+    Array.prototype.forEach.call(select.options, function (option) {
+      if (parseFloat(option.value) === fps) matched = option;
+    });
+    if (!matched) {
+      matched = document.createElement("option");
+      matched.value = String(fps);
+      matched.textContent = String(fps);
+      select.appendChild(matched);
+    }
+    select.value = matched.value;
+  }
+  if (s.format === "edl" || s.format === "fcpxml") setCreFormat(s.format);
+}
+
+function resumeDraft(draftId, btn) {
+  if (buildPanel.running() || revisePanel.running() || directPanel.running()) return;
+  busy(btn, function () {
+    return api("/api/drafts/" + encodeURIComponent(String(draftId))).then(function (draft) {
+      if (!draft || !draft.plan_json) throw new Error("This draft has no plan to resume — build a new cut instead.");
+      restoreWizardFromDraft(draft);
+      var s = draft.settings || {};
+      var exportBody = {
+        plan_json: draft.plan_json,
+        fps: s.fps || fpsFrom($("cre-fps")),
+        format: cre.format
+      };
+      if (s.audio) exportBody.audio = s.audio;
+      if (s.canvas) exportBody.canvas = s.canvas;
+      // rebuild the result card FROM the stored plan — no re-planning
+      return api("/api/create/export", { method: "POST", body: exportBody }).then(function (result) {
+        // the export's tempo is honestly 0 (nothing re-listened) — the
+        // draft remembers what the build knew, so the card stays complete
+        if (draft.tempo && result.plan && !result.plan.tempo) result.plan.tempo = draft.tempo;
+        rev.planJson = draft.plan_json;
+        rev.pins = (draft.pins || []).slice();
+        rev.lastBody = null;
+        cre.result = {
+          data: result, format: cre.format,
+          body: creBuildBody(), // reconstructed from the restored controls
+          kind: "export", exportBody: exportBody
+        };
+        cre.draftId = draft.autosave ? null : (draft.id || null);
+        $("cre-rev-rationale").hidden = true;
+        $("cre-rev-msg").hidden = true;
+        $("cre-build-msg").hidden = true;
+        $("cre-resolve-msg").hidden = true;
+        $("cre-resolve-result").hidden = true;
+        renderReviseEntries();
+        resetDirectorNotes();
+        if (draft.review) renderDirectorReview(draft.review);
+        renderCreResult(result);
+        if (!draft.autosave && draft.name) $("cre-draft-name").value = String(draft.name);
+        creShowStep(3, false);
+        $("cre-result-title").focus();
+        toast("Draft resumed — your cut is back, downloads and revisions included.", "success");
+      });
+    });
+  });
+}
 
 /* ---- step 3: publish kit (monteur.publish) ---- */
 
@@ -4327,6 +4585,7 @@ function startRevise(body, andThen) {
     revisePanel.start(data.job, {
       onDone: function (result) {
         setReviseBusy(false);
+        refreshDrafts(); // the server just autosaved this revision
         rev.lastBody = body;
         rev.planJson = (result && result.plan_json) || rev.planJson;
         rev.pins = []; // the kept shots live in the new plan now
@@ -4494,6 +4753,7 @@ function startDirectApply(body, andThen) {
     directPanel.start(data.job, {
       onDone: function (result) {
         setDirectApplyBusy(false);
+        refreshDrafts(); // the server just autosaved this improved cut
         dnotes.lastApplyBody = body;
         rev.planJson = (result && result.plan_json) || rev.planJson;
         rev.pins = [];
@@ -5798,6 +6058,7 @@ $("set-rv-clear").addEventListener("click", function () {
 updateMainVisibility();
 refreshVersions();
 loadResolve();
+refreshDrafts(); // reload-safety: offer "Continue where you left off" right away
 
 })();
 </script>

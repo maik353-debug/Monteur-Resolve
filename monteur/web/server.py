@@ -29,6 +29,12 @@ API (all JSON):
 * ``POST /api/create/distill`` {"timeline": {"filename",
   "content", "fps"?}, "music"?, "target"?, "style"?,
   "canvas"?, "audio"?, "format"?}                               -> {"job": id}
+* ``POST /api/create/export`` {"plan_json", "fps"?, "audio"?,
+  "canvas"?, "format"?}                                         -> build-result shape
+* ``GET  /api/drafts``                                          -> {"drafts": [...]}
+* ``GET  /api/drafts/<id>``                                     -> the full draft
+* ``POST /api/drafts``    the draft record                      -> the stored record
+* ``DELETE /api/drafts/<id>``                                   -> {"deleted": bool}
 * ``POST /api/create/resolve`` {"plan_json", "fps"?, "name"?,
   "canvas"?}                                                    -> {"job": id}
 * ``POST /api/resolve/render`` {"timeline"?, "target_dir",
@@ -116,6 +122,31 @@ noted honestly, never fatal), optional music is analyzed with the usual
 ``"music"`` progress entry, and the trailer comes back serialized exactly
 like a build result (audio auto-falls back to "original" when no music is
 given).
+
+``/api/create/export`` renders an existing ``"plan_json"`` straight to a
+timeline file — SYNCHRONOUS, no job: :func:`monteur.montage.plan_from_dict`
+-> :func:`monteur.montage.montage_to_timeline` -> writer is pure plan
+surgery, no sift, no re-plan, so it answers instantly. It exists for the
+Studio's draft-resume flow: a saved draft carries the full plan, and
+resuming must rebuild the result card (and re-render on a format switch)
+WITHOUT re-planning the cut. The response is the standard build-result
+shape (``filename``/``content``/``plan``/``plan_json``; ``tempo`` is 0 —
+the music is not re-analyzed). A bad or empty plan is a 400 with the
+loader's message.
+
+The ``/api/drafts`` endpoints are the Studio's WIP memory
+(:mod:`monteur.drafts`, ``~/.monteur/drafts.json``): the Create wizard's
+state — folder, music, settings, the full ``plan_json``, optional
+pins/review — survives a browser reload as a draft record. All four are
+instant, so none of them is a job: GET the light list (no plan_json), GET
+one full record by id (404 when unknown), POST a record to save it (400
+when ``folder``/``plan_json`` is missing; the stored record echoes back
+with its stamped id/saved_at), DELETE by id. On top of the named drafts,
+every SUCCESSFUL build, revise and direct-apply job writes the single
+``"autosave"`` slot (folder, music and settings from its own request
+payload, plus the fresh ``plan_json``) — best-effort by contract: an
+autosave failure never fails the job. That slot is why a reload can always
+offer "Continue where you left off" for the last good cut.
 
 ``/api/create/resolve`` builds the current cut as a real timeline in the
 OPEN DaVinci Resolve project (a ``"resolve-build"`` job) — no file, no
@@ -641,6 +672,53 @@ def _plan_from_payload(job: dict, payload: dict):
     return plan, reports, music, vision
 
 
+# The build-payload keys the autosave remembers as the draft's "settings" —
+# exactly what the browser needs to restore its wizard controls on resume.
+_DRAFT_SETTING_KEYS = (
+    "audio", "order", "style", "canvas", "transitions", "fps", "format",
+    "max_duration", "pace", "allow_repeats", "sfx", "cut_lead", "see",
+)
+
+
+def _autosave_draft(payload: dict, result: dict) -> None:
+    """Best-effort: remember a job's fresh cut in the drafts autosave slot.
+
+    Called from the SUCCESS path of the build, revise and direct-apply jobs
+    so a browser reload can always offer "Continue where you left off" with
+    the last good cut (:mod:`monteur.drafts`, single ``"autosave"`` slot).
+    Strictly an extra: any failure here (unwritable home directory, a
+    malformed payload) is swallowed — an autosave must never fail the job
+    that produced a perfectly good result.
+    """
+    try:
+        from monteur import drafts
+
+        plan_json = result.get("plan_json")
+        if not isinstance(plan_json, dict):
+            return
+        drafts.save_draft(
+            {
+                "autosave": True,
+                "name": "Auto-saved cut",
+                "folder": payload.get("folder", ""),
+                "music": payload.get("music")
+                or str(plan_json.get("music_path") or ""),
+                "settings": {
+                    key: payload[key]
+                    for key in _DRAFT_SETTING_KEYS
+                    if key in payload
+                },
+                "plan_json": plan_json,
+                # The song's tempo is not derivable from the plan (export
+                # never re-listens) — remember it so a resumed card can
+                # still show the BPM tile the build showed.
+                "tempo": float((result.get("plan") or {}).get("tempo") or 0),
+            }
+        )
+    except Exception:  # noqa: BLE001 — autosave is best-effort by contract
+        pass
+
+
 def _run_build_job(job: dict, payload: dict) -> None:
     """Daemon-thread body for POST /api/create/build."""
     from monteur.media import MonteurMediaError
@@ -680,6 +758,7 @@ def _run_build_job(job: dict, payload: dict) -> None:
             result["vision_error"] = vision["error"]
         elif vision["ran"]:
             result["vision_notes"] = vision["notes"]
+        _autosave_draft(payload, result)  # best-effort; never fails the job
         job["result"] = result
         job["state"] = "done"
     except SiftCancelled:
@@ -888,7 +967,7 @@ def _run_revise_job(job: dict, payload: dict) -> None:
             content, filename = write_edl(timeline), "monteur_montage.edl"
         else:
             content, filename = write_fcpxml(timeline), "monteur_montage.fcpxml"
-        job["result"] = {
+        result = {
             "filename": filename,
             "content": content,
             "plan": {
@@ -902,6 +981,8 @@ def _run_revise_job(job: dict, payload: dict) -> None:
             # One line saying how the instruction was read — honesty first.
             "rationale": revision.rationale,
         }
+        _autosave_draft(payload, result)  # best-effort; never fails the job
+        job["result"] = result
         job["state"] = "done"
     except SiftCancelled:
         job["state"] = "cancelled"
@@ -1033,7 +1114,7 @@ def _run_direct_apply_job(job: dict, payload: dict) -> None:
             content, filename = write_edl(timeline), "monteur_montage.edl"
         else:
             content, filename = write_fcpxml(timeline), "monteur_montage.fcpxml"
-        job["result"] = {
+        result = {
             "filename": filename,
             "content": content,
             "plan": {
@@ -1048,6 +1129,8 @@ def _run_direct_apply_job(job: dict, payload: dict) -> None:
             "notes": notes,
             "applied": True,
         }
+        _autosave_draft(payload, result)  # best-effort; never fails the job
+        job["result"] = result
         job["state"] = "done"
     except SiftCancelled:
         job["state"] = "cancelled"
@@ -1723,7 +1806,10 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/create/direct"): self._create_direct,
             ("POST", "/api/create/direct/apply"): self._create_direct_apply,
             ("POST", "/api/create/distill"): self._create_distill,
+            ("POST", "/api/create/export"): self._create_export,
             ("POST", "/api/create/resolve"): self._create_resolve,
+            ("GET", "/api/drafts"): self._drafts_list,
+            ("POST", "/api/drafts"): self._drafts_save,
             ("POST", "/api/find"): self._find,
             ("POST", "/api/movie/load"): self._movie_load,
             ("POST", "/api/movie/new"): self._movie_new,
@@ -1745,6 +1831,13 @@ class MonteurHandler(BaseHTTPRequestHandler):
                     return lambda: self._versions_get(vid)
                 if method == "DELETE":
                     return lambda: self._versions_delete(vid)
+        if path.startswith("/api/drafts/"):
+            draft_id = path[len("/api/drafts/"):]
+            if draft_id and "/" not in draft_id:
+                if method == "GET":
+                    return lambda: self._drafts_get(draft_id)
+                if method == "DELETE":
+                    return lambda: self._drafts_delete(draft_id)
         if path.startswith("/api/jobs/"):
             parts = path[len("/api/jobs/"):].split("/")
             if len(parts) == 1 and parts[0] and method == "GET":
@@ -2078,6 +2171,87 @@ class MonteurHandler(BaseHTTPRequestHandler):
             daemon=True,
         ).start()
         self._send_json({"job": job["id"]})
+
+    def _create_export(self) -> None:
+        """POST /api/create/export — plan_json -> timeline file, no re-plan.
+
+        Synchronous by design: :func:`monteur.montage.montage_to_timeline`
+        is pure plan -> timeline (no sift, no music analysis, no AI), so
+        the answer is instant and a background job would only add latency.
+        This is the draft-resume path — the Studio rebuilds a saved cut's
+        result card (and re-renders on a format switch) from the stored
+        plan without ever re-planning it. The response is the standard
+        build-result shape; ``tempo`` is 0 because nothing re-listens to
+        the song. A ValueError from the plan loader or renderer surfaces
+        as a 400 via the dispatcher.
+        """
+        from monteur.io import write_edl, write_fcpxml
+        from monteur.montage import montage_to_timeline, plan_from_dict, plan_to_dict
+
+        payload = self._read_json()
+        if not isinstance(payload.get("plan_json"), dict):
+            raise ApiError(
+                400, "missing 'plan_json' (the plan a build result carries)"
+            )
+        plan = plan_from_dict(payload["plan_json"])  # bad -> ValueError -> 400
+        if not plan.entries:
+            raise ApiError(400, "the plan has no entries — nothing to export")
+        audio = payload.get("audio") or ("music" if plan.music_path else "original")
+        if not plan.music_path and audio != "original":
+            raise ApiError(
+                400, f"the plan has no music; audio mode {audio!r} needs a song"
+            )
+        fps = float(payload.get("fps") or 25)
+        timeline_kwargs: dict = {"audio": audio}
+        if payload.get("canvas"):
+            timeline_kwargs["canvas"] = payload["canvas"]
+        timeline = montage_to_timeline(plan, fps=fps, **timeline_kwargs)
+        fmt = (payload.get("format") or "fcpxml").lower()
+        if fmt == "edl":
+            content, filename = write_edl(timeline), "monteur_montage.edl"
+        else:
+            content, filename = write_fcpxml(timeline), "monteur_montage.fcpxml"
+        self._send_json(
+            {
+                "filename": filename,
+                "content": content,
+                "plan": {
+                    "duration": plan.duration,
+                    "cuts": len(plan.entries),
+                    "tempo": 0,  # the music is not re-analyzed here
+                    "notes": plan.notes,
+                },
+                "plan_json": plan_to_dict(plan),
+            }
+        )
+
+    # -- drafts (the Create wizard's WIP memory — monteur.drafts) -----------
+
+    def _drafts_list(self) -> None:
+        from monteur import drafts
+
+        self._send_json({"drafts": drafts.list_drafts()})
+
+    def _drafts_get(self, draft_id: str) -> None:
+        from monteur import drafts
+
+        record = drafts.load_draft(draft_id)
+        if record is None:
+            raise ApiError(404, f"unknown draft {draft_id!r}")
+        self._send_json(record)
+
+    def _drafts_save(self) -> None:
+        # drafts.save_draft validates the minimal resumable shape (folder +
+        # plan_json) and raises ValueError with a user-ready message — the
+        # dispatcher turns that into the 400 this endpoint promises.
+        from monteur import drafts
+
+        self._send_json(drafts.save_draft(self._read_json()))
+
+    def _drafts_delete(self, draft_id: str) -> None:
+        from monteur import drafts
+
+        self._send_json({"deleted": drafts.delete_draft(draft_id)})
 
     def _find(self) -> None:
         """Search the vision cache — instant and offline, so no job."""
