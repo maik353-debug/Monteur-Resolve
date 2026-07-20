@@ -1403,6 +1403,7 @@ def build_plan_isolated(
     name: str = "Monteur Montage",
     titles: list[dict] | None = None,
     canvas: str | None = None,
+    audio: str = "music",
     timeout: float = 180.0,
 ) -> dict:
     """Build a montage timeline in Resolve from a child process; never raises.
@@ -1424,7 +1425,9 @@ def build_plan_isolated(
     (optional, a :data:`monteur.montage.CANVASES` preset key) sizes the
     built timeline like the file exports do — cinemascope presets also set
     "scale full frame with crop" on the footage; see
-    :meth:`ResolveBridge.build_timeline_from_plan`.
+    :meth:`ResolveBridge.build_timeline_from_plan`. ``audio`` (the montage
+    audio mode, default ``"music"``) only picks the SFX track for placed
+    sound elements — index 3 in "mix", index 2 otherwise.
 
     Returns ``{"ok": True, "timeline": <created name>, "warnings": [...]}``
     — ``warnings`` are the non-fatal messages from
@@ -1448,6 +1451,7 @@ def build_plan_isolated(
         "name": name,
         "titles": titles,
         "canvas": canvas,
+        "audio": audio,
     }
     ok, payload = _run_worker("build_plan", timeout, request=request)
     if not ok:
@@ -2065,6 +2069,7 @@ class ResolveBridge:
         titles: list[dict] | None = None,
         canvas: str | None = None,
         warnings: list[str] | None = None,
+        audio: str = "music",
     ) -> str:
         """Build a montage timeline in Resolve from a MontagePlan.
 
@@ -2118,6 +2123,21 @@ class ResolveBridge:
         returned exactly one item per requested path; and finally basename
         matching via ``GetName()``. An unmapped path raises
         MonteurResolveError.
+
+        SFX cues carrying a concrete ``file`` (placed sound elements,
+        :mod:`monteur.elements`) are appended after the music as audio
+        clips at ``recordFrame = timeline start + cue.time`` on the SFX
+        track — audio track index 3 in ``audio="mix"`` (song on A1,
+        camera sound on A2), index 2 otherwise, the same layout
+        :func:`monteur.montage.montage_to_timeline` uses. Their files are
+        imported with the same ImportMedia/mapping machinery (a separate
+        call, so the entry/music import stays untouched). Element
+        placement is best-effort by contract: import misses and per-cue
+        append refusals are collected into ONE summarized warning and
+        never fail the build; when this Resolve rejected positioned
+        placement altogether the elements are skipped with the same
+        summarized warning (gapless appends would land them at the wrong
+        times).
         """
         if canvas is not None:
             # Lazy import: monteur.montage pulls in numpy, and this module
@@ -2251,6 +2271,9 @@ class ResolveBridge:
                     f"Resolve failed to append the music {plan.music_path!r} "
                     f"to timeline {timeline_name!r}."
                 )
+        self._append_sfx_elements(
+            pool, plan, fps, record_base, placed, audio, warnings
+        )
         dips = list(getattr(plan, "dips", []) or [])
         if not placed and dips and warnings is not None:
             warnings.append(
@@ -2272,6 +2295,89 @@ class ResolveBridge:
                 warnings if warnings is not None else [],
             )
         return timeline_name
+
+    def _append_sfx_elements(
+        self,
+        pool: Any,
+        plan,
+        fps: float,
+        record_base: int,
+        placed: bool,
+        audio: str,
+        warnings: list[str] | None,
+    ) -> None:
+        """Append the plan's filed SFX cues as positioned audio clips.
+
+        Best-effort by contract (see :meth:`build_timeline_from_plan`):
+        every problem — positioned placement rejected, files Resolve
+        would not import, per-cue append refusals — is summarized into at
+        most ONE ``warnings`` message; nothing here ever raises.
+        """
+        filed = [
+            cue
+            for cue in (getattr(plan, "sfx", []) or [])
+            if getattr(cue, "file", "")
+        ]
+        if not filed:
+            return
+
+        def warn(message: str) -> None:
+            if warnings is not None:
+                warnings.append(message)
+
+        if not placed:
+            warn(
+                f"this Resolve build ignored positioned placement, so the "
+                f"{len(filed)} sound-element clips were skipped — they are "
+                "in the FCPXML export."
+            )
+            return
+        # The SFX track index mirrors montage_to_timeline's layout: A3 in
+        # "mix" (song on A1 + camera sound on A2), A2 otherwise.
+        track_index = 3 if audio == "mix" else 2
+        element_paths: list[str] = []
+        for cue in filed:
+            if cue.file not in element_paths:
+                element_paths.append(cue.file)
+        failures: list[str] = []
+        by_path: dict = {}
+        try:
+            items = pool.ImportMedia(element_paths) or []
+            by_path = _map_items_to_paths(element_paths, items)
+        except Exception:  # noqa: BLE001 - element import must not fail the build
+            by_path = {}
+        for cue in filed:
+            item = by_path.get(cue.file)
+            cue_name = os.path.basename(cue.file)
+            if item is None:
+                failures.append(cue_name)
+                continue
+            try:
+                clip_fps = _clip_native_fps(item, fps)
+                offset = _clip_source_offset(item, 0.0, clip_fps)
+                length = min(
+                    float(cue.duration), max(0.0, plan.duration - cue.time)
+                )
+                src_frames = max(1, int(round(length * clip_fps)))
+                info = {
+                    "mediaPoolItem": item,
+                    "startFrame": offset,
+                    "endFrame": offset + src_frames - 1,
+                    "mediaType": 2,
+                    "trackIndex": track_index,
+                    "recordFrame": record_base + int(round(cue.time * fps)),
+                }
+                if not pool.AppendToTimeline([info]):
+                    failures.append(cue_name)
+            except Exception:  # noqa: BLE001 - one bad cue must not kill the rest
+                failures.append(cue_name)
+        if failures:
+            shown = ", ".join(sorted(set(failures))[:4])
+            warn(
+                f"{len(failures)} of {len(filed)} sound-element clips could "
+                f"not be placed ({shown}) — drop them in by hand or import "
+                "the FCPXML export."
+            )
 
     def _apply_canvas(
         self,

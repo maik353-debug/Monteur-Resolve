@@ -1274,6 +1274,14 @@ svg text.axis {
               <label class="ft-check"><input type="checkbox" id="cre-sfx">Plan an SFX layer</label>
               <p class="help-small">Ambience, risers and impacts planned as green markers on the timeline — each with a search query for your sound library.</p>
             </div>
+            <div class="ft-field">
+              <label class="ft-label" for="cre-elements">Sound elements folder (optional)</label>
+              <div class="path-row">
+                <input type="text" id="cre-elements" placeholder="/Users/you/SFX/elements" spellcheck="false" autocomplete="off">
+                <button class="btn ghost" id="cre-browse-elements" type="button">Browse&hellip;</button>
+              </div>
+              <p class="help-small">Monteur classifies your impacts/whooshes/risers offline and places them as real clips on their own audio track — riser into the drop, impact on the smash cuts. Filling this turns the SFX layer on.</p>
+            </div>
           </div>
         </details>
         <div class="wiz-nav">
@@ -3259,6 +3267,8 @@ function makeJobPanel(hostId, texts) {
           stext += " (" + p.index + "/" + p.total + ")";
         }
         lines.push(stext);
+      } else if (p.stage === "elements") {
+        lines.push("Rating sound elements — " + String(p.name || "library"));
       } else if (p.stage === "kit") {
         lines.push(String(p.name || "writing publish kit") + "…");
       } else if (p.stage === "resolve") {
@@ -3281,6 +3291,7 @@ function makeJobPanel(hostId, texts) {
     else if (last && last.stage === "music") status.textContent = "Listening to the song…";
     else if (last && last.stage === "vision") status.textContent = "Claude is watching your clips…";
     else if (last && last.stage === "song") status.textContent = "Listening to your songs…";
+    else if (last && last.stage === "elements") status.textContent = "Rating your sound elements…";
     else if (last && last.stage === "kit") status.textContent = "Writing the publish kit…";
     else if (last && last.stage === "resolve") status.textContent = "Building the timeline in Resolve…";
     else if (last && last.stage === "movie") status.textContent = "Claude is writing your screenplay…";
@@ -3511,6 +3522,11 @@ $("cre-browse-folder").addEventListener("click", function () { browsePath("folde
 $("cre-browse-music").addEventListener("click", function () { browsePath("music", "cre-music", "cre-browse-music"); });
 $("cre-browse-musicdir").addEventListener("click", function () { browsePath("folder", "cre-music-dir", "cre-browse-musicdir"); });
 $("cre-browse-kit").addEventListener("click", function () { browsePath("folder", "cre-kit-dir", "cre-browse-kit"); });
+$("cre-browse-elements").addEventListener("click", function () { browsePath("folder", "cre-elements", "cre-browse-elements"); });
+/* a filled sound-elements folder needs (and therefore enables) the SFX layer */
+$("cre-elements").addEventListener("input", function () {
+  if (this.value.trim()) $("cre-sfx").checked = true;
+});
 $("cre-browse-render").addEventListener("click", function () { browsePath("folder", "cre-render-dir", "cre-browse-render"); });
 
 /* ---- step 1: scan the footage folder ---- */
@@ -4037,6 +4053,12 @@ function creBuildBody() {
   var lead = parseFloat($("cre-cutlead").value);
   if (isFinite(lead) && lead >= 0) body.cut_lead = lead;
   if (cre.pace) body.pace = cre.pace;
+  var elements = $("cre-elements").value.trim();
+  if (elements) {
+    // real sound files ride on the SFX cue layer, so the folder implies it
+    body.elements = elements;
+    body.sfx = true;
+  }
   return body;
 }
 
@@ -4265,7 +4287,7 @@ function draftSettingsFromState() {
   var settings = {};
   ["audio", "order", "style", "canvas", "transitions", "fps", "format",
    "max_duration", "pace", "allow_repeats", "sfx", "cut_lead", "see",
-   "ai_cut", "brief"].forEach(function (key) {
+   "ai_cut", "brief", "elements"].forEach(function (key) {
     if (body[key] !== undefined) settings[key] = body[key];
   });
   return settings;
@@ -4327,6 +4349,10 @@ function restoreWizardFromDraft(draft) {
   }
   if (typeof s.allow_repeats === "boolean") $("cre-repeats").checked = s.allow_repeats;
   if (typeof s.sfx === "boolean") $("cre-sfx").checked = s.sfx;
+  if (typeof s.elements === "string") {
+    $("cre-elements").value = s.elements;
+    if (s.elements) $("cre-sfx").checked = true; // the folder implies the layer
+  }
   if (typeof s.brief === "string") $("cre-brief").value = s.brief;
   if (typeof s.ai_cut === "boolean") {
     $("cre-ai-cut").checked = s.ai_cut;
@@ -4671,6 +4697,9 @@ $("cre-rev-btn").addEventListener("click", function () {
   };
   if (built.audio) body.audio = built.audio;
   if (built.canvas) body.canvas = built.canvas;
+  // the sound library the cut was built with: filed cues survive untouched
+  // regions, and the folder lets the server re-place replanned ones
+  if (built.elements) body.elements = built.elements;
   startRevise(body, null);
 });
 $("cre-rev-brief").addEventListener("keydown", function (e) {
@@ -4855,6 +4884,9 @@ function buildInResolve() {
     // current selection — so the Resolve timeline matches the download
     canvas: built.canvas || canvasKey()
   };
+  // the audio mode picks the SFX track for placed sound elements (A3 in
+  // "mix", A2 otherwise) — keep Resolve on the same layout as the download
+  if (built.audio) body.audio = built.audio;
   $("cre-resolve-msg").hidden = true;
   $("cre-resolve-result").hidden = true;
   if (renderPanel.running()) { renderPanel.stop(); setRenderBusy(false); }

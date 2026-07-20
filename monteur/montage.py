@@ -235,6 +235,13 @@ marker ("SFX: <kind>" / "<query> — <note>"), which the EDL/FCPXML writers
 and the Resolve bridge already carry. ``sfx=False`` (the default) plans
 exactly as before.
 
+On top of the cue markers, :mod:`monteur.elements` can place REAL files
+from the user's own sound library: :class:`SfxCue` carries an optional
+``file`` path, and :func:`montage_to_timeline` renders filed cues as
+audio clips on a dedicated SFX track ("A2" music/original, "A3" mix)
+while keeping the marker. ``plan_to_dict`` writes ``file`` only when
+set, so plans without placed elements serialize exactly as before.
+
 Plan persistence & revision
 ---------------------------
 :func:`plan_to_dict` / :func:`plan_from_dict` round-trip a full plan
@@ -532,6 +539,10 @@ class SfxCue:
     kind: str          # "riser" | "impact" | "whoosh" | "sub-drop" | "ambience"
     query: str         # ready-to-paste SFX search terms ("whoosh transition fast")
     note: str          # one line WHY this cue is here ("act change into climax")
+    # A concrete file from the user's sound library (monteur.elements): ""
+    # (the default) keeps the cue a search-query marker; a set path makes
+    # montage_to_timeline place it as a REAL audio clip on the SFX track.
+    file: str = ""
 
 
 # --- grid -------------------------------------------------------------------
@@ -2195,6 +2206,17 @@ def montage_to_timeline(
     sfx=True)``) gets one Green marker per cue at the cue's start frame —
     name ``"SFX: <kind>"``, note ``"<query> — <note>"`` — so the planned
     sound design shows up right on the timeline in Resolve.
+
+    Cues WITH a concrete ``file`` (a placed sound element,
+    :mod:`monteur.elements`) additionally become REAL audio clips on a
+    dedicated SFX track: ``"A3"`` in ``"mix"`` mode (the song owns A1 and
+    the camera sound A2) and ``"A2"`` otherwise (``"music"``: song on A1;
+    ``"original"``: camera sound on A1). Each clip records at ``cue.time``
+    for ``min(cue.duration, file duration, montage end)`` — the file's
+    real duration is probed when the media tooling is available and rides
+    along as ``media_duration_seconds`` for the writers, exactly like
+    entries do. The Green marker stays (it documents the intent); cues
+    without a file stay marker-only.
     """
     if audio not in _AUDIO_MODES:
         valid = ", ".join(_AUDIO_MODES)
@@ -2350,6 +2372,7 @@ def montage_to_timeline(
                 color="Blue",
             )
         )
+    sfx_track = "A3" if audio == "mix" else "A2"
     for cue in plan.sfx:
         # The planned sound-design layer rides along as Green markers: the
         # editor sees WHERE each effect goes and gets the search query to
@@ -2362,7 +2385,59 @@ def montage_to_timeline(
                 color="Green",
             )
         )
+        if not cue.file:
+            continue
+        # A placed sound element becomes a REAL clip on the SFX track. The
+        # file's honest duration (probed like the entries' metadata is)
+        # bounds the clip and feeds the writers; without media tooling the
+        # cue's own duration is trusted.
+        file_duration = _probe_media_duration(cue.file)
+        length = min(cue.duration, plan.duration - cue.time)
+        if file_duration > 0:
+            length = min(length, file_duration)
+        if length <= _EPS:
+            continue
+        rec_in = seconds_to_frames(cue.time, fps)
+        len_frames = seconds_to_frames(length, fps)
+        if len_frames <= 0:
+            continue
+        stem = PurePath(cue.file).stem
+        metadata: dict = {}
+        if file_duration > 0:
+            metadata["media_duration_seconds"] = file_duration
+        timeline.clips.append(
+            Clip(
+                name=stem,
+                track=sfx_track,
+                kind=AUDIO,
+                source_in=0,
+                source_out=len_frames,
+                record_in=rec_in,
+                record_out=rec_in + len_frames,
+                source_name=stem,
+                source_file=cue.file,
+                metadata=metadata,
+            )
+        )
     return timeline
+
+
+def _probe_media_duration(path: str) -> float:
+    """A media file's real duration in seconds, 0.0 when it can't be probed.
+
+    Best-effort by design: montage_to_timeline must keep working on plans
+    whose element files are elsewhere (another machine, a test fixture) and
+    in environments without the media extra — the cue's own duration then
+    stands in.
+    """
+    try:
+        from monteur.media import MonteurMediaError, probe
+    except ImportError:  # pragma: no cover - media.py is part of the package
+        return 0.0
+    try:
+        return max(0.0, float(probe(path).duration))
+    except MonteurMediaError:
+        return 0.0
 
 
 # --- plan persistence & the revision hook ---------------------------------------
@@ -2381,7 +2456,10 @@ def plan_to_dict(plan: MontagePlan) -> dict:
     future Monteur can refuse (or migrate) old files instead of misreading
     them. ``title_texts`` (the composed act titles, :mod:`monteur.compose`)
     is written only when set, so plans without it serialize exactly as
-    before; :func:`plan_from_dict` tolerates its absence.
+    before; :func:`plan_from_dict` tolerates its absence. Likewise a cue's
+    ``file`` (a concrete sound element, :mod:`monteur.elements`) is written
+    only when set — plans without placed elements stay byte-identical to
+    plans saved before the field existed.
     """
     data = {
         "monteur_plan": PLAN_FORMAT_VERSION,
@@ -2394,7 +2472,14 @@ def plan_to_dict(plan: MontagePlan) -> dict:
         "entries": [asdict(entry) for entry in plan.entries],
         "notes": list(plan.notes),
         "dips": [[start, length] for start, length in plan.dips],
-        "sfx": [asdict(cue) for cue in plan.sfx],
+        "sfx": [
+            {
+                key: value
+                for key, value in asdict(cue).items()
+                if not (key == "file" and not value)
+            }
+            for cue in plan.sfx
+        ],
     }
     if plan.title_texts:
         data["title_texts"] = [str(text) for text in plan.title_texts]

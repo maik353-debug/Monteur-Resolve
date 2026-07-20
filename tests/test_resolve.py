@@ -944,6 +944,132 @@ def test_build_timeline_canvas_crop_failures_warn_once_summarized() -> None:
     assert "Scale full frame with crop" in crop_warnings[0]
 
 
+# --- build_timeline_from_plan: placed SFX elements (SfxCue.file) ------------------
+
+
+def make_plan_with_elements() -> MontagePlan:
+    from monteur.montage import SfxCue
+
+    plan = make_plan()
+    plan.sfx = [
+        SfxCue(0.0, 2.0, "ambience", "outdoor ambience", "opening"),  # marker-only
+        SfxCue(1.0, 0.8, "impact", "hit", "on the drop", file="/sfx/hit.wav"),
+        SfxCue(2.5, 0.6, "whoosh", "whoosh", "fast cut", file="/sfx/whoosh.wav"),
+    ]
+    return plan
+
+
+def test_build_timeline_places_filed_cues_on_the_sfx_track() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    pool = project.media_pool
+    warnings: list[str] = []
+    bridge.build_timeline_from_plan(
+        make_plan_with_elements(), fps=24.0, warnings=warnings
+    )
+    assert warnings == []
+    # entries+music import first (untouched), the element files separately
+    assert pool.import_calls == [
+        ["/media/a.mov", "/media/b.mov", "/music/song.wav"],
+        ["/sfx/hit.wav", "/sfx/whoosh.wav"],
+    ]
+    sfx = pool.appended[4:]  # after 3 video entries + 1 music clip
+    assert [
+        (c["recordFrame"], c["startFrame"], c["endFrame"], c["mediaType"],
+         c["trackIndex"])
+        for c in sfx
+    ] == [
+        (24, 0, 18, 2, 2),   # impact at 1.0s for 0.8s (19 frames at 24fps)
+        (60, 0, 13, 2, 2),   # whoosh at 2.5s for 0.6s
+    ]
+    assert sfx[0]["mediaPoolItem"].path == "/sfx/hit.wav"
+    assert sfx[1]["mediaPoolItem"].path == "/sfx/whoosh.wav"
+
+
+def test_build_timeline_sfx_track_is_a3_in_mix_mode() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    bridge.build_timeline_from_plan(
+        make_plan_with_elements(), fps=24.0, audio="mix"
+    )
+    sfx = project.media_pool.appended[4:]
+    assert [c["trackIndex"] for c in sfx] == [3, 3]
+
+
+def test_build_timeline_without_filed_cues_imports_once() -> None:
+    # The compatibility bar: no filed cues -> exactly the old single import.
+    bridge, project = make_bridge([standard_timeline()])
+    bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+    assert len(project.media_pool.import_calls) == 1
+
+
+def test_build_timeline_sfx_append_failures_warn_once() -> None:
+    class SfxRejectingPool(FakeMediaPool):
+        def AppendToTimeline(self, clip_infos):
+            if any(info.get("trackIndex", 1) >= 2 for info in clip_infos):
+                return None  # this Resolve refuses the SFX track appends
+            return super().AppendToTimeline(clip_infos)
+
+    bridge, project = make_bridge([standard_timeline()])
+    project.media_pool = SfxRejectingPool(project)
+    warnings: list[str] = []
+    name = bridge.build_timeline_from_plan(
+        make_plan_with_elements(), fps=24.0, warnings=warnings
+    )
+    assert name == "Monteur Montage"  # per-cue failures NEVER fail the build
+    sfx_warnings = [w for w in warnings if "sound-element" in w]
+    assert len(sfx_warnings) == 1  # one summarized warning, not one per cue
+    assert "2 of 2" in sfx_warnings[0]
+    assert "hit.wav" in sfx_warnings[0]
+
+
+def test_build_timeline_sfx_import_miss_warns_once() -> None:
+    class ElementlessPool(FakeMediaPool):
+        def ImportMedia(self, paths):
+            if any(p.startswith("/sfx/") for p in paths):
+                self.import_calls.append(list(paths))
+                return []  # Resolve knows nothing about these files
+            return super().ImportMedia(paths)
+
+    bridge, project = make_bridge([standard_timeline()])
+    project.media_pool = ElementlessPool(project)
+    warnings: list[str] = []
+    bridge.build_timeline_from_plan(
+        make_plan_with_elements(), fps=24.0, warnings=warnings
+    )
+    assert len([w for w in warnings if "sound-element" in w]) == 1
+    # the montage itself still landed: 3 entries + music
+    assert len(project.media_pool.appended) == 4
+
+
+def test_build_timeline_sfx_skipped_when_placement_rejected() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    project.media_pool.reject_record_placement = True
+    warnings: list[str] = []
+    bridge.build_timeline_from_plan(
+        make_plan_with_elements(), fps=24.0, warnings=warnings
+    )
+    # gapless appends would land the elements at the wrong times — skipped,
+    # said so once, and their files were never imported
+    assert any("sound-element" in w and "skipped" in w for w in warnings)
+    assert len(project.media_pool.import_calls) == 1
+    assert all(info.get("trackIndex", 1) == 1 or "trackIndex" not in info
+               for info in project.media_pool.appended)
+
+
+def test_worker_build_plan_forwards_audio(monkeypatch) -> None:
+    import monteur._resolve_worker as _resolve_worker
+
+    fake = _FakeBuildBridge()
+    monkeypatch.setattr(resolve, "connect", lambda app=None: fake)
+    response = _resolve_worker.handle(
+        "build_plan", build_plan_request(audio="mix")
+    )
+    assert response["ok"] is True
+    assert fake.calls[0]["audio"] == "mix"
+    # and the default stays "music" for old requests without the key
+    _resolve_worker.handle("build_plan", build_plan_request())
+    assert fake.calls[1]["audio"] == "music"
+
+
 # --- add_titles -------------------------------------------------------------------
 
 
@@ -2755,12 +2881,12 @@ class _FakeBuildBridge:
 
     def build_timeline_from_plan(
         self, plan, fps, name="Monteur Montage", titles=None, canvas=None,
-        warnings=None,
+        warnings=None, audio="music",
     ):
         self.calls.append(
             {
                 "plan": plan, "fps": fps, "name": name, "titles": titles,
-                "canvas": canvas,
+                "canvas": canvas, "audio": audio,
             }
         )
         if warnings is not None:
@@ -3156,12 +3282,13 @@ def _run_cmd_create_into_resolve(monkeypatch, plan, build_result, extra_args=())
     calls: list[dict] = []
 
     def fake_build(
-        plan, fps, name="Monteur Montage", titles=None, canvas=None, timeout=180.0
+        plan, fps, name="Monteur Montage", titles=None, canvas=None,
+        audio="music", timeout=180.0,
     ):
         calls.append(
             {
                 "plan": plan, "fps": fps, "name": name, "titles": titles,
-                "canvas": canvas,
+                "canvas": canvas, "audio": audio,
             }
         )
         return build_result

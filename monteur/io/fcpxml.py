@@ -73,11 +73,15 @@ Limitations
 * Connected clips nested more than one level deep are ignored.
 * ``write_fcpxml`` assumes non-overlapping video clips (they are laid
   out in one spine); audio clips that do not pair with a video clip of
-  the same source and record range are skipped on write.
+  the same source and record range become connected clips whose lane is
+  derived from their model track (A1 -> lane -1 with the "music" role,
+  A2/A3/... -> lanes -2/-3/... with the "effects" role — the montage's
+  music bed and its placed SFX elements respectively).
 """
 
 from __future__ import annotations
 
+import re
 import urllib.parse
 import xml.etree.ElementTree as ET
 from fractions import Fraction
@@ -135,6 +139,20 @@ def _time_attr(elem: ET.Element, attr: str, default: str = "0s") -> Fraction:
 
 def _to_frames(t: Fraction, frame_dur: Fraction) -> int:
     return round(t / frame_dur)
+
+
+_AUDIO_TRACK_RE = re.compile(r"^A(\d+)$")
+
+
+def _audio_lane(track: str) -> str:
+    """Connected-clip lane for a model audio track ("A2" -> "-2"; default -1).
+
+    The exact inverse of :func:`_lane_track` for audio, so write -> read
+    round trips keep multi-track audio (music on A1, SFX elements on
+    A2/A3) on their own tracks.
+    """
+    m = _AUDIO_TRACK_RE.match((track or "").upper())
+    return f"-{m.group(1)}" if m else "-1"
 
 
 def _lane_track(lane: int, kind: str) -> str:
@@ -361,8 +379,10 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
     Video clips are laid out in the spine in record order (they must not
     overlap); an audio clip with the same source and record range as a
     video clip is folded into that clip's asset-clip via the asset's
-    audio channels. Audio clips without such a video partner are not
-    representable by this writer and are skipped.
+    audio channels. Audio clips without such a video partner (the music
+    bed, placed SFX elements) become connected clips with their own
+    assets — lane and role derived from the model track (A1 = "music",
+    A2/A3/... = "effects").
 
     A video clip with dissolve metadata gets a ``<transition
     name="Cross Dissolve">`` element in the spine before its asset-clip
@@ -633,20 +653,25 @@ def write_fcpxml(timeline: Timeline, name: str = "") -> str:
             start="0s",
         )
 
-    # Attach unpaired audio (music bed) as a connected clip on the first video
-    # clip. Its offset is expressed in the parent's local time, so offset ==
-    # the parent's start places it at the montage's record 0 (this is exactly
-    # what read_fcpxml reverses: record = p_offset + (offset - p_start)).
+    # Attach unpaired audio (music bed, placed SFX elements) as connected
+    # clips on the first video clip. Offsets are expressed in the parent's
+    # local time, so offset == the parent's start places a clip at the
+    # montage's record 0 (this is exactly what read_fcpxml reverses:
+    # record = p_offset + (offset - p_start)). The lane comes from the
+    # model track — A1 -> -1, A2 -> -2, A3 -> -3 — so a montage's SFX
+    # track survives the round trip; A1 keeps the "music" role, higher
+    # tracks (the SFX elements) are "effects".
     for aclip, aid in connected_audio:
+        lane = _audio_lane(aclip.track)
         attrs = {
             "ref": aid,
-            "lane": "-1",
+            "lane": lane,
             "name": aclip.source_name or aclip.name or "Music",
             "duration": _fmt_time(aclip.duration, frame_dur),
             "start": _fmt_time(
                 audio_start.get(id(aclip), 0) + aclip.source_in, frame_dur
             ),
-            "audioRole": "music",
+            "audioRole": "music" if lane == "-1" else "effects",
         }
         if first_clip_el is not None:
             attrs["offset"] = _fmt_time(first_clip_start + aclip.record_in, frame_dur)

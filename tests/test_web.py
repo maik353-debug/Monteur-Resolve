@@ -2002,12 +2002,12 @@ class TestResolveBuildApi:
 
         def fake_build(
             plan, fps, name="Monteur Montage", titles=None, canvas=None,
-            timeout=180.0,
+            audio="music", timeout=180.0,
         ):
             calls.append(
                 {
                     "plan": plan, "fps": fps, "name": name, "titles": titles,
-                    "canvas": canvas,
+                    "canvas": canvas, "audio": audio,
                 }
             )
             return dict(result)
@@ -2057,6 +2057,20 @@ class TestResolveBuildApi:
         )
         assert job["state"] == "done"
         assert calls[0]["canvas"] == "cine-uhd"
+
+    def test_resolve_build_forwards_audio_for_the_sfx_track(self, server, monkeypatch):
+        # The audio mode only picks the SFX track for placed sound elements
+        # (A3 in "mix", A2 otherwise) — the endpoint forwards it, and old
+        # payloads without the key keep the "music" default.
+        calls = self._patch_build(
+            monkeypatch, {"ok": True, "timeline": "Monteur Montage", "warnings": []}
+        )
+        job = self._resolve(server, plan_json=self._plan_json(), audio="mix")
+        assert job["state"] == "done"
+        assert calls[0]["audio"] == "mix"
+        job = self._resolve(server, plan_json=self._plan_json())
+        assert job["state"] == "done"
+        assert calls[1]["audio"] == "music"
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_app_sends_canvas_with_resolve_build(self):
@@ -2664,3 +2678,153 @@ class TestResolvePythonApi:
             assert result["probed"][-1]["ok"] is True
         else:
             assert resolve_python() == ""
+
+
+class TestSoundElements:
+    """The "elements" payload: the user's sound library placed as real clips."""
+
+    DEMO = str(_DEMO_FOOTAGE)
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+
+    @pytest.fixture()
+    def library(self, tmp_path):
+        np = pytest.importorskip("numpy")
+        import wave
+
+        folder = tmp_path / "sfx"
+        folder.mkdir()
+        rate = 22050
+
+        def write(name, samples):
+            pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2")
+            with wave.open(str(folder / name), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(rate)
+                w.writeframes(pcm.tobytes())
+
+        rng = np.random.default_rng(3)
+        t = np.linspace(0.0, 0.8, int(0.8 * rate), endpoint=False)
+        write("hit.wav", rng.uniform(-1, 1, len(t)) * np.exp(-t * 8) * 0.9)
+        write("swoosh.wav", rng.uniform(-1, 1, rate) * np.hanning(rate) * 0.9)
+        ramp = np.linspace(0.0, 1.0, 3 * rate, endpoint=False)
+        write("rise.wav", rng.uniform(-1, 1, 3 * rate) * ramp**2 * 0.9)
+        return str(folder)
+
+    def _build_payload(self, library, **extra):
+        payload = {
+            "folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+            "fps": 25, "format": "fcpxml", "elements": library,
+        }
+        payload.update(extra)
+        return payload
+
+    def test_build_with_elements_places_and_reports(self, server, library):
+        data = _post(
+            f"{server}/api/create/build", self._build_payload(library)
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        # the scan of the library is a visible progress stage
+        stages = [p["stage"] for p in job["progress"]]
+        assert "elements" in stages
+        entry = next(p for p in job["progress"] if p["stage"] == "elements")
+        assert entry["name"] == "sfx"
+        result = job["result"]
+        # elements imply the SFX layer, and the notes say what happened
+        notes = result["plan"]["notes"]
+        assert any(n.startswith("sfx layer:") for n in notes)
+        assert any(n.startswith("sound elements:") for n in notes)
+        # placed cues travel in the plan_json with their concrete files
+        cues = result["plan_json"]["sfx"]
+        assert cues, "the SFX layer must be planned"
+        filed = [c for c in cues if c.get("file")]
+        assert filed, "at least one library file must be placed"
+        assert all(c["file"].startswith(library) for c in filed)
+        # ...and the FCPXML carries them as real effects clips
+        assert 'audioRole="effects"' in result["content"]
+
+    def test_elements_with_explicit_sfx_false_is_an_error(self, server, library):
+        data = _post(
+            f"{server}/api/create/build",
+            self._build_payload(library, sfx=False),
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "SFX layer" in job["message"]
+
+    def test_elements_folder_missing_is_a_clean_error(self, server):
+        data = _post(
+            f"{server}/api/create/build",
+            {
+                "folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+                "elements": "/no/such/library",
+            },
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "not a directory" in job["message"]
+
+    def test_elements_persist_in_the_autosaved_draft(self, server, library):
+        # The browser sends sfx=true alongside a filled elements folder
+        # (creBuildBody) — both land in the autosave's settings for resume.
+        data = _post(
+            f"{server}/api/create/build", self._build_payload(library, sfx=True)
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        full = _get(f"{server}/api/drafts/autosave")
+        assert full["settings"]["elements"] == library
+        assert full["settings"]["sfx"] is True
+
+    def test_revise_reassigns_from_the_library(self, server, library):
+        build = _post(
+            f"{server}/api/create/build", self._build_payload(library)
+        )
+        build_job = _wait_for_job(server, build["job"])
+        assert build_job["state"] == "done"
+        plan_json = build_job["result"]["plan_json"]
+        assert any(c.get("file") for c in plan_json["sfx"])
+
+        revise = _post(
+            f"{server}/api/create/revise",
+            {
+                "plan_json": plan_json, "folder": self.DEMO,
+                "brief": "ruhiger", "elements": library, "fps": 25,
+            },
+        )
+        job = _wait_for_job(server, revise["job"])
+        assert job["state"] == "done"
+        # the library ran again on the revised plan (elements stage + files)
+        assert any(p["stage"] == "elements" for p in job["progress"])
+        revised_cues = job["result"]["plan_json"]["sfx"]
+        assert any(c.get("file") for c in revised_cues)
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_app_has_the_elements_field(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            'id="cre-elements"',
+            'id="cre-browse-elements"',
+            "Sound elements folder (optional)",
+            "places them as real clips on their own audio track",
+            "riser into the drop, impact on the smash cuts",
+            "body.elements = elements",
+            'p.stage === "elements"',
+            "Rating your sound elements…",
+        ):
+            assert needle in source, needle
+        # filling the folder auto-enables the SFX layer...
+        assert 'if (this.value.trim()) $("cre-sfx").checked = true;' in source
+        # ...and the folder is remembered with the other draft settings
+        assert '"ai_cut", "brief", "elements"' in source
+        assert 'if (typeof s.elements === "string")' in source
+        # the elements input lives in the Fine-tune block, next to the SFX
+        # checkbox
+        finetune = source.split('id="cre-finetune"', 1)[1].split("</details>", 1)[0]
+        assert 'id="cre-sfx"' in finetune
+        assert 'id="cre-elements"' in finetune

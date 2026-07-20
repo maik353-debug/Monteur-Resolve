@@ -17,12 +17,13 @@ API (all JSON):
 * ``POST /api/resolve/analyze`` {"timeline"?, "save"?}          -> {"stats", "version"?}
 * ``POST /api/create/scan``   {"folder", "see"?}                -> {"job": id}
 * ``POST /api/create/build``  {"folder", "music"?, "see"?,
-  "ai_cut"?, "brief"?, ...}                                     -> {"job": id}
+  "ai_cut"?, "brief"?, "elements"?, ...}                        -> {"job": id}
 * ``POST /api/create/pick``   {"folder", "music_dir",
   "max_duration"?}                                              -> {"job": id}
 * ``POST /api/create/kit``    {build payload + "kit_dir"}       -> {"job": id}
 * ``POST /api/create/revise`` {"plan_json", "folder", "brief",
-  "pins"?, "fps"?, "audio"?, "canvas"?, "format"?}              -> {"job": id}
+  "pins"?, "fps"?, "audio"?, "canvas"?, "format"?,
+  "elements"?}                                                  -> {"job": id}
 * ``POST /api/create/direct`` {"plan_json", "folder", "music"?,
   "notes"?}                                                     -> {"job": id}
 * ``POST /api/create/direct/apply`` {"plan_json", "folder",
@@ -37,7 +38,7 @@ API (all JSON):
 * ``POST /api/drafts``    the draft record                      -> the stored record
 * ``DELETE /api/drafts/<id>``                                   -> {"deleted": bool}
 * ``POST /api/create/resolve`` {"plan_json", "fps"?, "name"?,
-  "canvas"?}                                                    -> {"job": id}
+  "canvas"?, "audio"?}                                          -> {"job": id}
 * ``POST /api/resolve/render`` {"timeline"?, "target_dir",
   "name"?, "preset"?}                                           -> {"job": id}
 * ``POST /api/find``      {"folder", "query", "limit"?}         -> {"shots"} | {"error"}
@@ -95,6 +96,18 @@ vision this IS a gate: the user explicitly asked for the AI cut, so a
 of silently downgrading to the heuristic cut (the CLI's ``--ai-cut``
 keeps the graceful fallback with a printed note). Both keys ride into the
 draft autosave settings like every other wizard control.
+
+``"elements"`` on build/kit/revise is the user's own sound library
+(:mod:`monteur.elements`): the folder's snippets are classified OFFLINE
+(impact / whoosh / riser / braam, cached next to the folder) under an
+``"elements"`` progress stage and placed into the plan's SFX layer as
+REAL audio clips — riser ending on the drop, impact on the drop and the
+smash cuts — on their own audio track (A2, or A3 in "mix"). Sending
+``"elements"`` with an explicit ``"sfx": false`` is a job error (the
+cues ARE the places the elements go); without an ``"sfx"`` key the SFX
+layer is enabled automatically. On revise, files carry over to
+untouched cues (same kind + time) and the folder — when sent again —
+re-places the rest.
 
 ``/api/create/revise`` is the Studio's revision loop
 (:mod:`monteur.revise`): the build result carries the full plan as
@@ -678,6 +691,16 @@ def _plan_from_payload(job: dict, payload: dict):
         plan_kwargs["cut_lead"] = float(payload["cut_lead"])
     if "sfx" in payload:
         plan_kwargs["sfx"] = bool(payload["sfx"])
+    elements_dir = str(payload.get("elements") or "")
+    if elements_dir:
+        # A sound-elements folder rides on the SFX layer — the cues are the
+        # places the elements go. An explicit sfx=false contradicts it.
+        if plan_kwargs.get("sfx") is False:
+            raise ValueError(
+                "a sound-elements folder needs the SFX layer — enable "
+                "'Plan an SFX layer' or clear the elements folder"
+            )
+        plan_kwargs["sfx"] = True
     if payload.get("pace"):
         plan_kwargs["pace"] = float(payload["pace"])
     if payload.get("transitions"):
@@ -706,7 +729,28 @@ def _plan_from_payload(job: dict, payload: dict):
         plan = plan_montage(reports, music, **plan_kwargs)
     if not plan.entries:
         raise ValueError("no usable material found — check the scan results")
+    if elements_dir:
+        _apply_elements(job, plan, music, elements_dir)
     return plan, reports, music, vision
+
+
+def _apply_elements(job: dict, plan, music, elements_dir: str) -> None:
+    """Scan the sound library and place its snippets into the plan's SFX layer.
+
+    Shared by build/kit (via ``_plan_from_payload``) and revise. Adds an
+    ``"elements"`` progress stage, then appends
+    :func:`monteur.elements.assign_elements`' notes to the plan so the
+    result card says what landed where. A missing folder or missing media
+    dependencies raise :class:`MonteurMediaError` — the job's normal error
+    path, with the scanner's own actionable message.
+    """
+    from monteur.elements import assign_elements, scan_elements
+
+    with _JOBS_LOCK:
+        job["progress"].append(
+            {"stage": "elements", "name": Path(elements_dir).name or elements_dir}
+        )
+    plan.notes.extend(assign_elements(plan, music, scan_elements(elements_dir)))
 
 
 # The build-payload keys the autosave remembers as the draft's "settings" —
@@ -714,7 +758,7 @@ def _plan_from_payload(job: dict, payload: dict):
 _DRAFT_SETTING_KEYS = (
     "audio", "order", "style", "canvas", "transitions", "fps", "format",
     "max_duration", "pace", "allow_repeats", "sfx", "cut_lead", "see",
-    "ai_cut", "brief",
+    "ai_cut", "brief", "elements",
 )
 
 
@@ -952,7 +996,9 @@ def _run_revise_job(job: dict, payload: dict) -> None:
     ``allow_repeats=True`` keeps the repetition guard from re-capping it),
     and the SFX layer from whether cues were planned. The footage is
     re-sifted through the same scan cache as build/pick/kit, and the plan's
-    OWN music is re-analyzed when it has one.
+    OWN music is re-analyzed when it has one. Placed sound elements survive:
+    files carry over onto same-kind/same-time cues (untouched regions), and
+    a payload ``"elements"`` folder re-places the replanned rest.
     """
     from monteur.media import MonteurMediaError
     from monteur.montage import montage_to_timeline, plan_from_dict, plan_to_dict
@@ -1001,6 +1047,21 @@ def _run_revise_job(job: dict, payload: dict) -> None:
             raise ValueError(
                 "the revision left no entries — check the scan results"
             )
+
+        # Placed sound elements survive the revision: untouched regions get
+        # their files back (same kind + time), and when the browser still
+        # knows the library folder the replanned regions are re-placed too.
+        if any(cue.file for cue in plan.sfx):
+            from monteur.elements import carry_element_files
+
+            carried = carry_element_files(plan, revised)
+            if carried and not payload.get("elements"):
+                revised.notes.append(
+                    f"{carried} sound element{'s' if carried != 1 else ''} "
+                    "carried over from the previous cut"
+                )
+        if payload.get("elements"):
+            _apply_elements(job, revised, music, str(payload["elements"]))
 
         fps = float(payload.get("fps") or 25)
         timeline_kwargs: dict = {"audio": audio}
@@ -1289,13 +1350,16 @@ def _run_resolve_build_job(job: dict, payload: dict) -> None:
         fps = float(payload.get("fps") or 25)
         name = str(payload.get("name") or "Monteur Montage")
         canvas = payload.get("canvas") or None
+        # The audio mode only picks the SFX track for placed sound elements
+        # (A3 in "mix", A2 otherwise) — same layout as the file download.
+        audio = str(payload.get("audio") or "music")
         titles = titles_from_plan(plan) if plan.dips else None
         with _JOBS_LOCK:
             job["progress"].append(
                 {"stage": "resolve", "name": "building the timeline in Resolve"}
             )
         built = build_plan_isolated(
-            plan, fps=fps, name=name, titles=titles, canvas=canvas
+            plan, fps=fps, name=name, titles=titles, canvas=canvas, audio=audio
         )
         if not built.get("ok"):
             # Never raises by contract — a failure dict carries the worker's

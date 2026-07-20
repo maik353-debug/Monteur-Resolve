@@ -1694,3 +1694,135 @@ def test_pin_entry_splits_overlap_and_drops_covered_dip():
     assert right.transition == 0.0  # the cut out of the pinned shot is hard
     # the dip under the pinned window is gone (the shot covers that time)
     assert plan.dips == []
+
+
+# --- SfxCue.file: placed sound elements (monteur.elements) -------------------------
+
+
+def test_sfx_file_serialization_round_trip():
+    import json
+
+    from monteur.montage import MontagePlan, SfxCue, plan_from_dict, plan_to_dict
+
+    plan = MontagePlan(music_path="/m.wav", duration=10.0)
+    plan.sfx = [
+        SfxCue(1.0, 0.6, "whoosh", "whoosh transition fast", "fast cut"),
+        SfxCue(5.0, 0.8, "impact", "hit", "on the drop", file="/sfx/hit.wav"),
+    ]
+    data = json.loads(json.dumps(plan_to_dict(plan)))
+    # the plain cue serializes exactly as before the field existed
+    assert "file" not in data["sfx"][0]
+    assert data["sfx"][1]["file"] == "/sfx/hit.wav"
+    restored = plan_from_dict(data)
+    assert restored.sfx[0].file == ""
+    assert restored.sfx[1].file == "/sfx/hit.wav"
+
+
+def test_plans_without_files_serialize_byte_identically():
+    """The compatibility bar: a plan whose cues carry no files writes the
+    exact JSON it wrote before SfxCue.file existed (no new keys)."""
+    import json
+
+    from monteur.montage import plan_to_dict
+
+    plan = make_full_plan()
+    assert plan.sfx and all(not c.file for c in plan.sfx)
+    data = plan_to_dict(plan)
+    for cue in data["sfx"]:
+        assert set(cue) == {"time", "duration", "kind", "query", "note"}
+    # and old plans (written without the key) still load
+    from monteur.montage import plan_from_dict
+
+    assert plan_from_dict(json.loads(json.dumps(data))).sfx[0].file == ""
+
+
+def test_filed_cues_become_real_clips_on_a2_in_music_mode():
+    from monteur.model import AUDIO
+    from monteur.montage import MontagePlan, MontageEntry, SfxCue
+
+    plan = MontagePlan(music_path="/music/song.wav", duration=10.0)
+    plan.entries = [
+        MontageEntry(
+            clip_path="/f/a.mp4", source_start=0.0, source_end=10.0,
+            record_start=0.0, record_end=10.0, score=0.5,
+        )
+    ]
+    plan.sfx = [
+        SfxCue(2.0, 0.8, "impact", "hit", "on the drop", file="/sfx/hit.wav"),
+        SfxCue(4.0, 0.6, "whoosh", "whoosh", "fast cut"),  # marker-only
+    ]
+    timeline = montage_to_timeline(plan, fps=25.0, audio="music")
+    sfx_clips = [c for c in timeline.clips if c.track == "A2"]
+    assert len(sfx_clips) == 1
+    clip = sfx_clips[0]
+    assert clip.kind == AUDIO
+    assert clip.source_file == "/sfx/hit.wav"
+    assert clip.name == "hit"
+    # record at cue.time for cue.duration (the file path doesn't exist, so
+    # the probe falls back to the cue's own duration)
+    assert (clip.record_in, clip.record_out) == (50, 70)
+    assert (clip.source_in, clip.source_out) == (0, 20)
+    # both cues keep their Green markers (the intent is documented)
+    sfx_markers = [m for m in timeline.markers if m.name.startswith("SFX: ")]
+    assert len(sfx_markers) == 2
+    # the music bed still sits alone on A1
+    assert [c.track for c in timeline.clips if c.kind == AUDIO] == ["A1", "A2"]
+
+
+def test_filed_cues_land_on_a3_in_mix_mode():
+    from monteur.model import AUDIO
+    from monteur.montage import MontagePlan, MontageEntry, SfxCue
+
+    plan = MontagePlan(music_path="/music/song.wav", duration=10.0)
+    plan.entries = [
+        MontageEntry(
+            clip_path="/f/a.mp4", source_start=0.0, source_end=10.0,
+            record_start=0.0, record_end=10.0, score=0.5,
+        )
+    ]
+    plan.sfx = [SfxCue(2.0, 0.8, "impact", "hit", "n", file="/sfx/hit.wav")]
+    timeline = montage_to_timeline(plan, fps=25.0, audio="mix")
+    audio_tracks = [c.track for c in timeline.clips if c.kind == AUDIO]
+    # mix: camera sound on A2, song on A1 — the SFX element moves to A3
+    assert sorted(audio_tracks) == ["A1", "A2", "A3"]
+    sfx = next(c for c in timeline.clips if c.track == "A3")
+    assert sfx.source_file == "/sfx/hit.wav"
+
+
+def test_filed_cue_clamps_to_the_montage_end():
+    from monteur.montage import MontagePlan, MontageEntry, SfxCue
+
+    plan = MontagePlan(music_path="/music/song.wav", duration=10.0)
+    plan.entries = [
+        MontageEntry(
+            clip_path="/f/a.mp4", source_start=0.0, source_end=10.0,
+            record_start=0.0, record_end=10.0, score=0.5,
+        )
+    ]
+    plan.sfx = [SfxCue(9.5, 3.0, "sub-drop", "boom", "n", file="/sfx/boom.wav")]
+    timeline = montage_to_timeline(plan, fps=25.0)
+    clip = next(c for c in timeline.clips if c.track == "A2")
+    assert (clip.record_in, clip.record_out) == (238, 250)  # ends AT the cut
+
+
+def test_filed_cue_uses_the_probed_file_duration(tmp_path, monkeypatch):
+    from monteur import montage as montage_mod
+    from monteur.montage import MontagePlan, MontageEntry, SfxCue
+
+    plan = MontagePlan(music_path="/music/song.wav", duration=10.0)
+    plan.entries = [
+        MontageEntry(
+            clip_path="/f/a.mp4", source_start=0.0, source_end=10.0,
+            record_start=0.0, record_end=10.0, score=0.5,
+        )
+    ]
+    # the cue claims 5s but the real file is only 1.2s long
+    plan.sfx = [SfxCue(2.0, 5.0, "impact", "hit", "n", file="/sfx/hit.wav")]
+    monkeypatch.setattr(
+        montage_mod, "_probe_media_duration", lambda path: 1.2
+    )
+    timeline = montage_to_timeline(plan, fps=25.0)
+    clip = next(c for c in timeline.clips if c.track == "A2")
+    assert (clip.record_in, clip.record_out) == (50, 80)  # 1.2s, not 5s
+    # the real duration feeds the writers, exactly like entries do
+    assert clip.metadata["media_duration_seconds"] == 1.2

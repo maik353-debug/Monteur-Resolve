@@ -10,6 +10,8 @@ Workflow overview::
     monteur convert cut.edl cut.fcpxml --fps 25
     monteur create clips song.mp3 -o cut.fcpxml --save-plan plan.json
     monteur create clips song.mp3 -o cut.fcpxml --style trailer --see --ai-cut
+    monteur elements sfx_library
+    monteur create clips song.mp3 -o cut.fcpxml --elements sfx_library
     monteur revise plan.json clips -o cut_v2.fcpxml --brief "zweite Hälfte ruhiger"
     monteur direct plan.json clips --apply -o cut_v3.fcpxml
     monteur resolve status
@@ -422,6 +424,42 @@ def cmd_distill(args: argparse.Namespace) -> None:
         print(f"  {note}")
 
 
+def cmd_elements(args: argparse.Namespace) -> None:
+    """Rate a sound-elements folder: classify every snippet, print the library.
+
+    The "rate my snippets" view of :func:`monteur.elements.scan_elements` —
+    offline, cached next to the folder, no AI. Kinds impact/whoosh/riser/
+    braam are placeable by 'monteur create --elements'; "other" is listed
+    but never placed automatically.
+    """
+    from monteur.elements import scan_elements
+    from monteur.media import MonteurMediaError
+
+    try:
+        elements = scan_elements(args.folder)
+    except MonteurMediaError as exc:
+        _fail(str(exc))
+    if not elements:
+        _fail(f"no audio files found in {args.folder}")
+    print(f"{len(elements)} sound elements in {args.folder}:")
+    order = {"impact": 0, "whoosh": 1, "riser": 2, "braam": 3, "other": 4}
+    for e in sorted(
+        elements, key=lambda e: (order.get(e.kind, 9), -e.confidence, e.path)
+    ):
+        name = Path(e.path).name
+        line = (
+            f"  {e.kind:<6}  {e.confidence:>4.0%}  {e.duration:>6.2f}s  {name}"
+        )
+        if e.kind == "other":
+            line += "  (unclassified — never placed automatically)"
+        print(line)
+    placeable = sum(1 for e in elements if e.kind != "other")
+    print(
+        f"{placeable} placeable — use them with "
+        "'monteur create ... --elements " + args.folder + "'"
+    )
+
+
 def cmd_pick_music(args: argparse.Namespace) -> None:
     from monteur.media import MonteurMediaError
     from monteur.pick import list_songs, rank_songs
@@ -581,6 +619,11 @@ def cmd_create(args: argparse.Namespace) -> None:
             f"  -> style {args.style}, order {args.order}, "
             f"max duration {args.max_duration if args.max_duration else 'full song'}"
         )
+    # A sound-elements folder rides on the SFX layer: the cues are the
+    # places the elements go, so --elements implies --sfx.
+    if args.elements and not args.sfx:
+        args.sfx = True
+        print("--elements implies --sfx: planning the SFX cue layer")
     # No-music mode (ride-POV: the clips' own sound IS the soundtrack).
     # Validated after the brief so a brief-set max duration counts.
     if not args.music:
@@ -641,6 +684,19 @@ def cmd_create(args: argparse.Namespace) -> None:
         _fail(str(exc))
     if not plan.entries:
         _fail("no usable material found — run 'monteur sift' to see why")
+    if args.elements:
+        # Rate the user's sound library offline and place the snippets as
+        # real clips on the plan's SFX layer (riser into the drop, impact
+        # on the smash cuts); the notes say what landed where.
+        from monteur.elements import assign_elements, scan_elements
+
+        print(f"Rating sound elements in {args.elements} ...")
+        try:
+            elements = scan_elements(args.elements)
+        except MonteurMediaError as exc:
+            _fail(str(exc))
+        for note in assign_elements(plan, music, elements):
+            print(f"  {note}")
     audio_wording = {
         "music": "song only",
         "mix": "song + the clips' own sound",
@@ -662,7 +718,8 @@ def cmd_create(args: argparse.Namespace) -> None:
 
         titles = titles_from_plan(plan) if plan.dips else None
         result = build_plan_isolated(
-            plan, fps=args.fps, titles=titles, canvas=args.canvas
+            plan, fps=args.fps, titles=titles, canvas=args.canvas,
+            audio=args.audio,
         )
         if not result.get("ok"):
             _fail(result.get("error", "Resolve build failed."))
@@ -688,11 +745,16 @@ def cmd_create(args: argparse.Namespace) -> None:
         query_width = max(len(cue.query) for cue in plan.sfx)
         for cue in plan.sfx:
             total = int(cue.time)
-            print(
+            line = (
                 f"    {total // 60}:{total % 60:02d}  "
                 f"{cue.kind:<{kind_width}}  {cue.query:<{query_width}}  "
                 f"({cue.note})"
             )
+            if cue.file:
+                # A placed sound element: this cue is a REAL clip, not a
+                # search query.
+                line += f"  -> {Path(cue.file).name}"
+            print(line)
 
 
 def _save_plan(plan, path: str) -> None:
@@ -781,6 +843,20 @@ def cmd_revise(args: argparse.Namespace) -> None:
         _fail(str(exc))
     if not revised.entries:
         _fail("the revision left no entries — run 'monteur sift' to see why")
+
+    if any(cue.file for cue in plan.sfx):
+        # Placed sound elements survive the revision in untouched regions:
+        # same-kind cues at the same times get their files back. Cues in
+        # genuinely replanned regions stay search-query markers — re-run
+        # 'monteur create --elements' to re-place from the library.
+        from monteur.elements import carry_element_files
+
+        carried = carry_element_files(plan, revised)
+        if carried:
+            revised.notes.append(
+                f"{carried} sound element{'s' if carried != 1 else ''} "
+                "carried over from the previous cut"
+            )
 
     timeline = montage_to_timeline(
         revised, fps=args.fps, audio=audio, canvas=args.canvas
@@ -1117,6 +1193,13 @@ def build_parser() -> argparse.ArgumentParser:
              "--audio original",
     )
     p.add_argument(
+        "--elements", default="", metavar="DIR",
+        help="your own sound library folder (impacts, whooshes, risers): "
+             "Monteur classifies the snippets offline and places them as "
+             "REAL audio clips on their own track — riser into the drop, "
+             "impact on the smash cuts (implies --sfx)",
+    )
+    p.add_argument(
         "--allow-repeats", action="store_true",
         help="let footage repeat instead of capping the cut length at "
              "1.5x the unique material",
@@ -1331,6 +1414,14 @@ def build_parser() -> argparse.ArgumentParser:
                    default="uhd")
     p.add_argument("--sfx", action="store_true", help="plan an SFX cue layer too")
     p.set_defaults(func=cmd_distill)
+
+    p = sub.add_parser(
+        "elements",
+        help="rate a folder of sound snippets: impact / whoosh / riser / "
+             "braam, classified offline (use with 'create --elements')",
+    )
+    p.add_argument("folder", help="folder with your sound effect files")
+    p.set_defaults(func=cmd_elements)
 
     p = sub.add_parser(
         "pick-music",

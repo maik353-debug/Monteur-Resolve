@@ -456,3 +456,84 @@ def test_write_no_fade_transitions_without_metadata():
     )
     root = ET.fromstring(write_fcpxml(tl))
     assert root.find(".//spine").findall("transition") == []
+
+
+# --- placed SFX elements: multi-track connected audio ------------------------------
+
+
+def _sfx_timeline() -> Timeline:
+    """Video on V1, music bed on A1, one placed SFX element on A2."""
+    tl = Timeline(name="SFX", fps=25.0)
+    tl.clips = [
+        Clip("A", "V1", VIDEO, 0, 250, 0, 250, source_name="A",
+             source_file="/footage/a.mp4"),
+        Clip("song", "A1", AUDIO, 0, 250, 0, 250, source_name="song",
+             source_file="/music/song.mp3",
+             metadata={"media_duration_seconds": 30.0}),
+        Clip("hit", "A2", AUDIO, 0, 20, 50, 70, source_name="hit",
+             source_file="/sfx/hit.wav",
+             metadata={"media_duration_seconds": 1.2}),
+    ]
+    return tl
+
+
+def test_write_sfx_element_as_connected_effects_clip():
+    from monteur.io.fcpxml import write_fcpxml
+
+    xml = write_fcpxml(_sfx_timeline())
+    # the music bed keeps its lane and role untouched...
+    assert 'lane="-1"' in xml
+    assert 'audioRole="music"' in xml
+    # ...and the SFX element gets its own lane with the effects role
+    assert 'lane="-2"' in xml
+    assert 'audioRole="effects"' in xml
+    # the element is linkable real media with its honest duration
+    assert "file:///sfx/hit.wav" in xml
+    import re as _re
+
+    sfx_asset = _re.search(
+        r'<asset[^>]*name="hit"[^>]*duration="([^"]+)"', xml
+    )
+    assert sfx_asset is not None
+    assert sfx_asset.group(1) == "6/5s"  # 1.2s as rational seconds
+
+
+def test_sfx_element_round_trips_on_its_own_track():
+    from monteur.io.fcpxml import read_fcpxml, write_fcpxml
+
+    back = read_fcpxml(write_fcpxml(_sfx_timeline()))
+    audio = {c.track: c for c in back.audio_clips()}
+    assert set(audio) == {"A1", "A2"}
+    hit = audio["A2"]
+    assert (hit.record_in, hit.record_out) == (50, 70)
+    assert (hit.source_in, hit.source_out) == (0, 20)
+    music = audio["A1"]
+    assert (music.record_in, music.record_out) == (0, 250)
+
+
+def test_write_three_audio_tracks_mix_mode_layout():
+    """mix mode: camera sound pairs into the asset-clips, song on A1 and the
+    SFX element on A3 both come back on their own tracks."""
+    from monteur.io.fcpxml import read_fcpxml, write_fcpxml
+
+    tl = Timeline(name="Mix", fps=25.0)
+    tl.clips = [
+        Clip("A", "V1", VIDEO, 0, 250, 0, 250, source_name="A",
+             source_file="/footage/a.mp4"),
+        # the entry's own sound: same source + record range -> folded
+        Clip("A", "A2", AUDIO, 0, 250, 0, 250, source_name="A",
+             source_file="/footage/a.mp4"),
+        Clip("song", "A1", AUDIO, 0, 250, 0, 250, source_name="song",
+             source_file="/music/song.mp3"),
+        Clip("hit", "A3", AUDIO, 0, 20, 50, 70, source_name="hit",
+             source_file="/sfx/hit.wav"),
+    ]
+    xml = write_fcpxml(tl)
+    assert 'lane="-3"' in xml
+    back = read_fcpxml(xml)
+    tracks = sorted(c.track for c in back.audio_clips())
+    # the folded camera audio reads back on A1 alongside the music bed;
+    # the SFX element keeps its own A3
+    assert tracks == ["A1", "A1", "A3"]
+    hit = next(c for c in back.audio_clips() if c.track == "A3")
+    assert (hit.record_in, hit.record_out) == (50, 70)

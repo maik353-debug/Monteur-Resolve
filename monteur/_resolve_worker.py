@@ -105,14 +105,18 @@ stdin.
          "name": <str>,                                   # timeline name
          "titles": [{"start": <s>, "duration": <s>, "text": <str>}, ...]
                    | null,                                # optional Fusion titles
-         "canvas": <str> | null}                          # optional CANVASES key
+         "canvas": <str> | null,                          # optional CANVASES key
                                                           # (e.g. "uhd", "cine-uhd")
+         "audio": <str> | null}                           # montage audio mode:
+                                                          # picks the SFX track for
+                                                          # placed sound elements
+                                                          # (default "music")
 
     Rebuilds the MontagePlan (``plan_from_dict``) and runs
     ``connect().build_timeline_from_plan(plan, fps=fps, name=name,
-    titles=titles, canvas=canvas)`` — a canvas sets the timeline
-    resolution, and the cinemascope presets also put "scale full frame
-    with crop" on the footage. Response on success::
+    titles=titles, canvas=canvas, audio=audio)`` — a canvas sets the
+    timeline resolution, and the cinemascope presets also put "scale full
+    frame with crop" on the footage. Response on success::
 
         {"ok": true, "timeline": <created timeline name>,
          "warnings": [<str>, ...]}      # add_titles' + canvas messages
@@ -277,12 +281,13 @@ def handle(command: str, request: dict) -> dict:
         name = str(request.get("name") or "Monteur Montage")
         titles = request.get("titles") or None
         canvas = request.get("canvas") or None
+        audio = str(request.get("audio") or "music")
         warnings: list[str] = []
         try:
             bridge = connect()
             timeline_name = bridge.build_timeline_from_plan(
                 plan, fps=fps, name=name, titles=titles, canvas=canvas,
-                warnings=warnings,
+                warnings=warnings, audio=audio,
             )
             return {"ok": True, "timeline": timeline_name, "warnings": warnings}
         except (MonteurResolveError, ValueError) as exc:
