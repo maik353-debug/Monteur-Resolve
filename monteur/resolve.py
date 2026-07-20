@@ -2100,10 +2100,11 @@ class ResolveBridge:
         timeline resolution is set via timeline-level custom settings
         (``SetSetting("useCustomSettings", "1")`` then the
         ``timelineResolution*`` keys, string values), falling back to the
-        project-level ``SetSetting`` when the timeline refuses; and for the
-        cinemascope presets (``cine*``) every video-track-1 clip gets
-        ``SetProperty("Scaling", 1)`` — "scale full frame with crop" — so
-        16:9 footage fills the 2.39:1 frame instead of showing side bars.
+        project-level ``SetSetting`` when the timeline refuses; and every
+        video-track-1 clip gets explicit scaling — "scale full frame with
+        crop" for the cinemascope presets (16:9 footage fills the 2.39:1
+        frame instead of showing side bars), "fill" for everything else
+        (mismatched footage never sits small in the frame).
         Both steps are defensive: refusals are summarized into ``warnings``
         (one message per step, never per clip) and the build still succeeds.
 
@@ -2187,18 +2188,22 @@ class ResolveBridge:
                 item, getattr(entry, "media_start", 0.0) or 0.0, clip_fps
             )
             start = offset + int(round(entry.source_start * clip_fps))
-            end = max(start, offset + int(round(entry.source_end * clip_fps)) - 1)
+            # The source LENGTH is derived from the record window in
+            # timeline frames (converted to clip frames): rounding source
+            # and record independently leaves one-frame black slivers
+            # between neighbouring cuts on beat-aligned decimals.
+            rec_in = int(round(entry.record_start * fps))
+            rec_out = int(round(entry.record_end * fps))
+            src_frames = max(1, int(round((rec_out - rec_in) * clip_fps / fps)))
             clip_info = {
                 "mediaPoolItem": item,
                 "startFrame": start,
-                "endFrame": end,
+                "endFrame": start + src_frames - 1,
                 "mediaType": 1,
             }
             if placed:
                 clip_info["trackIndex"] = 1
-                clip_info["recordFrame"] = record_base + int(
-                    round(entry.record_start * fps)
-                )
+                clip_info["recordFrame"] = record_base + rec_in
             if not pool.AppendToTimeline([clip_info]):
                 if placed:
                     # This Resolve rejects positioned placement — retry the
@@ -2216,10 +2221,16 @@ class ResolveBridge:
         music_item = by_path[plan.music_path]
         music_fps = _clip_native_fps(music_item, fps)
         music_offset = _clip_source_offset(music_item, 0.0, music_fps)
+        # The plan cuts to the song's BEST window (plan.music_start), not
+        # its intro — starting the audio at source 0 would put every cut
+        # beside the beat.
+        music_in = music_offset + int(
+            round(float(getattr(plan, "music_start", 0.0) or 0.0) * music_fps)
+        )
         music_info = {
             "mediaPoolItem": music_item,
-            "startFrame": music_offset,
-            "endFrame": music_offset + int(round(plan.duration * music_fps)) - 1,
+            "startFrame": music_in,
+            "endFrame": music_in + int(round(plan.duration * music_fps)) - 1,
             "mediaType": 2,
         }
         if placed:
@@ -2269,9 +2280,11 @@ class ResolveBridge:
         ``timelineResolutionWidth``/``Height`` keys — Resolve's SetSetting
         takes STRING values), falling back to the project-level
         ``SetSetting`` when the timeline refuses (older Resolve versions
-        return False there). Then, for the cinemascope presets (``cine*``),
-        every clip on video track 1 gets ``SetProperty("Scaling", 1)`` —
-        "scale full frame with crop". Every refusal is non-fatal: each step
+        return False there). Then every clip on video track 1 gets explicit
+        scaling: ``SetProperty("Scaling", 1)`` ("scale full frame with
+        crop") for the cinemascope presets, ``("Scaling", 3)`` (fill) for
+        everything else, so mismatched footage never sits small in the
+        frame or behind bars. Every refusal is non-fatal: each step
         contributes at most ONE summarized message to ``warnings``.
         """
         width, height = size
@@ -2284,14 +2297,26 @@ class ResolveBridge:
                     "project setting) — set Project Settings > Timeline "
                     "resolution by hand."
                 )
-        if canvas.startswith("cine"):
-            failed, total = _set_crop_scaling(timeline)
-            if failed:
+        # Every canvas gets explicit per-clip scaling: mismatched footage
+        # (4:3 action cams, 16:9 in a 9:16 or 2.39:1 frame, HD files on a
+        # UHD timeline) must FILL the frame, never sit small in the middle
+        # or behind bars. Cinemascope keeps "scale full frame with crop";
+        # everything else fills (aspect preserved, overflow cropped).
+        mode = 1 if canvas.startswith("cine") else 3
+        failed, total = _set_clip_scaling(timeline, mode)
+        if failed:
+            if mode == 1:
                 warnings.append(
                     f"could not set 'scale full frame with crop' on {failed} "
                     f"of {total} clips — for the cinemascope look, set "
                     "Project Settings > Image Scaling > 'Scale full frame "
                     "with crop' by hand."
+                )
+            else:
+                warnings.append(
+                    f"could not set fill-the-frame scaling on {failed} of "
+                    f"{total} clips — if footage sits small or behind bars, "
+                    "set the clips' Scaling to 'Fill' in the Inspector."
                 )
 
 
@@ -2331,15 +2356,20 @@ def _set_project_resolution(project: Any, width: int, height: int) -> bool:
     return bool(ok_width and ok_height)
 
 
-def _set_crop_scaling(timeline: Any) -> tuple[int, int]:
-    """``SetProperty("Scaling", 1)`` (= "scale full frame with crop") on every
-    video-track-1 item. Returns ``(failed, total)`` — per-item failures are
-    counted, never raised, so the caller can emit ONE summarized warning."""
+def _set_clip_scaling(timeline: Any, mode: int) -> tuple[int, int]:
+    """``SetProperty("Scaling", mode)`` on every video-track-1 item.
+
+    Modes per the scripting API: 0 project default, 1 "scale full frame
+    with crop" (the cinemascope look), 2 fit, 3 fill (aspect preserved,
+    overflow cropped — the no-bars choice for mismatched footage), 4
+    stretch. Returns ``(failed, total)`` — per-item failures are counted,
+    never raised, so the caller can emit ONE summarized warning.
+    """
     try:
         if int(timeline.GetTrackCount("video") or 0) < 1:
             return 0, 0
         items = list(timeline.GetItemListInTrack("video", 1) or [])
-    except Exception:  # noqa: BLE001 - enumeration refused: nothing to crop
+    except Exception:  # noqa: BLE001 - enumeration refused: nothing to scale
         return 0, 0
     failed = 0
     for item in items:
@@ -2347,7 +2377,7 @@ def _set_crop_scaling(timeline: Any) -> tuple[int, int]:
         ok = False
         if callable(setter):
             try:
-                ok = bool(setter("Scaling", 1))
+                ok = bool(setter("Scaling", mode))
             except Exception:  # noqa: BLE001 - one bad item must not stop the rest
                 ok = False
         if not ok:

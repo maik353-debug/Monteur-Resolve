@@ -829,7 +829,7 @@ def test_build_timeline_canvas_cine_sets_resolution_and_crop() -> None:
     assert warnings == []
 
 
-def test_build_timeline_canvas_uhd_sets_resolution_without_crop() -> None:
+def test_build_timeline_canvas_uhd_sets_resolution_and_fill() -> None:
     bridge, project = make_bridge([standard_timeline()])
     warnings: list[str] = []
     bridge.build_timeline_from_plan(
@@ -841,9 +841,10 @@ def test_build_timeline_canvas_uhd_sets_resolution_without_crop() -> None:
         ("timelineResolutionWidth", "3840"),
         ("timelineResolutionHeight", "2160"),
     ]
-    # 16:9 canvases never touch the clips' scaling.
+    # Non-cine canvases FILL the frame (mode 3): mismatched footage must
+    # never sit small in the middle or behind bars.
     for item in created._tracks["video"][0]:
-        assert item.properties == []
+        assert item.properties == [("Scaling", 3)]
     assert warnings == []
 
 
@@ -1255,6 +1256,56 @@ def test_build_timeline_uses_clip_native_frame_space() -> None:
     music = pool.appended[3]
     assert (music["startFrame"], music["endFrame"]) == (0, 99)
     assert music["recordFrame"] == 0
+
+
+def test_build_timeline_music_starts_at_the_plans_song_window() -> None:
+    # The plan cuts to the song's BEST window (music_start), not its intro.
+    # Playing the song from 0 put every cut beside the beat — the second
+    # real-footage field bug.
+    bridge, project = make_bridge([standard_timeline()])
+    plan = make_plan()
+    plan.music_start = 42.0
+    bridge.build_timeline_from_plan(plan, fps=25.0)
+    music = project.media_pool.appended[-1]
+    assert music["mediaType"] == 2
+    # 42.0s into the song at 25 fps (audio has no FPS property -> timeline
+    # fps), for the plan's 4.0s duration; placed at record 0.
+    assert (music["startFrame"], music["endFrame"]) == (1050, 1149)
+    assert music["recordFrame"] == 0
+
+
+def test_build_timeline_tiles_without_one_frame_gaps() -> None:
+    # Beat-aligned record decimals used to round source and record
+    # independently, leaving 1-frame black slivers between the cuts.
+    bridge, project = make_bridge([standard_timeline()])
+    plan = MontagePlan(
+        music_path="/music/song.wav",
+        duration=3.72,
+        entries=[
+            MontageEntry(
+                clip_path="/media/a.mov", source_start=0.0, source_end=1.24,
+                record_start=0.0, record_end=1.24, score=1.0,
+            ),
+            MontageEntry(
+                clip_path="/media/a.mov", source_start=4.0, source_end=5.24,
+                record_start=1.24, record_end=2.48, score=0.9,
+            ),
+            MontageEntry(
+                clip_path="/media/a.mov", source_start=7.0, source_end=8.24,
+                record_start=2.48, record_end=3.72, score=0.8,
+            ),
+        ],
+    )
+    bridge.build_timeline_from_plan(plan, fps=25.0)
+    video = project.media_pool.appended[:3]
+    # Record positions and source lengths tile exactly: each item's record
+    # frame plus its frame count is the next item's record frame.
+    positions = [c["recordFrame"] for c in video]
+    lengths = [c["endFrame"] - c["startFrame"] + 1 for c in video]
+    assert positions == [0, 31, 62]
+    assert lengths == [31, 31, 31]
+    assert positions[0] + lengths[0] == positions[1]
+    assert positions[1] + lengths[1] == positions[2]
 
 
 def test_build_timeline_record_base_uses_timeline_start_frame() -> None:
