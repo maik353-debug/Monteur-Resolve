@@ -484,8 +484,9 @@ def create_montage(
     "cine"/"cine-uhd" 2.39:1 — it applies to the direct Resolve build
     too (the timeline is sized to the preset, and the cine presets
     auto-set "scale full frame with crop" on the footage), not just the
-    file export. ``allow_repeats`` lifts the cap that stops
-    footage repeating beyond 1.5x the unique material. ``cut_lead``
+    file export. ``allow_repeats`` lifts the zero-repeat rule that
+    otherwise shortens the cut to the unique material instead of
+    repeating footage. ``cut_lead``
     places cuts that many seconds before the beat. ``see=True`` asks
     Claude vision to label the moments first (needs the anthropic
     package and ANTHROPIC_API_KEY on this machine) so the plan casts by

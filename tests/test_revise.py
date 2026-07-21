@@ -522,3 +522,97 @@ def test_cli_pin_accepts_mmss_and_seconds():
         _parse_pin("vier")
     with pytest.raises(SystemExit):
         _parse_pin("-3")
+
+
+# --- zero-repeat promise across revisions (repeats off) --------------------------
+
+
+def _shared_material_pairs(plan):
+    from monteur.montage import _shares_material
+
+    pairs = []
+    for i, a in enumerate(plan.entries):
+        for b in plan.entries[i + 1:]:
+            if _shares_material(a, b):
+                pairs.append((a.record_start, b.record_start))
+    return pairs
+
+
+def test_snappier_region_replan_stays_repeat_free_when_repeats_off():
+    kwargs = dict(order=CHRONOLOGICAL, cut_lead=0.0, pace=2.0)
+    original = plan_montage(make_reports(), make_high_music(), **kwargs)
+    assert _shared_material_pairs(original) == []
+    rev = Revision(region=(0.5, 1.0), pace_scale=SNAPPY_SCALE)
+    revised = revise_plan(
+        original, make_reports(), make_high_music(), rev, **kwargs
+    )
+    # the splice restores originals next to an independent re-plan — with
+    # repeats off the result must still show zero repeated material
+    assert _shared_material_pairs(revised) == []
+    pairs = [(e.clip_path, round(e.source_start, 3)) for e in revised.entries]
+    assert len(pairs) == len(set(pairs))
+
+
+def test_pinned_shot_never_doubles_material_when_repeats_off():
+    kwargs = dict(order=CHRONOLOGICAL, cut_lead=0.0)
+    original = plan_montage(make_reports(), make_music(), **kwargs)
+    rev = Revision(region=(0.5, 1.0), pace_scale=SNAPPY_SCALE)
+    revised = revise_plan(
+        original, make_reports(), make_music(), rev, pinned=[0.5], **kwargs
+    )
+    assert _shared_material_pairs(revised) == []
+
+
+def test_allow_repeats_true_skips_the_revision_dedupe():
+    # With repeats allowed the revision keeps whatever the splice produced
+    # — no "no repeats:" note, no re-sourcing.
+    kwargs = dict(order=CHRONOLOGICAL, cut_lead=0.0, allow_repeats=True, pace=2.0)
+    original = plan_montage(make_reports(), make_high_music(), **kwargs)
+    rev = Revision(region=(0.5, 1.0), pace_scale=SNAPPY_SCALE)
+    revised = revise_plan(
+        original, make_reports(), make_high_music(), rev, **kwargs
+    )
+    assert not any(n.startswith("no repeats:") for n in revised.notes)
+
+
+def test_dedupe_repeats_resources_or_drops_duplicates():
+    from monteur.montage import MontageEntry, MontagePlan
+    from monteur.revise import _dedupe_repeats
+
+    def dup_plan():
+        return MontagePlan(
+            music_path="/music/song.wav",
+            duration=4.0,
+            entries=[
+                MontageEntry("/f/a.mp4", 1.0, 3.0, 0.0, 2.0, 0.9),
+                MontageEntry("/f/a.mp4", 1.0, 3.0, 2.0, 4.0, 0.9),
+            ],
+        )
+
+    # spare material exists: the later duplicate is re-sourced onto it
+    plan = dup_plan()
+    reports = [
+        ClipReport(
+            path="/f/a.mp4",
+            duration=30.0,
+            moments=[Moment(1.0, 3.0, 0.9), Moment(10.0, 14.0, 0.6)],
+        )
+    ]
+    resourced, dropped = _dedupe_repeats(plan, reports, [])
+    assert (resourced, dropped) == (1, 0)
+    assert _shared_material_pairs(plan) == []
+    assert plan.entries[1].source_start == pytest.approx(10.0)
+    assert plan.entries[1].source_end == pytest.approx(12.0)
+    assert plan.entries[1].record_start == pytest.approx(2.0)  # slot kept
+
+    # no spare material anywhere: the duplicate is dropped, never kept
+    plan = dup_plan()
+    reports = [
+        ClipReport(
+            path="/f/a.mp4", duration=3.0, moments=[Moment(1.0, 3.0, 0.9)]
+        )
+    ]
+    resourced, dropped = _dedupe_repeats(plan, reports, [])
+    assert (resourced, dropped) == (0, 1)
+    assert len(plan.entries) == 1
+    assert _shared_material_pairs(plan) == []

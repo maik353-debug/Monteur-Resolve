@@ -244,11 +244,12 @@ def test_distill_no_music_path():
 
 
 def test_distill_repetition_guard_stays_active():
-    # One 4s shot cannot honestly fill a 60s trailer: the guard caps the cut.
+    # One 4s shot cannot honestly fill a 60s trailer: with repeats off the
+    # cut shrinks to the unique material itself — zero repeats.
     short = Timeline("tiny", 25.0, clips=[vclip("/footage/only.mp4", 0, 100, 0)])
     plan = distill(short, None, target=60.0)
-    assert plan.duration <= 4.0 * 1.5 + 1e-6
-    assert any("capped the cut" in note for note in plan.notes)
+    assert plan.duration <= 4.0 + 1e-6
+    assert any("length reduced" in note for note in plan.notes)
 
 
 def test_distill_forwards_plan_kwargs():

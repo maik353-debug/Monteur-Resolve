@@ -58,11 +58,16 @@ def test_clear_pulse_beats_woolly_pulse():
 
 
 def test_length_fit_prefers_song_that_needs_no_repeats():
-    fits = rate_song(_music(duration=50.0), _footage(material=40.0))
+    # A perfect fit means the song fits INSIDE the unique material — the
+    # planner never lets a cut outgrow it with repeats off.
+    fits = rate_song(_music(duration=40.0), _footage(material=40.0))
+    slightly_long = rate_song(_music(duration=50.0), _footage(material=40.0))
     long = rate_song(_music(duration=180.0), _footage(material=40.0))
     assert fits.parts["length"] == 1.0
+    assert any("nothing has to repeat" in r for r in fits.reasons)
+    assert 0.6 < slightly_long.parts["length"] < 1.0
     assert long.parts["length"] < 0.6
-    assert any("repeat" in r for r in long.reasons)
+    assert any("shortened cut" in r and "repeat" in r for r in long.reasons)
 
 
 def test_length_fit_against_target_duration():

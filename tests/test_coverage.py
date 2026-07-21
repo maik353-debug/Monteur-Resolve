@@ -75,7 +75,8 @@ class TestCoverageBasics:
         assert facts["moments"] == 3
         # unique material: (6-1) + (12-10) + (5-2) = 10 s
         assert facts["usable_seconds"] == pytest.approx(10.0)
-        assert facts["max_comfortable_seconds"] == pytest.approx(15.0)
+        # the no-repeat maximum IS the usable material — no 1.5x anymore
+        assert facts["max_comfortable_seconds"] == pytest.approx(10.0)
         assert facts["roles"] == {"opener": 1, "build": 1, "climax": 1, "closer": 0}
         assert facts["heroes"] == 2  # hero >= 0.5
         assert facts["groups"] == 2  # "road" + "rest"
@@ -89,15 +90,18 @@ class TestCoverageBasics:
         # usable time = 0.8*30 + 0.5*20 = 34 of 50 -> 32% unusable
         assert facts["unusable_share"] == pytest.approx(0.32)
 
-    def test_repetition_risk_uses_the_planner_tolerance(self):
+    def test_repetition_risk_uses_the_planner_no_repeat_rule(self):
         risky = coverage_basics(make_labeled_reports(), "auto", target_seconds=30.0)
         assert risky["target_seconds"] == pytest.approx(30.0)
-        assert risky["repetition_risk"] is True  # 30 > 10 x 1.5
-        assert any("repeat" in f for f in risky["findings"])
+        assert risky["repetition_risk"] is True  # 30 > 10s of unique material
+        assert any("shortens to the material" in f for f in risky["findings"])
 
-        fine = coverage_basics(make_labeled_reports(), "auto", target_seconds=12.0)
-        assert fine["repetition_risk"] is False  # 12 <= 15
-        assert not any("repeat" in f for f in fine["findings"])
+        fine = coverage_basics(make_labeled_reports(), "auto", target_seconds=10.0)
+        assert fine["repetition_risk"] is False  # 10 <= 10
+        assert not any("shortens to the material" in f for f in fine["findings"])
+
+        over = coverage_basics(make_labeled_reports(), "auto", target_seconds=12.0)
+        assert over["repetition_risk"] is True  # 12 > 10: the old 1.5x grace is gone
 
     def test_zero_closers_is_a_finding_when_vision_ran(self):
         facts = coverage_basics(make_labeled_reports())

@@ -11,8 +11,9 @@ possible. It is the PRE-CUT sibling of Director's Notes
 Two functions, two layers:
 
 * :func:`coverage_basics` — deterministic facts, no AI, always works:
-  usable seconds vs the target length (the montage planner's own 1.5x
-  repetition tolerance decides when footage would repeat visibly), role
+  usable seconds vs the target length (the montage planner's own
+  no-repeat rule: with repeats off a cut never outgrows the unique
+  material, so a longer target means a shortened cut), role
   coverage (openers/closers/heroes from the vision roles — zero openers
   is a finding), scene-group variety (everything in one group is a
   finding) and the unusable share. Pure and testable.
@@ -124,7 +125,7 @@ def coverage_basics(
 
         {"style": str, "clips": int, "moments": int,
          "usable_seconds": float,          # deduplicated moment material
-         "max_comfortable_seconds": float, # usable x the 1.5 repeat tolerance
+         "max_comfortable_seconds": float, # the no-repeat maximum (== usable)
          "unusable_share": float,          # 0..1 across all clip durations
          "roles": {"opener": n, "build": n, "climax": n, "closer": n},
          "heroes": int,                    # moments with hero >= 0.5
@@ -135,8 +136,11 @@ def coverage_basics(
          "findings": [str, ...]}           # plain-language flags
 
     ``usable_seconds`` reuses the montage planner's own unique-material
-    measure, and ``repetition_risk`` its 1.5x tolerance: a target longer
-    than ``usable x 1.5`` repeats footage too visibly. The role/group
+    measure, and ``repetition_risk`` its no-repeat rule: a target longer
+    than the usable material either shortens the cut (repeats off, the
+    default) or visibly repeats footage (repeats on) —
+    ``max_comfortable_seconds`` therefore equals the usable material,
+    the honest maximum a repeat-free cut can reach. The role/group
     findings (zero openers, zero closers, no hero, everything one scene
     group) only fire when vision annotations exist — unlabeled material
     is unknown, not missing.
@@ -170,7 +174,7 @@ def coverage_basics(
         "clips": len(reports),
         "moments": moments,
         "usable_seconds": _r(usable),
-        "max_comfortable_seconds": _r(usable * _montage._REPEAT_TOLERANCE),
+        "max_comfortable_seconds": _r(usable),
         "unusable_share": _r(unusable_share),
         "roles": roles,
         "heroes": heroes,
@@ -181,12 +185,13 @@ def coverage_basics(
     findings: list[str] = []
     if target_seconds is not None and target_seconds > _EPS:
         facts["target_seconds"] = _r(target_seconds)
-        risk = target_seconds > usable * _montage._REPEAT_TOLERANCE + _EPS
+        risk = target_seconds > usable + _EPS
         facts["repetition_risk"] = risk
         if risk:
             findings.append(
                 f"only {usable:.0f}s of unique material for a "
-                f"{target_seconds:.0f}s target — footage will repeat visibly"
+                f"{target_seconds:.0f}s target — the cut shortens to the "
+                "material (or repeats footage if repeats are allowed)"
             )
     if total_duration > _EPS and unusable_share >= 0.5:
         findings.append(

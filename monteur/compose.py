@@ -60,7 +60,11 @@ from pathlib import Path
 
 from monteur import ai
 from monteur import montage as _montage
-from monteur.montage import MontagePlan, plan_montage
+from monteur.montage import (
+    MontagePlan,
+    _shares_material,  # the shared zero-repeat overlap rule
+    plan_montage,
+)
 from monteur.music import MusicAnalysis
 from monteur.sift import ClipReport, Moment
 
@@ -267,6 +271,8 @@ def compose_context(
     music: MusicAnalysis | None = None,
     style: str = "auto",
     locked: set[int] | frozenset[int] = frozenset(),
+    *,
+    allow_repeats: bool = True,
 ) -> dict:
     """The JSON-ready dossier the composer prompt carries.
 
@@ -286,6 +292,11 @@ def compose_context(
     slots ``"locked": true`` in the dossier — the prompt tells Claude to
     compose around them, and :func:`_apply_cast` ignores any cast for
     them regardless. Empty (the default) leaves the dossier unchanged.
+
+    ``allow_repeats=False`` (the plan was built with repeats off) sets
+    ``"reuse_forbidden": true`` in the dossier: the prompt then forbids
+    reusing a moment and :func:`_apply_cast` rejects reused casts to the
+    heuristic fallback. The default (True) leaves the dossier unchanged.
 
     With music, the dossier also carries the adaptive music window:
     ``music_opening`` (the song's own opening character from
@@ -364,6 +375,8 @@ def compose_context(
         "inventory": inventory,
         "vision": _has_vision(reports),
     }
+    if not allow_repeats:
+        context["reuse_forbidden"] = True
     if music is not None:
         from monteur.music import intro_profile
 
@@ -424,13 +437,22 @@ def _build_prompt(context: dict, style: str, brief: str) -> str:
             "`music_in_candidates` (seconds); omit the field to keep the "
             "engine's choice."
         )
+    if context.get("reuse_forbidden"):
+        reuse_rule = (
+            "- repeats are OFF for this cut: NEVER reuse a moment — every "
+            "slot must cast distinct material, and a cast repeating "
+            "material already used in another slot is rejected (that slot "
+            "falls back to the engine's own pick);\n"
+        )
+    else:
+        reuse_rule = "- reuse a moment only when the slot count leaves no alternative;\n"
     parts.append(
         "Compose the cut:\n"
         "- cast EVERY slot: pick the clip and the `start` second whose "
         "material fills the slot's full `seconds` from `start`;\n"
         "- `start` must lie inside one of that clip's inventory windows "
         "and leave enough material for the slot;\n"
-        "- reuse a moment only when the slot count leaves no alternative;\n"
+        + reuse_rule +
         "- slots marked `drop` want the hero material; slots marked "
         "`after_dip` hit out of black — open them strong;\n"
         "- slots with noticeably more `seconds` than their neighbours are "
@@ -466,12 +488,115 @@ def _overlapping_moment(
     return best
 
 
+def _enforce_no_reuse(
+    entries: list,
+    heuristic: list,
+    reports: list[ClipReport],
+    cast_slots: set[int],
+    locked: set[int] | frozenset[int],
+    fallbacks: list[tuple[int, str]],
+) -> tuple[int, list[tuple[int, int]]]:
+    """Make the composed cut repeat-free, in place (repeats OFF only).
+
+    Resolves every pair of entries sharing material (:func:`_shares_material`)
+    with a clear precedence — the composer's explicit choice is worth
+    saving, the engine's picks are fungible:
+
+    * **cast vs cast** — the later cast is rejected to its heuristic
+      entry (a per-slot ``fallbacks`` note; the reverted heuristic is
+      re-checked against everything on the next pass).
+    * **cast vs engine pick** — the ENGINE pick moves: it is re-sourced
+      to unused moment material (:func:`monteur.montage._find_unused_window`;
+      a shorter span keeps the record slot with the fill's own gap
+      semantics). Only when no unused span remains is the cast rejected
+      instead.
+    * **cast vs locked slot** — the arrangement is final: the cast is
+      rejected.
+    * **engine vs engine** (reachable only after reverts) — the later
+      one is re-sourced; two LOCKED slots sharing material are the
+      editor's own arrangement demanding reuse and are left alone.
+
+    Mutates ``entries``, ``cast_slots`` and ``fallbacks``; returns
+    ``(re-sourced count, unresolvable pairs)`` — an unresolvable pair
+    (no material anywhere) is left as-is but reported, never silent.
+    """
+    resourced = 0
+    stuck: list[tuple[int, int]] = []
+    skip: set[tuple[int, int]] = set()
+
+    def first_collision() -> tuple[int, int] | None:
+        for a in range(len(entries)):
+            for b in range(a + 1, len(entries)):
+                if (a, b) in skip:
+                    continue
+                if a in locked and b in locked:
+                    continue  # the editor's own arrangement may reuse
+                if _shares_material(entries[a], entries[b]):
+                    return a, b
+        return None
+
+    def resource(idx: int) -> bool:
+        nonlocal resourced
+        entry = entries[idx]
+        needed = entry.record_end - entry.record_start
+        used = [
+            (e.clip_path, e.source_start, e.source_end)
+            for k, e in enumerate(entries)
+            if k != idx
+        ]
+        found = _montage._find_unused_window(reports, used, needed)
+        if found is None:
+            return False
+        report, moment, start, length = found
+        entries[idx] = replace(
+            entry,
+            clip_path=report.path,
+            source_start=start,
+            source_end=start + length,
+            score=moment.score,
+            media_start=report.media_start,
+            clip_duration=report.duration,
+            label=getattr(moment, "label", ""),
+        )
+        resourced += 1
+        return True
+
+    def reject(idx: int, other: int) -> None:
+        entries[idx] = replace(heuristic[idx])
+        cast_slots.discard(idx)
+        fallbacks.append(
+            (idx, f"repeats are off — that material already plays in slot {other + 1}")
+        )
+
+    guard = 4 * len(entries) + 8  # bounded by construction; belt and braces
+    while guard > 0:
+        guard -= 1
+        pair = first_collision()
+        if pair is None:
+            break
+        i, j = pair
+        ci, cj = i in cast_slots, j in cast_slots
+        if ci and cj:
+            reject(j, i)  # the later cast loses
+        elif ci or cj:
+            cast, engine = (i, j) if ci else (j, i)
+            if engine in locked or not resource(engine):
+                reject(cast, engine)
+        else:
+            movable = j if j not in locked else i
+            if not resource(movable):
+                stuck.append((i, j))
+                skip.add((i, j))
+    return resourced, stuck
+
+
 def _apply_cast(
     plan: MontagePlan,
     data: dict,
     reports: list[ClipReport],
     locked: set[int] | frozenset[int] = frozenset(),
     music_in_candidates: list[float] | None = None,
+    allow_repeats: bool = True,
 ) -> None:
     """Apply a parsed composer reply to the plan, in place.
 
@@ -492,6 +617,16 @@ def _apply_cast(
     candidate within :data:`_MUSIC_IN_MATCH` seconds and lands in
     ``plan.music_in`` with a note; anything else keeps the engine's own
     window with a note saying why.
+
+    ``allow_repeats=False`` extends the zero-repeat promise to the
+    composer via :func:`_enforce_no_reuse`: entries sharing material
+    (same clip, >= :data:`monteur.montage._REUSE_OVERLAP_SHARE` overlap of the shorter
+    window) are resolved — a cast reusing another cast's or a locked
+    slot's material is rejected to the heuristic fallback with a
+    per-slot note; a cast colliding with an engine pick keeps the cast
+    and re-sources the engine pick to unused material (rejecting the
+    cast only when nothing unused remains). ``True`` (the default)
+    keeps deliberate reuse, noted as before.
     """
     by_name: dict[str, ClipReport] = {}
     for report in reports:
@@ -565,6 +700,22 @@ def _apply_cast(
             label=getattr(moment, "label", ""),
         )
         cast_slots.add(i)
+
+    if not allow_repeats and cast_slots:
+        resourced, stuck = _enforce_no_reuse(
+            entries, plan.entries, reports, cast_slots, locked, fallbacks
+        )
+        if resourced:
+            plan.notes.append(
+                f"composer: {resourced} engine pick"
+                + ("s" if resourced != 1 else "")
+                + " re-sourced so the cast stays repeat-free"
+            )
+        for i, j in stuck:
+            plan.notes.append(
+                f"composer: slots {i + 1} and {j + 1} share material — no "
+                "unused footage left to re-source (repeats are off)"
+            )
     plan.entries = entries
 
     # Reuse accounting: Claude may repeat material, but only knowingly —
@@ -702,6 +853,12 @@ def compose_montage(
     and immune to recasting — so Claude composes the remaining slots,
     titles and story around the editor's order.
 
+    ``allow_repeats`` in ``plan_kwargs`` (default False) carries the
+    zero-repeat promise through the composer stage: with repeats off the
+    dossier says reuse is forbidden and a reused cast is rejected to the
+    heuristic entry (:func:`_apply_cast`); with ``allow_repeats=True``
+    Claude may still reuse material deliberately, noted as before.
+
     ``strict=False`` (default): an unreachable backend or unparseable
     reply returns the heuristic plan with a ``"composer unavailable"``
     note — never raises. ``strict=True``: those failures raise
@@ -718,7 +875,14 @@ def compose_montage(
     arrangement = plan_kwargs.get("arrangement") or []
     locked = frozenset(range(min(len(arrangement), len(plan.entries))))
 
-    context = compose_context(plan, reports, music, style=style, locked=locked)
+    # Repeats off (plan_montage's default) extends the zero-repeat promise
+    # to the composer: the dossier says reuse is forbidden and _apply_cast
+    # rejects reused casts to the heuristic fallback.
+    allow_repeats = bool(plan_kwargs.get("allow_repeats", False))
+    context = compose_context(
+        plan, reports, music, style=style, locked=locked,
+        allow_repeats=allow_repeats,
+    )
     prompt = _build_prompt(context, style, brief)
     try:
         raw = ai.complete(prompt, system=_SYSTEM, json_schema=COMPOSE_SCHEMA)
@@ -747,6 +911,7 @@ def compose_montage(
         music_in_candidates=[
             float(t) for t in context.get("music_in_candidates") or []
         ],
+        allow_repeats=allow_repeats,
     )
     if not context.get("vision"):
         plan.notes.append(

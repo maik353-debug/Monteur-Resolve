@@ -14,11 +14,13 @@ Five signals, each 0..1, weighted into one score per song:
   with a woolly pulse produces a woolly montage no matter what.
 * Length fit (0.30) — the song's duration against the footage's unique
   material (deduplicated moment seconds, same measure the repetition guard
-  uses). Ideal: the song fits inside unique x _REPEAT_TOLERANCE, so nothing
-  has to repeat. Longer songs taper off; Monteur can cut a montage SHORTER
-  than the song (best_energy_window), so moderate oversize is only a mild
-  penalty. When ``target_duration`` is given it replaces the material
-  measure: the song must simply be at least that long.
+  uses). Ideal: the song fits inside the unique material itself, so nothing
+  has to repeat (repeats are off by default and the planner shortens the
+  cut rather than recycle footage). Longer songs taper off; Monteur can cut
+  a montage SHORTER than the song (best_energy_window), so moderate
+  oversize is only a mild penalty. When ``target_duration`` is given it
+  replaces the material measure: the song must simply be at least that
+  long.
 * Tempo fit (0.20) — fast footage wants a fast song. The footage's mean
   moment motion (normalised at _MOTION_FAST_PX px/frame ~ "fast") maps to a
   preferred BPM inside 90..150; the song is scored on a Gaussian around it.
@@ -36,7 +38,7 @@ import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from monteur.montage import _REPEAT_TOLERANCE, _unique_material
+from monteur.montage import _unique_material
 from monteur.music import MusicAnalysis
 from monteur.sift import ClipReport
 
@@ -114,19 +116,21 @@ def _length_fit(
         return score, f"only {music.duration:.0f}s — shorter than the {target:.0f}s target"
     if unique <= _EPS:
         return 0.5, "footage material unknown"
-    supported = unique * _REPEAT_TOLERANCE
-    if music.duration <= supported + _EPS:
+    # The no-repeat rule: a montage never outgrows the unique material
+    # (repeats off shortens the cut instead of recycling footage), so a
+    # song is a perfect length fit only when it fits INSIDE that material.
+    if music.duration <= unique + _EPS:
         return 1.0, (
             f"{music.duration:.0f}s fits your {unique:.0f}s of material — "
             "nothing has to repeat"
         )
-    # Oversize tapers: 2x supported ~ 0.5. Monteur can still cut the song
-    # short, so this is a soft penalty, not a veto.
-    ratio = music.duration / supported
+    # Oversize tapers: 2x the material ~ 0.5. Monteur can still cut the
+    # song short, so this is a soft penalty, not a veto.
+    ratio = music.duration / unique
     score = max(0.0, 1.0 - 0.5 * (ratio - 1.0))
     return score, (
         f"{music.duration:.0f}s is long for your {unique:.0f}s of material — "
-        "expect a shortened cut or repeats"
+        "expect a shortened cut (or allow repeats)"
     )
 
 

@@ -465,7 +465,8 @@ def test_composer_leaves_arranged_slots_locked(monkeypatch):
         {"clip": "a.mp4", "start": 40.0},
     ]
     plain = plan_montage(
-        make_big_reports(), make_music(), cut_lead=0.0, arrangement=arrangement
+        make_big_reports(), make_music(), cut_lead=0.0, arrangement=arrangement,
+        allow_repeats=True,  # every cast reuses b.mp4@10 — deliberate here
     )
     n = len(plain.entries)
     reply = {
@@ -482,7 +483,8 @@ def test_composer_leaves_arranged_slots_locked(monkeypatch):
 
     monkeypatch.setattr(ai, "complete", fake)
     plan = compose_montage(
-        make_big_reports(), make_music(), cut_lead=0.0, arrangement=arrangement
+        make_big_reports(), make_music(), cut_lead=0.0, arrangement=arrangement,
+        allow_repeats=True,
     )
     entries = sorted(plan.entries, key=lambda e: e.record_start)
     assert entries[0].clip_path == "/footage/c.mp4"  # locked
@@ -522,3 +524,28 @@ def test_cli_create_parser_accepts_arrangement():
         ["create", "/footage", "/music/song.wav", "-o", "out.fcpxml"]
     )
     assert args.arrangement == ""
+
+
+# --- arrangement + autofill under the zero-repeat promise ------------------------
+
+
+def test_arrangement_autofill_never_repeats_when_repeats_off():
+    # Two arranged scenes up front; the autofill serves the rest. With
+    # repeats off the whole cut — arranged AND autofilled — must show zero
+    # duplicate (clip, source_start) pairs and no shared source material.
+    from monteur.montage import _shares_material
+
+    arrangement = [
+        {"clip": "b.mp4", "start": 15.0},
+        {"clip": "a.mp4", "start": 1.0},
+    ]
+    plan = plan_montage(
+        make_reports(), make_music(), cut_lead=0.0, arrangement=arrangement
+    )
+    assert plan.entries
+    pairs = [(e.clip_path, round(e.source_start, 3)) for e in plan.entries]
+    assert len(pairs) == len(set(pairs))
+    for i, a in enumerate(plan.entries):
+        for b in plan.entries[i + 1:]:
+            assert not _shares_material(a, b)
+    assert not any("footage repeats" in n for n in plan.notes)

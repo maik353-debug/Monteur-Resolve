@@ -29,8 +29,12 @@ Slotting algorithm
    short, unconsumed tails are sliced first — the pool is scanned cyclically
    for the next moment with unused material and the next non-overlapping
    slot-length piece is taken (a long moment thus splits into several
-   pieces). Only when *no* moment has unused material left is a moment
-   rewound and its footage repeated, and that is noted.
+   pieces; distinct footage, never a repeat). Only when *no* moment has
+   unused material left do the two modes part ways: with
+   ``allow_repeats=True`` a moment is rewound and its footage repeated,
+   and that is noted; with repeats OFF (the default) nothing is ever
+   rewound — the montage ends at the last slot that fresh material could
+   fill (see Repetition guard below).
 5. Each entry takes ``slot length`` seconds starting at
    ``moment.start + consumed``. If the remaining piece is shorter than the
    slot it is padded by extending toward the clip's end; if even that is
@@ -183,15 +187,39 @@ the music fade in Resolve.
 
 Repetition guard
 ----------------
-Stretching little footage over a long song repeats material painfully
-(36 clips over a 2:30 song "extrem viel wiederholt"). ``plan_montage``
-merges each clip's overlapping moments, sums the deduplicated material,
-and caps the montage length at ``unique_material x _REPEAT_TOLERANCE``
-(1.5) when the requested length exceeds it — the end_on_phrase snap then
-refines the capped length, and the strongest-window logic works from it.
-A note explains the cap; ``allow_repeats=True`` (CLI ``--allow-repeats``)
-disables it. The cap never lengthens a montage and never applies when
-the request is already below it.
+``allow_repeats=False`` (the default) is a PROMISE: zero repeated
+moments — the checkbox says clips may not repeat, so they never do.
+Three mechanisms enforce it:
+
+* **Length cap.** ``plan_montage`` merges each clip's overlapping
+  moments, sums the deduplicated material, and caps the montage length
+  at exactly that unique material when the request exceeds it — the
+  montage gets SHORTER instead of recycling. The end_on_phrase snap then
+  refines the capped length and the strongest-window logic works from
+  it. The note names the deal ("length reduced to ...s — shoot more or
+  pass allow_repeats=True / --allow-repeats"). The cap never lengthens a
+  montage and never applies when the request is already below it.
+* **Pool trim.** Overlapping pool moments (sift output never overlaps,
+  but hand-built reports and distilled timelines can) are trimmed per
+  clip so no two moments claim the same frames.
+* **Grid truncation.** Should the fill still run dry (padding losses,
+  short clips), it NEVER rewinds: the grid is cut at the last slot fresh
+  material could serve — every slot boundary already sits on the musical
+  grid, and the ending additionally snaps down to a phrase/downbeat when
+  one lies within tolerance — and an honest note lands in the plan
+  ("length reduced to 28.5s: 19 distinct moments, no repeats allowed —
+  shoot more or allow repeats").
+
+``allow_repeats=True`` (CLI ``--allow-repeats``) keeps the old,
+unlimited behavior: the full requested length, tails first, then honest
+rewinds ("some footage repeats").
+
+Perceived variety
+-----------------
+Even a repeat-free cut can FEEL repetitive when most shots come from one
+clip. When more than :data:`_VARIETY_SHARE` (60%) of a cut's entries
+share a single source clip, one deterministic note is appended:
+"variety: N of M shots come from one clip — more footage would help".
 
 Cut-ahead lead
 --------------
@@ -348,9 +376,10 @@ _STUTTER_CUTS = 3
 # "auto" rhythm: a longer hold opens each music section (the first multiplier,
 # capped by _opening_hold), then a breath every len(pattern)-th cut.
 _AUTO_PATTERN = (2.0, 1.0, 1.0, 1.0)
-# Repetition guard: a montage longer than (unique material x this factor)
-# repeats footage too visibly and is capped (unless allow_repeats=True).
-_REPEAT_TOLERANCE = 1.5
+# Perceived variety: when more than this share of a cut's entries come from
+# ONE source clip, a note says more footage would help (see the module
+# docstring's Perceived variety section).
+_VARIETY_SHARE = 0.6
 # No-music plans have no beat grid; each phase cuts on a fixed interval of
 # (beats_per_cut x this nominal pseudo-beat) seconds — slow phases every ~3s,
 # fast phases every ~0.75s.
@@ -1671,6 +1700,40 @@ def _pick_reuse(
     return None
 
 
+def _trim_overlapping_pool(pool: list[_PoolItem]) -> list[_PoolItem]:
+    """Per clip, trim pool moments so no two claim the same frames.
+
+    The zero-repeat promise (``allow_repeats=False``) must hold even for
+    pools whose moments overlap within a clip — sift output never does,
+    but hand-built reports and distilled timelines can. Walking each
+    clip's moments in (start, end) order, a moment starting before the
+    clip's running high-water mark is trimmed to start there (a COPY;
+    the caller's reports are never mutated) and a moment fully inside
+    already-claimed footage drops out. Pool order is preserved for the
+    survivors; non-overlapping pools come back untouched (the common
+    case costs one sorted pass).
+    """
+    order = sorted(
+        range(len(pool)),
+        key=lambda i: (pool[i].clip_path, pool[i].moment.start, pool[i].moment.end),
+    )
+    claimed_to: dict[str, float] = {}  # clip path -> high-water mark (seconds)
+    trimmed: dict[int, _PoolItem | None] = {}
+    for i in order:
+        item = pool[i]
+        mark = claimed_to.get(item.clip_path)
+        lo = item.moment.start if mark is None else max(item.moment.start, mark)
+        if item.moment.end - lo <= _EPS:
+            trimmed[i] = None  # fully inside already-claimed footage
+            continue
+        if lo > item.moment.start + _EPS:
+            trimmed[i] = replace(item, moment=replace(item.moment, start=lo))
+        claimed_to[item.clip_path] = max(
+            claimed_to.get(item.clip_path, 0.0), item.moment.end
+        )
+    return [trimmed.get(i, it) for i, it in enumerate(pool) if trimmed.get(i, it) is not None]
+
+
 def _motion_continuity(
     prev_exit: tuple[float, float] | None, entry: tuple[float, float]
 ) -> float:
@@ -1739,7 +1802,8 @@ def _fill(
     pre_used: set[int] | frozenset[int] = frozenset(),
     preset: dict[int, "_PoolItem"] | None = None,
     hook_loop: bool = False,
-) -> tuple[list[MontageEntry], list[str]]:
+    allow_repeats: bool = True,
+) -> tuple[list[MontageEntry], list[str], float | None]:
     """Assign pool moments to slots.
 
     The first pass still consumes every pool moment exactly once, in pool
@@ -1766,8 +1830,16 @@ def _fill(
     passages calm footage. With an all-static pool the term is equal for
     every candidate, so behavior without motion data is unchanged.
 
-    Reuse (pool exhausted) is unchanged — cyclic scan for unconsumed tails,
-    then rewind — except a drop slot still grabs the best remaining material.
+    Reuse (pool exhausted) slices unconsumed tails first — a cyclic scan
+    for the next moment with unused material; distinct footage, never a
+    repeat — and a drop slot still grabs the best remaining material.
+    Only when NO moment has unused material left do the modes differ:
+    ``allow_repeats=True`` rewinds a moment and repeats its footage
+    (noted); ``allow_repeats=False`` NEVER rewinds — filling stops, every
+    entry at/after the first unservable slot is dropped, and the third
+    return value carries that slot's record start so the caller can cut
+    the plan there (None everywhere else). The zero-repeat promise beats
+    the requested length.
 
     ``pre_used`` (pool indices an arrangement already placed) keeps those
     moments out of the first pass — their unconsumed TAILS stay available
@@ -1823,6 +1895,7 @@ def _fill(
         if peak > _EPS:
             motion_norm = [m / peak for m in mags]
     rewound = False
+    short_at: float | None = None  # record start of the first unservable slot
     # Pool indices not yet placed, in pool order (an arrangement's picks
     # are already placed and start consumed).
     unused = [i for i in range(n) if i not in pre_used]
@@ -1978,6 +2051,19 @@ def _fill(
                     )
             if item is None:
                 item = _pick_reuse(pool, visit % n, held)
+            if item is None and not allow_repeats and held:
+                # Repeats are off and only drop-held material remains:
+                # releasing a reservation beats ending the cut early (the
+                # drop slot then pads or gaps — but never repeats).
+                item = _pick_reuse(pool, visit % n)
+            if item is None and not allow_repeats:
+                # Zero-repeat promise: never rewind. The montage ends at
+                # the first slot fresh material cannot serve; entries the
+                # (possibly energy-ordered) fill already placed at/after
+                # that point are dropped, and the caller cuts the plan.
+                short_at = min(slots[s][0] for s in slot_order[visit:])
+                entries = [e for e in entries if e.record_start < short_at - _EPS]
+                break
             if item is None:  # everything consumed: rewind and repeat footage
                 idx = visit % n
                 for k in range(n):  # don't rewind a held (drop-reserved) moment
@@ -2015,9 +2101,15 @@ def _fill(
             )
         )
     if len(slot_order) > n:
-        msg = f"material ran short: {len(slot_order)} slots for {n} moments; moments reused"
-        if rewound:
-            msg += " (some footage repeats)"
+        if allow_repeats:
+            msg = f"material ran short: {len(slot_order)} slots for {n} moments; moments reused"
+            if rewound:
+                msg += " (some footage repeats)"
+        else:
+            msg = (
+                f"material ran short: {len(slot_order)} slots for {n} moments; "
+                "long moments split into extra pieces (nothing repeats)"
+            )
         notes.append(msg)
     if semantic:
         pieces: list[str] = []
@@ -2045,7 +2137,7 @@ def _fill(
             )
         if pieces:
             notes.append("semantic casting: " + ", ".join(pieces))
-    return entries, notes
+    return entries, notes, short_at
 
 
 # --- arrangement (the editor's own scene order) --------------------------------
@@ -2502,6 +2594,121 @@ def decide_music_window(
     return float(chosen["time"]), note
 
 
+# Reuse detection (repeats off): two entries share material when their
+# source windows on the same clip overlap by at least this share of the
+# shorter window — identical picks overlap fully, padding slivers don't.
+_REUSE_OVERLAP_SHARE = 0.5
+
+
+def _shares_material(a: "MontageEntry", b: "MontageEntry") -> bool:
+    """True when two entries put (near-)identical frames on screen twice.
+
+    Same clip and the source windows overlap by at least
+    :data:`_REUSE_OVERLAP_SHARE` of the shorter window. Used by the
+    composer's and the revision's zero-repeat enforcement.
+    """
+    if a.clip_path != b.clip_path:
+        return False
+    ov = min(a.source_end, b.source_end) - max(a.source_start, b.source_start)
+    shorter = min(a.source_end - a.source_start, b.source_end - b.source_start)
+    return shorter > _EPS and ov >= _REUSE_OVERLAP_SHARE * shorter - _EPS
+
+
+def _find_unused_window(
+    reports: list[ClipReport],
+    used: list[tuple[str, float, float]],
+    needed: float,
+    min_piece: float = MIN_CUT_INTERVAL,
+) -> tuple[ClipReport, Moment, float, float] | None:
+    """First unused span of sifted moment material — the re-source helper.
+
+    ``used`` lists (clip_path, source_start, source_end) windows already
+    on screen. Walking the reports and their moments in order, the moment
+    spans minus the used windows yield free gaps; the FIRST gap at least
+    ``needed`` seconds long wins. When none is big enough, the longest
+    gap of at least ``min_piece`` seconds is returned instead (the caller
+    keeps the record slot and takes the shorter source — the fill's own
+    gap semantics). Returns ``(report, moment, start, length)`` with
+    ``length <= needed``, or None when no usable span remains.
+    Deterministic; used by the composer's and the revision's zero-repeat
+    enforcement (repeats off must survive recasting and region splices).
+    """
+    best: tuple[float, ClipReport, Moment, float] | None = None
+    for report in reports:
+        clip_used = sorted(
+            (lo, hi) for c, lo, hi in used if c == report.path and hi - lo > _EPS
+        )
+        for moment in report.moments:
+            gaps: list[tuple[float, float]] = []
+            cursor = moment.start
+            for lo, hi in clip_used:
+                if hi <= cursor + _EPS or lo >= moment.end - _EPS:
+                    continue
+                if lo > cursor + _EPS:
+                    gaps.append((cursor, lo))
+                cursor = max(cursor, hi)
+            if moment.end > cursor + _EPS:
+                gaps.append((cursor, moment.end))
+            for lo, hi in gaps:
+                length = hi - lo
+                if length >= needed - _EPS:
+                    return report, moment, lo, needed
+                if length >= min_piece - _EPS and (
+                    best is None or length > best[0] + _EPS
+                ):
+                    best = (length, report, moment, lo)
+    if best is not None:
+        return best[1], best[2], best[3], best[0]
+    return None
+
+
+def _shorten_no_repeats(
+    plan: MontagePlan,
+    entries: list[MontageEntry],
+    music: MusicAnalysis,
+    short_at: float,
+    n_moments: int,
+) -> list[MontageEntry]:
+    """Cut the plan where fresh material ran out (no-repeats truncation).
+
+    ``short_at`` is the record start of the first slot the fill could not
+    serve without repeating footage. The montage ends there — every slot
+    boundary already sits on the musical grid — and additionally snaps
+    DOWN onto a phrase/downbeat/beat via :func:`_snap_ending_length` when
+    one lies within tolerance below (never up: there is no material past
+    the cut). Entries at/after the cut are dropped, an entry straddling
+    it is trimmed 1:1 in source, and the plan's duration, phases and
+    strip metadata shrink to match; the honest note names the deal.
+    """
+    cut = short_at
+    snapped, _kind = _snap_ending_length(music, cut)
+    if snapped is not None and snapped < cut - _EPS:
+        survivors = [e for e in entries if e.record_start < snapped - _EPS]
+        if survivors and snapped - survivors[-1].record_start >= MIN_CUT_INTERVAL - _EPS:
+            cut = snapped
+    kept = [e for e in entries if e.record_start < cut - _EPS]
+    if kept and kept[-1].record_end > cut + _EPS:
+        last = kept[-1]
+        delta = last.record_end - cut
+        last.record_end = cut
+        last.source_end = max(last.source_start, last.source_end - delta)
+    plan.duration = cut
+    plan.phases = [
+        (s, min(e, cut), lab) for s, e, lab in plan.phases if s < cut - _EPS
+    ]
+    if plan.music_energy:
+        plan.music_energy = plan.music_energy[
+            : int(math.floor(cut * MUSIC_ENERGY_RATE)) + 1
+        ]
+    plan.beat_marks = [t for t in plan.beat_marks if t <= cut + _EPS]
+    plan.drop_marks = [t for t in plan.drop_marks if t <= cut + _EPS]
+    plan.notes.append(
+        f"length reduced to {cut:.1f}s: {n_moments} distinct moments, "
+        "no repeats allowed — shoot more or allow repeats"
+    )
+    return kept
+
+
 # --- public API ---------------------------------------------------------------
 
 
@@ -2539,12 +2746,17 @@ def plan_montage(
     :func:`_build_pseudo_grid`) and the plan carries ``music_path`` "" —
     render it with ``montage_to_timeline(..., audio="original")``.
 
-    ``allow_repeats`` (default False) controls the repetition guard: a
-    montage longer than the deduplicated moment material x
-    ``_REPEAT_TOLERANCE`` (1.5) is capped to that product, with a note (see
-    the module docstring). The cap runs before the phrase snap and the
-    strongest-window choice, never lengthens the montage, and never applies
-    when the request is already below it.
+    ``allow_repeats`` (default False) controls the repetition guard —
+    False is a promise of ZERO repeated moments: a montage longer than
+    the deduplicated moment material is capped to exactly that material
+    (shorter cut, honest note), overlapping pool moments are trimmed so
+    no two claim the same frames, and the fill never rewinds — should it
+    still run dry, the grid is cut at the last fillable slot instead
+    (see the module docstring's Repetition guard section). The cap runs
+    before the phrase snap and the strongest-window choice, never
+    lengthens the montage, and never applies when the request is already
+    below it. ``allow_repeats=True`` plans the full requested length and
+    repeats footage knowingly, exactly as before.
 
     ``pace`` (seconds, optional) sets how fast the montage cuts: it is the
     approximate clip length of the FASTEST phase, rounded to whole beats;
@@ -2648,19 +2860,19 @@ def plan_montage(
             music.duration if max_duration is None else min(music.duration, max_duration)
         )
 
-    # Repetition guard: don't stretch little footage over a long montage.
-    # Runs BEFORE the phrase snap and best_energy_window so both refine the
-    # capped length.
+    # Repetition guard: with repeats off, the montage never outgrows the
+    # distinct material — it gets shorter instead of recycling. Runs BEFORE
+    # the phrase snap and best_energy_window so both refine the capped length.
     length = requested
     repeat_note: str | None = None
     unique_material = _unique_material(reports)
-    supported = unique_material * _REPEAT_TOLERANCE
-    if not allow_repeats and unique_material > _EPS and requested > supported + _EPS:
-        length = supported
+    if not allow_repeats and unique_material > _EPS and requested > unique_material + _EPS:
+        length = unique_material
         repeat_note = (
-            f"footage supports about {supported:.0f}s — capped the cut to "
-            f"{length:.0f}s (was {requested:.0f}s); pass allow_repeats=True / "
-            f"--allow-repeats to use the full length"
+            f"length reduced to {length:.0f}s (was {requested:.0f}s): only "
+            f"{unique_material:.0f}s of distinct footage, no repeats allowed "
+            "— shoot more or pass allow_repeats=True / --allow-repeats for "
+            "the full length"
         )
 
     end_note: str | None = None
@@ -2773,6 +2985,10 @@ def plan_montage(
         for r in reports
         for m in r.moments
     ]
+    if not allow_repeats:
+        # Zero-repeat promise: overlapping moments (possible in hand-built
+        # reports and distilled timelines) must not enter the cut twice.
+        pool = _trim_overlapping_pool(pool)
     if not slots or not pool:
         plan.notes.append("no slots or no moments; nothing planned")
         return plan
@@ -2822,7 +3038,7 @@ def plan_montage(
         ]
     elif music is not None and grid_music.sections:
         slot_energies = [_energy_at(grid_music.sections, s) for s, _ in slots]
-    entries, fill_notes = _fill(
+    entries, fill_notes, short_at = _fill(
         slots, slot_order, pool, phases, highlight_phase, drop_slots,
         semantic=semantic, slot_energies=slot_energies,
         pre_used=arr_pre_used, preset=arr_preset or None,
@@ -2830,15 +3046,32 @@ def plan_montage(
         # (the "short" style) gets the pattern-interrupt slot 0 and the
         # loop-friendly last slot (see _fill's docstring).
         hook_loop=bool(phases) and phases[0][2] == "hook",
+        allow_repeats=allow_repeats,
     )
     entries = arr_entries + entries
     entries.sort(key=lambda e: e.record_start)
+    if short_at is not None:
+        # No-repeats truncation: the fill ran out of fresh material — cut
+        # the plan at the last fillable slot instead of recycling footage.
+        entries = _shorten_no_repeats(plan, entries, grid_music, short_at, len(pool))
     plan.entries = entries
     plan.notes.extend(fill_notes)
     if arrangement:
         plan.notes.extend(arr_notes)
     used = sum(1 for it in pool if it.uses)
-    plan.notes.append(f"{len(slots)} slots filled, {used} of {len(pool)} moments used")
+    plan.notes.append(f"{len(entries)} slots filled, {used} of {len(pool)} moments used")
+    # Perceived variety: a cut leaning on one clip feels repetitive even
+    # with zero repeated frames — say so once, deterministically.
+    if len(entries) >= 2:
+        per_clip: dict[str, int] = {}
+        for e in entries:
+            per_clip[e.clip_path] = per_clip.get(e.clip_path, 0) + 1
+        top = max(per_clip.values())
+        if top > _VARIETY_SHARE * len(entries) + _EPS:
+            plan.notes.append(
+                f"variety: {top} of {len(entries)} shots come from one clip "
+                "— more footage would help"
+            )
     # Adaptive music window: the tool decides when the music enters (the
     # override wins; "auto" has no arc boundaries and always stays at 0).
     if music is not None:

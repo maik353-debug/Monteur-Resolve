@@ -320,7 +320,26 @@ def test_out_of_range_start_snaps_into_the_moment(monkeypatch):
     assert entry.source_start == pytest.approx(15.0 - slot_len)
 
 
-def test_explicit_reuse_is_allowed_and_noted(monkeypatch):
+def test_explicit_reuse_is_allowed_and_noted_with_repeats_on(monkeypatch):
+    reply = empty_reply()
+    reply["cast"] = [
+        {"slot": 0, "clip": "a.mp4", "start": 10.0},
+        {"slot": 1, "clip": "a.mp4", "start": 10.0},
+    ]
+    monkeypatch.setattr(ai, "complete", fake_complete(reply))
+    plan = compose_montage(
+        make_reports(), make_music(), cut_lead=0.0, allow_repeats=True
+    )
+    assert plan.entries[0].clip_path == plan.entries[1].clip_path == "/footage/a.mp4"
+    assert plan.entries[0].source_start == pytest.approx(plan.entries[1].source_start)
+    assert any("reused material in 1 slot" in n for n in plan.notes)
+    assert any("same-clip cut" in n and "Claude's explicit choice" in n
+               for n in plan.notes)
+
+
+def test_reused_cast_is_rejected_when_repeats_off(monkeypatch):
+    # Same reply, but repeats OFF (the default): the second, reused cast
+    # falls back to the heuristic entry and the plan stays duplicate-free.
     reply = empty_reply()
     reply["cast"] = [
         {"slot": 0, "clip": "a.mp4", "start": 10.0},
@@ -328,10 +347,40 @@ def test_explicit_reuse_is_allowed_and_noted(monkeypatch):
     ]
     monkeypatch.setattr(ai, "complete", fake_complete(reply))
     plan = compose_montage(make_reports(), make_music(), cut_lead=0.0)
-    assert plan.entries[0].clip_path == plan.entries[1].clip_path == "/footage/a.mp4"
-    assert any("reused material in 1 slot" in n for n in plan.notes)
-    assert any("same-clip cut" in n and "Claude's explicit choice" in n
-               for n in plan.notes)
+    # slot 0 keeps the cast; slot 1's identical cast is rejected
+    assert plan.entries[0].clip_path == "/footage/a.mp4"
+    assert plan.entries[0].source_start == pytest.approx(10.0)
+    assert any(
+        "slot 2 kept the heuristic pick" in n and "repeats are off" in n
+        for n in plan.notes
+    )
+    assert not any("reused material" in n for n in plan.notes)
+    # zero duplicate (clip, source_start) pairs across the whole cut...
+    pairs = [(e.clip_path, round(e.source_start, 3)) for e in plan.entries]
+    assert len(pairs) == len(set(pairs))
+    # ...and no two entries share source material at all
+    for a_i, a in enumerate(plan.entries):
+        for b in plan.entries[a_i + 1:]:
+            assert not compose._shares_material(a, b)
+
+
+def test_dossier_and_prompt_say_reuse_is_forbidden_when_repeats_off(monkeypatch):
+    captured: dict = {}
+
+    def spy(prompt, system=None, json_schema=None):
+        captured["prompt"] = prompt
+        return json.dumps(empty_reply())
+
+    monkeypatch.setattr(ai, "complete", spy)
+    compose_montage(make_reports(), make_music(), cut_lead=0.0)
+    assert '"reuse_forbidden": true' in captured["prompt"]
+    assert "NEVER reuse a moment" in captured["prompt"]
+
+    compose_montage(
+        make_reports(), make_music(), cut_lead=0.0, allow_repeats=True
+    )
+    assert '"reuse_forbidden"' not in captured["prompt"]
+    assert "reuse a moment only when the slot count leaves no alternative" in captured["prompt"]
 
 
 # --- titles ------------------------------------------------------------------------

@@ -371,14 +371,17 @@ def _parity_reports() -> list[ClipReport]:
 # sha256 of the sorted-key JSON of plan_to_dict, captured on the engine
 # BEFORE the "short" style existed. Any drift means an existing style's
 # plan changed — the one thing this feature must never do.
+# Regenerated 2026-07 for the honest no-repeat rule: allow_repeats=False now
+# means ZERO repeated moments — the default parity plans shrink to the unique
+# material (40s) instead of silently recycling footage over the 60s song.
 _PARITY_GOLDEN = {
-    "auto": "0920c6f954669f1f5aaa64b24ac2139ea292321d94044a5eb18b41fb99121950",
-    "travel": "aea7a53eccfc21cb9c8ec70381c4c79c9c01600635c5236b03d23040feb320f2",
-    "wedding": "da7ffef60f96594fc2eb5253aebc79ead40d124bde252ce9f18139abcdcd7b27",
-    "music_video": "b761ea04c4c2b254169331152e44539b6a853a0e6dc3ec823b51ac58d1194875",
-    "trailer": "c6125f1f4894940a52142c53495a7c18a64ab572a372b69f5fc695faf48801a9",
-    "trailer-best-paced": "bcaf8191ac707dd4529a78e9a7bcd422746f3d2565952d3e08257bf571f3d9f9",
-    "travel-no-music": "fd8624e966b4d5b18940d425f4f691516e35e75b37b5a9351415156aa73a1c6b",
+    "auto": "10d20a1e9a4fa35fcee413e1e841e2c60327b42739c930ee08bbb1e3b4eb0588",
+    "travel": "288429904c19c0b9ef23c2bae10ddaf388289fec5292389bceb383a4077923f6",
+    "wedding": "3454b6eb0d34a207850add93b9d7e7dbce2ea525378e1b5a629bfeaa648e5b5e",
+    "music_video": "8f9938a036d6d300bb750797d1fc0251d7a2e21b0b846be5308143d0cd5a3a46",
+    "trailer": "99b1281eaab17f0c1c0df265088d38a04d47029d824b93b4c3667707fb0a706a",
+    "trailer-best-paced": "49a9d30e1c027b8f17e73310f43f5b667fa0e71508e4434173734bbd43e14d9c",
+    "travel-no-music": "daa845c961a0388a74557ef2fae8266a661887c395c255d90b317f74f3389cd5",
 }
 
 

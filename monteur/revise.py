@@ -43,8 +43,10 @@ implemented here, asymmetrically:
   boundaries stay on original cut positions (a new entry straddling the
   boundary is trimmed to it, its source trimmed 1:1). Limits: the realized
   pace is bounded by the music — a region already cutting on every beat
-  cannot get faster; footage may appear both in a restored shot and in the
-  re-cut region (the re-plan doesn't know what the original spent where);
+  cannot get faster; the re-plan doesn't know what the original spent
+  where, so footage could appear both in a restored shot and in the re-cut
+  region — with repeats off (the default) :func:`_dedupe_repeats`
+  re-sources such duplicates afterwards (allow_repeats=True keeps them);
   smash-to-black dips inside the region come from the re-plan, dips outside
   from the original.
 
@@ -78,9 +80,12 @@ import statistics
 from dataclasses import dataclass, replace
 
 from monteur.montage import (
+    MIN_CUT_INTERVAL,
     STYLES,
     MontageEntry,
     MontagePlan,
+    _find_unused_window,
+    _shares_material,
     pin_entry,
     plan_montage,
 )
@@ -395,6 +400,76 @@ def _splice_region(
     return True
 
 
+def _dedupe_repeats(
+    plan: MontagePlan,
+    reports: list[ClipReport],
+    protected: list[MontageEntry],
+) -> tuple[int, int]:
+    """Make the revised cut repeat-free again, in place (repeats OFF only).
+
+    ``plan_montage`` itself never repeats footage with repeats off, but
+    the revision mechanics can reintroduce repeats around it: a
+    snappier-region SPLICE restores original entries next to entries from
+    an independent re-plan (which spent its material without knowing what
+    the original used where), a calmer-region MERGE pads sources toward
+    the clip's end over footage other entries may show, and a PINNED shot
+    is forced in verbatim while the re-plan may have cast the same
+    material elsewhere. This pass makes the zero-repeat promise hold END
+    TO END: pinned entries claim their material first (they are never
+    touched), then the entries are walked in record order and any entry
+    sharing material with an already-kept one (the planner's own
+    :func:`monteur.montage._shares_material` rule) is RE-SOURCED to
+    unused moment material (:func:`monteur.montage._find_unused_window`;
+    a shorter free span keeps the record slot with the fill's own gap
+    semantics). Only when no usable span remains anywhere is the entry
+    dropped — an honest hole beats a silent repeat. Returns
+    ``(re-sourced, dropped)``; the caller writes the note.
+    """
+    protected_keys = {
+        (e.clip_path, round(e.source_start, 4), round(e.record_start, 4))
+        for e in protected
+    }
+    used: list[MontageEntry] = [
+        e
+        for e in plan.entries
+        if (e.clip_path, round(e.source_start, 4), round(e.record_start, 4))
+        in protected_keys
+    ]
+    resourced = dropped = 0
+    kept: list[MontageEntry] = []
+    for entry in sorted(plan.entries, key=lambda e: e.record_start):
+        if any(entry is p for p in used):
+            kept.append(entry)  # pinned: already claimed, never touched
+            continue
+        if any(_shares_material(entry, other) for other in used + kept):
+            needed = entry.record_end - entry.record_start
+            windows = [
+                (e.clip_path, e.source_start, e.source_end) for e in used + kept
+            ]
+            found = _find_unused_window(
+                reports, windows, needed, min_piece=min(MIN_CUT_INTERVAL, needed)
+            )
+            if found is None:
+                dropped += 1
+                continue
+            report, moment, start, length = found
+            entry = replace(
+                entry,
+                clip_path=report.path,
+                source_start=start,
+                source_end=start + length,
+                score=moment.score,
+                media_start=report.media_start,
+                clip_duration=report.duration,
+                label=getattr(moment, "label", ""),
+            )
+            resourced += 1
+        kept.append(entry)
+    if resourced or dropped:
+        plan.entries = sorted(kept, key=lambda e: e.record_start)
+    return resourced, dropped
+
+
 def _prune_stale_whooshes(plan: MontagePlan) -> int:
     """Drop whoosh cues whose cut no longer exists (in place).
 
@@ -525,6 +600,25 @@ def revise_plan(
 
     for entry in pinned_entries:
         pin_entry(revised, entry)
+
+    # Zero-repeat promise, end to end: the splice/merge/pin mechanics can
+    # put the same material on screen twice even though every plan_montage
+    # call was repeat-free — re-source (or, out of material, drop) the
+    # duplicates unless the caller planned with allow_repeats=True.
+    if not plan_kwargs.get("allow_repeats"):
+        resourced, dedup_dropped = _dedupe_repeats(revised, reports, pinned_entries)
+        if resourced or dedup_dropped:
+            bits = []
+            if resourced:
+                bits.append(
+                    f"{resourced} repeated shot{'s' if resourced != 1 else ''} "
+                    "re-sourced"
+                )
+            if dedup_dropped:
+                bits.append(
+                    f"{dedup_dropped} dropped (no unused footage left)"
+                )
+            extra_notes.append("no repeats: " + ", ".join(bits))
 
     dropped = _prune_stale_whooshes(revised)
     if dropped:

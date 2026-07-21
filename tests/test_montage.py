@@ -696,7 +696,7 @@ def make_ending_music(**overrides) -> MusicAnalysis:
 
 def test_end_on_phrase_snaps_to_nearest_phrase():
     music = make_ending_music(phrases=[0.0, 56.0, 72.0])
-    plan = plan_montage(make_long_reports(), music, max_duration=60.0)
+    plan = plan_montage(make_long_reports(), music, max_duration=60.0, allow_repeats=True)
     assert plan.duration == pytest.approx(56.0)
     assert plan.entries[-1].record_end == pytest.approx(56.0)
     assert any("length snapped to phrase at 56.0s" in n for n in plan.notes)
@@ -706,14 +706,16 @@ def test_end_on_phrase_refuses_snap_beyond_tolerance():
     # nearest phrase is 84s = 40% longer than requested; downbeats/beats
     # already sit exactly on 60s, so the length stays untouched
     music = make_ending_music(phrases=[0.0, 84.0])
-    plan = plan_montage(make_long_reports(), music, max_duration=60.0)
+    plan = plan_montage(make_long_reports(), music, max_duration=60.0, allow_repeats=True)
     assert plan.duration == pytest.approx(60.0)
     assert not any("length snapped" in n for n in plan.notes)
 
 
 def test_end_on_phrase_prefers_shorter_on_tie():
     # phrases every 8s: 56s and 64s are equidistant from the 60s request
-    plan = plan_montage(make_long_reports(), make_ending_music(), max_duration=60.0)
+    plan = plan_montage(
+        make_long_reports(), make_ending_music(), max_duration=60.0, allow_repeats=True
+    )
     assert plan.duration == pytest.approx(56.0)
 
 
@@ -726,7 +728,10 @@ def test_end_snap_falls_back_to_downbeats():
 
 def test_end_on_phrase_disabled():
     music = make_ending_music(phrases=[0.0, 56.0])
-    plan = plan_montage(make_long_reports(), music, max_duration=60.0, end_on_phrase=False)
+    plan = plan_montage(
+        make_long_reports(), music, max_duration=60.0, end_on_phrase=False,
+        allow_repeats=True,
+    )
     assert plan.duration == pytest.approx(60.0)
     assert not any("length snapped" in n for n in plan.notes)
 
@@ -902,34 +907,57 @@ def ten_second_reports() -> list[ClipReport]:
     ]
 
 
-def test_repetition_guard_caps_length_with_note():
-    # 10s of unique moments over a 60s song: capped at 10 x 1.5 = 15s.
+def duplicate_source_pairs(plan) -> list[tuple[str, float]]:
+    """(clip_path, source_start) pairs appearing more than once in the plan."""
+    seen: dict[tuple[str, float], int] = {}
+    for e in plan.entries:
+        key = (e.clip_path, round(e.source_start, 3))
+        seen[key] = seen.get(key, 0) + 1
+    return [k for k, n in seen.items() if n > 1]
+
+
+def test_repetition_guard_caps_length_at_unique_material_with_note():
+    # 10s of unique moments over a 60s song: zero repeats means the cut
+    # shrinks to the material itself — 10s, not 1.5x of it.
     plan = plan_montage(ten_second_reports(), make_repeat_music())
-    assert plan.duration <= 15.0 + 1e-6
-    assert plan.duration == pytest.approx(15.0)
+    assert plan.duration == pytest.approx(10.0)
     assert plan.entries[-1].record_end == pytest.approx(plan.duration)
-    note = next(n for n in plan.notes if "capped the cut" in n)
-    assert "footage supports about 15s" in note
-    assert "was 60s" in note
+    note = next(n for n in plan.notes if "length reduced" in n)
+    assert "10s" in note and "was 60s" in note
     assert "allow_repeats=True" in note and "--allow-repeats" in note
+    assert duplicate_source_pairs(plan) == []
+
+
+def test_no_repeats_is_zero_duplicates_even_on_long_requests():
+    # The user's field bug: checkbox off + a request far beyond the
+    # material must yield a SHORTER plan, never a recycled one.
+    plan = plan_montage(ten_second_reports(), make_repeat_music(), max_duration=60.0)
+    assert plan.duration == pytest.approx(10.0)
+    assert duplicate_source_pairs(plan) == []
+    assert not any("footage repeats" in n for n in plan.notes)
+    assert any("length reduced" in n for n in plan.notes)
 
 
 def test_repetition_guard_disabled_by_allow_repeats():
     plan = plan_montage(ten_second_reports(), make_repeat_music(), allow_repeats=True)
     assert plan.duration == pytest.approx(60.0)
-    assert not any("capped the cut" in n for n in plan.notes)
+    assert not any("length reduced" in n for n in plan.notes)
+    # the full length genuinely repeats footage — knowingly and noted
+    assert duplicate_source_pairs(plan)
+    assert any("moments reused" in n for n in plan.notes)
 
 
 def test_repetition_guard_never_raises_a_short_request():
-    # 8s requested is already below the 15s cap: left untouched, no note.
+    # 8s requested is already below the 10s material: left untouched, no note.
     plan = plan_montage(ten_second_reports(), make_repeat_music(), max_duration=8.0)
     assert plan.duration == pytest.approx(8.0)
-    assert not any("capped the cut" in n for n in plan.notes)
+    assert not any("length reduced" in n for n in plan.notes)
 
 
 def test_repetition_guard_merges_overlapping_moments_per_clip():
     # Two overlapping moments (0-6 and 4-10) are 10s of unique material, not
-    # 12s: the cap must use the merged span (15s, not 18s).
+    # 12s: the cap must use the merged span (10s, not 12s) — and the shared
+    # 4-6s span must not enter the cut twice.
     reports = [
         ClipReport(
             path="/footage/a.mp4",
@@ -938,11 +966,16 @@ def test_repetition_guard_merges_overlapping_moments_per_clip():
         )
     ]
     plan = plan_montage(reports, make_repeat_music())
-    assert plan.duration == pytest.approx(15.0)
+    assert plan.duration == pytest.approx(10.0)
+    assert duplicate_source_pairs(plan) == []
+    # overlap-trimmed sources: no two entries share any source span
+    windows = sorted((e.source_start, e.source_end) for e in plan.entries)
+    for (a_lo, a_hi), (b_lo, b_hi) in zip(windows, windows[1:]):
+        assert b_lo >= a_hi - 1e-6
 
 
 def test_repetition_guard_runs_before_strongest_window():
-    # The capped (15s) length — not the requested full 60s — is what the
+    # The capped (10s) length — not the requested full 60s — is what the
     # strongest-window logic places against the song's high-energy tail.
     music = make_repeat_music(
         sections=[
@@ -951,8 +984,72 @@ def test_repetition_guard_runs_before_strongest_window():
         ]
     )
     plan = plan_montage(ten_second_reports(), music)
-    assert plan.duration == pytest.approx(15.0)
-    assert plan.music_start == pytest.approx(40.0)  # 15s window inside "high"
+    assert plan.duration == pytest.approx(10.0)
+    assert plan.music_start >= 40.0 - 1e-6  # 10s window inside "high"
+
+
+def test_fill_truncates_instead_of_rewinding_when_repeats_off():
+    # Force the fill dry directly: three 2s slots, one 2s moment, no
+    # padding room. With repeats off the grid is CUT at the last fillable
+    # slot; with repeats on the old rewind fills all three.
+    from monteur.montage import _PoolItem, _fill
+
+    def slots_and_pool():
+        slots = [(0.0, 2.0), (2.0, 4.0), (4.0, 6.0)]
+        pool = [_PoolItem("/footage/a.mp4", 2.0, Moment(0.0, 2.0, 0.9))]
+        return slots, pool
+
+    slots, pool = slots_and_pool()
+    entries, notes, short_at = _fill(
+        slots, [0, 1, 2], pool, allow_repeats=False
+    )
+    assert short_at == pytest.approx(2.0)
+    assert len(entries) == 1
+    assert entries[0].record_end == pytest.approx(2.0)
+
+    slots, pool = slots_and_pool()
+    entries, notes, short_at = _fill(slots, [0, 1, 2], pool, allow_repeats=True)
+    assert short_at is None
+    assert len(entries) == 3  # the old rewind behavior, unchanged
+    assert any("footage repeats" in n for n in notes)
+
+
+def test_variety_note_when_one_clip_dominates():
+    # 4 moments in a.mp4, 1 in b.mp4 -> most slots come from a.mp4.
+    reports = [
+        ClipReport(
+            path="/footage/a.mp4",
+            duration=60.0,
+            moments=[Moment(i * 6.0, i * 6.0 + 2.0, 0.8) for i in range(4)],
+        ),
+        ClipReport(
+            path="/footage/b.mp4", duration=10.0, moments=[Moment(0.0, 2.0, 0.7)]
+        ),
+    ]
+    plan = plan_montage(reports, make_repeat_music(duration=10.0))
+    counts: dict[str, int] = {}
+    for e in plan.entries:
+        counts[e.clip_path] = counts.get(e.clip_path, 0) + 1
+    top = max(counts.values())
+    assert top > 0.6 * len(plan.entries)  # the fixture really is lopsided
+    notes = [n for n in plan.notes if n.startswith("variety:")]
+    assert notes == [
+        f"variety: {top} of {len(plan.entries)} shots come from one clip "
+        "— more footage would help"
+    ]
+
+
+def test_no_variety_note_for_balanced_footage():
+    reports = [
+        ClipReport(
+            path=f"/footage/{name}.mp4",
+            duration=30.0,
+            moments=[Moment(i * 8.0, i * 8.0 + 2.0, 0.8) for i in range(3)],
+        )
+        for name in ("a", "b", "c")
+    ]
+    plan = plan_montage(reports, make_repeat_music(duration=18.0))
+    assert not any(n.startswith("variety:") for n in plan.notes)
 
 
 # --- cut-ahead lead ----------------------------------------------------------------
@@ -1262,7 +1359,8 @@ def test_hero_bonus_beats_motion_continuity_in_climax():
     # Mirrors test_highlight_preference_in_climax_phase: at the first climax
     # slot the higher-scored moment leads the window, but the hero shot one
     # step behind takes it — the hero bonus outweighs order and motion.
-    # (10 fillers cover the 3 opening + 7 build slots exactly.)
+    # (10 fillers cover the 3 opening + 7 build slots exactly; the 36s
+    # target replicates what the old 1.5x tolerance derived here.)
     fillers = [Moment(i * 2.0, i * 2.0 + 2.0, 0.8) for i in range(10)]
     quiet_good = Moment(40.0, 42.0, 0.9)
     hero_shot = sem_moment(44.0, 46.0, 0.5, hero=0.9)
@@ -1272,7 +1370,8 @@ def test_hero_bonus_beats_motion_continuity_in_climax():
         moments=fillers + [quiet_good, hero_shot],
     )
     plan = plan_montage(
-        [report], make_arc_music(), style="travel", order=CHRONOLOGICAL, cut_lead=0.0
+        [report], make_arc_music(), style="travel", order=CHRONOLOGICAL,
+        cut_lead=0.0, max_duration=36.0, allow_repeats=True,
     )
     climax_first = [e for e in plan.entries if e.record_start == pytest.approx(16.0)]
     assert len(climax_first) == 1
