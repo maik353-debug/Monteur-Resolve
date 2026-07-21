@@ -1337,6 +1337,42 @@ def cmd_direct(args: argparse.Namespace) -> None:
         _save_plan(improved, args.save_plan)
 
 
+def cmd_proxies(args: argparse.Namespace) -> None:
+    """Prepare the playback proxies Studio's instant players run on.
+
+    A thin wrapper over :func:`monteur.proxies.ensure_proxies` — one small
+    seek-friendly H.264 per clip in ``~/.monteur/proxies`` (or
+    ``MONTEUR_PROXIES_PATH``), skip-when-fresh, then a cache prune. The
+    Studio kicks the same transcodes automatically after every scan; this
+    command warms the cache ahead of time (or from scripts).
+    """
+    from monteur import proxies as proxies_mod
+    from monteur.media import MonteurMediaError, list_media
+
+    try:
+        paths = [str(p) for p in list_media(args.folder)]
+    except MonteurMediaError as exc:
+        _fail(str(exc))
+    if not paths:
+        _fail(f"no video files found in {args.folder}")
+
+    def progress(done: int, total: int, name: str) -> None:
+        print(f"[{done}/{total}] {name}", flush=True)
+
+    print(f"Preparing playback proxies in {proxies_mod.proxies_dir()} ...", flush=True)
+    made, errors = proxies_mod.ensure_proxies(paths, progress=progress)
+    removed = proxies_mod.prune_proxies(max_gb=args.max_gb)
+    for path, message in errors.items():
+        print(f"  ! {Path(path).name}: {message}")
+    print(
+        f"\nProxies ready for {len(made)}/{len(paths)} clips"
+        + (f" ({len(removed)} old proxies pruned)" if removed else "")
+        + " — Studio plays these instantly."
+    )
+    if errors and not made:
+        _fail("no proxy could be prepared — see the messages above")
+
+
 def cmd_transcribe(args: argparse.Namespace) -> None:
     import json as json_module
     from dataclasses import asdict
@@ -1842,6 +1878,19 @@ def build_parser() -> argparse.ArgumentParser:
         "deterministic plan when no AI backend is reachable)",
     )
     p_status.set_defaults(func=cmd_movie_status)
+
+    p = sub.add_parser(
+        "proxies",
+        help="prepare small playback proxies so Studio's players scrub "
+             "instantly (the UI also does this automatically after a scan)",
+    )
+    p.add_argument("folder", help="directory with your video clips")
+    p.add_argument(
+        "--max-gb", type=float, default=5.0,
+        help="proxy cache budget in GB — oldest proxies beyond it are "
+             "pruned (default 5)",
+    )
+    p.set_defaults(func=cmd_proxies)
 
     p = sub.add_parser(
         "find",

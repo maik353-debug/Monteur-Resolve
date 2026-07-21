@@ -747,6 +747,74 @@ svg text.axis {
 
 /* ---------- "Sehen ohne Resolve": preview player + storyboard ----------- */
 .preview-block { margin: 6px 0 12px; }
+
+/* virtual timeline playout: two stacked <video> (double-buffer) over a
+   black stage; dips = both hidden (black) with the title as DOM text;
+   fades = opacity on the inner frame so the stage stays black. */
+.playout { margin: 2px 0 12px; }
+.playout-stage {
+  position: relative; width: 100%; max-width: 640px; aspect-ratio: 16 / 9;
+  background: #000; border: 1px solid var(--border); border-radius: 3px;
+  overflow: hidden;
+}
+.po-frame { position: absolute; inset: 0; }
+.po-video {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: contain; visibility: hidden; background: #000;
+}
+.po-video.on { visibility: visible; }
+.playout-title {
+  position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; padding: 0 28px; text-align: center;
+  color: #fff; font-size: 21px; font-weight: 600; letter-spacing: 0.04em;
+  line-height: 1.35;
+}
+.playout-transport {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 8px; max-width: 640px;
+}
+.playout-transport .po-hint { margin: 0; }
+.po-time {
+  font-family: var(--mono); font-size: 12px; color: var(--ink-2);
+  min-width: 92px;
+}
+.exact-preview { margin-top: 10px; }
+
+/* the timeline strip doubles as the playout scrubber */
+.tl-playhead {
+  position: absolute; top: 0; height: 64px; width: 2px; margin-left: -1px;
+  background: var(--accent); pointer-events: none; z-index: 3;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+
+/* moment player: one shared floating mini player (fixed corner) */
+.mini-player {
+  position: fixed; right: 18px; bottom: 18px; z-index: 70; width: 340px;
+  max-width: calc(100vw - 36px); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 4px; overflow: hidden;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
+}
+.mini-head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; }
+.mini-title {
+  flex: 1; min-width: 0; font-family: var(--mono); font-size: 11px;
+  color: var(--ink-2); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis;
+}
+#mini-video { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; }
+.mini-note { margin: 0; padding: 6px 9px; font-size: 11px; color: var(--ink-muted); }
+
+/* the ▶ hover affordance on playable thumbnails (board, palette, lane) */
+.sb-thumb-wrap.playable { cursor: pointer; }
+.sb-play {
+  position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; font-size: 19px; color: #fff;
+  background: rgba(0, 0, 0, 0.35); opacity: 0; transition: opacity 0.12s;
+  pointer-events: none;
+}
+.sb-thumb-wrap.playable:hover .sb-play,
+.sb-thumb-wrap.playable:focus-visible .sb-play { opacity: 1; }
+.insp-alts img { cursor: pointer; }
+#cre-insp-thumb { cursor: pointer; }
 .preview-row { display: flex; align-items: flex-start; gap: 12px; }
 .preview-row .btn { flex: none; }
 .preview-row .help-small { margin: 5px 0 0; }
@@ -853,7 +921,7 @@ input.sb-dip-input {
    Block WIDTH = duration share, background = story-arc phase; black
    notches are the smash-to-black dips; the canvas lane underneath draws
    the song's energy, downbeat ticks, cut hairlines and the drop marker. */
-.tl-strip { margin: 10px 0 4px; }
+.tl-strip { margin: 10px 0 4px; position: relative; touch-action: none; }
 .tl-blocks {
   display: flex; align-items: stretch; height: 34px;
   border: 1px solid var(--border); border-radius: 3px 3px 0 0;
@@ -1372,6 +1440,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         <p class="help-small" style="max-width: 620px; margin: 0 0 14px;">Needs the anthropic package and your Anthropic API key (ANTHROPIC_API_KEY) on the machine running <code>monteur ui</code>. Claude looks at one frame per good moment (about a cent per scan) and labels what it shows.</p>
         <div id="cre-scan-panel"></div>
         <p class="scan-note" id="cre-scan-msg" role="status" hidden></p>
+        <p class="scan-note" id="cre-proxy-status" role="status" aria-live="polite" hidden></p>
         <p class="scan-note" id="cre-vision-msg" role="status" hidden></p>
         <div class="clip-grid" id="cre-clips"></div>
         <div class="vision-notes" id="cre-vision-notes" hidden></div>
@@ -1605,9 +1674,25 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             </div>
           </details>
           <div class="preview-block" id="cre-preview">
-            <div class="preview-row">
-              <button class="btn" id="cre-preview-btn" type="button">Preview this cut<span class="spin" aria-hidden="true"></span></button>
-              <p class="help-small">Rendered by Monteur&rsquo;s own engine in seconds &mdash; rough pixels, real cut. Dissolves show as hard cuts here; the Resolve build stays the reference.</p>
+            <div class="playout" id="cre-playout" hidden>
+              <div class="playout-stage" id="po-stage">
+                <div class="po-frame" id="po-frame">
+                  <video class="po-video" id="po-video-a" preload="auto" playsinline muted></video>
+                  <video class="po-video" id="po-video-b" preload="auto" playsinline muted></video>
+                  <div class="playout-title" id="po-title" hidden></div>
+                </div>
+                <audio id="po-music" preload="auto"></audio>
+              </div>
+              <div class="playout-transport">
+                <button class="btn" id="po-play" type="button" aria-pressed="false" aria-label="Play or pause the draft (Space)">&#9654; Play</button>
+                <span class="po-time" id="po-time">0:00 / 0:00</span>
+                <span class="help-small po-hint">Space plays &middot; &larr; &rarr; jump between cuts &middot; click or drag the timeline strip below to scrub. No render &mdash; the draft plays straight from your clips.</span>
+              </div>
+              <p class="scan-note" id="po-note" role="status" hidden></p>
+            </div>
+            <div class="preview-row exact-preview">
+              <button class="btn ghost small" id="cre-preview-btn" type="button">Render exact preview<span class="spin" aria-hidden="true"></span></button>
+              <p class="help-small">The player above plays your draft instantly &mdash; cuts, dips, titles, fades and the music in real time. Rendered by Monteur&rsquo;s own engine in seconds &mdash; this button makes a small exact FILE when you want frame-true pixels and the final music mix instead. Dissolves show as hard cuts here; the Resolve build stays the reference.</p>
             </div>
             <div id="cre-preview-panel"></div>
             <p class="scan-note" id="cre-preview-msg" role="status" hidden></p>
@@ -1618,6 +1703,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             <div class="tl-strip" id="cre-strip" hidden>
               <div class="tl-blocks" id="cre-strip-blocks"></div>
               <canvas class="tl-lane" id="cre-strip-lane" height="30" aria-hidden="true"></canvas>
+              <div class="tl-playhead" id="cre-strip-playhead" aria-hidden="true" hidden></div>
               <p class="tl-legend" id="cre-strip-legend" hidden></p>
             </div>
             <div class="sb-board" id="cre-sb-board"></div>
@@ -2282,6 +2368,16 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
       <button class="btn ghost" id="settings-close" type="button">Close</button>
     </div>
   </div>
+</div>
+
+<div class="mini-player" id="mini-player" role="dialog" aria-label="Clip player" hidden>
+  <div class="mini-head">
+    <span class="mini-title" id="mini-title"></span>
+    <button class="btn ghost small" id="mini-loop" type="button" aria-pressed="false" title="Replay this moment in a loop">Loop</button>
+    <button class="btn ghost small" id="mini-close" type="button" aria-label="Close the clip player (Esc)" title="Close (Esc)">&times;</button>
+  </div>
+  <video id="mini-video" playsinline preload="auto"></video>
+  <p class="mini-note" id="mini-note" hidden></p>
 </div>
 
 <div class="toasts" id="toasts" aria-live="polite"></div>
@@ -4127,6 +4223,8 @@ function creStopJobs() {
   if (distillPanel.running()) { distillPanel.stop(); setDistillBusy(false); }
   if (previewPanel.running()) { previewPanel.stop(); setPreviewBusy(false); }
   if (exportPanel.running()) { exportPanel.stop(); setExportBusy(false); }
+  poPause();         // leaving the Create view silences the playout
+  closeMiniPlayer(); // ...and the floating moment player
 }
 
 function creNote(id, message, isError) {
@@ -4160,7 +4258,11 @@ function creShowStep(n, focusHeading) {
     $("cre-step-" + i).hidden = i !== n;
     $("wbar-" + i).className = at <= rank ? "on" : "";
   });
-  if (n !== 3) closeInspector(); // the drawer belongs to the storyboard
+  if (n !== 3) {
+    closeInspector(); // the drawer belongs to the storyboard
+    poPause();        // ...and so does the playout — never play off-screen
+    closeMiniPlayer();
+  }
   if (n === 3 && $("cre-arrange-tools").open) arrRender();
   if (focusHeading) $("cre-h" + n).focus();
 }
@@ -4254,6 +4356,7 @@ function scanFolder() {
   $("cre-scan-msg").hidden = true;
   $("cre-vision-msg").hidden = true;
   $("cre-vision-notes").hidden = true;
+  startProxyWatch(null); // a fresh scan restarts the proxy status line
   cre.clips = null;
   cre.result = null; // footage changed — any previous build is stale
   cre.draftId = null; // ...a re-save after this is a NEW draft, not an update
@@ -4278,6 +4381,8 @@ function scanFolder() {
         cre.clips = (result && result.clips) || [];
         renderClips();
         renderVisionExtras(result);
+        // the scan kicked the background proxy transcodes — watch quietly
+        startProxyWatch(result && result.proxies_job);
         // a labeled scan is what makes the composed cut sharp — suggest it
         if (!cre.aiCutTouched) $("cre-ai-cut").checked = scanHasVision(cre.clips);
         updateSuggestion();
@@ -4868,6 +4973,8 @@ function arrPaletteCard(moment) {
     "Scene from " + baseName(moment.clip)));
   wrap.appendChild(el("span", "sb-badge sb-dur", fmt1(moment.end - moment.start) + "s"));
   if (moment.hero >= 0.7) wrap.appendChild(el("span", "sb-badge sb-hero", "hero"));
+  // thumbnail = watch the moment; the card body still adds it to the order
+  attachMomentPlayer(wrap, moment.clip, moment.start, moment.end);
   card.appendChild(wrap);
   var meta = el("div", "sb-meta");
   meta.appendChild(el("span", "sb-name", baseName(moment.clip)));
@@ -4891,6 +4998,7 @@ function arrSeqCard(item, index, total) {
     "Scene " + (index + 1) + " — " + baseName(item.clip)));
   wrap.appendChild(el("span", "sb-badge sb-slot", String(index + 1)));
   wrap.appendChild(el("span", "sb-badge sb-dur", fmt1((item.end || 0) - (item.start || 0)) + "s"));
+  attachMomentPlayer(wrap, item.clip, item.start, item.end);
   card.appendChild(wrap);
   var meta = el("div", "sb-meta");
   meta.appendChild(el("span", "sb-name", baseName(item.clip)));
@@ -5954,6 +6062,8 @@ function sbEntryCard(entry, i, noPin) {
   wrap.appendChild(el("span", "sb-badge sb-slot", String(i + 1)));
   var length = (entry.record_end || 0) - (entry.record_start || 0);
   wrap.appendChild(el("span", "sb-badge sb-dur", fmt1(length) + "s"));
+  // click the thumbnail = watch exactly this segment in the mini player
+  attachMomentPlayer(wrap, entry.clip_path, entry.source_start || 0, entry.source_end || 0);
   card.appendChild(wrap);
   var meta = el("div", "sb-meta");
   meta.appendChild(el("span", "sb-name", baseName(entry.clip_path)));
@@ -6038,6 +6148,7 @@ function renderStoryboard() {
   if (insp.slot !== null) renderInspector();
   renderMissingHook(); // the step-1 coverage result, collapsed by the board
   if ($("cre-arrange-tools").open) arrRender(); // the lane mirrors the board
+  poRebuild(); // the playout plan follows every build/revise/apply/adjust
 }
 
 /* ---- step 3: preview player (monteur.preview — Sehen ohne Resolve) ----
@@ -6101,6 +6212,622 @@ function renderPreviewCut() {
   });
 }
 $("cre-preview-btn").addEventListener("click", renderPreviewCut);
+
+/* ---- playback media: proxies + /api/media --------------------------------
+   Every clip (and the song) streams from GET /api/media?path=… — the server
+   serves the small seek-friendly playback proxy when one is ready and the
+   original file otherwise, with Range support either way. Proxies are
+   transcoded in the background right after the scan (the scan result
+   carries the job id); the step-1 status line below is the only UI —
+   everything WORKS without proxies, playback just gets smoother with them. */
+
+function mediaUrl(path) {
+  return "/api/media?path=" + encodeURIComponent(String(path || ""));
+}
+
+/* the quiet step-1 proxy status line ("Preparing smooth playback — 3/7…") */
+var proxyWatch = { token: 0 };
+
+function startProxyWatch(jobId) {
+  proxyWatch.token += 1;
+  var token = proxyWatch.token;
+  var node = $("cre-proxy-status");
+  if (!jobId) { node.hidden = true; return; }
+  node.classList.remove("error");
+  creNote("cre-proxy-status", "Preparing smooth playback…");
+  function tick() {
+    if (token !== proxyWatch.token) return;
+    api("/api/jobs/" + jobId).then(function (job) {
+      if (token !== proxyWatch.token) return;
+      if (job.state === "running") {
+        var done = 0, total = 0;
+        (job.progress || []).forEach(function (p) {
+          if (p.stage === "proxy") {
+            if (typeof p.index === "number") done = p.index;
+            if (typeof p.total === "number") total = p.total;
+          }
+        });
+        node.textContent = total
+          ? "Preparing smooth playback — " + done + "/" + total + " clips…"
+          : "Preparing smooth playback…";
+        window.setTimeout(tick, 900);
+      } else if (job.state === "done") {
+        var errors = (job.result && job.result.errors) || [];
+        node.textContent = errors.length
+          ? "Playback ready — " + errors.length + (errors.length === 1 ? " clip plays" : " clips play") + " from the original file."
+          : "Playback ready — the storyboard and the draft play instantly.";
+      } else {
+        // proxies are an upgrade, never a gate: playback uses the originals
+        node.textContent = "Smooth-playback files couldn't be prepared — clips play from the original files.";
+      }
+    }).catch(function () {
+      if (token === proxyWatch.token) node.hidden = true;
+    });
+  }
+  tick();
+}
+
+/* ---- the moment player: watch any card's clip segment --------------------
+   One shared floating mini player (fixed corner): a <video> on /api/media
+   seeked to the moment's source_start, auto-paused at source_end (the
+   timeupdate guard), Loop replays the segment. Esc and click-outside
+   close it; open-clicks stopPropagation so they never select/close. */
+
+var mini = { clip: "", start: 0, end: 0, loop: false, open: false };
+
+function openMiniPlayer(clip, start, end, label) {
+  mini.clip = String(clip || "");
+  mini.start = Math.max(0, start || 0);
+  mini.end = (end || 0) > mini.start + 0.01 ? end : 0;
+  mini.open = true;
+  $("mini-title").textContent = (label ? String(label) : baseName(mini.clip)) +
+    " · " + fmtClock(mini.start) + "–" + fmtClock(mini.end || mini.start);
+  $("mini-note").hidden = true;
+  $("mini-player").hidden = false;
+  var video = $("mini-video");
+  var url = mediaUrl(mini.clip);
+  if (video.dataset.url !== url) {
+    video.dataset.url = url;
+    video.src = url;
+    video.load(); // loadedmetadata seeks to mini.start and plays
+  } else if (video.readyState >= 1) {
+    try { video.currentTime = mini.start; } catch (e) { /* not seekable yet */ }
+    var p = video.play();
+    if (p && p.catch) p.catch(function () { /* autoplay veto — user can press play */ });
+  }
+}
+
+function closeMiniPlayer() {
+  if (!mini.open) return;
+  mini.open = false;
+  var video = $("mini-video");
+  try { video.pause(); } catch (e) { /* nothing loaded */ }
+  $("mini-player").hidden = true;
+}
+
+$("mini-video").addEventListener("loadedmetadata", function () {
+  if (!mini.open) return;
+  try { this.currentTime = mini.start; } catch (e) { /* not seekable */ }
+  var p = this.play();
+  if (p && p.catch) p.catch(function () { /* autoplay veto */ });
+});
+/* the timeupdate guard: pause (or loop) at the moment's end */
+$("mini-video").addEventListener("timeupdate", function () {
+  if (!mini.open || !mini.end) return;
+  if (this.currentTime >= mini.end - 0.03) {
+    if (mini.loop) {
+      try { this.currentTime = mini.start; } catch (e) { /* mid-load */ }
+    } else {
+      this.pause();
+    }
+  }
+});
+$("mini-video").addEventListener("error", function () {
+  if (!mini.open) return;
+  $("mini-note").textContent = "This clip can't be decoded by your browser — the thumbnail on the card still shows the moment.";
+  $("mini-note").hidden = false;
+});
+$("mini-close").addEventListener("click", closeMiniPlayer);
+$("mini-loop").addEventListener("click", function () {
+  mini.loop = !mini.loop;
+  this.setAttribute("aria-pressed", String(mini.loop));
+  this.classList.toggle("busy", false);
+  if (mini.loop && mini.open) {
+    var video = $("mini-video");
+    if (video.paused && video.readyState >= 1) {
+      try { video.currentTime = mini.start; } catch (e) { /* mid-load */ }
+      var p = video.play();
+      if (p && p.catch) p.catch(function () { /* autoplay veto */ });
+    }
+  }
+});
+/* click outside closes (open-clicks stopPropagation, so they never race) */
+document.addEventListener("click", function (e) {
+  if (mini.open && !$("mini-player").contains(e.target)) closeMiniPlayer();
+});
+/* Esc closes the mini player FIRST (capture phase beats the inspector's
+   bubble listener; stopPropagation keeps the inspector open) */
+document.addEventListener("keydown", function (e) {
+  if (e.key === "Escape" && mini.open) {
+    e.preventDefault();
+    e.stopPropagation();
+    closeMiniPlayer();
+  }
+}, true);
+
+/* wire a thumbnail wrap as a click-to-watch target (▶ on hover) */
+function attachMomentPlayer(wrap, clip, start, end, label) {
+  wrap.classList.add("playable");
+  wrap.appendChild(el("span", "sb-play", "▶"));
+  wrap.title = "Watch this moment";
+  wrap.addEventListener("click", function (e) {
+    e.stopPropagation(); // never select the card / close the player
+    openMiniPlayer(clip, start, end, label);
+  });
+}
+
+/* the inspector's big thumb plays the selected shot's segment too */
+$("cre-insp-thumb").addEventListener("click", function (e) {
+  var entries = planSortedEntries();
+  var entry = insp.slot === null ? null : entries[insp.slot];
+  if (!entry) return;
+  e.stopPropagation();
+  openMiniPlayer(entry.clip_path, entry.source_start || 0, entry.source_end || 0);
+});
+
+/* ---- step 3: virtual timeline playout ------------------------------------
+   Play and scrub the DRAFT without rendering anything: a requestAnimation-
+   Frame-driven virtual clock is the master; two stacked <video> elements
+   double-buffer the entries' proxy segments (the standby preloads the next
+   entry and pre-seeks to its source_start; at the boundary visibility
+   swaps); black dips render as both-hidden (black stage) with the dip's
+   title text as DOM; fade_in/fade_out are CSS opacity on the frame. Music
+   is a separate <audio> on /api/media playing music_start + t inside the
+   plan's music window; per-entry ORIGINAL sound is the active video's own
+   audio (mix: both, video at 0.6) — matching the build's audio mode. Every
+   500 ms a drift check reseeks any media element more than 80 ms off the
+   clock. The timeline strip IS the scrubber (click/drag = seek; the
+   playhead line tracks at 60 fps); ← → jump between cuts, Space plays. */
+
+var po = {
+  segs: [],        // [{kind:'clip'|'black', t0, t1, entry, slot, title}]
+  duration: 0,
+  sig: "",         // plan signature — only a REAL change rebuilds mid-play
+  t: 0,            // the virtual clock, in record seconds
+  playing: false,
+  raf: 0,
+  clock0: 0,       // performance.now() when play/seek anchored the clock
+  t0: 0,           // po.t at that anchor
+  seg: -1,
+  active: null,    // the visible <video> of the A/B pair
+  standby: null,
+  audioMode: "original",
+  musicIn: 0,
+  musicEnd: 0,
+  lastDrift: 0,
+  scrubbing: false
+};
+
+/* the plan as ordered playout segments — the same record-gap reading as
+   monteur.preview._segments: entries tile the record range, gaps are dips */
+function poPlanSegments() {
+  var plan = rev.planJson || {};
+  var entries = planSortedEntries();
+  var duration = plan.duration ||
+    (entries.length ? entries[entries.length - 1].record_end || 0 : 0);
+  var dips = ((plan.dips || []).slice()).sort(function (a, b) {
+    return (a[0] || 0) - (b[0] || 0);
+  });
+  var titles = plan.title_texts || [];
+  function dipTitle(t0) {
+    for (var k = 0; k < dips.length; k++) {
+      if (Math.abs((dips[k][0] || 0) - t0) < 0.05) return String(titles[k] || "").trim();
+    }
+    return "";
+  }
+  var segs = [];
+  var cursor = 0;
+  entries.forEach(function (entry, slot) {
+    var rs = entry.record_start || 0;
+    var re = entry.record_end || 0;
+    if (rs - cursor > 0.01) {
+      segs.push({ kind: "black", t0: cursor, t1: rs, entry: null, slot: -1, title: dipTitle(cursor) });
+    }
+    if (re - rs > 0.01) {
+      segs.push({ kind: "clip", t0: rs, t1: re, entry: entry, slot: slot, title: "" });
+    }
+    cursor = Math.max(cursor, re);
+  });
+  if (duration - cursor > 0.01) {
+    segs.push({ kind: "black", t0: cursor, t1: duration, entry: null, slot: -1, title: dipTitle(cursor) });
+  }
+  return { segs: segs, duration: duration };
+}
+
+function poSignature(plan) {
+  if (!plan) return "";
+  var parts = (plan.entries || []).map(function (e) {
+    return [e.clip_path, e.source_start, e.source_end, e.record_start, e.record_end].join(",");
+  });
+  parts.push(JSON.stringify(plan.dips || []));
+  parts.push(JSON.stringify(plan.title_texts || []));
+  parts.push(String(plan.duration || 0), String(plan.music_path || ""),
+    String(plan.music_start || 0), String(plan.music_in || 0),
+    String(plan.music_out || 0), String(plan.fade_in || 0), String(plan.fade_out || 0));
+  return parts.join("|");
+}
+
+function poSegAt(t) {
+  for (var i = po.segs.length - 1; i >= 0; i--) {
+    if (po.segs[i].t0 <= t + 0.001) return i;
+  }
+  return po.segs.length ? 0 : -1;
+}
+
+function poNextClipSeg(k) {
+  for (var j = k + 1; j < po.segs.length; j++) {
+    if (po.segs[j].kind === "clip") return j;
+  }
+  return -1;
+}
+
+/* point a buffer video at segment k's proxy and pre-seek its source_start */
+function poPrepare(video, k) {
+  var seg = po.segs[k];
+  if (!seg || seg.kind !== "clip") { video.dataset.seg = ""; return; }
+  video.dataset.seg = String(k);
+  var url = mediaUrl(seg.entry.clip_path);
+  var at = seg.entry.source_start || 0;
+  if (video.dataset.url !== url) {
+    video.dataset.url = url;
+    video.src = url;
+    video.load();
+  }
+  poSeekVideo(video, at);
+}
+
+function poSeekVideo(video, at) {
+  if (video.readyState >= 1) {
+    try { video.currentTime = at; } catch (e) { /* not seekable yet */ }
+    delete video.dataset.pendingSeek;
+  } else {
+    video.dataset.pendingSeek = at.toFixed(3); // applied on loadedmetadata
+  }
+}
+
+["po-video-a", "po-video-b"].forEach(function (id) {
+  $(id).addEventListener("loadedmetadata", function () {
+    var pending = this.dataset.pendingSeek;
+    if (pending !== undefined) {
+      try { this.currentTime = parseFloat(pending); } catch (e) { /* raced */ }
+      delete this.dataset.pendingSeek;
+    }
+  });
+});
+
+function poEntryOffset(seg) {
+  return (po.t - seg.t0) + (seg.entry.source_start || 0);
+}
+
+/* make segment k the visible one (swap the double buffer at boundaries) */
+function poActivate(k, hard) {
+  po.seg = k;
+  var seg = po.segs[k];
+  var title = $("po-title");
+  if (!seg) return;
+  if (seg.kind === "black") {
+    // dip: both buffers hidden — the stage is black; the title is DOM text
+    po.active.classList.remove("on");
+    po.standby.classList.remove("on");
+    try { po.active.pause(); } catch (e) { /* nothing loaded */ }
+    if (seg.title) { title.textContent = seg.title; title.hidden = false; }
+    else { title.hidden = true; }
+    var up = poNextClipSeg(k); // preload the next shot while black plays
+    if (up !== -1 && po.standby.dataset.seg !== String(up)) poPrepare(po.standby, up);
+  } else {
+    title.hidden = true;
+    if (po.standby.dataset.seg === String(k)) {
+      var was = po.active; po.active = po.standby; po.standby = was;
+    } else if (po.active.dataset.seg !== String(k)) {
+      poPrepare(po.active, k);
+    }
+    if (hard || po.active.readyState >= 1) {
+      var want = poEntryOffset(seg);
+      if (hard || Math.abs((po.active.currentTime || 0) - want) > 0.25) {
+        poSeekVideo(po.active, want);
+      }
+    }
+    po.active.classList.add("on");
+    po.standby.classList.remove("on");
+    try { po.standby.pause(); } catch (e) { /* nothing loaded */ }
+    if (po.playing) {
+      var p = po.active.play();
+      if (p && p.catch) p.catch(function () { /* decode/autoplay veto — the clock still runs */ });
+    } else {
+      try { po.active.pause(); } catch (e) { /* nothing loaded */ }
+    }
+    var next = poNextClipSeg(k);
+    if (next !== -1 && po.standby.dataset.seg !== String(next)) poPrepare(po.standby, next);
+    // light selection sync: during playback the inspector follows the playhead
+    if (po.playing && seg.slot >= 0 && !$("cre-inspector").hidden && insp.slot !== seg.slot) {
+      selectSlot(seg.slot);
+    }
+  }
+  poApplyAudio();
+}
+
+/* what the song should read right now — the engine's mapping: the bed is
+   read from music_start (+ window) and delayed to music_in, so at record
+   time t the song sits at music_start + t (silent before music_in). */
+function poMusicPos() {
+  var plan = rev.planJson || {};
+  return (plan.music_start || 0) + po.t;
+}
+
+function poSyncMusic(force) {
+  var music = $("po-music");
+  if (!music.dataset.url || music.readyState < 1) return;
+  var want = poMusicPos();
+  if (force || Math.abs(music.currentTime - want) > 0.08) {
+    try { music.currentTime = want; } catch (e) { /* not seekable */ }
+  }
+}
+
+/* volumes/mute per the build's audio mode; music only inside its window */
+function poApplyAudio() {
+  var seg = po.segs[po.seg];
+  var clip = seg && seg.kind === "clip";
+  var own = po.audioMode === "original" || po.audioMode === "mix";
+  po.active.muted = !(clip && own);
+  po.active.volume = po.audioMode === "mix" ? 0.6 : 1; // MIX_ORIGINAL_LEVEL
+  po.standby.muted = true;
+  var music = $("po-music");
+  if (po.audioMode === "original" || !music.dataset.url) {
+    try { music.pause(); } catch (e) { /* nothing loaded */ }
+    return;
+  }
+  var inWindow = po.t >= po.musicIn - 0.05 && po.t < po.musicEnd;
+  if (po.playing && inWindow) {
+    if (music.paused) {
+      poSyncMusic(true);
+      var p = music.play();
+      if (p && p.catch) p.catch(function () { /* autoplay veto */ });
+    }
+  } else {
+    try { music.pause(); } catch (e) { /* nothing loaded */ }
+  }
+}
+
+/* every 500 ms: reseek any media element more than 80 ms off the clock */
+function poDriftCheck() {
+  var seg = po.segs[po.seg];
+  if (seg && seg.kind === "clip" && po.active.readyState >= 1) {
+    var want = poEntryOffset(seg);
+    if (Math.abs(po.active.currentTime - want) > 0.08) {
+      try { po.active.currentTime = want; } catch (e) { /* mid-load */ }
+    }
+    if (po.playing && po.active.paused) {
+      var p = po.active.play();
+      if (p && p.catch) p.catch(function () { /* still vetoed */ });
+    }
+  }
+  poSyncMusic(false);
+  poApplyAudio(); // music window entry/exit happens between boundaries
+}
+
+function poRender() {
+  $("po-time").textContent = fmtClock(po.t) + " / " + fmtClock(po.duration);
+  var head = $("cre-strip-playhead");
+  if (po.duration > 0 && po.segs.length && !$("cre-strip").hidden) {
+    head.hidden = false;
+    head.style.left = (100 * po.t / po.duration) + "%";
+  } else {
+    head.hidden = true;
+  }
+  // the plan's fades as CSS opacity on the frame (the stage stays black)
+  var plan = rev.planJson || {};
+  var op = 1;
+  var fadeIn = plan.fade_in || 0;
+  var fadeOut = plan.fade_out || 0;
+  if (fadeIn > 0 && po.t < fadeIn) op = Math.min(op, po.t / fadeIn);
+  if (fadeOut > 0 && po.t > po.duration - fadeOut) {
+    op = Math.min(op, Math.max(0, (po.duration - po.t) / fadeOut));
+  }
+  $("po-frame").style.opacity = String(Math.max(0, Math.min(1, op)));
+}
+
+function poTick() {
+  po.raf = 0;
+  if (!po.playing) return;
+  var now = performance.now();
+  po.t = po.t0 + (now - po.clock0) / 1000;
+  if (po.t >= po.duration) {
+    po.t = po.duration;
+    poPause();
+    poRender();
+    return;
+  }
+  var k = poSegAt(po.t);
+  if (k !== po.seg) poActivate(k, false);
+  if (now - po.lastDrift > 500) {
+    po.lastDrift = now;
+    poDriftCheck();
+  }
+  poRender();
+  po.raf = window.requestAnimationFrame(poTick);
+}
+
+function poUpdateTransport() {
+  var btn = $("po-play");
+  btn.textContent = po.playing ? "❚❚ Pause" : "▶ Play";
+  btn.setAttribute("aria-pressed", String(po.playing));
+  poRender();
+}
+
+function poPlay() {
+  if (po.playing || !po.segs.length) return;
+  if (po.t >= po.duration - 0.01) po.t = 0; // play again from the top
+  po.playing = true;
+  po.t0 = po.t;
+  po.clock0 = performance.now();
+  po.lastDrift = 0;
+  poActivate(poSegAt(po.t), true);
+  poUpdateTransport();
+  po.raf = window.requestAnimationFrame(poTick);
+}
+
+function poPause() {
+  po.playing = false;
+  if (po.raf) { window.cancelAnimationFrame(po.raf); po.raf = 0; }
+  if (po.active) { try { po.active.pause(); } catch (e) { /* empty */ } }
+  if (po.standby) { try { po.standby.pause(); } catch (e) { /* empty */ } }
+  try { $("po-music").pause(); } catch (e) { /* empty */ }
+  if (po.segs.length) poUpdateTransport();
+}
+
+function poToggle() { if (po.playing) poPause(); else poPlay(); }
+
+function poSeek(t) {
+  if (!po.segs.length) return;
+  t = Math.max(0, Math.min(po.duration, t || 0));
+  po.t = t;
+  po.t0 = t;
+  po.clock0 = performance.now(); // re-anchor: scrubbing while playing works
+  var k = poSegAt(t);
+  poActivate(k, true);
+  var seg = po.segs[k];
+  if (seg && seg.kind === "clip") poSeekVideo(po.active, poEntryOffset(seg));
+  poSyncMusic(true);
+  poRender();
+}
+
+/* ← / → : jump to the previous/next cut (segment boundaries) */
+function poJumpCut(direction) {
+  if (!po.segs.length) return;
+  var marks = po.segs.map(function (seg) { return seg.t0; });
+  marks.push(po.duration);
+  if (direction > 0) {
+    for (var i = 0; i < marks.length; i++) {
+      if (marks[i] > po.t + 0.05) { poSeek(marks[i]); return; }
+    }
+    poSeek(po.duration);
+  } else {
+    for (var j = marks.length - 1; j >= 0; j--) {
+      if (marks[j] < po.t - 0.05) { poSeek(marks[j]); return; }
+    }
+    poSeek(0);
+  }
+}
+
+/* rebuild the playout plan from rev.planJson — called from renderStoryboard
+   after every build/revise/apply/adjust; a signature check keeps playback
+   running undisturbed when nothing about the cut actually changed. */
+function poRebuild() {
+  var plan = rev.planJson;
+  var host = $("cre-playout");
+  if (!plan || !((plan.entries || []).length)) {
+    poPause();
+    po.segs = [];
+    po.sig = "";
+    po.t = 0;
+    host.hidden = true;
+    $("cre-strip-playhead").hidden = true;
+    return;
+  }
+  var sig = poSignature(plan);
+  if (sig === po.sig && !host.hidden) return; // same cut — keep playing
+  po.sig = sig;
+  var keepT = po.t;
+  poPause();
+  var built = poPlanSegments();
+  po.segs = built.segs;
+  po.duration = built.duration;
+  po.seg = -1;
+  po.active = $("po-video-a");
+  po.standby = $("po-video-b");
+  po.active.dataset.seg = "";
+  po.standby.dataset.seg = "";
+  var body = (cre.result && cre.result.body) || {};
+  po.audioMode = plan.music_path ? (body.audio || cre.audio || "music") : "original";
+  var music = $("po-music");
+  if (plan.music_path && po.audioMode !== "original") {
+    var url = mediaUrl(plan.music_path);
+    if (music.dataset.url !== url) {
+      music.dataset.url = url;
+      music.src = url;
+      music.load();
+    }
+  } else if (music.dataset.url) {
+    music.dataset.url = "";
+    music.removeAttribute("src");
+    music.load();
+  }
+  po.musicIn = Math.max(0, Math.min(plan.music_in || 0, po.duration));
+  var out = plan.music_out || 0;
+  po.musicEnd = out > 0.01 ? Math.min(out, po.duration) : po.duration;
+  if (po.musicEnd <= po.musicIn + 0.01) { po.musicIn = 0; po.musicEnd = po.duration; }
+  $("po-note").hidden = true;
+  host.hidden = false;
+  poSeek(Math.min(keepT, Math.max(0, po.duration - 0.001))); // keep t where possible
+  poUpdateTransport();
+}
+
+$("po-play").addEventListener("click", poToggle);
+$("po-music").addEventListener("error", function () {
+  if ($("cre-playout").hidden || !this.dataset.url) return;
+  creNote("po-note", "The song can't play in this browser (format not supported) — the pictures still play; the exact preview below has the full mix.");
+});
+
+/* the timeline strip is the scrubber: click/drag = seek the virtual clock */
+(function () {
+  var strip = $("cre-strip");
+  function timeAt(e) {
+    var rect = strip.getBoundingClientRect();
+    var x = Math.max(rect.left, Math.min(rect.right, e.clientX));
+    return (x - rect.left) / Math.max(1, rect.width) * po.duration;
+  }
+  strip.addEventListener("pointerdown", function (e) {
+    if ($("cre-playout").hidden || !po.segs.length || e.button !== 0) return;
+    // NO pointer capture: a plain click must still reach the tl-block
+    // underneath (click-to-seek AND click-to-select are the same gesture).
+    po.scrubbing = true;
+    poSeek(timeAt(e));
+  });
+  document.addEventListener("pointermove", function (e) {
+    if (po.scrubbing) poSeek(timeAt(e)); // drag anywhere once started
+  });
+  function done() { po.scrubbing = false; }
+  document.addEventListener("pointerup", done);
+  document.addEventListener("pointercancel", done);
+})();
+
+/* transport keys — only while step 3 is on screen and not typing */
+document.addEventListener("keydown", function (e) {
+  if ($("create").hidden || cre.step !== 3 || $("cre-playout").hidden) return;
+  var tag = (e.target && e.target.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select" || tag === "button" ||
+      (e.target && e.target.isContentEditable)) return;
+  if (e.key === " " || e.code === "Space") {
+    e.preventDefault();
+    poToggle();
+  } else if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && insp.slot === null) {
+    // with the inspector open ← → keep moving the selection (see above)
+    e.preventDefault();
+    poJumpCut(e.key === "ArrowRight" ? 1 : -1);
+  }
+});
+
+/* exposed for the Playwright acceptance tests (and console debugging) */
+window.monteurPlayout = {
+  state: po,
+  mini: mini,
+  seek: poSeek,
+  play: poPlay,
+  pause: poPause,
+  rebuild: poRebuild,
+  plan: function () { return rev.planJson; },
+  entries: function () { return planSortedEntries(); }
+};
 
 function startRevise(body, andThen) {
   if (revisePanel.running() || buildPanel.running() || directPanel.running()) return;
@@ -6768,6 +7495,11 @@ function renderAlternatives(alternatives) {
     img.alt = String(alt.name || "");
     img.src = "/api/thumb?clip=" + encodeURIComponent(String(alt.clip || "")) +
       "&t=" + mid.toFixed(3) + "&w=320";
+    img.title = "Watch this moment";
+    img.addEventListener("click", function (e) {
+      e.stopPropagation(); // watching an alternative must not swap to it
+      openMiniPlayer(alt.clip, alt.start || 0, alt.end || 0, alt.name);
+    });
     btn.appendChild(img);
     var meta = el("div", "insp-alt-meta");
     meta.appendChild(el("span", "insp-alt-name", String(alt.name || "")));

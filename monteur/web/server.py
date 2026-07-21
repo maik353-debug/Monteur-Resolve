@@ -39,6 +39,9 @@ API (all JSON):
 * ``POST /api/plan/adjust`` {"plan_json", "slot", "transition",
   "fps"?, "audio"?, "canvas"?, "format"?}                       -> build-result shape
 * ``GET  /api/thumb?clip=&t=&w=``                                -> JPEG bytes
+* ``GET  /api/media?path=<abs>``                                 -> media bytes (Range-capable;
+  serves the playback proxy when fresh, else the original file)
+* ``POST /api/proxies`` {"folder"}                              -> {"job": id}
 * ``POST /api/create/preview`` {"plan_json", "audio"?,
   "width"?}                                                     -> {"job": id}
 * ``GET  /api/preview/<token>.mp4``                              -> MP4 bytes (Range-capable)
@@ -271,6 +274,28 @@ pass). The result is ``{"path", "duration", "seconds", "notes"}`` —
 without source handles, skipped titles, missing SFX files). Rendering
 comes from Monteur's own engine; the Resolve build/render pair stays the
 path for grading and fine-tuning.
+
+``GET /api/media?path=<abs path>`` is the playback surface behind the
+Studio's moment player and virtual timeline playout (:mod:`monteur.
+proxies`): it serves the clip's PLAYBACK PROXY when a fresh one exists in
+the proxy cache (small uniform H.264/AAC, dense keyframes, +faststart —
+what makes browser scrubbing instant) and falls back to the original file
+otherwise, with the same single-range byte serving as the preview route
+(206/416/200 + ``Accept-Ranges``), STREAMED in chunks so multi-gigabyte
+originals never load into memory. The proxy is served as ``video/mp4``;
+originals get a Content-Type from their suffix. Like ``/api/thumb`` the
+path is an absolute local file that must exist (400 without a path, 404
+when it does not exist) — Studio is a local single-user tool.
+
+Proxies are prepared in the background: a successful scan job kicks a
+``"proxies"`` job automatically (the scan result carries its id as
+``"proxies_job"``), and ``POST /api/proxies {"folder"}`` (re)starts one
+manually. The job runs :func:`monteur.proxies.ensure_proxies` — one
+transcode per clip, skip-when-fresh, per-file progress as ``{"stage":
+"proxy", "index", "total", "name"}`` entries — and prunes the cache
+best-effort afterwards. Per-file failures are soft (the result's
+``"errors"`` list names them; playback falls back to the original file);
+the UI shows a quiet status line, and everything works without proxies.
 
 ``GET /api/preview/<token>.mp4`` serves that file WITH HTTP Range support —
 ``<video>`` seeking needs 206 partial responses: a valid ``Range:
@@ -812,10 +837,92 @@ def _run_export_video_job(job: dict, payload: dict) -> None:
         job["state"] = "error"
 
 
+# Content types for /api/media originals, by suffix (the proxy is always
+# video/mp4). Unknown suffixes degrade to octet-stream — the browser then
+# probes the bytes itself.
+_MEDIA_TYPES = {
+    ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime",
+    ".webm": "video/webm", ".mkv": "video/x-matroska",
+    ".avi": "video/x-msvideo", ".mts": "video/mp2t", ".m2ts": "video/mp2t",
+    ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
+    ".aac": "audio/aac", ".flac": "audio/flac", ".ogg": "audio/ogg",
+    ".oga": "audio/ogg", ".opus": "audio/ogg", ".aif": "audio/aiff",
+    ".aiff": "audio/aiff",
+}
+
+
+def _run_proxies_job(job: dict, folder: str) -> None:
+    """Daemon-thread body for the background playback-proxy transcodes.
+
+    One :func:`monteur.proxies.ensure_proxy` per video file in ``folder``
+    (skip-when-fresh — a re-run after an unchanged scan is near-instant),
+    per-file progress as ``{"stage": "proxy"}`` entries, then a
+    best-effort cache prune. Per-file failures are SOFT: they land in the
+    result's ``"errors"`` list and playback of those clips falls back to
+    the original file — proxies are an upgrade, never a gate.
+
+    ``monteur.proxies`` is resolved at CALL time via importlib (honours
+    ``sys.modules``), so tests can monkeypatch ``ensure_proxies`` /
+    ``prune_proxies`` without a single real transcode.
+    """
+    import importlib
+
+    from monteur.media import MonteurMediaError, list_media
+
+    try:
+        paths = [str(p) for p in list_media(folder)]
+        if not paths:
+            raise MonteurMediaError(f"no video files found in {folder}")
+        proxies = importlib.import_module("monteur.proxies")
+
+        def progress(done: int, total: int, name: str) -> None:
+            entry = {"stage": "proxy", "index": done, "total": total, "name": name}
+            with _JOBS_LOCK:
+                job["progress"].append(entry)
+
+        made, errors = proxies.ensure_proxies(
+            paths, progress=progress, cancel=job["cancel"]
+        )
+        if job["cancel"].is_set():
+            job["state"] = "cancelled"
+            return
+        try:  # keep the cache bounded — best-effort by contract
+            proxies.prune_proxies()
+        except Exception:  # noqa: BLE001 — pruning must never fail the job
+            pass
+        job["result"] = {
+            "ready": len(made),
+            "total": len(paths),
+            "errors": [
+                f"{Path(path).name}: {message}"
+                for path, message in errors.items()
+            ],
+        }
+        job["state"] = "done"
+    except (MonteurMediaError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
+def _start_proxies_job(folder: str) -> dict:
+    """Create and start a ``"proxies"`` job for ``folder``; returns the job."""
+    job = _new_job("proxies")
+    threading.Thread(
+        target=_run_proxies_job,
+        args=(job, folder),
+        name=f"monteur-proxies-{job['id']}",
+        daemon=True,
+    ).start()
+    return job
+
+
 def _new_job(kind: str) -> dict:
     job = {
         "id": secrets.token_hex(4),
-        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "direct" | "direct-apply" | "coverage" | "distill" | "preview" | "export-video" | "resolve-build" | "resolve-render" | "resolve-detect" | "movie" | "scene-check" | "movie-assemble" | "ai-test" | "youtube-upload"
+        "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "direct" | "direct-apply" | "coverage" | "distill" | "preview" | "proxies" | "export-video" | "resolve-build" | "resolve-render" | "resolve-detect" | "movie" | "scene-check" | "movie-assemble" | "ai-test" | "youtube-upload"
         "state": "running",  # -> "done" | "error" | "cancelled"
         "progress": [],  # dicts: {"index","total","name","stage"[,"usable_ratio"]}
         "message": "",  # human-readable reason when state == "error"
@@ -1073,6 +1180,13 @@ def _run_scan_job(job: dict, folder: str, see: bool = False) -> None:
                 result["vision_notes"] = notes
         # asdict AFTER vision so the clip payload includes the annotations.
         result["clips"] = [asdict(r) for r in reports]
+        # Every successful scan (and rescan) kicks the background proxy
+        # transcodes, so playback is smooth by the time the user reaches
+        # the storyboard. Best-effort: proxies never fail a scan.
+        try:
+            result["proxies_job"] = _start_proxies_job(folder)["id"]
+        except Exception:  # noqa: BLE001 — proxies are an upgrade, not a gate
+            pass
         job["result"] = result
         job["state"] = "done"
     except SiftCancelled:
@@ -2759,6 +2873,8 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/create/preview"): self._create_preview,
             ("POST", "/api/create/export-video"): self._create_export_video,
             ("GET", "/api/thumb"): self._thumb,
+            ("GET", "/api/media"): self._media,
+            ("POST", "/api/proxies"): self._proxies_start,
             ("POST", "/api/create/resolve"): self._create_resolve,
             ("GET", "/api/drafts"): self._drafts_list,
             ("POST", "/api/drafts"): self._drafts_save,
@@ -3524,51 +3640,134 @@ class MonteurHandler(BaseHTTPRequestHandler):
         ).start()
         self._send_json({"job": job["id"]})
 
+    def _send_file_range(
+        self, path: str, content_type: str, missing_message: str = ""
+    ) -> None:
+        """Serve a local file with single-range support, streamed in chunks.
+
+        The one shared byte-serving path behind ``/api/preview/<token>.mp4``
+        and ``/api/media`` — ``<video>``/``<audio>`` seeking needs true 206
+        partial responses, and the stdlib handler has none: ``bytes=a-b`` /
+        ``bytes=a-`` / ``bytes=-suffix`` get a 206 with ``Content-Range``,
+        an unsatisfiable range gets a 416, anything malformed falls back to
+        the full 200 (per RFC 7233 an unparseable Range header may be
+        ignored). The body is STREAMED from disk in 512 KiB chunks — media
+        originals can be multi-gigabyte camera files and must never be read
+        into memory whole. A file that cannot be opened is a 404 carrying
+        ``missing_message`` (or a generic line).
+        """
+        try:
+            handle = open(path, "rb")
+        except OSError:
+            raise ApiError(
+                404, missing_message or f"cannot read {Path(path).name}"
+            )
+        with handle:
+            size = os.fstat(handle.fileno()).st_size
+            headers = {"Accept-Ranges": "bytes", "Cache-Control": "no-store"}
+            status = 200
+            start, end = 0, size - 1
+            range_header = (self.headers.get("Range") or "").strip()
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header)
+            if match and (match.group(1) or match.group(2)):
+                if match.group(1):
+                    start = int(match.group(1))
+                    end = (
+                        min(int(match.group(2)), size - 1)
+                        if match.group(2) else size - 1
+                    )
+                else:  # suffix form: the last N bytes
+                    start = max(0, size - int(match.group(2)))
+                    end = size - 1
+                if start >= size or start > end:
+                    self._send_bytes(
+                        b"", content_type, status=416,
+                        headers={"Content-Range": f"bytes */{size}", **headers},
+                    )
+                    return
+                status = 206
+                headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+            length = max(0, end - start + 1) if size else 0
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(length))
+                for name, value in headers.items():
+                    self.send_header(name, value)
+                self.end_headers()
+                handle.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = handle.read(min(512 * 1024, remaining))
+                    if not chunk:
+                        break  # truncated on disk mid-send — stop honestly
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+            except _CLIENT_GONE:
+                pass  # client closed the socket mid-stream — nothing to do
+
     def _preview_file(self, name: str) -> None:
         """GET /api/preview/<token>.mp4 — serve a finished preview with Range.
 
-        ``<video>`` seeking needs 206 partial responses, so this implements
-        single-range byte serving by hand (the stdlib handler has none):
-        ``bytes=a-b`` / ``bytes=a-`` / ``bytes=-suffix`` get a 206 with
-        ``Content-Range``, an unsatisfiable range gets a 416, anything
-        malformed falls back to the full 200 (per RFC 7233 an unparseable
-        Range header may be ignored). The name must match the server's own
-        token naming — this route can only ever serve the preview dir.
+        Byte serving via :meth:`_send_file_range`. The name must match the
+        server's own token naming — this route can only ever serve the
+        preview directory.
         """
         if not _PREVIEW_NAME_RE.fullmatch(name):
             raise ApiError(404, f"no preview {name!r}")
         path = Path(_preview_dir()) / name
-        try:
-            data = path.read_bytes()
-        except OSError:
-            raise ApiError(
-                404,
+        self._send_file_range(
+            str(path), "video/mp4",
+            missing_message=(
                 "this preview is gone — it was replaced by a newer one; "
-                "render the preview again",
-            )
-        size = len(data)
-        headers = {"Accept-Ranges": "bytes", "Cache-Control": "no-store"}
-        range_header = (self.headers.get("Range") or "").strip()
-        match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header)
-        if match and (match.group(1) or match.group(2)):
-            if match.group(1):
-                start = int(match.group(1))
-                end = min(int(match.group(2)), size - 1) if match.group(2) else size - 1
-            else:  # suffix form: the last N bytes
-                start = max(0, size - int(match.group(2)))
-                end = size - 1
-            if start >= size or start > end:
-                self._send_bytes(
-                    b"", "video/mp4", status=416,
-                    headers={"Content-Range": f"bytes */{size}", **headers},
-                )
-                return
-            headers["Content-Range"] = f"bytes {start}-{end}/{size}"
-            self._send_bytes(
-                data[start:end + 1], "video/mp4", status=206, headers=headers
-            )
-            return
-        self._send_bytes(data, "video/mp4", headers=headers)
+                "render the preview again"
+            ),
+        )
+
+    def _media(self) -> None:
+        """GET /api/media?path=<abs path> — Range-capable media serving.
+
+        The playback surface behind the moment player and the virtual
+        timeline playout: serves the clip's PLAYBACK PROXY when a fresh
+        one exists (:func:`monteur.proxies.fresh_proxy` — small H.264,
+        dense keyframes, +faststart, always ``video/mp4``) and falls back
+        to the original file otherwise (Content-Type by suffix), so
+        playback works with or without proxies. Like ``/api/thumb`` the
+        path is an absolute local file that must exist — Studio is a
+        local single-user tool (the server binds to 127.0.0.1).
+        """
+        from urllib.parse import parse_qs, urlsplit
+
+        query = parse_qs(urlsplit(self.path).query)
+        raw = (query.get("path") or [""])[0].strip()
+        if not raw:
+            raise ApiError(400, "missing 'path' (absolute path to a media file)")
+        path = os.path.abspath(raw)
+        if not os.path.isfile(path):
+            raise ApiError(404, f"no such media file: {raw}")
+        serve_path = path
+        content_type = _MEDIA_TYPES.get(
+            Path(path).suffix.lower(), "application/octet-stream"
+        )
+        try:
+            import importlib
+
+            proxies = importlib.import_module("monteur.proxies")
+            fresh = proxies.fresh_proxy(path)
+        except Exception:  # noqa: BLE001 — proxies are an upgrade, not a gate
+            fresh = None
+        if fresh is not None:
+            serve_path, content_type = str(fresh), "video/mp4"
+        self._send_file_range(serve_path, content_type)
+
+    def _proxies_start(self) -> None:
+        """POST /api/proxies {"folder"} — (re)start the proxy transcodes."""
+        payload = self._read_json()
+        folder = str(payload.get("folder") or "").strip()
+        if not folder:
+            raise ApiError(400, "missing 'folder' (path to your footage)")
+        job = _start_proxies_job(folder)
+        self._send_json({"job": job["id"]})
 
     # -- drafts (the Create wizard's WIP memory — monteur.drafts) -----------
 

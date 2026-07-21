@@ -27,18 +27,40 @@ from _demo import DEMO as _DEMO_FOOTAGE
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+@pytest.fixture(scope="session")
+def _proxy_cache_dir(tmp_path_factory):
+    """ONE proxy cache for the whole test session: every scan job kicks the
+    background proxy transcodes, and sharing the cache means the demo clips
+    are transcoded once and every later scan's proxies job is a near-instant
+    skip-when-fresh pass instead of 4 fresh ffmpeg runs per test. The env
+    var is set at SESSION scope (os.environ directly) because the proxies
+    job outlives its test: a daemon thread must never see the variable
+    flicker off between tests and write into the real ~/.monteur/proxies."""
+    cache = tmp_path_factory.mktemp("proxy-cache")
+    previous = os.environ.get("MONTEUR_PROXIES_PATH")
+    os.environ["MONTEUR_PROXIES_PATH"] = str(cache)
+    yield cache
+    if previous is None:
+        os.environ.pop("MONTEUR_PROXIES_PATH", None)
+    else:
+        os.environ["MONTEUR_PROXIES_PATH"] = previous
+
+
 @pytest.fixture(autouse=True)
-def _isolated_settings(tmp_path, monkeypatch):
+def _isolated_settings(tmp_path, monkeypatch, _proxy_cache_dir):
     """Every web test gets scratch settings AND drafts files — the server
     reads monteur.settings per request and autosaves drafts after builds,
     and tests must never touch (or depend on) the developer's real
-    ~/.monteur/settings.json or ~/.monteur/drafts.json."""
+    ~/.monteur/settings.json or ~/.monteur/drafts.json. The proxy cache is
+    isolated too (session-scoped — see _proxy_cache_dir): scans kick real
+    background transcodes, and those must never land in ~/.monteur/proxies."""
     monkeypatch.setenv(
         "MONTEUR_SETTINGS_PATH", str(tmp_path / "web-settings.json")
     )
     monkeypatch.setenv(
         "MONTEUR_DRAFTS_PATH", str(tmp_path / "web-drafts.json")
     )
+    monkeypatch.setenv("MONTEUR_PROXIES_PATH", str(_proxy_cache_dir))
 
 
 @pytest.fixture()
@@ -5109,3 +5131,544 @@ class TestProUiStatic:
             "applyFindingBadges(); // a cleared review takes its warning dots with it",
         ):
             assert needle in source, needle
+
+
+# --- proxies + /api/media + the virtual playout (the "watch without rendering"
+# --- surface: monteur.proxies, GET /api/media, the step-3 playout engine) ----
+
+
+class TestMediaApi:
+    """GET /api/media?path=… — Range-capable serving of proxy-or-original."""
+
+    DEMO = str(_DEMO_FOOTAGE)
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+
+    @pytest.fixture()
+    def _empty_proxy_cache(self, tmp_path, monkeypatch):
+        """Point the cache at an empty dir so the ORIGINAL is served."""
+        monkeypatch.setenv("MONTEUR_PROXIES_PATH", str(tmp_path / "no-proxies"))
+
+    def _url(self, server, path):
+        return f"{server}/api/media?path={_quote(path)}"
+
+    def test_serves_the_original_with_full_range_behavior(
+        self, server, _empty_proxy_cache
+    ):
+        clip = Path(self.DEMO) / "clip_A.mp4"
+        data = clip.read_bytes()
+        url = self._url(server, clip)
+
+        status, headers, body = _get_raw(url)
+        assert status == 200
+        assert headers["Content-Type"] == "video/mp4"
+        assert headers["Accept-Ranges"] == "bytes"
+        assert int(headers["Content-Length"]) == len(data)
+        assert body == data  # no proxy -> the original file, byte-true
+
+        # Range GET: <video> seeking needs true 206 partial responses
+        status, headers, part = _get_raw(url, headers={"Range": "bytes=0-99"})
+        assert status == 206
+        assert headers["Content-Range"] == f"bytes 0-99/{len(data)}"
+        assert part == data[:100]
+
+        status, headers, tail = _get_raw(url, headers={"Range": "bytes=100-"})
+        assert status == 206
+        assert headers["Content-Range"] == f"bytes 100-{len(data) - 1}/{len(data)}"
+        assert tail == data[100:]
+
+        status, headers, suffix = _get_raw(url, headers={"Range": "bytes=-50"})
+        assert status == 206
+        assert suffix == data[-50:]
+
+        # unsatisfiable range: 416 with the total size
+        status, headers, _body = _get_raw(
+            url, headers={"Range": f"bytes={len(data)}-"}
+        )
+        assert status == 416
+        assert headers["Content-Range"] == f"bytes */{len(data)}"
+
+        # a malformed Range header falls back to the full 200 (RFC 7233)
+        status, _, whole = _get_raw(url, headers={"Range": "bytes=abc"})
+        assert status == 200
+        assert whole == data
+
+    def test_serves_the_fresh_proxy_when_one_exists(self, server):
+        from monteur import proxies
+
+        clip = Path(self.DEMO) / "clip_C.mp4"
+        proxy = proxies.ensure_proxy(clip)  # session cache — usually fresh
+        proxy_data = proxy.read_bytes()
+        assert proxy_data != clip.read_bytes()
+
+        status, headers, body = _get_raw(self._url(server, clip))
+        assert status == 200
+        assert headers["Content-Type"] == "video/mp4"
+        assert body == proxy_data  # the PROXY, not the original
+
+        status, headers, part = _get_raw(
+            self._url(server, clip), headers={"Range": "bytes=0-15"}
+        )
+        assert status == 206
+        assert part == proxy_data[:16]
+        assert headers["Content-Range"] == f"bytes 0-15/{len(proxy_data)}"
+
+    def test_stale_proxy_falls_back_to_the_original(self, server, tmp_path):
+        """An edited clip (new mtime) must NOT serve the old proxy."""
+        from monteur import proxies
+
+        copy = tmp_path / "edited.mp4"
+        import shutil
+
+        shutil.copyfile(Path(self.DEMO) / "clip_D.mp4", copy)
+        proxies.ensure_proxy(copy)
+        os.utime(copy, (1_000_000, 1_000_000))  # "the clip was replaced"
+        status, _headers, body = _get_raw(self._url(server, copy))
+        assert status == 200
+        assert body == copy.read_bytes()  # the original — never a stale proxy
+
+    def test_content_type_follows_the_original_suffix(
+        self, server, _empty_proxy_cache
+    ):
+        song = Path(self.DEMO) / "song.wav"
+        status, headers, body = _get_raw(self._url(server, song))
+        assert status == 200
+        assert headers["Content-Type"] == "audio/wav"
+        assert body[:4] == b"RIFF"
+
+    def test_missing_path_param_is_400(self, server):
+        status, _, body = _get_raw(f"{server}/api/media")
+        assert status == 400
+        assert "path" in json.loads(body)["error"]
+
+    def test_nonexistent_file_is_404(self, server):
+        status, _, body = _get_raw(
+            self._url(server, f"{self.DEMO}/no_such_clip.mp4")
+        )
+        assert status == 404
+        assert "no such media file" in json.loads(body)["error"]
+
+
+class TestProxiesJobs:
+    """The background "proxies" job: kicked by every scan, startable by hand.
+
+    ``monteur.proxies`` is resolved at CALL time in the job body, so
+    ``monkeypatch.setattr("monteur.proxies.ensure_proxies", …)`` is a
+    complete hook — no real transcode behind these tests.
+    """
+
+    DEMO = str(_DEMO_FOOTAGE)
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+
+    def _patch_proxies(self, monkeypatch, errors=None, ticks=()):
+        calls = {"batches": [], "pruned": 0}
+
+        def fake_ensure(paths, progress=None, *, cancel=None):
+            calls["batches"].append([str(p) for p in paths])
+            for done, total, name in ticks:
+                if progress is not None:
+                    progress(done, total, name)
+            made = {str(p): str(p) + ".proxy" for p in paths}
+            for path in (errors or {}):
+                made.pop(path, None)
+            return made, dict(errors or {})
+
+        def fake_prune(max_gb=5.0):
+            calls["pruned"] += 1
+            return []
+
+        monkeypatch.setattr("monteur.proxies.ensure_proxies", fake_ensure)
+        monkeypatch.setattr("monteur.proxies.prune_proxies", fake_prune)
+        return calls
+
+    def test_scan_kicks_a_proxies_job_automatically(self, server, monkeypatch):
+        calls = self._patch_proxies(
+            monkeypatch, ticks=[(1, 4, "clip_A.mp4"), (4, 4, "clip_D.mp4")]
+        )
+        _clear_scan_cache()
+        data = _post(f"{server}/api/create/scan", {"folder": self.DEMO})
+        scan = _wait_for_job(server, data["job"])
+        assert scan["state"] == "done"
+        # the scan result names the proxies job it kicked
+        proxies_job_id = scan["result"]["proxies_job"]
+        assert isinstance(proxies_job_id, str) and proxies_job_id
+        job = _wait_for_job(server, proxies_job_id)
+        assert job["kind"] == "proxies"
+        assert job["state"] == "done"
+        # every scanned clip was handed to ensure_proxies, in one batch
+        assert len(calls["batches"]) == 1
+        assert sorted(Path(p).name for p in calls["batches"][0]) == [
+            "clip_A.mp4", "clip_B.mp4", "clip_C.mp4", "clip_D.mp4",
+        ]
+        assert calls["pruned"] == 1  # best-effort prune after the batch
+        # per-file progress arrives as {"stage": "proxy"} entries
+        stages = {p["stage"] for p in job["progress"]}
+        assert stages == {"proxy"}
+        assert job["result"] == {"ready": 4, "total": 4, "errors": []}
+
+    def test_manual_proxies_endpoint(self, server, monkeypatch):
+        calls = self._patch_proxies(monkeypatch)
+        data = _post(f"{server}/api/proxies", {"folder": self.DEMO})
+        job = _wait_for_job(server, data["job"])
+        assert job["kind"] == "proxies"
+        assert job["state"] == "done"
+        assert len(calls["batches"]) == 1
+
+    def test_per_file_failures_are_soft_and_named(self, server, monkeypatch):
+        broken = str(Path(self.DEMO) / "clip_B.mp4")
+        self._patch_proxies(monkeypatch, errors={broken: "ffmpeg said no"})
+        data = _post(f"{server}/api/proxies", {"folder": self.DEMO})
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"  # soft — the job still succeeds
+        assert job["result"]["ready"] == 3
+        assert job["result"]["errors"] == ["clip_B.mp4: ffmpeg said no"]
+
+    def test_proxies_missing_folder_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/proxies", {})
+        assert exc_info.value.code == 400
+
+    def test_proxies_bad_folder_is_an_error_job(self, server):
+        data = _post(f"{server}/api/proxies", {"folder": "/no/such/folder"})
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "not a directory" in job["message"]
+
+
+class TestPlayoutUi:
+    """Static asserts on app.html: the virtual playout, the moment player
+    and the demoted (but present) exact-preview render."""
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_playout_container_and_transport(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        step3 = _step3_html(source)
+        for needle in (
+            # the double-buffered stage with the dip-title overlay
+            'id="cre-playout"',
+            'id="po-video-a"',
+            'id="po-video-b"',
+            'id="po-title"',
+            'id="po-music"',
+            # transport: play/pause + readout
+            'id="po-play"',
+            'id="po-time"',
+        ):
+            assert needle in step3, needle
+        for needle in (
+            # the rAF-driven virtual clock is the master
+            "performance.now()",
+            "requestAnimationFrame(poTick)",
+            # drift correction: every 500 ms, reseek anything > 80 ms off
+            "now - po.lastDrift > 500",
+            "> 0.08",
+            # audio modes: mix ducks the clips' own sound to 0.6
+            'po.audioMode === "mix" ? 0.6 : 1',
+            # everything streams from the proxy-or-original endpoint
+            "/api/media?path=",
+            # rebuilds keep t where possible
+            "poSeek(Math.min(keepT",
+        ):
+            assert needle in source, needle
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_strip_is_the_scrubber(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            'id="cre-strip-playhead"',
+            "tl-playhead",
+            'strip.addEventListener("pointerdown"',
+            'document.addEventListener("pointermove"',  # drag continues past strip
+            "function poJumpCut",       # ← → jump between cuts
+            "function poSeek",
+            'e.code === "Space"',       # Space toggles (step 3, not typing)
+        ):
+            assert needle in source, needle
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_mini_player_markup_and_guards(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            'id="mini-player"',
+            'id="mini-video"',
+            'id="mini-title"',
+            'id="mini-loop"',
+            'id="mini-close"',
+            # the timeupdate guard pauses (or loops) at source_end
+            'addEventListener("timeupdate"',
+            "mini.loop",
+            # board cards get the hover ▶ affordance
+            "attachMomentPlayer",
+            "sb-play",
+            # Esc + click-outside close
+            "closeMiniPlayer",
+        ):
+            assert needle in source, needle
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_exact_preview_is_demoted_but_present(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        step3 = _step3_html(source)
+        # the playout stage comes FIRST; the render button moved below it
+        assert step3.index('id="cre-playout"') < step3.index('id="cre-preview-btn"')
+        assert "Render exact preview" in step3
+        # its help line says what only the rendered file has
+        assert "final loudness" in step3.lower() or "final music mix" in step3.lower()
+        # the render pipeline itself is untouched
+        assert "/api/create/preview" in source
+        assert 'id="cre-preview-video"' in source
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_proxy_status_line_in_step_1(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        assert 'id="cre-proxy-status"' in source
+        assert "Preparing smooth playback" in source
+        assert "Playback ready" in source
+        # the scan result's proxies_job feeds the watcher
+        assert "result.proxies_job" in source
+
+
+def _launch_chromium(playwright):
+    """A Chromium for the acceptance tests: the standard install when
+    present, else any pinned browser on the machine. None = skip."""
+    try:
+        return playwright.chromium.launch()
+    except Exception:  # noqa: BLE001 — fall through to pinned browsers
+        pass
+    import glob
+
+    patterns = (
+        os.path.expanduser("~/.cache/ms-playwright/chromium-*/chrome-linux/chrome"),
+        "/opt/pw-browsers/chromium-*/chrome-linux/chrome",
+    )
+    for pattern in patterns:
+        for candidate in sorted(glob.glob(pattern), reverse=True):
+            try:
+                return playwright.chromium.launch(executable_path=candidate)
+            except Exception:  # noqa: BLE001 — try the next candidate
+                continue
+    return None
+
+
+class TestPlayoutAcceptance:
+    """Playwright: scan → storyboard → play/scrub the draft → moment player.
+
+    NOTE on codecs: the sandbox/test Chromium ships WITHOUT the proprietary
+    H.264 decoder (``canPlayType('video/mp4; codecs="avc1…"') === ''``), so
+    the proxies (and the H.264 demo originals) cannot VISUALLY decode here.
+    The engine is deliberately built so that does not matter: the virtual
+    clock is rAF-driven and independent of media readiness, so play/scrub/
+    dips/titles are asserted via element state, the clock and the network
+    (206 Range responses on /api/media), with a codec-conditional branch
+    for ``currentTime`` where decode would be needed. Real browsers
+    (Chrome/Edge/Safari/Firefox with H.264) decode these exact files fine.
+    """
+
+    DEMO = str(_DEMO_FOOTAGE)
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+
+    def test_watch_without_rendering_end_to_end(self, server, tmp_path):
+        playwright_api = pytest.importorskip(
+            "playwright.sync_api", reason="playwright is not installed"
+        )
+        shots = Path(
+            os.environ.get("MONTEUR_PLAYWRIGHT_SHOTS") or str(tmp_path / "shots")
+        )
+        shots.mkdir(parents=True, exist_ok=True)
+        media_responses = []
+
+        with playwright_api.sync_playwright() as playwright:
+            browser = _launch_chromium(playwright)
+            if browser is None:
+                pytest.skip("no Chromium browser available for Playwright")
+            page = browser.new_page(viewport={"width": 1440, "height": 960})
+            page.on(
+                "response",
+                lambda response: media_responses.append(
+                    (response.url, response.status)
+                ) if "/api/media" in response.url else None,
+            )
+            po = "window.monteurPlayout.state"
+
+            # ---- step 1: scan, then the quiet proxy status line -----------
+            page.goto(server)
+            page.click("#tab-create")
+            page.fill("#cre-folder", self.DEMO)
+            page.click("#cre-scan-btn")
+            page.wait_for_selector("#cre-next-1", state="visible", timeout=120_000)
+            page.wait_for_function(
+                "document.getElementById('cre-proxy-status')"
+                ".textContent.indexOf('Playback ready') === 0",
+                timeout=180_000,
+            )
+            page.screenshot(path=str(shots / "playout-step1-proxies.png"))
+
+            # ---- step 2 -> 3: build the draft ------------------------------
+            page.click("#cre-next-1")
+            page.click("#audio-original")  # no song: fast + deterministic
+            page.fill("#cre-maxlen", "12")
+            page.click("#cre-next-2")  # entering the storyboard builds
+            page.wait_for_selector(
+                "#cre-sb-board .sb-card", state="visible", timeout=180_000
+            )
+            page.wait_for_selector("#cre-playout", state="visible")
+            duration = page.evaluate(po + ".duration")
+            assert duration > 3
+            assert page.evaluate(po + ".segs.length") >= 2
+
+            # ---- play: the virtual clock advances, the playhead moves -----
+            page.click("#po-play")
+            page.wait_for_function(po + ".t > 0.8", timeout=10_000)
+            assert page.evaluate(po + ".playing") is True
+            left_1 = page.eval_on_selector(
+                "#cre-strip-playhead", "el => parseFloat(el.style.left)"
+            )
+            assert left_1 > 0
+            page.wait_for_function(
+                po + f".t > {page.evaluate(po + '.t')} + 0.4", timeout=5_000
+            )
+            left_2 = page.eval_on_selector(
+                "#cre-strip-playhead", "el => parseFloat(el.style.left)"
+            )
+            assert left_2 > left_1  # the strip playhead tracks the clock
+            assert not page.text_content("#po-time").startswith("0:00 /")
+            # the active video element is wired to /api/media and got real
+            # bytes (206 partial responses — the Range machinery end-to-end)
+            assert media_responses, "no /api/media traffic during playback"
+            assert any(status == 206 for _url, status in media_responses)
+            active_src = page.evaluate(po + ".active.currentSrc")
+            assert "/api/media?path=" in active_src
+            page.screenshot(path=str(shots / "playout-step3-playing.png"))
+            page.click("#po-play")  # pause
+            assert page.evaluate(po + ".playing") is False
+
+            # ---- scrub: click mid-strip -> the readout jumps ---------------
+            box = page.locator("#cre-strip").bounding_box()
+            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + 8)
+            t_mid = page.evaluate(po + ".t")
+            assert abs(t_mid - duration / 2) < max(0.6, duration * 0.15)
+            readout = page.text_content("#po-time")
+            assert not readout.startswith("0:00 /")  # the readout jumped too
+
+            # ---- moment player: click a board card's thumbnail -------------
+            entry = page.evaluate("window.monteurPlayout.entries()[0]")
+            page.click("#cre-sb-board .sb-card[data-slot='0'] .sb-thumb-wrap")
+            page.wait_for_selector("#mini-player", state="visible")
+            title = page.text_content("#mini-title")
+            assert Path(str(entry["clip_path"])).name in title
+            assert "–" in title  # "clip.mp4 · 0:01–0:03"
+            src = page.eval_on_selector(
+                "#mini-video", "el => el.currentSrc || el.src"
+            )
+            assert "/api/media?path=" in src
+            decodable = page.evaluate(
+                "document.createElement('video')"
+                ".canPlayType('video/mp4; codecs=\"avc1.42E01E\"') !== ''"
+            )
+            if decodable:
+                # a real browser: the player seeks into the segment and plays
+                page.wait_for_function(
+                    "(() => { const v = document.getElementById('mini-video');"
+                    f" return v.readyState >= 1 && v.currentTime >= "
+                    f"{entry['source_start']} - 0.05; }})()",
+                    timeout=10_000,
+                )
+                current = page.evaluate(
+                    "document.getElementById('mini-video').currentTime"
+                )
+                assert (
+                    entry["source_start"] - 0.05
+                    <= current
+                    <= entry["source_end"] + 0.25
+                )
+            else:
+                # sandbox Chromium: no H.264 decode — assert the honest
+                # fallback instead: the segment's bytes were requested over
+                # /api/media and the player shows its can't-decode note.
+                page.wait_for_function(
+                    "(() => { const v = document.getElementById('mini-video');"
+                    " return v.error !== null ||"
+                    " !document.getElementById('mini-note').hidden; })()",
+                    timeout=10_000,
+                )
+                assert any(
+                    urllib.parse.quote(str(entry["clip_path"]), safe="") in url
+                    for url, _status in media_responses
+                )
+            page.screenshot(path=str(shots / "playout-miniplayer.png"))
+            page.keyboard.press("Escape")
+            page.wait_for_selector("#mini-player", state="hidden")
+
+            # ---- dip: black stage + title overlay at the right time --------
+            # Take the plan's first dip, or carve one through the inspector's
+            # real smash control when the build produced none.
+            def sorted_dips():
+                return page.evaluate(
+                    "((window.monteurPlayout.plan().dips) || [])"
+                    ".slice().sort((a, b) => a[0] - b[0])"
+                )
+
+            if not sorted_dips():
+                slot = page.evaluate(
+                    """(() => {
+                      const entries = window.monteurPlayout.entries();
+                      let best = -1, bestLen = 0;
+                      for (let i = 1; i < entries.length; i++) {
+                        const prev = entries[i - 1];
+                        const len = prev.record_end - prev.record_start;
+                        if ((entries[i].transition || 0) > 0) continue;
+                        if (len > bestLen) { best = i; bestLen = len; }
+                      }
+                      return best;
+                    })()"""
+                )
+                assert slot >= 1
+                page.click(f"#cre-strip-blocks .tl-block[data-slot='{slot}']")
+                page.wait_for_selector("#cre-inspector", state="visible")
+                page.click('#cre-insp-trans button[data-trans="smash"]')
+                page.wait_for_function(
+                    "((window.monteurPlayout.plan().dips) || []).length > 0",
+                    timeout=30_000,
+                )
+            # give every dip a visible act title, then rebuild the playout
+            page.evaluate(
+                """(() => {
+                  const plan = window.monteurPlayout.plan();
+                  plan.title_texts = (plan.dips || []).map(() => 'KAPITEL ZWEI');
+                  window.monteurPlayout.rebuild();
+                })()"""
+            )
+            dip_start, dip_length = sorted_dips()[0]
+            page.evaluate(
+                f"window.monteurPlayout.seek({max(0.0, dip_start - 0.15)})"
+            )
+            page.evaluate("window.monteurPlayout.play()")
+            # inside the dip: both buffers hidden (black) + the title as DOM
+            page.wait_for_function(
+                """(() => {
+                  const title = document.getElementById('po-title');
+                  const a = document.getElementById('po-video-a');
+                  const b = document.getElementById('po-video-b');
+                  return !title.hidden &&
+                    title.textContent === 'KAPITEL ZWEI' &&
+                    !a.classList.contains('on') && !b.classList.contains('on');
+                })()""",
+                timeout=int((0.15 + dip_length) * 1000) + 8_000,
+            )
+            page.evaluate("window.monteurPlayout.pause()")
+            t_now = page.evaluate(po + ".t")
+            assert dip_start - 0.05 <= t_now <= dip_start + dip_length + 0.3
+            page.screenshot(path=str(shots / "playout-dip-title.png"))
+
+            browser.close()
