@@ -56,6 +56,14 @@ Audio heuristics (also approximate, thresholds are module constants):
 * HIGHLIGHT — cheers, laughter and action read as loudness bursts: windows
   louder than 1.8x the clip's median rms. A moment's highlight is
   min(1, burst_share_in_window * 3).
+
+Peak-on-beat (blueprint 1.1): every moment additionally carries an
+intra-moment ``envelope`` (normalised motion, blended half-and-half with
+the normalised audio level when the clip has audio) and its ``peak_time``
+— the instant the moment culminates, at the sift's honest resolution
+(motion ~2 samples/s, audio 0.5 s windows, so ±0.25 s). The montage
+planner aims that peak at the beat its slot serves; a moment without the
+signal (flat envelope, hand-built reports) plans exactly as before.
 """
 
 from __future__ import annotations
@@ -120,6 +128,12 @@ _AUDIO_MIN_RELIABLE_WINDOWS = 4  # need at least this many windows to judge dyna
 _HIGHLIGHT_BURST_FACTOR = 1.8  # burst: window rms > 1.8x clip median rms
 _HIGHLIGHT_GAIN = 3.0  # highlight = min(1, burst_share * gain)
 _MOTION_EDGE_SAMPLES = 2  # samples averaged for entry/exit motion stability
+# Intra-moment envelope blend (peak-on-beat, blueprint 1.1): the moment's
+# energy curve mixes normalised motion and normalised audio level half and
+# half when audio exists; motion alone otherwise. The honest resolution is
+# the sift's own sampling — motion ~2 samples/s, audio 0.5 s windows — so
+# ``peak_time`` is a ±0.25 s statement, never a frame-exact one.
+_ENVELOPE_AUDIO_WEIGHT = 0.5
 
 
 @dataclass
@@ -155,6 +169,20 @@ class Moment:
     entry_motion: tuple[float, float] = (0.0, 0.0)  # (dx, dy) at the window start
     exit_motion: tuple[float, float] = (0.0, 0.0)  # (dx, dy) at the window end
     highlight: float = 0.0  # 0..1 audio-highlight strength inside the window
+    # Intra-moment energy envelope (peak-on-beat, blueprint 1.1): (t, 0..1)
+    # samples in CLIP time at the sift's own motion sample positions —
+    # normalised motion, blended half-and-half with normalised audio level
+    # by :func:`apply_audio` when the clip has audio. ``peak_time`` is the
+    # envelope's maximum (clip seconds; ties go to the EARLIEST sample);
+    # -1.0 = no signal (empty/flat envelope, or a hand-built moment) — the
+    # montage planner then behaves exactly as before the field existed.
+    envelope: list[tuple[float, float]] = field(default_factory=list)
+    peak_time: float = -1.0
+    # Per-sample frame quality inside the window (first-frame gate,
+    # blueprint 1.9): (t, 0..1) with quality = sharpness rank x brightness
+    # adequacy — the same per-sample number the segment score averages.
+    # Empty = unknown; only the "short" style's hook slot reads it.
+    frame_quality: list[tuple[float, float]] = field(default_factory=list)
     label: str = ""        # one-line description from vision ("overtake in a left-hand curve")
     tags: list[str] = field(default_factory=list)  # 2-5 lowercase keywords ("curve", "mountains")
     role: str = ""         # "opener" | "build" | "climax" | "closer" | "" = unknown/not analyzed
@@ -348,6 +376,20 @@ def _edge_motion(
     )
 
 
+def _envelope_peak(envelope: list[tuple[float, float]]) -> float:
+    """Time of the envelope's maximum (ties earliest), -1.0 for a flat one.
+
+    A flat/empty envelope carries no peak information — the sentinel keeps
+    the montage planner's behavior byte-identical to before the envelope
+    existed (blueprint 1.1's neutral degradation).
+    """
+    best_t, best_v = -1.0, 0.0
+    for t, v in envelope:
+        if v > best_v + 1e-12:
+            best_t, best_v = t, v
+    return best_t
+
+
 def find_moments(
     segments: list[ClipSegment], metrics: list[FrameMetric], min_length: float = 1.0
 ) -> list[Moment]:
@@ -360,6 +402,14 @@ def find_moments(
     extreme motion (handled by SHAKY upstream) earns nothing. Overlapping
     windows are deduplicated (the better one wins) and the result is capped
     at 12 per clip, sorted best-first.
+
+    Every kept moment additionally carries its intra-moment machinery
+    (blueprint 1.1/1.9): ``envelope`` — (t, motion / clip peak motion)
+    samples inside the window, ``peak_time`` — the envelope maximum (from
+    motion alone here; :func:`apply_audio` re-blends it with the clip's
+    audio level), and ``frame_quality`` — (t, sharpness rank x brightness
+    adequacy) samples for the shorts' first-frame gate. A motionless clip
+    yields a flat envelope and ``peak_time`` -1.0 (no signal).
     """
     if not metrics or min_length <= 0:
         return []
@@ -368,6 +418,7 @@ def find_moments(
     median_motion, _ = _motion_stats(metrics)
     band_lo = _MODERATE_MOTION_BAND[0] * median_motion
     band_hi = _MODERATE_MOTION_BAND[1] * median_motion
+    peak_motion = max((m.motion for m in metrics[1:]), default=0.0)
     step = min_length / 2
 
     candidates: list[Moment] = []
@@ -393,6 +444,13 @@ def find_moments(
                     (1 - _MOMENT_MOTION_BONUS) * mean_rank
                     + _MOMENT_MOTION_BONUS * moderate,
                 )
+                envelope = [
+                    (
+                        metrics[j].t,
+                        metrics[j].motion / peak_motion if peak_motion > 0 else 0.0,
+                    )
+                    for j in idx
+                ]
                 candidates.append(
                     Moment(
                         start=start,
@@ -400,6 +458,16 @@ def find_moments(
                         score=score,
                         entry_motion=_edge_motion(metrics, idx, head=True),
                         exit_motion=_edge_motion(metrics, idx, head=False),
+                        envelope=envelope,
+                        peak_time=_envelope_peak(envelope),
+                        frame_quality=[
+                            (
+                                metrics[j].t,
+                                ranks[j]
+                                * _brightness_adequacy(metrics[j].brightness),
+                            )
+                            for j in idx
+                        ],
                     )
                 )
             start += step
@@ -506,9 +574,19 @@ def apply_audio(moments: list[Moment], audio: list[AudioMetric]) -> list[str]:
     the share of audio windows starting inside [start, end) that are
     loudness bursts (see :func:`audio_flags`). Empty ``audio`` (no audio
     stream) leaves every highlight at 0.0 and returns no notes.
+
+    Peak-on-beat (blueprint 1.1): with audio present, each moment's
+    ``envelope`` is re-blended in place — ``_ENVELOPE_AUDIO_WEIGHT`` (0.5)
+    audio level (window rms / clip peak rms, piecewise-constant over the
+    0.5 s windows) mixed into the motion curve — and ``peak_time`` moves to
+    the blended maximum, so a cheer or a door slam can out-peak the fastest
+    pixels. Without audio (or without an envelope) both fields keep the
+    motion-only values from :func:`find_moments`.
     """
     notes, bursts = audio_flags(audio)
     eps = 1e-9
+    peak_rms = max((a.rms for a in audio), default=0.0)
+    window = audio[1].t - audio[0].t if len(audio) > 1 else 0.5
     for moment in moments:
         idx = [
             i for i, a in enumerate(audio) if moment.start - eps <= a.t < moment.end - eps
@@ -516,6 +594,21 @@ def apply_audio(moments: list[Moment], audio: list[AudioMetric]) -> list[str]:
         if idx:
             share = sum(bursts[i] for i in idx) / len(idx)
             moment.highlight = min(1.0, share * _HIGHLIGHT_GAIN)
+        envelope = getattr(moment, "envelope", None)
+        if envelope and audio and peak_rms > 0:
+            blended: list[tuple[float, float]] = []
+            for t, motion in envelope:
+                slot = min(len(audio) - 1, max(0, int(t / window) if window > 0 else 0))
+                level = audio[slot].rms / peak_rms
+                blended.append(
+                    (
+                        t,
+                        (1 - _ENVELOPE_AUDIO_WEIGHT) * motion
+                        + _ENVELOPE_AUDIO_WEIGHT * level,
+                    )
+                )
+            moment.envelope = blended
+            moment.peak_time = _envelope_peak(blended)
     return notes
 
 

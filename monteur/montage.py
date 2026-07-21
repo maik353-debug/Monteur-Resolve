@@ -82,12 +82,18 @@ still lands on the beat/downbeat grid, quantized to whole units):
 * **Accelerando** — the build's cut lengths step down monotonically from
   the previous phase's base toward the following phase's (the trailer
   ramp); a split build ramps across the whole run.
-* **Drop hold + stutter** — the slot ON the drop holds 2-4 beats
-  (:func:`_drop_hold`, aim 3x the climax base) — impact needs screen
-  time — and ``_STUTTER_CUTS`` one-beat cuts directly before it sharpen
-  the hit (only when the build ends fast enough to afford them). The
-  "auto" style clears grid cuts inside ~2 beats after each drop-forced
-  cut for the same reason.
+* **Drop hold + stutter + recovery** — the slot ON the drop holds 2-4
+  beats (:func:`_drop_hold`, aim 3x the climax base) — impact needs
+  screen time — and ``_STUTTER_CUTS`` one-beat cuts directly before it
+  sharpen the hit (only when the build ends fast enough to afford them).
+  Right after the hold, ONE recovery cut at ~2x the climax base
+  (blueprint 1.6) lets the peak land before the pattern re-accelerates.
+  The "auto" style clears grid cuts inside ~2 beats after each
+  drop-forced cut for the same reason.
+* **Hot/cool phrase groups** — a LONG climax (two-plus 8-unit groups)
+  alternates the style's own pattern with a cooled copy (multipliers
+  doubled) in 8-unit groups (blueprint 1.6): peaks and valleys instead
+  of uniform fire; a phrase boundary still re-anchors the cycle.
 * **Pattern texture** — the other phases cycle a per-style multiplier
   pattern on their base (:attr:`MontageStyle.rhythm`; trailer aggressive,
   travel/wedding gentle, music_video punchy). A phrase boundary falling
@@ -326,6 +332,26 @@ slot drops below ``_LEAD_MIN_SLOT`` (0.25 s, or its own original length
 if shorter), the first cut stays at 0 and the final boundary stays at
 the montage length.
 
+Cut on action (peak-on-beat)
+----------------------------
+Blueprint 1.1: the image's accent and the music's accent must be the
+SAME event. When a sifted moment carries an intra-moment envelope peak
+(:attr:`monteur.sift.Moment.peak_time` — motion blended with audio
+level, honest to ±0.25 s), the fill no longer plays the moment from its
+head: the in-point is chosen so the peak lands exactly on the slot's
+beat (``record_start + cut_lead``; slot 0's beat is 0), clamped to the
+moment's bounds (:func:`_aim_start`). Drop HOLDS aim the peak at the
+drop instant and extend PAST it through the pool's vetted slack (the
+enclosing USABLE sift segment, capped by the next same-clip moment and
+the clip length). Guarantees: skipped head material is remembered as a
+reclaimable gap and served by the reuse phase — the zero-repeat promise
+never burns it; pinned/arranged slots stay bit-identical; and a pool
+without peak signals (hand-built reports, old distills) fills
+byte-identically to before the aim existed. The "short" style's hook
+slot additionally nudges its aimed in-point to the sharpest first frame
+within the ±0.25 s window (blueprint 1.9 — frame 1 is the thumbnail).
+The plan notes count what was aimed ("cut on action: N of M slots ...").
+
 No-music plans and audio modes
 ------------------------------
 ``plan_montage(reports, music=None, max_duration=...)`` plans a cut with
@@ -392,10 +418,12 @@ exactly as before.
 
 On top of the cue markers, :mod:`monteur.elements` can place REAL files
 from the user's own sound library: :class:`SfxCue` carries an optional
-``file`` path, and :func:`montage_to_timeline` renders filed cues as
-audio clips on a dedicated SFX track ("A2" music/original, "A3" mix)
-while keeping the marker. ``plan_to_dict`` writes ``file`` only when
-set, so plans without placed elements serialize exactly as before.
+``file`` path plus a ``source_offset`` (seconds into the file — a riser
+plays its LAST run-up seconds so the build ends at its climax, blueprint
+1.3), and :func:`montage_to_timeline` renders filed cues as audio clips
+on a dedicated SFX track ("A2" music/original, "A3" mix) while keeping
+the marker. ``plan_to_dict`` writes ``file`` and ``source_offset`` only
+when set, so plans without placed elements serialize exactly as before.
 
 Arrangement (the editor's own scene order)
 ------------------------------------------
@@ -447,7 +475,7 @@ from monteur.music import (
     best_energy_window,
     intro_profile,
 )
-from monteur.sift import ClipReport, Moment
+from monteur.sift import USABLE, ClipReport, Moment
 
 CHRONOLOGICAL = "chronological"  # keep footage order (travel/event films)
 BEST_FIRST = "best_first"  # strongest material on the strongest sections
@@ -467,6 +495,17 @@ _BEATS_PER_BAR = 4
 # a stutter burst is this many consecutive one-beat cuts directly before the
 # drop (only when the build is fast enough to afford it).
 _STUTTER_CUTS = 3
+# Breath in the canon (blueprint 1.6). After the drop hold the canon takes
+# ONE recovery breath — a cut of this many x the climax base — before it
+# re-accelerates into the pattern: peaks need valleys, and a drop followed
+# by instant machine-gun cuts reads relentless, not climactic.
+_RECOVERY_MULT = 2
+# ...and a LONG climax (at least two phrase groups) alternates "hot"
+# 8-unit groups (the style's own pattern) with "cool" ones (the pattern's
+# multipliers doubled) instead of looping one flat 4-cycle — constant
+# intensity is no intensity.
+_CLIMAX_GROUP_UNITS = 8
+_COOL_PATTERN_MULT = 2.0
 # "auto" rhythm: a longer hold opens each music section (the first multiplier,
 # capped by _opening_hold), then a breath every len(pattern)-th cut.
 _AUTO_PATTERN = (2.0, 1.0, 1.0, 1.0)
@@ -483,6 +522,20 @@ _PSEUDO_BEAT = 0.75
 _DEFAULT_CUT_LEAD = 0.04
 # Lead shifting never squeezes a slot below this (seconds).
 _LEAD_MIN_SLOT = 0.25
+# Peak-on-beat (blueprint 1.1): when a fresh moment carries a sifted
+# ``peak_time``, its in-point is chosen so the peak lands on the slot's
+# beat (record_start + cut lead; the montage's first slot has no lead).
+# A skipped head at/above this many seconds is remembered as a reclaimable
+# GAP instead of being burnt — the zero-repeat promise must not lose
+# material to the aim; shorter slivers cannot serve a slot anyway.
+_PEAK_GAP_MIN = MIN_CUT_INTERVAL
+# First-frame gate (blueprint 1.9, "short" style only): the hook slot's
+# aimed in-point may shift to a sharper first frame among the sifted
+# quality samples within this window (the peak promise's own ±0.25 s
+# honesty), and only for a real quality gain — frame 1 is the thumbnail,
+# but the peak still rules.
+_HOOK_GATE_WINDOW = 0.25
+_HOOK_GATE_MIN_GAIN = 0.02
 # Audio modes for montage_to_timeline.
 _AUDIO_MODES = ("music", "mix", "original")
 # Transition modes for plan_montage: how clips hand over to each other.
@@ -972,6 +1025,14 @@ class SfxCue:
     # (the default) keeps the cue a search-query marker; a set path makes
     # montage_to_timeline place it as a REAL audio clip on the SFX track.
     file: str = ""
+    # Seconds INTO the file where playback starts (blueprint 1.3): a riser
+    # longer than its run-up plays its LAST seconds (offset = file length
+    # - play), so the build ends at the file's climax instead of losing it
+    # to a tail trim; an impact whose run-in would start before record 0
+    # skips just enough head that its peak still lands on the hit.
+    # Serialized only when set (the ``file`` pattern), so plans without
+    # offsets keep their exact bytes and old readers keep loading them.
+    source_offset: float = 0.0
 
 
 # --- grid -------------------------------------------------------------------
@@ -1282,12 +1343,15 @@ def _phase_cut_lengths(
     pattern: tuple[float, ...] = (),
     *,
     first_hold: int = 0,
+    recovery: int = 0,
     ramp_from: float | None = None,
     ramp_to: float | None = None,
     stutter: int = 0,
     decel: bool = False,
     phrase_units: tuple[int, ...] = (),
     max_len: int = 0,
+    cool_pattern: tuple[float, ...] = (),
+    group_units: int = 0,
 ) -> list[int]:
     """Cut lengths (whole grid units) for one phase — the rhythm kernel.
 
@@ -1299,7 +1363,10 @@ def _phase_cut_lengths(
     loosely (exactly, for ``decel``).
 
     * ``first_hold`` > 0 makes the FIRST cut exactly that long (clamped to
-      the phase) — the establishing hold or the drop hold.
+      the phase) — the establishing hold or the drop hold. ``recovery``
+      > 0 (blueprint 1.6) then emits ONE recovery cut of that many units
+      right after the hold — the post-peak breath before the pattern
+      re-accelerates.
     * ``ramp_from``/``ramp_to`` (both set) generate the accelerando: a
       monotone run from one base toward the other, quantized per cut.
       ``stutter`` then reserves that many trailing one-unit cuts (the
@@ -1310,6 +1377,11 @@ def _phase_cut_lengths(
     * ``pattern`` (otherwise) cycles multipliers on ``base``; a phrase
       boundary (``phrase_units``: cumulative unit offsets) re-anchors the
       cycle so the pattern restarts with the music's own phrasing.
+      ``cool_pattern`` + ``group_units`` (blueprint 1.6) alternate the
+      cycle between "hot" (``pattern``) and "cool" (``cool_pattern``)
+      groups of ``group_units`` units — long climaxes breathe in phrase
+      groups instead of looping one flat cycle; a group handover restarts
+      the incoming cycle at its head (phrase re-anchors still win).
     * ``max_len`` > 0 clamps every emitted length (and the decel's final
       hold target) to that many units — the absolute-seconds ceiling
       (:data:`_MAX_CUT_SECONDS`) translated by the caller.
@@ -1323,6 +1395,12 @@ def _phase_cut_lengths(
         hold = max(1, min(first_hold, n_units))
         lengths.append(hold)
         consumed = hold
+        if recovery > 0 and consumed < n_units:
+            # Post-peak recovery (blueprint 1.6): one longer breath right
+            # after the drop hold, before the pattern re-accelerates.
+            breath = max(1, min(recovery, n_units - consumed))
+            lengths.append(breath)
+            consumed += breath
     if decel:
         remaining = n_units - consumed
         if remaining <= base:
@@ -1357,14 +1435,25 @@ def _phase_cut_lengths(
         lengths.extend([1] * min(max(0, stutter), n_units - consumed))
         return _clamp_lengths(lengths, max_len)
     pat = tuple(pattern) or (1.0,)
+    cool = tuple(cool_pattern)
+
+    def _cycle_at(units_done: int) -> tuple[float, ...]:
+        """Hot or cool cycle for the group containing ``units_done``."""
+        if cool and group_units > 0 and (units_done // group_units) % 2 == 1:
+            return cool
+        return pat
+
     i = 1 % len(pat) if first_hold > 0 else 0
     while consumed < n_units:
-        length = max(1, round(pat[i % len(pat)] * base))
+        cycle = _cycle_at(consumed)
+        length = max(1, round(cycle[i % len(cycle)] * base))
         prev_consumed = consumed
         lengths.append(length)
         consumed += length
         if any(prev_consumed < pu <= consumed for pu in phrase_units):
             i = 0  # a phrase boundary re-anchors the cycle
+        elif _cycle_at(consumed) is not cycle:
+            i = 0  # a hot/cool group handover restarts the incoming cycle
         else:
             i += 1
     return _clamp_lengths(lengths, max_len)
@@ -1473,6 +1562,25 @@ def _style_rhythm_specs(
                 _drop_hold(base), base, unit_s(i), _MAX_HOLD_SECONDS
             )
             bits.append(f"drop hold {spec['first_hold'] * factors[i]} beats")
+            # Breath in the canon (blueprint 1.6): after the drop hold, ONE
+            # recovery cut at ~2x the climax base before re-accelerating —
+            # the valley that makes the next peak read as a peak.
+            spec["recovery"] = _cap_units(
+                _RECOVERY_MULT * base, base, unit_s(i), _MAX_CUT_SECONDS
+            )
+            bits.append(
+                f"a {spec['recovery'] * factors[i]}-beat recovery breath after it"
+            )
+        if label == "climax" and n_units_list[i] >= 2 * _CLIMAX_GROUP_UNITS:
+            # Breath in the canon (blueprint 1.6): a LONG climax alternates
+            # hot and cool 8-unit phrase groups instead of one flat cycle.
+            hot = spec["pattern"] or (1.0,)
+            spec["cool_pattern"] = tuple(_COOL_PATTERN_MULT * m for m in hot)
+            spec["group_units"] = _CLIMAX_GROUP_UNITS
+            bits.append(
+                f"hot/cool {_CLIMAX_GROUP_UNITS * factors[i]}-beat phrase "
+                "groups in the climax"
+            )
         if label == "outro" and i == len(labels) - 1:
             spec["decel"] = True
         specs.append(spec)
@@ -1886,10 +1994,24 @@ class _PoolItem:
     media_start: float = 0.0  # seconds: the file's embedded start timecode
     consumed: float = 0.0  # seconds of the moment already placed
     uses: int = 0
+    # Drop-hold slack (peak-on-beat, blueprint 1.1): how far past the
+    # moment's end the source may extend when a drop HOLD is aimed at the
+    # peak — the end of the enclosing USABLE sift segment, capped by the
+    # next moment of the same clip (zero-repeat) and the clip length.
+    # 0.0 = unknown (hand-built pools): the aim then stays inside the
+    # moment, exactly like every non-drop slot.
+    slack_end: float = 0.0
+    # Reclaimable head material the peak aim skipped over: [lo, hi) spans
+    # BEFORE the consumed cursor that were never on screen. The reuse
+    # phase slices them before rewinding anything — the zero-repeat
+    # bookkeeping must not burn skipped heads. Always empty while no
+    # moment carries a peak, so peak-less pools behave byte-identically.
+    gaps: list[list[float]] = field(default_factory=list)
 
     @property
     def remaining(self) -> float:
-        return self.moment.end - (self.moment.start + self.consumed)
+        tail = self.moment.end - (self.moment.start + self.consumed)
+        return max(0.0, tail) + sum(hi - lo for lo, hi in self.gaps)
 
     # Vision annotations (see monteur.vision). getattr keeps Moment objects
     # from before the vision fields existed working: the defaults mean "not
@@ -1982,6 +2104,120 @@ def _trim_overlapping_pool(pool: list[_PoolItem]) -> list[_PoolItem]:
             claimed_to.get(item.clip_path, 0.0), item.moment.end
         )
     return [trimmed.get(i, it) for i, it in enumerate(pool) if trimmed.get(i, it) is not None]
+
+
+def _aim_start(
+    item: _PoolItem, slot_len: float, lead: float, drop: bool = False
+) -> float | None:
+    """Peak-on-beat in-point (blueprint 1.1), or None for the plain head.
+
+    A FRESH moment (nothing consumed yet) with a sifted ``peak_time``
+    chooses its source start so the peak lands on the slot's beat —
+    ``record_start + lead`` (the cut-ahead lead; the montage's first slot
+    has no lead). Clamps, in order:
+
+    * never before ``moment.start`` (the zero-repeat promise and the pool
+      trim both reason from the moment's own bounds);
+    * for a normal slot, never later than ``moment.end - slot_len`` — the
+      slot stays inside the sifted material wherever it fits;
+    * for a ``drop`` HOLD (usually longer than the ~1 s moment), the
+      ceiling widens to ``slack_end - slot_len`` when the pool knows its
+      slack (the enclosing USABLE segment, capped by the next same-clip
+      moment): the peak then hits the drop instant and the hold extends
+      PAST it through vetted material.
+
+    Returns None — today's behavior, byte-identical — when the moment has
+    no peak signal, is partially consumed (reuse slices stay
+    chronological), or the clamped aim IS the plain head anyway.
+    """
+    moment = item.moment
+    peak = getattr(moment, "peak_time", -1.0)
+    if peak is None or peak < 0 or item.consumed > _EPS:
+        return None
+    hi = moment.end - slot_len
+    if drop and item.slack_end > moment.end + _EPS:
+        hi = max(hi, item.slack_end - slot_len)
+    hi = max(moment.start, hi)
+    desired = min(max(peak - lead, moment.start), hi)
+    if desired <= moment.start + _EPS:
+        return None
+    return desired
+
+
+def _first_frame_gate(item: _PoolItem, aimed: float, slot_len: float) -> float:
+    """Nudge the hook slot's aimed in-point to a sharper first frame (1.9).
+
+    Frame 1 of a short IS the feed thumbnail. Among the moment's sifted
+    ``frame_quality`` samples within ``±_HOOK_GATE_WINDOW`` of the aimed
+    start (the peak promise's own ±0.25 s honesty) — and inside the same
+    clamps the aim used — the sharpest/brightest frame wins, but only for
+    a real gain (> ``_HOOK_GATE_MIN_GAIN``) over the frame at the aimed
+    start itself: the peak rules, the gate breaks near-ties.
+    """
+    quality = getattr(item.moment, "frame_quality", None)
+    if not quality:
+        return aimed
+    moment = item.moment
+    hi = max(moment.start, moment.end - slot_len)
+    # A start after the peak itself would push the peak OFF screen — the
+    # gate may only trade run-in, never the peak (the peak rules).
+    peak = getattr(moment, "peak_time", aimed)
+    window = [
+        (t, q)
+        for t, q in quality
+        if abs(t - aimed) <= _HOOK_GATE_WINDOW + _EPS
+        and moment.start - _EPS <= t <= min(hi, peak) + _EPS
+    ]
+    if not window:
+        return aimed
+    base_q = min(window, key=lambda tq: (abs(tq[0] - aimed), tq[0]))[1]
+    best_t, best_q = max(window, key=lambda tq: (tq[1], -abs(tq[0] - aimed), -tq[0]))
+    if best_q > base_q + _HOOK_GATE_MIN_GAIN and best_t > moment.start + _EPS:
+        return best_t
+    return aimed
+
+
+def _peek_slice(item: _PoolItem, slot_len: float) -> tuple[float, float, int | None]:
+    """The next un-aimed slice ``(src_start, src_end, gap_index)`` — no mutation.
+
+    Reclaimed head gaps (skipped by a peak aim, never played) serve first:
+    the first gap that fits a full slot, else — once the tail is gone —
+    the LONGEST gap as a short piece (a gap is never padded: material
+    after it is already on screen). Without gaps this is exactly the
+    classic head-cursor slice, padding toward the clip's end when the
+    moment's tail runs short — byte-identical to the pre-peak behavior.
+    ``gap_index`` says which gap served (None = the cursor), so
+    :func:`_commit_slice` can book the consumption.
+    """
+    moment = item.moment
+    for k, (lo, hi) in enumerate(item.gaps):
+        if hi - lo >= slot_len - _EPS:
+            return lo, lo + slot_len, k
+    tail = moment.end - (moment.start + item.consumed)
+    if item.gaps and tail <= _EPS:
+        k = max(range(len(item.gaps)), key=lambda i: item.gaps[i][1] - item.gaps[i][0])
+        lo, hi = item.gaps[k]
+        return lo, hi, k
+    src_start = moment.start + item.consumed
+    src_end = min(src_start + slot_len, moment.end)
+    if src_end - src_start < slot_len - _EPS:
+        # Pad the short piece by extending toward the clip's end.
+        src_end = max(src_end, min(src_start + slot_len, item.clip_duration))
+    return src_start, src_end, None
+
+
+def _commit_slice(
+    item: _PoolItem, src_start: float, src_end: float, gap_index: int | None
+) -> None:
+    """Book a :func:`_peek_slice` result on the item (cursor or gap)."""
+    if gap_index is None:
+        item.consumed = src_end - item.moment.start
+        return
+    lo, hi = item.gaps[gap_index]
+    if src_end >= hi - _EPS:
+        del item.gaps[gap_index]
+    else:
+        item.gaps[gap_index][0] = src_end
 
 
 def _motion_continuity(
@@ -2098,8 +2334,23 @@ def _fill(
     hook_loop: bool = False,
     allow_repeats: bool = True,
     slot_contexts: list[str] | None = None,
+    cut_lead: float = 0.0,
 ) -> tuple[list[MontageEntry], list[str], float | None]:
     """Assign pool moments to slots.
+
+    Peak-on-beat (blueprint 1.1): a fresh moment carrying a sifted
+    ``peak_time`` does not simply play from its head — its in-point is
+    chosen so the peak lands on the slot's beat, ``record_start +
+    cut_lead`` (the montage's first slot has no lead), clamped to the
+    moment's bounds; a drop HOLD may extend past the moment through the
+    pool's vetted slack (see :func:`_aim_start`). Head material the aim
+    skips is remembered as a reclaimable gap and served by the reuse
+    phase before anything rewinds — the zero-repeat bookkeeping never
+    burns a skipped head. The "short" style's hook slot additionally
+    gates its aimed in-point by first-frame quality
+    (:func:`_first_frame_gate`, blueprint 1.9). Pools without peak
+    signals fill byte-identically to before the aim existed; arranged
+    (preset) slots are never re-aimed.
 
     The first pass still consumes every pool moment exactly once, in pool
     order — the ordering mode decides WHICH moments are in play — with two
@@ -2288,9 +2539,13 @@ def _fill(
     # are not guarded against).
     windows: dict[int, tuple[str, float, float]] = {}
     same_scene_avoided = 0
+    aimed_slots = 0  # slots whose in-point was peak-aimed (blueprint 1.1)
     for visit, slot_idx in enumerate(slot_order):
         rec_start, rec_end = slots[slot_idx]
         slot_len = rec_end - rec_start
+        # The beat this slot serves sits cut_lead AFTER the (shifted) cut;
+        # the montage's first slot starts ON its beat.
+        lead = cut_lead if slot_idx > 0 else 0.0
 
         def _is_jumpy(clip: str, cand_start: float, cand_end: float) -> bool:
             """Would this source window sit as a same-scene jump cut next
@@ -2374,10 +2629,14 @@ def _fill(
             # Jump-cut guard: a same-clip neighbour with a small source
             # gap that the continuity merge would NOT join reads as a
             # visible jump inside one scene — penalize the candidate so
-            # a different clip wins while the pool has one.
+            # a different clip wins while the pool has one. Peak-aimed
+            # candidates are judged at their AIMED start.
             jump_pen: dict[int, float] = {}
             for idx in window:
                 cand_start = pool[idx].moment.start + pool[idx].consumed
+                aim = _aim_start(pool[idx], slot_len, lead, drop=slot_idx in drop_slots)
+                if aim is not None:
+                    cand_start = aim
                 if _is_jumpy(pool[idx].clip_path, cand_start, cand_start + slot_len):
                     jump_pen[idx] = _JUMP_CUT_PENALTY
 
@@ -2428,7 +2687,7 @@ def _fill(
                         ),
                     )
             def _reuse_jumpy(it: _PoolItem) -> bool:
-                start_s = it.moment.start + it.consumed
+                start_s = _peek_slice(it, slot_len)[0]
                 return _is_jumpy(it.clip_path, start_s, start_s + slot_len)
 
             if item is None:
@@ -2457,17 +2716,33 @@ def _fill(
                 rewound = True
         by_slot[slot_idx] = item
         moment = item.moment
-        src_start = moment.start + item.consumed
-        src_end = min(src_start + slot_len, moment.end)
-        if src_end - src_start < slot_len - _EPS:
-            # Pad the short piece by extending toward the clip's end.
-            src_end = max(src_end, min(src_start + slot_len, item.clip_duration))
+        aimed = _aim_start(item, slot_len, lead, drop=slot_idx in drop_slots)
+        if aimed is not None and hook_loop and slot_idx == 0:
+            # First-frame gate (blueprint 1.9): the hook's frame 1 is the
+            # thumbnail — nudge the aimed start to a sharper frame.
+            aimed = _first_frame_gate(item, aimed, slot_len)
+        if aimed is not None:
+            # Peak-on-beat (blueprint 1.1): play from the aimed in-point;
+            # the skipped head stays reclaimable (a gap, never burnt).
+            head = moment.start + item.consumed
+            if aimed - head >= _PEAK_GAP_MIN - _EPS:
+                item.gaps.append([head, aimed])
+            src_start = aimed
+            src_end = min(src_start + slot_len, moment.end)
+            if src_end - src_start < slot_len - _EPS:
+                # Pad the short piece by extending toward the clip's end
+                # (a drop hold's slack ceiling was vetted by _aim_start).
+                src_end = max(src_end, min(src_start + slot_len, item.clip_duration))
+            item.consumed = max(item.consumed, src_end - moment.start)
+            aimed_slots += 1
+        else:
+            src_start, src_end, gap_index = _peek_slice(item, slot_len)
+            _commit_slice(item, src_start, src_end, gap_index)
         if src_end - src_start < slot_len - _EPS:
             notes.append(
                 f"gap at {rec_start:.2f}s: only {src_end - src_start:.2f}s of "
                 f"source for a {slot_len:.2f}s slot"
             )
-        item.consumed = src_end - moment.start
         item.uses += 1
         windows[slot_idx] = (item.clip_path, src_start, src_end)
         entries.append(
@@ -2482,6 +2757,11 @@ def _fill(
                 clip_duration=item.clip_duration,
                 label=item.label,
             )
+        )
+    if aimed_slots:
+        notes.append(
+            f"cut on action: {aimed_slots} of {len(slots)} slot"
+            f"{'s' if len(slots) != 1 else ''} aim the picture's peak at the beat"
         )
     if len(slot_order) > n:
         if allow_repeats:
@@ -3735,11 +4015,37 @@ def plan_montage(
         for i, (s, _) in enumerate(slots)
         if any(abs(s - d) <= cut_lead + _EPS for d in drop_starts)
     }
-    pool = [
-        _PoolItem(r.path, r.duration, m, media_start=r.media_start)
-        for r in reports
-        for m in r.moments
-    ]
+    # Pool build. slack_end (peak-on-beat, blueprint 1.1) is how far past
+    # each moment a drop HOLD may extend: the enclosing USABLE sift
+    # segment where the report carries segments, capped by the next
+    # moment of the same clip (its material is spoken for — zero-repeat)
+    # and the clip length. Only ever read when a peak is aimed.
+    pool: list[_PoolItem] = []
+    for r in reports:
+        usable = [s for s in r.segments if s.label == USABLE]
+        starts = sorted(m.start for m in r.moments)
+        for m in r.moments:
+            slack = r.duration if r.duration > 0 else m.end
+            seg = next(
+                (
+                    s
+                    for s in usable
+                    if s.start - _EPS <= m.start and m.end <= s.end + _EPS
+                ),
+                None,
+            )
+            if seg is not None:
+                slack = min(slack, seg.end)
+            nxt = next((s for s in starts if s > m.start + _EPS), None)
+            if nxt is not None:
+                slack = min(slack, nxt)
+            pool.append(
+                _PoolItem(
+                    r.path, r.duration, m,
+                    media_start=r.media_start,
+                    slack_end=max(slack, 0.0),
+                )
+            )
     if not allow_repeats:
         # Zero-repeat promise: overlapping moments (possible in hand-built
         # reports and distilled timelines) must not enter the cut twice.
@@ -3811,6 +4117,7 @@ def plan_montage(
         # loop-friendly last slot (see _fill's docstring).
         hook_loop=bool(phases) and phases[0][2] == "hook",
         allow_repeats=allow_repeats,
+        cut_lead=cut_lead,
     )
     entries = arr_entries + entries
     entries.sort(key=lambda e: e.record_start)
@@ -4595,17 +4902,22 @@ def montage_to_timeline(
         # A placed sound element becomes a REAL clip on the SFX track. The
         # file's honest duration (probed like the entries' metadata is)
         # bounds the clip and feeds the writers; without media tooling the
-        # cue's own duration is trusted.
+        # cue's own duration is trusted. ``source_offset`` (blueprint 1.3:
+        # a riser plays its LAST run-up seconds, a shifted impact skips
+        # just enough head that its peak still hits) becomes the clip's
+        # source_in, and the play length shrinks by what the offset ate.
         file_duration = _probe_media_duration(cue.file)
+        offset = max(0.0, getattr(cue, "source_offset", 0.0) or 0.0)
         length = min(cue.duration, plan.duration - cue.time)
         if file_duration > 0:
-            length = min(length, file_duration)
+            length = min(length, max(0.0, file_duration - offset))
         if length <= _EPS:
             continue
         rec_in = seconds_to_frames(cue.time, fps)
         len_frames = seconds_to_frames(length, fps)
         if len_frames <= 0:
             continue
+        src_in = seconds_to_frames(offset, fps)
         stem = PurePath(cue.file).stem
         metadata: dict = {}
         if file_duration > 0:
@@ -4615,8 +4927,8 @@ def montage_to_timeline(
                 name=stem,
                 track=sfx_track,
                 kind=AUDIO,
-                source_in=0,
-                source_out=len_frames,
+                source_in=src_in,
+                source_out=src_in + len_frames,
                 record_in=rec_in,
                 record_out=rec_in + len_frames,
                 source_name=stem,
@@ -4681,7 +4993,9 @@ def plan_to_dict(plan: MontagePlan) -> dict:
             {
                 key: value
                 for key, value in asdict(cue).items()
-                if not (key == "file" and not value)
+                # Only-when-set fields (file, source_offset): plans without
+                # placed/offset elements serialize exactly as before.
+                if not (key in ("file", "source_offset") and not value)
             }
             for cue in plan.sfx
         ],

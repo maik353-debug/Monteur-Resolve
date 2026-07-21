@@ -44,6 +44,16 @@ files — every decision deterministic:
   markers), best duration fit, confidence as the tiebreak. A filed cue's
   duration becomes the file's play length, clamped to the montage end
   (with a trim note when the file is longer than fits).
+* **peak on the hit (blueprint 1.3)**: the classifier's measured
+  ``peak_time`` aligns every filed cue — an impact's/braam's peak lands
+  ON the hit instant (the cue starts the file's run-in earlier; when the
+  montage starts too late, ``SfxCue.source_offset`` skips just enough
+  head that the peak still hits), a whoosh's peak lands on the cut its
+  planned cue straddles, and a riser plays its LAST run-up seconds
+  (offset = file length - play) so the build ends at the file's climax.
+  Tails ring out: play length is the file's remainder, clamped only by
+  the montage end — never hard-trimmed back to the planned cue length.
+  Files without a measured peak keep the head-anchored placement.
 * **riser — one per TENSION RAMP, never one per boundary**: a riser ends
   exactly on each ramp target — the plan's delayed music entry
   (``plan.music_in`` > 0: the cold open's riser ends where the song
@@ -135,6 +145,11 @@ _DEFAULT_REUSE_GAP = 10.0
 _RISER_MIN_PLAY = 2.0
 _RISER_MIN_SHARE = 0.7
 _NEAR_CUE = 0.5  # s: an existing cue this close to a target is "that cue"
+# Carry matching (carry_element_files): a filed cue's time may have been
+# peak-shifted earlier by its file's run-in (blueprint 1.3 — at most a few
+# tenths for impacts/whooshes), so a replanned cue matches an old filed one
+# within this window instead of the pre-peak 50 ms.
+_CARRY_TOLERANCE = 0.35
 
 _EPS = 1e-6
 
@@ -417,6 +432,23 @@ def _quiet_spans(style: str, duration: float) -> list[tuple[float, float]]:
     return spans
 
 
+def _element_peak(element: SoundElement) -> float | None:
+    """The element's measured envelope peak (seconds into the file), or None.
+
+    Read from the classifier's own ``features["peak_time"]`` (blueprint
+    1.3: the peak is measured once, at scan time — never re-derived).
+    None for missing/invalid features (e.g. an old cache entry), which
+    keeps the head-anchored placement of before.
+    """
+    try:
+        peak = float(element.features["peak_time"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if peak < 0.0 or peak > element.duration + _EPS:
+        return None
+    return min(peak, element.duration)
+
+
 def _drop_in_plan(plan: MontagePlan, music: MusicAnalysis | None) -> float | None:
     """The first drop in montage time, or None when out of range / no music."""
     if music is None:
@@ -541,19 +573,48 @@ def assign_elements(
             )
         return candidates[0]
 
+    def placement(cue: SfxCue, element: SoundElement) -> tuple[float, float, float]:
+        """(start, source_offset, play) — peak-on-the-hit alignment (1.3).
+
+        The cue's HIT instant is what it means: an impact/braam hits at
+        ``cue.time`` (the drop, the frame out of the black, the dip), a
+        whoosh's hit is the CUT its planned cue straddles (the planned
+        centre). With a measured file peak the start shifts earlier by
+        the run-in so the peak lands ON the hit; a start before record 0
+        skips just enough head (``source_offset``) that the peak still
+        hits. The play length is the file's remainder — the tail rings
+        out and is clamped only by the montage end, never hard-trimmed
+        back to the planned cue length. No measured peak = the old
+        head-anchored placement, byte-identical.
+        """
+        hit = cue.time + (cue.duration / 2.0 if cue.kind == "whoosh" else 0.0)
+        peak = _element_peak(element)
+        start, offset = cue.time, 0.0
+        if peak is not None and peak > _EPS:
+            start = hit - peak
+            if start < 0.0:
+                offset = min(peak, -start)
+                start = 0.0
+        play = min(element.duration - offset, duration - start)
+        return start, offset, max(0.0, play)
+
     def file_cue(cue: SfxCue, element: SoundElement, why: str) -> None:
-        room = duration - cue.time
-        trimmed = element.duration > room + _EPS
+        start, offset, play = placement(cue, element)
+        trimmed = element.duration - offset > play + _EPS
+        cue.time = start
         cue.file = element.path
-        cue.duration = min(element.duration, room)
-        uses.setdefault(element.path, []).append(cue.time)
+        cue.source_offset = offset
+        cue.duration = play
+        uses.setdefault(element.path, []).append(start)
         line = (
             f"{cue.kind} {Path(element.path).name} at "
-            f"{cue.time:.1f}s ({why})"
+            f"{start:.1f}s ({why})"
         )
+        if offset > _EPS:
+            line += f" — head skipped {offset:.1f}s so the peak still hits"
         if trimmed:
             line += (
-                f" — trimmed to {cue.duration:.1f}s "
+                f" — trimmed to {play:.1f}s "
                 f"(the file is {element.duration:.1f}s)"
             )
         notes.append(line)
@@ -620,11 +681,17 @@ def assign_elements(
         cue.time = start
         cue.duration = play
         cue.file = chosen.path
+        # Riser head-trim (blueprint 1.3): a riser builds toward its END —
+        # a file longer than the run-up plays its LAST ``play`` seconds
+        # (head skipped via source_offset), so the build still ends at the
+        # file's climax instead of losing it to a tail trim.
+        cue.source_offset = max(0.0, chosen.duration - play)
         uses.setdefault(chosen.path, []).append(cue.time)
         line = f"riser {Path(chosen.path).name} ends on {why} at {target:.1f}s"
         if chosen.duration > play + _EPS:
             line += (
-                f" — trimmed to {play:.1f}s (the file is {chosen.duration:.1f}s)"
+                f" — trimmed to its last {play:.1f}s "
+                f"(the file is {chosen.duration:.1f}s)"
             )
         notes.append(line)
 
@@ -729,11 +796,13 @@ def carry_element_files(old_plan: MontagePlan, new_plan: MontagePlan) -> int:
 
     The revision hook: a re-plan rebuilds the SFX layer without files, but
     in untouched regions the new cues land at the same times — those get
-    their old file (and its play length) back. Matching is strict (same
-    kind, time within 50 ms, each old cue used once), so cues in genuinely
-    replanned regions stay unfiled — re-run :func:`assign_elements` to
-    fill them when the library folder is at hand. Returns how many cues
-    were carried.
+    their old file (with its play window: time, length AND source offset)
+    back. Matching is strict (same kind, time within
+    :data:`_CARRY_TOLERANCE` — wide enough for a peak-shifted filed cue,
+    far below any same-kind cue spacing; each old cue used once), so cues
+    in genuinely replanned regions stay unfiled — re-run
+    :func:`assign_elements` to fill them when the library folder is at
+    hand. Returns how many cues were carried.
     """
     carried = 0
     used: set[int] = set()
@@ -745,10 +814,14 @@ def carry_element_files(old_plan: MontagePlan, new_plan: MontagePlan) -> int:
                 id(old) not in used
                 and old.file
                 and old.kind == cue.kind
-                and abs(old.time - cue.time) <= 0.05
+                and abs(old.time - cue.time) <= _CARRY_TOLERANCE
             ):
                 cue.file = old.file
                 cue.duration = old.duration
+                # The filed placement is the peak-aligned one (1.3): keep
+                # its exact play window, not the replanned cue's raw time.
+                cue.time = old.time
+                cue.source_offset = getattr(old, "source_offset", 0.0)
                 used.add(id(old))
                 carried += 1
                 break

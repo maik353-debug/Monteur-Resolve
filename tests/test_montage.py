@@ -344,9 +344,12 @@ def test_travel_phase_beat_densities():
     assert opening == pytest.approx([4.0, 2.0, 2.0])
     assert build == pytest.approx([2.0, 1.5, 1.5, 1.0, 1.0, 0.5, 0.5])
     assert outro == pytest.approx([2.0, 2.0, 4.0])
-    # 39 slots on the grid; the continuity merge joins 4 same-clip reuse
-    # cuts in the climax back into continuous shots
-    assert len(plan.entries) == 3 + 7 + 26 + 3 - 4
+    # Blueprint 1.6 (breath in the canon): the 32-beat climax alternates
+    # hot 8-beat phrase groups (the travel pattern) with cool ones (its
+    # multipliers doubled) instead of looping one flat 4-cycle — 19 raw
+    # climax cuts instead of the old uniform 26; the continuity merge then
+    # joins 3 same-clip reuse cuts back into continuous shots.
+    assert len(plan.entries) == 3 + 7 + 19 + 3 - 3
     # grid stays contiguous and closes on the montage length
     assert plan.entries[0].record_start == 0.0
     for prev, nxt in zip(plan.entries, plan.entries[1:]):
@@ -1386,7 +1389,9 @@ def test_role_bonus_flips_pick_in_matching_phase():
     assert by_start[0.0].source_start == pytest.approx(0.0)
     # at the 4.0s slot (opening phase) the opener is one step behind: it wins
     assert by_start[4.0].source_start == pytest.approx(8.0)
-    assert any("semantic casting: 1 of 39 slots matched to roles" in n for n in plan.notes)
+    # 32 slots, not 39: blueprint 1.6's hot/cool climax phrase groups cut
+    # the long climax more sparsely than the old flat 4-cycle did.
+    assert any("semantic casting: 1 of 32 slots matched to roles" in n for n in plan.notes)
 
 
 def test_first_and_last_slot_prefer_opener_and_closer_in_auto():
@@ -2657,10 +2662,19 @@ def test_merge_stays_out_of_the_climax_and_inside_phases():
             if entry.record_start >= s - 1e-6 and entry.record_start < e - 1e-6
         ]
         assert spans and entry.record_end <= spans[0][1] + 1e-6
-        # Climax slots never merge: cuts there stay at/below 2 beats + the
-        # style's 2-beat rhythm slam (1s each at 120 bpm).
+        # Climax slots never CALM-merge: calm material there stays at/below
+        # the longest single climax cut — blueprint 1.6's cool phrase groups
+        # slam up to 4 beats (2s at 120 bpm). (Longer climax entries exist,
+        # but only as same-clip CONTINUITY joins of the fast material, which
+        # the climax deliberately allows — the ride is held, not re-cut.)
         if climax[0] - 1e-6 <= entry.record_start < climax[1] - 1e-6:
-            assert entry.record_end - entry.record_start <= 2.0 + 1e-6
+            if entry.clip_path == "/f/calm.mp4":
+                assert entry.record_end - entry.record_start <= 2.0 + 1e-6
+            else:
+                # a continuity join plays continuous source 1:1 — never a skip
+                assert (entry.source_end - entry.source_start) == pytest.approx(
+                    entry.record_end - entry.record_start
+                )
 
 
 def test_merge_never_swallows_a_smash_dip():

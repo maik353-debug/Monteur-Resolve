@@ -378,13 +378,20 @@ def _parity_reports() -> list[ClipReport]:
 # merge, jump-cut guard and per-cut transitions deliberately change every
 # style's plan (fewer same-scene cuts). These hashes still pin the engine
 # against ACCIDENTAL drift between waves.
+# Regenerated 2026-07 for magie-blueprint 1.6 (breath in the canon): pinned
+# climaxes now take a recovery breath after the drop hold and long climaxes
+# alternate hot/cool 8-beat phrase groups — a deliberate default change for
+# every style WITH a climax ("auto" and the no-music travel plan, whose short
+# pseudo-climax stays under two phrase groups, are byte-identical). The
+# parity pool carries no sift envelopes, so blueprint 1.1's peak aim is
+# provably inactive here (no "cut on action" note in any parity plan).
 _PARITY_GOLDEN = {
     "auto": "f9d843f342b27ddde52eb44b387259e2664c538e3d93de108deb1096df015c18",
-    "travel": "850a26fa3e54c42a93ff21e28baa5f86fa1c6cfec2b3b7df3e716df33e4903b8",
-    "wedding": "fbf271d23eea0976a25c1a1939abb163226c9c8e14c4256508546d6516e61668",
-    "music_video": "ce8c010fd5bd77a3ffd86359c377f5d2710735074fce197991fd73731f4390aa",
-    "trailer": "6a5c0f585798ad4ac75327a12fbab23baba7016fc0456c3182ee9c9a3272f608",
-    "trailer-best-paced": "d762c928f8ec0fbd582fdcbdb715430251e15a2886ceb910b1aa8b6894367702",
+    "travel": "e0a9ef81e6bc145f98d11fa795804f26cc34e330c6b60a6a212de089c6af4f48",
+    "wedding": "0c3e4e4c5afe90b3b05a0b0a2a988186ba1ded67864f31151f6e7c50ec03aa7b",
+    "music_video": "b837650cce63b2284ea0c0f4152f82025d956ec3b98d2805429072f603ee1eef",
+    "trailer": "bb5be518fdf056711ccd9a9593ee7eaaa19eb8839e4e3605887d78e519e6be70",
+    "trailer-best-paced": "3cb042ebd97b6430c550775f5fe7ea74ed056b66777f893595a0690bf17330c4",
     "travel-no-music": "645cc4b7fffe1795a6aeba05785e836c2dc9f600ebd5ffb5b4fce44aba769baf",
 }
 

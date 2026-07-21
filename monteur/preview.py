@@ -42,14 +42,18 @@ Audio modes mirror :func:`monteur.montage.montage_to_timeline`:
   :data:`MIX_ORIGINAL_LEVEL` (0.6) — a preview approximation of "song on
   A1, camera sound under it", not a mixing console.
 
-Limitations (deliberate, PREVIEW only): :func:`render_preview` draws no
-titles on the dips — they render as plain black; SFX cues with placed
-``file``\\ s are NOT mixed in; dissolves (``MontageEntry.transition``)
-render as hard cuts. The preview is a fast, rough look — all three ARE
-rendered by :func:`render_export`, the full-quality path (real ``xfade``
-dissolves, ``drawtext`` act titles, placed sound effects, YouTube-target
-loudness), which shares the segment machinery above but encodes for
-delivery instead of speed.
+Limitations (deliberate, PREVIEW only): SFX cues with placed ``file``\\ s
+are NOT mixed in; dissolves (``MontageEntry.transition``) render as hard
+cuts. The preview is a fast, rough look — both ARE rendered by
+:func:`render_export`, the full-quality path (real ``xfade`` dissolves,
+placed sound effects, YouTube-target loudness), which shares the segment
+machinery above but encodes for delivery instead of speed. Act titles
+(``plan.title_texts``) ARE drawn in BOTH renderers (blueprint 1.8 — a
+preview without the titles makes every A/B look review a surrogate):
+each titled black dip gets the same centered ``drawtext``, with the same
+defensive probing (an ffmpeg build without the filter, or no usable
+font, silently leaves the preview dips plain black; the export
+additionally notes the degradation).
 """
 
 from __future__ import annotations
@@ -189,6 +193,33 @@ def _segments(plan: MontagePlan) -> list[tuple[str, float, object]]:
     return out
 
 
+def _dip_titles(
+    plan: MontagePlan, segments: list[tuple[str, float, object]]
+) -> dict[int, str]:
+    """Segment index -> composed act title for that black dip.
+
+    ``plan.dips`` aligns with ``plan.title_texts`` by index; a black
+    segment is matched to its dip by record position. Shared by both
+    renderers (blueprint 1.8: the preview must show the same titles the
+    export shows). Empty when the plan has no composed titles.
+    """
+    starts: list[float] = []
+    cursor = 0.0
+    for _kind, length, _entry in segments:
+        starts.append(cursor)
+        cursor += length
+    titles: dict[int, str] = {}
+    for j, (dip_start, _dip_len) in enumerate(plan.dips):
+        text = plan.title_texts[j].strip() if j < len(plan.title_texts) else ""
+        if not text:
+            continue
+        for i, (kind, _length, _entry) in enumerate(segments):
+            if kind == "black" and abs(starts[i] - dip_start) < 0.05:
+                titles[i] = text
+                break
+    return titles
+
+
 def _canvas_size(plan: MontagePlan, width: int) -> tuple[int, int]:
     """Even preview canvas (W, H): ``width`` x the first entry's aspect.
 
@@ -271,6 +302,17 @@ def render_preview(
 
     w, h = _canvas_size(plan, width)
     own_audio = audio in ("original", "mix")
+    # Act titles on the dips (blueprint 1.8): the preview shows the same
+    # titles the export draws — otherwise every A/B look reviews an
+    # unfinished surrogate. Probed defensively exactly like the export
+    # (no drawtext filter / no font -> the dips stay plain black; a
+    # preview never fails over a title), just without the export's note.
+    titles = _dip_titles(plan, segments)
+    font: str | None = None
+    if titles and _supports_drawtext():
+        font = _find_font()
+    if not font:
+        titles = {}
     # Uniform video for every segment: same size, sample-aspect, and rate,
     # so the concat demuxer joins them without a hiccup.
     video_filter = (
@@ -323,13 +365,22 @@ def render_preview(
                     audio_args = ["-map", "1:a:0", *audio_encode]
                 else:
                     audio_args = ["-an"]
+                video_args: list[str] = []
+                if i in titles:
+                    # The act title over its black dip (blueprint 1.8) —
+                    # the same drawtext the export uses, preview quality.
+                    text_file = str(Path(tmpdir) / f"title_{i:04d}.txt")
+                    Path(text_file).write_text(titles[i], encoding="utf-8")
+                    video_args = ["-vf", _title_filter(text_file, font, h, length)]
                 _run_ffmpeg(
                     [
-                        *args, "-map", "0:v:0", *encode, *audio_args, seg,
+                        *args, "-map", "0:v:0", *video_args,
+                        *encode, *audio_args, seg,
                     ],
-                    f"encoding segment {i + 1}/{len(segments)} (black dip)",
+                    f"encoding segment {i + 1}/{len(segments)} "
+                    f"({'title' if i in titles else 'black dip'})",
                 )
-                tick("black")
+                tick("title" if i in titles else "black")
             paths.append(seg)
 
         # Concat list for the demuxer; single quotes escaped per its syntax.
@@ -558,9 +609,15 @@ def _export_audio_graph(
     ``"music"`` is the song alone, ``"original"`` the concatenated clip
     sound, ``"mix"`` both at the fixed :data:`MIX_MUSIC_LEVEL` /
     :data:`MIX_ORIGINAL_LEVEL` levels. Placed SFX cues (``(input label,
-    start seconds, trimmed length)``) are each trimmed, resampled to the
-    export rate, delayed to their cue time and ``amix``-ed ON TOP of the
-    bed at full level (``normalize=0`` keeps everyone's gain honest).
+    start seconds, trimmed length)`` — optionally a fourth element, the
+    ``source_offset`` seconds skipped from the file's head, blueprint
+    1.3: a riser plays its LAST run-up seconds, a shifted impact keeps
+    its peak on the hit) are each trimmed from their offset, resampled
+    to the export rate, delayed to their cue time and ``amix``-ed ON TOP
+    of the bed at full level (``normalize=0`` keeps everyone's gain
+    honest). Tail rule: the trim is the file's REMAINDER past the
+    offset, clamped by the caller only to the montage end — a hit's ring
+    -out is never cut back to the planned cue length.
     The chain finishes with the plan's ``afade``\\ s and — always last —
     single-pass ``loudnorm`` at YouTube's -14 LUFS / -1 dBTP / LRA 11
     target, then a resample back to :data:`_AUDIO_RATE` (loudnorm
@@ -602,10 +659,17 @@ def _export_audio_graph(
         base = "[xbed]"
     if sfx:
         labels = ""
-        for k, (label, start, trim) in enumerate(sfx):
+        for k, spec in enumerate(sfx):
+            label, start, trim = spec[0], spec[1], spec[2]
+            offset = float(spec[3]) if len(spec) > 3 else 0.0
             ms = max(0, int(round(start * 1000)))
+            atrim = (
+                f"atrim={offset:.3f}:{offset + trim:.3f}"
+                if offset > 0
+                else f"atrim=0:{trim:.3f}"
+            )
             parts.append(
-                f"[{label}]atrim=0:{trim:.3f},aresample={_AUDIO_RATE},"
+                f"[{label}]{atrim},aresample={_AUDIO_RATE},"
                 f"aformat=channel_layouts=stereo,adelay={ms}|{ms}[xs{k}]"
             )
             labels += f"[xs{k}]"
@@ -730,10 +794,14 @@ def render_export(
       libfreetype), or no font from :data:`_FONT_CANDIDATES` (DejaVu on
       Linux, Arial/Helvetica on macOS/Windows), skips the titles with a
       note — never a failed export.
-    * **SFX** — cues with a placed ``file`` are trimmed to
-      ``min(cue.duration, file length)``, delayed to ``cue.time`` and
-      mixed on top of the audio bed (one final audio graph). A missing
-      or unreadable file is a note, not an error.
+    * **SFX** — cues with a placed ``file`` play from their
+      ``source_offset`` (blueprint 1.3: a riser's head trim, a shifted
+      hit's skip), delayed to ``cue.time`` and mixed on top of the audio
+      bed (one final audio graph). The tail rule: the play length is
+      ``min(cue.duration, file remainder past the offset)``, clamped to
+      the montage end — when headroom exists the tail rings out rather
+      than being hard-trimmed to the planned cue length. A missing or
+      unreadable file is a note, not an error.
     * **Loudness** — the audio chain finishes with single-pass
       ``loudnorm`` at YouTube's target (-14 LUFS, -1 dBTP, LRA 11).
     * **Fades** — the plan's ``fade_in``/``fade_out``, exactly as in
@@ -797,24 +865,10 @@ def render_export(
         if progress is not None:
             progress(done, total, label)
 
-    # Segment start times in the montage (record time), for title matching.
-    starts: list[float] = []
-    cursor = 0.0
-    for _kind, length, _entry in segments:
-        starts.append(cursor)
-        cursor += length
-
     # Which black segments carry an act title (dips align with title_texts
-    # by index; a black segment is matched to its dip by record position).
-    titles: dict[int, str] = {}
-    for j, (dip_start, _dip_len) in enumerate(plan.dips):
-        text = plan.title_texts[j].strip() if j < len(plan.title_texts) else ""
-        if not text:
-            continue
-        for i, (kind, _length, _entry) in enumerate(segments):
-            if kind == "black" and abs(starts[i] - dip_start) < 0.05:
-                titles[i] = text
-                break
+    # by index; a black segment is matched to its dip by record position —
+    # the same mapping render_preview draws from, blueprint 1.8).
+    titles = _dip_titles(plan, segments)
     font: str | None = None
     if titles:
         if not _supports_drawtext():
@@ -971,11 +1025,19 @@ def render_export(
                     f"(cue at {cue.time:.1f}s left out)"
                 )
                 continue
-            trim = min(cue.duration, file_len) if cue.duration > 0 else file_len
+            # Peak-aligned play window (blueprint 1.3): the file plays from
+            # its source_offset (a riser's head trim, a shifted hit's skip)
+            # and the tail RINGS OUT — available headroom is the file's
+            # remainder, clamped to the montage end, never hard-trimmed
+            # back to the planned cue length.
+            offset = max(0.0, float(getattr(cue, "source_offset", 0.0) or 0.0))
+            headroom = max(0.0, file_len - offset)
+            trim = min(cue.duration, headroom) if cue.duration > 0 else headroom
+            trim = min(trim, max(0.0, plan.duration - cue.time))
             if trim < 1e-3:
                 continue
             final += ["-i", str(cue_file)]
-            sfx_specs.append((f"{idx}:a", max(0.0, cue.time), trim))
+            sfx_specs.append((f"{idx}:a", max(0.0, cue.time), trim, offset))
             idx += 1
         graph = (
             _export_video_graph(lengths, trans, fade_in, fade_out, plan.duration)
