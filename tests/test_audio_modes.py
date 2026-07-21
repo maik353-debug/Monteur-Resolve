@@ -47,13 +47,17 @@ def make_reports() -> list[ClipReport]:
 
 
 def make_pov_reports() -> list[ClipReport]:
-    """Plenty of material so the repetition guard never caps these plans."""
+    """Plenty of material so the repetition guard never caps these plans.
+
+    One clip per moment: no same-clip adjacency, so the pseudo-beat GRID
+    stays observable (the continuity merge has nothing to join)."""
     return [
         ClipReport(
-            path="/footage/ride.mp4",
+            path=f"/footage/ride{i:02d}.mp4",
             duration=120.0,
-            moments=[Moment(i * 4.0, i * 4.0 + 2.0, 0.8) for i in range(20)],
+            moments=[Moment(i * 4.0, i * 4.0 + 2.0, 0.8)],
         )
+        for i in range(20)
     ]
 
 
@@ -212,3 +216,70 @@ def test_cli_create_without_music_requires_max_duration(capsys):
         args.func(args)
     err = capsys.readouterr().err
     assert "--max-duration" in err
+
+
+# --- music through the dips ---------------------------------------------------------
+#
+# The rule: the SONG always plays through smash-to-black title dips (the
+# music is what carries a title card). A dip is a VIDEO-only black gap —
+# no surface may cut the A1 bed there. "original" mode is silent in the
+# dip by design, but a placed SFX element cue at the dip still lands.
+
+
+def _dip_plan() -> "MontagePlan":
+    from monteur.montage import MontageEntry, MontagePlan
+
+    return MontagePlan(
+        music_path="/music/song.wav",
+        duration=6.0,
+        song_duration=60.0,
+        entries=[
+            MontageEntry("/f/a.mp4", 1.0, 3.0, 0.0, 2.0, 1.0, clip_duration=30.0),
+            # record gap 2.0..2.4 — the smash-to-black dip
+            MontageEntry("/f/b.mp4", 2.0, 4.0, 2.4, 4.4, 0.9, clip_duration=30.0),
+            MontageEntry("/f/c.mp4", 0.5, 2.1, 4.4, 6.0, 0.8, clip_duration=30.0),
+        ],
+        dips=[(2.0, 0.4)],
+    )
+
+
+@pytest.mark.parametrize("mode", ["music", "mix"])
+def test_music_bed_spans_the_dip_continuously(mode):
+    timeline = montage_to_timeline(_dip_plan(), fps=25.0, audio=mode)
+    song = [c for c in timeline.track_clips("A1") if c.source_file == "/music/song.wav"]
+    assert len(song) == 1  # ONE continuous bed, not one piece per gap
+    assert song[0].record_in == 0
+    assert song[0].record_out == 150  # 6.0s at 25 fps: spans the dip
+    # V1 really does have the black gap the bed must bridge
+    video = timeline.video_clips()
+    assert video[0].record_out == 50 and video[1].record_in == 60
+
+
+def test_windowed_music_bed_still_spans_the_dip():
+    plan = _dip_plan()
+    plan.music_in = 1.0  # dry open; the entry lies BEFORE the dip
+    timeline = montage_to_timeline(plan, fps=25.0, audio="music")
+    song = [c for c in timeline.track_clips("A1") if c.source_file == plan.music_path]
+    assert len(song) == 1
+    assert song[0].record_in == 25
+    assert song[0].record_out == 150
+
+
+def test_original_mode_is_silent_in_the_dip_but_sfx_cues_land():
+    from monteur.montage import SfxCue
+
+    plan = _dip_plan()
+    plan.sfx = [
+        SfxCue(time=2.0, duration=0.4, kind="sub-drop", query="sub drop boom",
+               note="title slot", file="/sfx/boom.wav"),
+    ]
+    timeline = montage_to_timeline(plan, fps=25.0, audio="original")
+    # no song anywhere; the clips' own sound leaves the dip silent
+    own = timeline.track_clips("A1")
+    assert all(c.source_file != "/music/song.wav" for c in timeline.clips)
+    assert not any(c.record_in < 60 and c.record_out > 50 for c in own)
+    # but the placed braam still hits ON the dip (SFX track A2)
+    sfx = timeline.track_clips("A2")
+    assert len(sfx) == 1
+    assert sfx[0].source_file == "/sfx/boom.wav"
+    assert sfx[0].record_in == 50

@@ -374,14 +374,18 @@ def _parity_reports() -> list[ClipReport]:
 # Regenerated 2026-07 for the honest no-repeat rule: allow_repeats=False now
 # means ZERO repeated moments — the default parity plans shrink to the unique
 # material (40s) instead of silently recycling footage over the 60s song.
+# Regenerated again 2026-07 for the same-clip continuity wave: the continuity
+# merge, jump-cut guard and per-cut transitions deliberately change every
+# style's plan (fewer same-scene cuts). These hashes still pin the engine
+# against ACCIDENTAL drift between waves.
 _PARITY_GOLDEN = {
-    "auto": "10d20a1e9a4fa35fcee413e1e841e2c60327b42739c930ee08bbb1e3b4eb0588",
-    "travel": "288429904c19c0b9ef23c2bae10ddaf388289fec5292389bceb383a4077923f6",
-    "wedding": "3454b6eb0d34a207850add93b9d7e7dbce2ea525378e1b5a629bfeaa648e5b5e",
-    "music_video": "8f9938a036d6d300bb750797d1fc0251d7a2e21b0b846be5308143d0cd5a3a46",
-    "trailer": "99b1281eaab17f0c1c0df265088d38a04d47029d824b93b4c3667707fb0a706a",
-    "trailer-best-paced": "49a9d30e1c027b8f17e73310f43f5b667fa0e71508e4434173734bbd43e14d9c",
-    "travel-no-music": "daa845c961a0388a74557ef2fae8266a661887c395c255d90b317f74f3389cd5",
+    "auto": "f9d843f342b27ddde52eb44b387259e2664c538e3d93de108deb1096df015c18",
+    "travel": "850a26fa3e54c42a93ff21e28baa5f86fa1c6cfec2b3b7df3e716df33e4903b8",
+    "wedding": "fbf271d23eea0976a25c1a1939abb163226c9c8e14c4256508546d6516e61668",
+    "music_video": "ce8c010fd5bd77a3ffd86359c377f5d2710735074fce197991fd73731f4390aa",
+    "trailer": "6a5c0f585798ad4ac75327a12fbab23baba7016fc0456c3182ee9c9a3272f608",
+    "trailer-best-paced": "d762c928f8ec0fbd582fdcbdb715430251e15a2886ceb910b1aa8b6894367702",
+    "travel-no-music": "645cc4b7fffe1795a6aeba05785e836c2dc9f600ebd5ffb5b4fce44aba769baf",
 }
 
 

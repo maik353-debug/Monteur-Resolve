@@ -4817,3 +4817,42 @@ def test_build_plan_isolated_sends_mode(monkeypatch) -> None:
     assert json.loads(captured["input"])["mode"] == "hybrid"  # the default
     resolve.build_plan_isolated(make_plan(), fps=25.0, mode="append")
     assert json.loads(captured["input"])["mode"] == "append"
+
+
+# --- music through the dips (append build) ------------------------------------------
+
+
+def test_build_append_music_spans_dips_as_one_clip() -> None:
+    """A smash-to-black dip is a record gap on V1; the music append must
+    stay ONE clip covering the whole montage — the song carries the title
+    card, no surface may cut it at the dip."""
+    bridge, project = make_bridge([standard_timeline()])
+    pool = project.media_pool
+    plan = MontagePlan(
+        music_path="/music/song.wav",
+        duration=4.4,
+        entries=[
+            MontageEntry(
+                clip_path="/media/a.mov", source_start=1.0, source_end=3.0,
+                record_start=0.0, record_end=2.0, score=1.0,
+            ),
+            # record gap 2.0..2.4 — the dip
+            MontageEntry(
+                clip_path="/media/b.mov", source_start=0.6, source_end=2.6,
+                record_start=2.4, record_end=4.4, score=0.5,
+            ),
+        ],
+        dips=[(2.0, 0.4)],
+    )
+    build_append(bridge, plan, fps=25.0)
+    music = [
+        c for c in pool.appended if c["mediaPoolItem"].path == "/music/song.wav"
+    ]
+    assert len(music) == 1  # ONE continuous bed, never per-gap pieces
+    # full montage length (4.4s at 25 fps), positioned at record 0 — the
+    # bed bridges the V1 gap the dip leaves at record 2.0..2.4
+    assert (music[0]["startFrame"], music[0]["endFrame"]) == (0, 109)
+    assert music[0]["recordFrame"] == 0
+    # the video entries really leave the gap (record positions in frames)
+    video = [c for c in pool.appended if c["mediaType"] == 1]
+    assert [c["recordFrame"] for c in video] == [0, 60]

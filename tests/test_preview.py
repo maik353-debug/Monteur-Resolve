@@ -598,3 +598,78 @@ def test_successful_export_leaves_no_temp_dir(tmp_path, monkeypatch):
     )
     render_export(demo_plan(), str(tmp_path / "ok.mp4"), size=(320, 180))
     assert list(workdir.iterdir()) == []
+
+
+# ------------------------------------------------------------ music through the dip
+#
+# Field bug hunt: "during the title cards there is NO sound at all". The
+# renderers must keep the SONG playing through a smash-to-black dip (the
+# music carries the title card); "original" mode is silent there by
+# design. Measured for real: RMS level of the rendered audio inside the
+# dip window vs. the body.
+
+
+def _rms_db(path: str, start: float, end: float) -> float:
+    """Mean RMS level (dB) of the audio between start and end; -inf = silence."""
+    import re
+    import subprocess
+
+    from monteur.media import find_ffmpeg
+
+    out = subprocess.run(
+        [
+            find_ffmpeg(), "-hide_banner", "-i", str(path),
+            "-af", f"atrim={start}:{end},astats=metadata=1:reset=0",
+            "-f", "null", "-",
+        ],
+        capture_output=True,
+    ).stderr.decode("utf-8", "replace")
+    match = re.search(r"RMS level dB:\s*(-?[\d.]+|-inf)", out)
+    assert match, f"no astats RMS in ffmpeg output for {path}"
+    return float("-inf") if match.group(1) == "-inf" else float(match.group(1))
+
+
+@needs_ffmpeg
+@needs_demo
+@pytest.mark.parametrize("mode", ["music", "mix"])
+def test_preview_music_plays_through_the_dip(tmp_path, mode):
+    out = tmp_path / f"dip_{mode}.mp4"
+    render_preview(demo_plan(), str(out), audio=mode)
+    # the dip is 2.0..2.4; the song must still be audible inside it
+    assert _rms_db(out, 2.05, 2.35) > -60.0
+
+
+@needs_ffmpeg
+@needs_demo
+def test_preview_original_mode_is_silent_in_the_dip_by_design(tmp_path):
+    out = tmp_path / "dip_original.mp4"
+    render_preview(demo_plan(), str(out), audio="original")
+    assert _rms_db(out, 2.05, 2.35) == float("-inf")
+    assert _rms_db(out, 1.0, 1.5) > -60.0  # the body carries the clip sound
+
+
+@needs_ffmpeg
+@needs_demo
+@pytest.mark.parametrize("mode", ["music", "mix"])
+def test_export_music_plays_through_the_dip(tmp_path, mode):
+    out = tmp_path / f"dip_export_{mode}.mp4"
+    render_export(demo_plan(), str(out), size=(320, 180), audio=mode,
+                  quality="medium")
+    assert _rms_db(out, 2.05, 2.35) > -60.0
+
+
+@needs_ffmpeg
+@needs_demo
+def test_export_original_dip_is_silent_but_the_braam_lands(tmp_path):
+    # "original" mode: the dip itself is silent, but a placed SFX element
+    # cue AT the dip still hits — the braam that carries the title.
+    plan = demo_plan()
+    plan.sfx = [
+        SfxCue(time=2.0, duration=0.4, kind="sub-drop", query="sub drop boom",
+               note="title slot", file=_tiny_wav(tmp_path / "boom.wav", 0.4)),
+    ]
+    out = tmp_path / "dip_braam.mp4"
+    result = render_export(plan, str(out), size=(320, 180), audio="original",
+                           quality="medium")
+    assert result["notes"] == []
+    assert _rms_db(out, 2.05, 2.35) > -60.0  # the braam is audible in the dip

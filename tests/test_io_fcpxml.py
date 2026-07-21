@@ -568,3 +568,45 @@ def test_write_three_audio_tracks_mix_mode_layout():
     assert tracks == ["A1", "A1", "A3"]
     hit = next(c for c in back.audio_clips() if c.track == "A3")
     assert (hit.record_in, hit.record_out) == (50, 70)
+
+
+# --- music through the dips ---------------------------------------------------------
+
+
+def test_music_bed_spans_v1_gaps_as_one_connected_clip():
+    """A smash-to-black dip is a V1 gap; the A1 music bed must stay ONE
+    continuous connected clip spanning it — the song carries the title."""
+    timeline = Timeline(name="Dipped", fps=25.0)
+    timeline.clips.append(
+        Clip(name="a", track="V1", kind=VIDEO, source_in=0, source_out=50,
+             record_in=0, record_out=50, source_name="a",
+             source_file="/media/a.mov")
+    )
+    # 0.4s black dip: frames 50..60 have no video
+    timeline.clips.append(
+        Clip(name="b", track="V1", kind=VIDEO, source_in=0, source_out=90,
+             record_in=60, record_out=150, source_name="b",
+             source_file="/media/b.mov")
+    )
+    timeline.clips.append(
+        Clip(name="song", track="A1", kind=AUDIO, source_in=0, source_out=150,
+             record_in=0, record_out=150, source_name="song",
+             source_file="/media/song.wav",
+             metadata={"media_duration_seconds": 60.0})
+    )
+    xml = write_fcpxml(timeline)
+    # exactly one music asset-clip, full length, on the music lane
+    assert xml.count('audioRole="music"') == 1
+    music_line = next(
+        line for line in xml.splitlines() if 'audioRole="music"' in line
+    )
+    assert 'duration="6s"' in music_line  # 150 frames at 25 fps — spans the dip
+    assert 'lane="-1"' in music_line
+    # the round trip keeps one continuous A1 clip over the whole montage
+    back = read_fcpxml(xml)
+    song = [c for c in back.audio_clips() if c.track == "A1"]
+    assert len(song) == 1
+    assert (song[0].record_in, song[0].record_out) == (0, 150)
+    # while V1 really has the gap
+    video = sorted(back.video_clips(), key=lambda c: c.record_in)
+    assert video[0].record_out == 50 and video[1].record_in == 60

@@ -192,6 +192,31 @@ The notes carry the arc ("story: daylight arc day -> golden -> night
 (soft)") and honest per-slot warnings when a cast slot sits against the
 flow ("slot 14: night shot inside the day block").
 
+Same-clip continuity
+--------------------
+The slot grid must not chop one continuing take into jump cuts. Two
+mechanisms guard that (see :func:`_merge_continuity` and the jump-cut
+guard in :func:`_fill`):
+
+* **Continuity merge.** After casting, adjacent slots cast from the SAME
+  clip whose source windows sit within :data:`_CONTINUITY_MAX_GAP` (3 s)
+  of each other become ONE continuous shot: the merged entry plays from
+  the first window's start straight across the bridge frames (the clip's
+  own material between the windows), so nothing jumps. Unlike the calm
+  merge below, no calmness or music-energy gate applies and the CLIMAX
+  may merge internally (the same ride continuing over the drop is held,
+  not re-cut) — but a merge still never crosses an act/section change
+  (structure and smash-to-black dips survive), never absorbs a drop slot
+  or the final entry, respects :data:`_MAX_CUT_SECONDS` and the
+  zero-repeat promise, and leaves arranged entries alone.
+* **Jump-cut guard.** During casting, a candidate that would sit next to
+  a same-clip neighbour with a source gap under :data:`_JUMP_CUT_MIN_GAP`
+  (8 s) pays :data:`_JUMP_CUT_PENALTY` — more than the group penalty, so
+  a different clip up to two order positions later wins — unless the
+  continuity merge would join the pair anyway. When the pool is too
+  small to cast around it, the surviving visible jumps are counted into
+  one honest note ("footage variety is low: ...").
+
 Content-adaptive pacing
 -----------------------
 After casting, a slot-merge pass (:func:`_merge_calm_slots`) lets slow
@@ -210,6 +235,23 @@ With no motion data in the pool calmness is unknowable and the pass
 changes nothing. A note reports the result ("pacing: 6 calm slots merged
 into 3 longer shots ...").
 
+Auto pace
+---------
+``pace=None`` (the default, recommended) does not mean "fixed style
+bases": for arc styles the per-phase base is derived from the material
+(:func:`_auto_pace_bias`). Two signals each slow every phase base one
+notch (base x 2, at most two notches): a content mix whose calm share
+(the calm-merge thresholds, weighted by moment seconds) reaches
+:data:`_AUTO_PACE_CALM_SHARE` (60%), and a song whose duration-weighted
+mean section energy sits at/below :data:`_AUTO_PACE_LOW_ENERGY` (0.35).
+The arc-less "auto" style is not biased (its section grid already reads
+the song's own density, and the merge passes adapt it to content);
+"short" is not biased either (the vertical anti-canon never slows
+down). An explicit ``pace`` is the override and skips the bias
+entirely. On top of the base, real shot length still follows the music
+(the beat grid), the clip (continuity + calm merges) and the local
+tempo (the rhythm canon) — so the realized cut varies a lot by design.
+
 Finishing
 ---------
 A montage shorter than the song ends on a musical boundary:
@@ -219,10 +261,17 @@ then beats, serve as fallbacks; the change is never allowed to exceed
 12%, and a full-song montage is left alone). Styles with an outro phase
 plan a 0.5 s fade-in and a fade-out of min(2 s, last outro slot) on
 :class:`MontagePlan` (``fade_in`` / ``fade_out``); "auto" plans 0.5 s /
-1 s. Entries in gentle phases — >= 4 beats per cut, i.e. opening/outro,
-or "low" sections in "auto" — carry a dissolve INTO them:
-``MontageEntry.transition`` = min(0.5 s, half the slot length), always 0
-for the montage's first entry (its fade is ``fade_in``).
+1 s. ``transitions="auto"`` (the default) decides every boundary PER
+CUT from what meets there (:func:`_plan_finishing`): a same-clip
+continuation always cuts hard, climax/"high" passages cut hard, a
+daylight-block change dissolves (the soft time-lapse feel), and gentle
+passages — >= 4 beats per cut, i.e. opening/outro, or "low" sections in
+"auto" style — dissolve at scene-group changes while two takes of the
+same group cut hard; gentle boundaries with no group knowledge keep the
+classic dissolve INTO the entry: ``MontageEntry.transition`` =
+min(0.5 s, half the slot length), always 0 for the montage's first
+entry (its fade is ``fade_in``). The explicit modes (cuts / dissolves /
+smash) stay blunt overrides.
 :func:`montage_to_timeline` publishes dissolves as clip metadata
 (``"transition"`` / ``"transition_frames"``) and the fades as timeline
 metadata (``"fade_in_frames"`` / ``"fade_out_frames"``) so the EDL/FCPXML
@@ -437,9 +486,11 @@ _LEAD_MIN_SLOT = 0.25
 # Audio modes for montage_to_timeline.
 _AUDIO_MODES = ("music", "mix", "original")
 # Transition modes for plan_montage: how clips hand over to each other.
-# "auto" = the style's own habits (gentle-phase dissolves; the trailer
-# smashes to black), "cuts" = hard cuts only, "dissolves" = dissolve on
-# every cut, "smash" = black title-slot gaps at act/section changes.
+# "auto" = per-cut intelligence (same-clip continuations and climax/"high"
+# passages cut hard, daylight-block changes and scene changes in calm
+# passages dissolve; the trailer smashes to black at act changes),
+# "cuts" = hard cuts only, "dissolves" = dissolve on every cut,
+# "smash" = black title-slot gaps at act/section changes.
 TRANSITION_MODES = ("auto", "cuts", "dissolves", "smash")
 # Canvas presets for montage_to_timeline: shape x resolution.
 CANVASES: dict[str, tuple[int, int]] = {
@@ -535,6 +586,42 @@ _MERGE_CALM_MOTION = 0.35
 # ...and its audio highlight is at/below this (matches the arrangement's
 # calm-on-the-drop threshold).
 _MERGE_CALM_HIGHLIGHT = 0.3
+# Same-clip continuity (the continuity-merge pass + the jump-cut guard;
+# see the module docstring's Same-clip continuity section).
+# Adjacent slots cast from the SAME clip whose source windows sit within
+# this many seconds of each other are ONE continuing shot chopped in two:
+# the merge joins them into one continuous take (bridging the gap with
+# the clip's own in-between frames).
+_CONTINUITY_MAX_GAP = 3.0
+# The casting guard: a candidate that would put the same clip next to
+# itself with a source gap under this many seconds pays the jump-cut
+# penalty (unless the continuity merge would join the pair anyway) —
+# a cut that jumps a few seconds INSIDE one scene reads as an error,
+# not an edit.
+_JUMP_CUT_MIN_GAP = 8.0
+# Sized ABOVE the group penalty and well above one order step
+# (_ORDER_WEIGHT / _CANDIDATE_WINDOW = 0.175): a different clip two
+# order positions behind still wins over a same-scene jump cut.
+_JUMP_CUT_PENALTY = 0.4
+# A surviving same-clip boundary with a source skip at/above this many
+# seconds is a VISIBLE jump cut (below it the shot simply continues);
+# survivors are counted into one honest low-variety note.
+_JUMP_CUT_VISIBLE_GAP = 0.25
+# Auto pace (pace=None; see the module docstring's Auto pace section):
+# the per-phase bases are derived, not fixed. Arc styles start from their
+# beats_per_cut table and get biased one "notch" slower (base x 2) per
+# signal that fires — at most two notches:
+#   * content mix: at least _AUTO_PACE_CALM_SHARE of the pool's material
+#     is calm (the _MERGE_CALM_* thresholds — the same numbers the
+#     calm-merge pass uses); no motion data anywhere = no content signal;
+#   * music density: the windowed song's duration-weighted mean section
+#     energy is at/below _AUTO_PACE_LOW_ENERGY.
+# The arc-less "auto" style is excluded (its section grid already reads
+# the song's density directly, and the merge passes adapt it to content);
+# so is "short" (the vertical anti-canon never slows down). An explicit
+# ``pace`` overrides — the bias only runs when no pace was given.
+_AUTO_PACE_CALM_SHARE = 0.6
+_AUTO_PACE_LOW_ENERGY = 0.35
 # Which vision role each arc phase asks for.
 _ROLE_FOR_PHASE = {
     "opening": "opener",
@@ -1680,6 +1767,67 @@ def _apply_pace(
     return style, steps, note
 
 
+def _auto_pace_bias(
+    reports: list[ClipReport], sections: list[MusicSection]
+) -> tuple[int, str]:
+    """Auto-pace notches (0..2) plus the note naming the signals.
+
+    With ``pace=None`` the per-phase base is DERIVED, not fixed: each
+    signal that fires slows every phase base one notch (base x 2, the
+    natural beat-grid step — see the constants block above for the
+    thresholds and which styles take part):
+
+    * **content mix** — the share of calm material (motion at/below
+      :data:`_MERGE_CALM_MOTION` of the pool's fastest AND highlight
+      at/below :data:`_MERGE_CALM_HIGHLIGHT`, weighted by moment
+      seconds) reaches :data:`_AUTO_PACE_CALM_SHARE`. A pool with no
+      motion data anywhere gives no content signal (calmness is
+      unknowable — the same rule the calm merge follows).
+    * **music density** — the windowed song's duration-weighted mean
+      section energy sits at/below :data:`_AUTO_PACE_LOW_ENERGY`.
+      No sections (or no music) = no signal.
+
+    Returns ``(0, "")`` when nothing fires — plans without the signals
+    are byte-identical to before the bias existed.
+    """
+    signals: list[str] = []
+    mags: list[float] = []
+    for report in reports:
+        for m in report.moments:
+            mags.append(
+                (math.hypot(*m.entry_motion) + math.hypot(*m.exit_motion)) / 2.0
+            )
+    peak = max(mags, default=0.0)
+    if peak > _EPS:
+        calm = total = 0.0
+        i = 0
+        for report in reports:
+            for m in report.moments:
+                length = max(0.0, m.end - m.start)
+                total += length
+                if (
+                    mags[i] / peak <= _MERGE_CALM_MOTION + _EPS
+                    and m.highlight <= _MERGE_CALM_HIGHLIGHT + _EPS
+                ):
+                    calm += length
+                i += 1
+        if total > _EPS and calm / total >= _AUTO_PACE_CALM_SHARE - _EPS:
+            signals.append("calm footage dominates")
+    weighted = sum((s.end - s.start) * s.energy for s in sections)
+    span = sum(s.end - s.start for s in sections)
+    if span > _EPS and weighted / span <= _AUTO_PACE_LOW_ENERGY + _EPS:
+        signals.append("a quiet song")
+    if not signals:
+        return 0, ""
+    notches = len(signals)
+    note = (
+        f"auto pace: {' and '.join(signals)} — cutting "
+        f"{'two notches' if notches == 2 else 'one notch'} slower "
+        "(set a pace to override)"
+    )
+    return notches, note
+
+
 def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
     """Merge overlapping/touching [start, end] intervals (sorted result).
 
@@ -1769,22 +1917,37 @@ class _PoolItem:
 
 
 def _pick_reuse(
-    pool: list[_PoolItem], start: int, held: set[int] | frozenset[int] = frozenset()
+    pool: list[_PoolItem],
+    start: int,
+    held: set[int] | frozenset[int] = frozenset(),
+    jumpy=None,
 ) -> _PoolItem | None:
     """First pool item (cyclic scan from ``start``) with unconsumed material.
 
     Indices in ``held`` (reserved for a not-yet-served drop slot) are skipped
     so their material stays fresh for the drop.
+
+    ``jumpy`` (optional predicate on a pool item) is the reuse phase's
+    jump-cut guard: a first scan skips items whose next slice would sit as
+    a same-scene jump next to an already-cast neighbour; when EVERY item
+    with material is jumpy the plain scan decides (material beats craft —
+    the survivors are then counted into the low-variety note).
     """
     n = len(pool)
+    fallback: _PoolItem | None = None
     for k in range(n):
         idx = (start + k) % n
         if idx in held:
             continue
         item = pool[idx]
-        if item.remaining > _EPS:
-            return item
-    return None
+        if item.remaining <= _EPS:
+            continue
+        if jumpy is not None and jumpy(item):
+            if fallback is None:
+                fallback = item
+            continue
+        return item
+    return fallback
 
 
 def _trim_overlapping_pool(pool: list[_PoolItem]) -> list[_PoolItem]:
@@ -1934,6 +2097,7 @@ def _fill(
     preset: dict[int, "_PoolItem"] | None = None,
     hook_loop: bool = False,
     allow_repeats: bool = True,
+    slot_contexts: list[str] | None = None,
 ) -> tuple[list[MontageEntry], list[str], float | None]:
     """Assign pool moments to slots.
 
@@ -2000,6 +2164,21 @@ def _fill(
 
     Both reservations skip slots an arrangement already cast (``preset``)
     and are reported in the notes ("hook: ...", "loop: ...").
+
+    ``slot_contexts`` (one act/section label per slot, or None) feeds the
+    JUMP-CUT GUARD: a candidate that would sit next to a same-clip
+    neighbour with a source gap inside ``±_JUMP_CUT_MIN_GAP`` (forward
+    skips AND nearby rewinds; beyond that the cut reads as another
+    scene) pays :data:`_JUMP_CUT_PENALTY` — bigger than the group
+    penalty, so a different clip up to two order positions behind wins
+    instead — UNLESS the continuity merge (:func:`_merge_continuity`)
+    would join the pair anyway (gap within :data:`_CONTINUITY_MAX_GAP`,
+    same context, not into a drop/final slot, merged span within the
+    cut ceiling, play reaching the later window): a joinable
+    continuation is one shot, not a jump. The REUSE phase applies the
+    same test: :func:`_pick_reuse` first scans for material that does
+    not jump against an already-cast neighbour and falls back to the
+    plain cyclic scan only when everything left is jumpy.
 
     ``semantic=True`` (any pool moment carries vision annotations) layers
     the semantic-casting bonuses onto the candidate blend: a fitting role
@@ -2104,10 +2283,52 @@ def _fill(
     held = set(reserved.values())  # kept out of reuse until their drop is served
 
     by_slot: dict[int, _PoolItem] = dict(preset or {})
+    # Source windows already placed, per slot — the jump-cut guard reads
+    # its neighbours here (arranged slots are the editor's own order and
+    # are not guarded against).
+    windows: dict[int, tuple[str, float, float]] = {}
     same_scene_avoided = 0
     for visit, slot_idx in enumerate(slot_order):
         rec_start, rec_end = slots[slot_idx]
         slot_len = rec_end - rec_start
+
+        def _is_jumpy(clip: str, cand_start: float, cand_end: float) -> bool:
+            """Would this source window sit as a same-scene jump cut next
+            to an already-cast neighbour of ``slot_idx``? (False when the
+            continuity merge would join the pair into one shot.)"""
+            for ns in (slot_idx - 1, slot_idx + 1):
+                w = windows.get(ns)
+                if not w or w[0] != clip:
+                    continue
+                if ns < slot_idx:
+                    gap = cand_start - w[2]
+                    earlier, later = ns, slot_idx
+                    early_src, late_src = w[1], cand_start
+                else:
+                    gap = w[1] - cand_end
+                    earlier, later = slot_idx, ns
+                    early_src, late_src = cand_start, w[1]
+                if abs(gap) > _JUMP_CUT_MIN_GAP + _EPS:
+                    continue  # far apart (either way): reads as another scene
+                # A nearby rewind (small negative gap) is always a jump
+                # cut; a small forward gap is fine only when the continuity
+                # merge would join the pair into one shot (same rules).
+                span = slots[later][1] - slots[earlier][0]
+                if (
+                    -_EPS <= gap <= _CONTINUITY_MAX_GAP + _EPS
+                    and later not in drop_slots
+                    and later != len(slots) - 1
+                    and (
+                        not slot_contexts
+                        or slot_contexts[earlier] == slot_contexts[later]
+                    )
+                    and span <= _MAX_CUT_SECONDS + _EPS
+                    and early_src + span >= late_src - _EPS
+                ):
+                    continue  # the continuity merge joins them: one shot
+                return True
+            return False
+
         if slot_idx in reserved:
             item = pool[reserved[slot_idx]]  # drop slot: strongest moment
             held.discard(reserved[slot_idx])
@@ -2150,6 +2371,16 @@ def _fill(
                     if pool[idx].group and pool[idx].group in neighbour_groups:
                         sem_penalty[idx] = _GROUP_PENALTY
 
+            # Jump-cut guard: a same-clip neighbour with a small source
+            # gap that the continuity merge would NOT join reads as a
+            # visible jump inside one scene — penalize the candidate so
+            # a different clip wins while the pool has one.
+            jump_pen: dict[int, float] = {}
+            for idx in window:
+                cand_start = pool[idx].moment.start + pool[idx].consumed
+                if _is_jumpy(pool[idx].clip_path, cand_start, cand_start + slot_len):
+                    jump_pen[idx] = _JUMP_CUT_PENALTY
+
             def _blend(pos: int, idx: int) -> float:
                 score = (
                     _ORDER_WEIGHT * (1.0 - pos / _CANDIDATE_WINDOW)
@@ -2170,7 +2401,7 @@ def _fill(
                         score -= _DAYLIGHT_SWITCH_PENALTY
                     if day_targets and pool[idx].daylight == day_targets[slot_idx]:
                         score += _DAYLIGHT_BLOCK_WEIGHT
-                return score
+                return score - jump_pen.get(idx, 0.0)
 
             best = max(
                 enumerate(window),
@@ -2196,13 +2427,17 @@ def _fill(
                             it.moment.score,
                         ),
                     )
+            def _reuse_jumpy(it: _PoolItem) -> bool:
+                start_s = it.moment.start + it.consumed
+                return _is_jumpy(it.clip_path, start_s, start_s + slot_len)
+
             if item is None:
-                item = _pick_reuse(pool, visit % n, held)
+                item = _pick_reuse(pool, visit % n, held, jumpy=_reuse_jumpy)
             if item is None and not allow_repeats and held:
                 # Repeats are off and only drop-held material remains:
                 # releasing a reservation beats ending the cut early (the
                 # drop slot then pads or gaps — but never repeats).
-                item = _pick_reuse(pool, visit % n)
+                item = _pick_reuse(pool, visit % n, jumpy=_reuse_jumpy)
             if item is None and not allow_repeats:
                 # Zero-repeat promise: never rewind. The montage ends at
                 # the first slot fresh material cannot serve; entries the
@@ -2234,6 +2469,7 @@ def _fill(
             )
         item.consumed = src_end - moment.start
         item.uses += 1
+        windows[slot_idx] = (item.clip_path, src_start, src_end)
         entries.append(
             MontageEntry(
                 clip_path=item.clip_path,
@@ -2308,7 +2544,184 @@ def _fill(
     return entries, notes, short_at
 
 
-# --- content-adaptive pacing (the slot-merge pass) ------------------------------
+# --- post-cast coalescing (continuity + content-adaptive pacing) ----------------
+
+
+def _match_pool_moment(entry: MontageEntry, pool: list[_PoolItem]) -> int | None:
+    """Pool index of the moment ``entry`` was cast from (largest source
+    overlap in the same clip), or None when nothing overlaps."""
+    best: int | None = None
+    best_ov = 0.0
+    for i, item in enumerate(pool):
+        if item.clip_path != entry.clip_path:
+            continue
+        ov = min(item.moment.end, entry.source_end) - max(
+            item.moment.start, entry.source_start
+        )
+        if ov > best_ov + _EPS:
+            best, best_ov = i, ov
+    return best
+
+
+def _extension_overlaps(
+    entries: list[MontageEntry],
+    clip: str,
+    lo: float,
+    hi: float,
+    absorbed: set[int],
+) -> bool:
+    """True when (lo, hi) of ``clip`` is on screen in another entry."""
+    for k, other in enumerate(entries):
+        if k in absorbed or other.clip_path != clip:
+            continue
+        if min(other.source_end, hi) - max(other.source_start, lo) > _EPS:
+            return True
+    return False
+
+
+def _boundary_context(
+    entries: list[MontageEntry],
+    i: int,
+    phases: list[tuple[float, float, str]],
+    sections: list[MusicSection],
+) -> str:
+    """The act/section an entry sits in — merges never cross these."""
+    if phases:
+        return _phase_label_at(phases, entries[i].record_start) or ""
+    if sections:
+        return _label_at(sections, entries[i].record_start)
+    return ""
+
+
+def _merge_continuity(
+    entries: list[MontageEntry],
+    slot_of: list[int],
+    phases: list[tuple[float, float, str]],
+    sections: list[MusicSection],
+    drop_slots: set[int] | frozenset[int],
+    protected: int,
+) -> tuple[list[MontageEntry], list[int], str | None]:
+    """Join adjacent same-clip slots into ONE continuous shot (deterministic).
+
+    When the casting puts two-plus ADJACENT slots on material from the
+    SAME clip whose source windows sit within :data:`_CONTINUITY_MAX_GAP`
+    seconds of each other, the viewer sees one continuing scene chopped
+    by jump cuts — the exact field complaint. This pass replaces the run
+    with one shot that plays CONTINUOUSLY from the first window's start
+    across the full merged record span: the bridge material (the clip's
+    own frames between the windows) is played instead of jumped over, so
+    the source stays 1:1 with the record and the shot ends
+    ``total gap`` seconds before the last window's end (that tail is
+    simply released). Cut boundaries only DISAPPEAR — every surviving
+    cut still sits on the musical grid.
+
+    Rules, and how they differ from the calm merge
+    (:func:`_merge_calm_slots`) — that pass is about PACING (calm
+    content on calm music earns longer shots), this one is about
+    CONTINUITY (one take must read as one take), so the gates differ:
+
+    * same ``clip_path`` and every joined boundary's source gap within
+      ``[0, _CONTINUITY_MAX_GAP]`` (a negative gap is a replay, never a
+      continuity) — no calmness requirement, no music-energy gate, and
+      no motion data needed;
+    * the CLIMAX may merge internally: when the same ride continues
+      over the drop's aftermath, holding the shot beats re-cutting it
+      (the calm merge never touches the climax — a pacing merge there
+      would drain the peak; a continuity merge there just keeps the
+      ride). Crossing an act/section-label change is still forbidden
+      (:func:`_boundary_context`), so structure — and every
+      smash-to-black dip, which is carved AT those changes — survives;
+    * a drop slot is never ABSORBED (the drop keeps its own fresh hit)
+      but may itself absorb its followers (the drop hold grows);
+    * arranged entries (``entries[0..protected-1]``) and the final entry
+      (the cast closer/loop shot) never take part; the merged shot stays
+      at/below :data:`_MAX_CUT_SECONDS`;
+    * the bridge frames must not be on screen in any other entry — the
+      zero-repeat promise survives; the accumulated drift (source end vs
+      the last absorbed window's end) stays within
+      :data:`_CONTINUITY_MAX_GAP`; and the continuous play must REACH
+      each absorbed window's own material — a join that would show only
+      bridge frames is replacement, not continuity, and is refused.
+
+    ``slot_of[i]`` is entry i's original slot index (the fill's 1:1
+    tiling); the returned list maps each SURVIVING entry to the slot it
+    STARTS in, so the calm merge can still look up slot energies and
+    drop slots afterwards. Returns ``(entries, slot_of, note)`` — the
+    note ("continuity: N same-scene cuts joined ...") is None when
+    nothing merged.
+    """
+    n = len(entries)
+    if n < 2:
+        return entries, slot_of, None
+
+    result: list[MontageEntry] = []
+    result_slots: list[int] = []
+    joined = 0
+    groups = 0
+    i = 0
+    while i < n:
+        entry = entries[i]
+        if i < protected:
+            result.append(entry)
+            result_slots.append(slot_of[i])
+            i += 1
+            continue
+        ctx = _boundary_context(entries, i, phases, sections)
+        absorbed: set[int] = {i}
+        new_record_end = entry.record_end
+        new_source_end = entry.source_end
+        j = i + 1
+        while (
+            j < n - 1  # the last entry is never absorbed (the cast closer)
+            and j >= protected
+            and slot_of[j] not in drop_slots  # the drop keeps its own hit
+            and entries[j].clip_path == entry.clip_path
+            and _boundary_context(entries, j, phases, sections) == ctx
+            and abs(entries[j].record_start - new_record_end) <= _EPS
+            and entries[j].record_end - entry.record_start
+            <= _MAX_CUT_SECONDS + _EPS
+        ):
+            gap = entries[j].source_start - entries[j - 1].source_end
+            if gap < -_EPS or gap > _CONTINUITY_MAX_GAP + _EPS:
+                break  # a replay, or too far apart to be the same ride
+            want_end = entry.source_start + (
+                entries[j].record_end - entry.record_start
+            )
+            drift = entries[j].source_end - want_end
+            if drift < -_EPS or drift > _CONTINUITY_MAX_GAP + _EPS:
+                break  # material missing, or drifted too far off the cast
+            if want_end < entries[j].source_start - _EPS:
+                break  # the continuous play would never reach this slot's
+                # cast material — that is replacement, not continuity
+            if _extension_overlaps(
+                entries, entry.clip_path, new_source_end, want_end, absorbed | {j}
+            ):
+                break  # the bridge would repeat material another slot plays
+            absorbed.add(j)
+            new_record_end = entries[j].record_end
+            new_source_end = want_end
+            j += 1
+        if len(absorbed) > 1:
+            result.append(
+                replace(entry, record_end=new_record_end, source_end=new_source_end)
+            )
+            result_slots.append(slot_of[i])
+            joined += len(absorbed) - 1
+            groups += 1
+            i = j
+        else:
+            result.append(entry)
+            result_slots.append(slot_of[i])
+            i += 1
+
+    if not groups:
+        return entries, slot_of, None
+    note = (
+        f"continuity: {joined} same-scene cut{'s' if joined != 1 else ''} "
+        f"joined into {groups} longer shot{'s' if groups != 1 else ''} "
+        "(one take reads as one take)"
+    )
+    return result, result_slots, note
 
 
 def _merge_calm_slots(
@@ -2319,6 +2732,7 @@ def _merge_calm_slots(
     sections: list[MusicSection],
     drop_slots: set[int] | frozenset[int],
     protected: int,
+    slot_of: list[int] | None = None,
 ) -> tuple[list[MontageEntry], str | None]:
     """Merge adjacent calm-on-calm slots into longer shots (deterministic).
 
@@ -2349,12 +2763,19 @@ def _merge_calm_slots(
       extension must not overlap material any other entry plays — the
       zero-repeat promise survives; otherwise the split is kept.
 
+    ``slot_of`` maps each entry to the slot it STARTS in (identity when
+    None — the fill's 1:1 tiling); the continuity merge
+    (:func:`_merge_continuity`) runs first and hands its surviving map
+    through, so slot energies and drop slots stay correctly addressed.
+
     Returns ``(entries, note)`` — the note ("pacing: N calm slots merged
     into M longer shots ...") is None when nothing merged.
     """
     n = len(entries)
     if n < 2:
         return entries, None
+    if slot_of is None:
+        slot_of = list(range(n))
     mags = [
         (math.hypot(*it.moment.entry_motion) + math.hypot(*it.moment.exit_motion)) / 2.0
         for it in pool
@@ -2367,16 +2788,7 @@ def _merge_calm_slots(
     # source overlap in the same clip) — the calm signals live there.
     infos: list[tuple[Moment, bool] | None] = []
     for entry in entries:
-        best: int | None = None
-        best_ov = 0.0
-        for i, item in enumerate(pool):
-            if item.clip_path != entry.clip_path:
-                continue
-            ov = min(item.moment.end, entry.source_end) - max(
-                item.moment.start, entry.source_start
-            )
-            if ov > best_ov + _EPS:
-                best, best_ov = i, ov
+        best = _match_pool_moment(entry, pool)
         if best is None:
             infos.append(None)
         else:
@@ -2387,17 +2799,12 @@ def _merge_calm_slots(
             infos.append((pool[best].moment, calm))
 
     def context(i: int) -> str:
-        """The act/section an entry sits in — merges never cross these."""
-        if phases:
-            return _phase_label_at(phases, entries[i].record_start) or ""
-        if sections:
-            return _label_at(sections, entries[i].record_start)
-        return ""
+        return _boundary_context(entries, i, phases, sections)
 
     def blocked(i: int) -> bool:
         return (
             i < protected
-            or i in drop_slots
+            or slot_of[i] in drop_slots
             or (phases and _phase_label_at(phases, entries[i].record_start) == "climax")
         )
 
@@ -2405,17 +2812,8 @@ def _merge_calm_slots(
         return (
             infos[i] is not None
             and infos[i][1]
-            and slot_energies[i] <= _MERGE_MAX_SLOT_ENERGY + _EPS
+            and slot_energies[slot_of[i]] <= _MERGE_MAX_SLOT_ENERGY + _EPS
         )
-
-    def extension_overlaps(clip: str, lo: float, hi: float, absorbed: set[int]) -> bool:
-        """True when (lo, hi) of ``clip`` is on screen in another entry."""
-        for k, other in enumerate(entries):
-            if k in absorbed or other.clip_path != clip:
-                continue
-            if min(other.source_end, hi) - max(other.source_start, lo) > _EPS:
-                return True
-        return False
 
     result: list[MontageEntry] = []
     merged_slots = 0
@@ -2444,8 +2842,8 @@ def _merge_calm_slots(
             want_end = entry.source_start + (entries[j].record_end - entry.record_start)
             if want_end > moment.end + _EPS:
                 break  # the moment does not have the material: keep the split
-            if extension_overlaps(
-                entry.clip_path, new_source_end, want_end, absorbed | {j}
+            if _extension_overlaps(
+                entries, entry.clip_path, new_source_end, want_end, absorbed | {j}
             ):
                 break  # extending would repeat material another slot plays
             absorbed.add(j)
@@ -3090,20 +3488,27 @@ def plan_montage(
     below it. ``allow_repeats=True`` plans the full requested length and
     repeats footage knowingly, exactly as before.
 
-    ``pace`` (seconds, optional) sets how fast the montage cuts: it is the
-    approximate clip length of the FASTEST phase, rounded to whole beats;
-    slower phases scale proportionally, so the style's arc dynamics are
-    kept. ``None`` (the default) keeps each style's own pacing. Values
-    that are not positive raise ValueError. The anti-strobe floor
-    (:data:`MIN_CUT_INTERVAL`) still applies to very small paces.
+    ``pace`` (seconds, optional) is an OVERRIDE on how fast the montage
+    cuts: the approximate clip length of the FASTEST phase, rounded to
+    whole beats; slower phases scale proportionally, so the style's arc
+    dynamics are kept. ``None`` (the default, recommended) is Auto: the
+    engine derives the pace from the music, the footage and the local
+    tempo — arc styles additionally bias their bases slower on
+    calm-dominated material and quiet songs (see the module docstring's
+    Auto pace section). Values that are not positive raise ValueError.
+    The anti-strobe floor (:data:`MIN_CUT_INTERVAL`) still applies to
+    very small paces.
 
     ``transitions`` picks how clips hand over (:data:`TRANSITION_MODES`):
-    ``"auto"`` (default) keeps each style's habits — dissolves in gentle
-    phases, and the trailer smashes to black at act changes; ``"cuts"``
-    is hard cuts only; ``"dissolves"`` dissolves on every cut;
-    ``"smash"`` forces black title-slot gaps at act changes (for "auto"
-    style: at the song's section changes). Unknown values raise
-    ValueError listing the four.
+    ``"auto"`` (default, recommended) decides PER CUT from the content —
+    same-clip continuations and climax/"high" passages cut hard,
+    daylight-block changes and scene changes in calm passages dissolve,
+    and the trailer still smashes to black at act changes (the module
+    docstring's Finishing section has the full matrix). The explicit
+    modes are overrides: ``"cuts"`` is hard cuts only; ``"dissolves"``
+    dissolves on every cut; ``"smash"`` forces black title-slot gaps at
+    act changes (for "auto" style: at the song's section changes).
+    Unknown values raise ValueError listing the four.
 
     ``cut_lead`` (default 0.04 s, ~1 frame at 25 fps; 0 disables) shifts
     every interior cut earlier so the incoming shot lands ON the beat
@@ -3250,12 +3655,30 @@ def plan_montage(
         return plan
 
     # Cut pace: scale every phase's beat step so the fastest phase cuts at
-    # ~`pace` seconds per clip (the style's own pacing when pace is None).
+    # ~`pace` seconds per clip. pace=None is AUTO — the style's bases,
+    # biased by what the footage and the song actually are
+    # (_auto_pace_bias): calm-dominated material and/or a quiet song cut
+    # one notch slower per signal. The arc-less "auto" style reads the
+    # song's density directly (and the merge passes adapt it to content),
+    # and the "short" anti-canon never slows down — neither is biased.
     auto_steps: dict[str, int] | None = None
     if pace is not None:
         beat = _pulse_interval(grid_music) if music is not None else _PSEUDO_BEAT
         chosen, auto_steps, pace_note = _apply_pace(chosen, pace, beat)
         plan.notes.append(pace_note)
+    elif chosen.arc and not chosen.no_opening_hold:
+        notches, bias_note = _auto_pace_bias(
+            reports, grid_music.sections if music is not None else []
+        )
+        if notches:
+            factor = 2**notches
+            chosen = replace(
+                chosen,
+                beats_per_cut={
+                    k: v * factor for k, v in chosen.beats_per_cut.items()
+                },
+            )
+            plan.notes.append(bias_note)
 
     phases: list[tuple[float, float, str]] = []
     highlight_phase: str | None = None
@@ -3370,10 +3793,19 @@ def plan_montage(
         ]
     elif music is not None and grid_music.sections:
         slot_energies = [_energy_at(grid_music.sections, s) for s, _ in slots]
+    # Act/section label per slot — the jump-cut guard's "would the
+    # continuity merge join this pair?" check needs the same context the
+    # merge itself gates on.
+    slot_contexts: list[str] | None = None
+    if phases:
+        slot_contexts = [_phase_label_at(phases, s) or "" for s, _ in slots]
+    elif music is not None and grid_music.sections:
+        slot_contexts = [_label_at(grid_music.sections, s) for s, _ in slots]
     entries, fill_notes, short_at = _fill(
         slots, slot_order, pool, phases, highlight_phase, drop_slots,
         semantic=semantic, slot_energies=slot_energies,
         pre_used=arr_pre_used, preset=arr_preset or None,
+        slot_contexts=slot_contexts,
         # Hook/loop casting: any style whose arc OPENS on a "hook" phase
         # (the "short" style) gets the pattern-interrupt slot 0 and the
         # loop-friendly last slot (see _fill's docstring).
@@ -3386,21 +3818,48 @@ def plan_montage(
         # No-repeats truncation: the fill ran out of fresh material — cut
         # the plan at the last fillable slot instead of recycling footage.
         entries = _shorten_no_repeats(plan, entries, grid_music, short_at, len(pool))
-    # Content-adaptive pacing: adjacent calm slots on calm music merge into
-    # longer shots (never in the climax, never across act/section changes,
-    # never an arranged or drop slot; see _merge_calm_slots). Entries tile
-    # the slots 1:1 at this point, so entry index == slot index.
+    # Post-cast coalescing. Entries tile the slots 1:1 at this point, so
+    # entry index == slot index; slot_of keeps the mapping alive across
+    # the passes. First same-clip CONTINUITY (adjacent slots that are one
+    # continuing take become one shot — see _merge_continuity), then
+    # content-adaptive PACING (adjacent calm slots on calm music merge
+    # into longer shots — see _merge_calm_slots).
+    merge_sections = grid_music.sections if music is not None else []
+    slot_of = list(range(len(entries)))
+    entries, slot_of, continuity_note = _merge_continuity(
+        entries, slot_of, phases, merge_sections, drop_slots, len(arr_entries)
+    )
     merge_note: str | None = None
     if slot_energies is not None:
         entries, merge_note = _merge_calm_slots(
-            entries, pool, slot_energies, phases,
-            grid_music.sections if music is not None else [],
-            drop_slots, len(arr_entries),
+            entries, pool, slot_energies, phases, merge_sections,
+            drop_slots, len(arr_entries), slot_of=slot_of,
         )
     plan.entries = entries
     plan.notes.extend(fill_notes)
+    if continuity_note:
+        plan.notes.append(continuity_note)
     if merge_note:
         plan.notes.append(merge_note)
+    # Honest low-variety note: same-clip boundaries that SURVIVED the
+    # continuity merge with a visible source skip are jump cuts the guard
+    # could not cast away (the pool was too small) — say so once.
+    jump_survivors = 0
+    for prev, nxt in zip(entries, entries[1:]):
+        if prev.clip_path != nxt.clip_path:
+            continue
+        gap = nxt.source_start - prev.source_end
+        # A visible skip inside the scene — forwards or backwards. Beyond
+        # ~8s either way the cut reads as another scene, below ~0.25s the
+        # shot simply continues; in between it reads as an error.
+        if _JUMP_CUT_VISIBLE_GAP - _EPS <= abs(gap) <= _JUMP_CUT_MIN_GAP + _EPS:
+            jump_survivors += 1
+    if jump_survivors:
+        plan.notes.append(
+            f"footage variety is low: same-scene jump cuts were unavoidable "
+            f"in {jump_survivors} spot{'s' if jump_survivors != 1 else ''} "
+            "— more footage would help"
+        )
     if arrangement:
         plan.notes.extend(arr_notes)
     used = sum(1 for it in pool if it.uses)
@@ -3457,7 +3916,22 @@ def plan_montage(
             if decided_in > _EPS:
                 plan.music_in = decided_in
                 plan.notes.append(window_note)
-    _plan_finishing(plan, entries, grid_music, chosen, phases, transitions)
+    # Per-cut transitions read the cast moments' scene groups and daylight
+    # classes (both soft annotations; None when the pool carries neither).
+    entry_semantics: list[tuple[str, str]] | None = None
+    if any(it.group or it.daylight for it in pool):
+        entry_semantics = []
+        for entry in entries:
+            match = _match_pool_moment(entry, pool)
+            entry_semantics.append(
+                (pool[match].group, pool[match].daylight)
+                if match is not None
+                else ("", "")
+            )
+    _plan_finishing(
+        plan, entries, grid_music, chosen, phases, transitions,
+        entry_semantics=entry_semantics,
+    )
     if arr_entries:
         _arrangement_boundaries(plan, entries, arr_items, len(arr_entries))
     if sfx:
@@ -3474,6 +3948,7 @@ def _plan_finishing(
     style: MontageStyle,
     phases: list[tuple[float, float, str]],
     transitions: str = "auto",
+    entry_semantics: list[tuple[str, str]] | None = None,
 ) -> None:
     """Set the plan's fades, dissolves and smash-to-black dips (in place).
 
@@ -3481,16 +3956,35 @@ def _plan_finishing(
     min(2 s, last outro slot length); "auto" gets 0.5 s / 1 s — fades
     apply in every transition mode.
 
-    ``transitions`` = "auto": every entry in a gentle phase (>=
-    ``_SLOW_PHASE_STEP`` beats per cut; "low" sections in "auto") except
-    the montage's very first entry gets ``transition`` = min(0.5 s, half
-    its slot length) — a dissolve INTO that entry — and a style with
-    ``smash_to_black`` (the trailer) dips to black at act changes.
-    "dissolves" dissolves into EVERY entry, "cuts" plans neither
-    dissolves nor dips, "smash" forces the dips (at act changes; for the
-    arc-less "auto" style at the song's section changes) without
-    dissolves. Notes the dissolve count and reminds that the music
-    fade-out must be applied in Resolve (the export formats can't carry it).
+    ``transitions`` = "auto" is PER-CUT intelligence: every boundary is
+    decided from what actually meets there, in this order:
+
+    * **same-clip continuation** (the incoming entry plays the same clip
+      as the outgoing one — post-merge, i.e. a continuation the
+      continuity pass could not join) → hard cut, always: dissolving a
+      shot into itself reads as a ghost;
+    * **climax phase / "high" section** → hard cuts only;
+    * **daylight-block change** (``entry_semantics``: the entries' cast
+      daylight classes, both known, differ) → a dissolve — the soft
+      time-lapse feel of day handing over to golden hour;
+    * **gentle passage** (>= ``_SLOW_PHASE_STEP`` beats per cut; "low"
+      sections in "auto"): a scene-group CHANGE dissolves (min 0.5 s,
+      half the slot); two takes of the SAME group cut hard (a dissolve
+      inside one scene is the jump cut's uglier cousin). Boundaries
+      without group knowledge keep the classic gentle-phase dissolve;
+    * everything else cuts hard. A style with ``smash_to_black`` (the
+      trailer) additionally dips to black at act changes, unchanged.
+
+    ``entry_semantics`` (one ``(group, daylight)`` per entry, from the
+    cast moments' vision/daylight annotations; None = none known) feeds
+    the two content rules; without it the behavior is the classic
+    gentle-phase rule plus the same-clip hard cut. The explicit modes
+    are unchanged overrides: "dissolves" dissolves into EVERY entry,
+    "cuts" plans neither dissolves nor dips, "smash" forces the dips
+    (at act changes; for the arc-less "auto" style at the song's
+    section changes) without dissolves. Notes summarize what was
+    decided and remind that the music fade-out must be applied in
+    Resolve (the export formats can't carry it).
     """
     if not entries:
         return
@@ -3504,21 +3998,87 @@ def _plan_finishing(
         plan.fade_out = _AUTO_FADE_OUT
 
     dissolves = 0
-    for entry in entries[1:]:  # the first entry's fade is fade_in, not a dissolve
+    scene_dissolves = 0  # dissolves earned by a confirmed scene-group change
+    daylight_dissolves = 0  # dissolves earned by a daylight-block change
+    continuation_cuts = 0  # gentle boundaries cut hard: the shot continues
+    same_scene_cuts = 0  # gentle boundaries cut hard: same group either side
+    for i in range(1, len(entries)):  # entry 0's fade is fade_in, not a dissolve
+        entry = entries[i]
+        prev = entries[i - 1]
+        reason = ""
         if transitions == "dissolves":
-            gentle = True
+            want = True
         elif transitions != "auto":
-            gentle = False  # "cuts" and "smash" plan no dissolves
-        elif style.arc:
-            label = _phase_label_at(phases, entry.record_start)
-            gentle = label is not None and style.beats_per_cut.get(label, 2) >= _SLOW_PHASE_STEP
+            want = False  # "cuts" and "smash" plan no dissolves
         else:
-            gentle = _label_at(music.sections, entry.record_start) == "low"
-        if gentle:
-            entry.transition = min(_MAX_DISSOLVE, (entry.record_end - entry.record_start) / 2.0)
+            if style.arc:
+                label = _phase_label_at(phases, entry.record_start)
+                gentle = (
+                    label is not None
+                    and style.beats_per_cut.get(label, 2) >= _SLOW_PHASE_STEP
+                )
+                high = label == "climax"
+            else:
+                s_label = _label_at(music.sections, entry.record_start)
+                gentle = s_label == "low"
+                high = s_label == "high"
+            prev_group, prev_day = (
+                entry_semantics[i - 1] if entry_semantics else ("", "")
+            )
+            group, day = entry_semantics[i] if entry_semantics else ("", "")
+            if entry.clip_path == prev.clip_path:
+                want = False  # a continuing take never dissolves into itself
+                if gentle:
+                    continuation_cuts += 1
+            elif high:
+                want = False  # the peak cuts hard, whatever the content says
+            elif prev_day and day and prev_day != day:
+                want = True
+                reason = "daylight"
+            elif gentle:
+                if prev_group and group and prev_group == group:
+                    want = False  # same scene, different take: cut
+                    same_scene_cuts += 1
+                else:
+                    want = True
+                    if prev_group and group:
+                        reason = "scene"
+            else:
+                want = False
+        if want:
+            entry.transition = min(
+                _MAX_DISSOLVE, (entry.record_end - entry.record_start) / 2.0
+            )
             if entry.transition > _EPS:
                 dissolves += 1
-    if dissolves:
+                if reason == "daylight":
+                    daylight_dissolves += 1
+                elif reason == "scene":
+                    scene_dissolves += 1
+    smart = (
+        scene_dissolves or daylight_dissolves or continuation_cuts or same_scene_cuts
+    )
+    if transitions == "auto" and smart:
+        has_high = "climax" in arc_labels or (
+            not style.arc and any(s.label == "high" for s in music.sections)
+        )
+        plain = dissolves - scene_dissolves - daylight_dissolves
+        bits: list[str] = []
+        if scene_dissolves:
+            bits.append(
+                f"{scene_dissolves} dissolve{'s' if scene_dissolves != 1 else ''} "
+                "at scene changes"
+            )
+        if daylight_dissolves:
+            bits.append(f"{daylight_dissolves} at daylight changes")
+        if plain:
+            bits.append(f"{plain} in gentle passages")
+        if continuation_cuts or same_scene_cuts:
+            bits.append("hard cuts where the scene continues")
+        if has_high:
+            bits.append("hard cuts in the climax")
+        plan.notes.append("transitions: " + ", ".join(bits))
+    elif dissolves:
         plan.notes.append(
             f"{dissolves} dissolves"
             + (" in gentle phases" if transitions == "auto" else " on every cut")

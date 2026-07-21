@@ -1613,9 +1613,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--pace", type=float, default=None,
-        help="approximate seconds per clip in the fastest phase, e.g. 1 for "
-             "snappy cuts or 4 for long calm shots; slower phases scale with "
-             "it (default: the style's own pacing)",
+        help="OVERRIDE the cut pace: approximate seconds per clip in the "
+             "fastest phase, e.g. 1 for snappy cuts or 4 for long calm "
+             "shots; slower phases scale with it. Default: Auto "
+             "(recommended) — the engine follows the music, the footage "
+             "(calm material cuts slower) and the local tempo, and varies "
+             "shot length on its own",
     )
     p.add_argument(
         "--canvas",
@@ -1628,10 +1631,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--transitions", choices=["auto", "cuts", "dissolves", "smash"],
         default="auto",
-        help="how clips hand over: auto = the style's own habits (the "
-             "trailer smashes to black), cuts = hard cuts only, dissolves = "
-             "dissolve on every cut, smash = black title-slot gaps at act "
-             "changes",
+        help="how clips hand over: auto (recommended) decides per cut — "
+             "hard cuts in the climax and where the same shot continues, "
+             "dissolves at scene and daylight changes in calm passages, "
+             "and the trailer smashes to black at act changes; cuts = hard "
+             "cuts only, dissolves = dissolve on every cut, smash = black "
+             "title-slot gaps at act changes",
     )
     p.add_argument(
         "--brief", default="",

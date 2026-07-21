@@ -11,6 +11,8 @@ import pytest
 from monteur.montage import (
     BEST_FIRST,
     CHRONOLOGICAL,
+    MontageEntry,
+    MontagePlan,
     montage_to_timeline,
     plan_montage,
 )
@@ -49,6 +51,23 @@ def make_reports() -> list[ClipReport]:
     return [a, b]
 
 
+def make_varied_reports(n: int = 20) -> list[ClipReport]:
+    """One 2s moment per DISTINCT clip: no same-clip adjacency anywhere.
+
+    Grid/rhythm/transition tests use this so they observe the raw cut
+    grid — the continuity merge and the jump-cut guard (same-clip craft)
+    have nothing to act on. Chronological pool order = clip-name order.
+    """
+    return [
+        ClipReport(
+            path=f"/footage/v{i:02d}.mp4",
+            duration=30.0,
+            moments=[Moment(4.0, 6.0, 0.8)],
+        )
+        for i in range(n)
+    ]
+
+
 def slot_length(entry) -> float:
     return entry.record_end - entry.record_start
 
@@ -60,8 +79,9 @@ def test_grid_density_follows_section_energy():
     # Faster where loud: each section's cuts average at least twice the next
     # louder section's, no cut is ever faster than the section's base step,
     # and (the rhythm canon) a section opens on a hold with a breath later —
-    # not one metronomic interval.
-    plan = plan_montage(make_reports(), make_music(), cut_lead=0.0)
+    # not one metronomic interval. Varied clips: every slot is a distinct
+    # clip, so the continuity merge leaves the raw grid observable.
+    plan = plan_montage(make_varied_reports(), make_music(), cut_lead=0.0)
     assert plan.duration == 12.0
     low = [slot_length(e) for e in plan.entries if e.record_start < 4.0]
     mid = [slot_length(e) for e in plan.entries if 4.0 <= e.record_start < 8.0]
@@ -129,14 +149,55 @@ def test_anti_strobe_doubles_dense_grid():
 
 
 def test_chronological_orders_by_record_time_and_clip_order():
-    plan = plan_montage(make_reports(), make_music(), order=CHRONOLOGICAL)
+    plan = plan_montage(make_varied_reports(), make_music(), order=CHRONOLOGICAL)
     starts = [e.record_start for e in plan.entries]
     assert starts == sorted(starts)
-    # first pass follows (clip path, moment start) order
-    first_pass = plan.entries[:6]
-    assert [e.clip_path for e in first_pass] == ["/footage/a.mp4"] * 3 + ["/footage/b.mp4"] * 3
-    a_sources = [e.source_start for e in first_pass[:3]]
-    assert a_sources == sorted(a_sources)
+    # first pass follows (clip path, moment start) order — with one clip
+    # per moment that IS the clip-name order, undisturbed by the guard
+    clips = [e.clip_path for e in plan.entries]
+    assert clips == sorted(clips)
+    assert clips[0] == "/footage/v00.mp4"
+
+
+def test_jump_cut_guard_prefers_a_different_clip():
+    # a.mp4's two moments sit ~6s apart in source — cut back to back that
+    # is a visible jump inside one scene, too far for a continuity join.
+    # Pool order would cast a, a, b; the guard diverts to a, b, a.
+    a = ClipReport(
+        path="/footage/a.mp4",
+        duration=20.0,
+        moments=[Moment(0.0, 2.0, 0.9), Moment(8.0, 10.0, 0.8)],
+    )
+    b = ClipReport(
+        path="/footage/b.mp4", duration=20.0, moments=[Moment(0.0, 2.0, 0.7)]
+    )
+    plan = plan_montage([a, b], None, max_duration=4.5, cut_lead=0.0)
+    clips = [e.clip_path.rsplit("/", 1)[-1] for e in plan.entries[:3]]
+    assert clips == ["a.mp4", "b.mp4", "a.mp4"]
+    assert not any(n.startswith("footage variety is low") for n in plan.notes)
+
+
+def test_jump_cut_unavoidable_is_noted_once():
+    # One clip, moments ~5s apart: the guard has no other clip to divert
+    # to, so same-scene jumps survive — one honest note, not a failure.
+    report = ClipReport(
+        path="/footage/only.mp4",
+        duration=30.0,
+        moments=[Moment(i * 7.0, i * 7.0 + 2.0, 0.8) for i in range(3)],
+    )
+    plan = plan_montage([report], None, max_duration=6.0, cut_lead=0.0)
+    jumps = 0
+    for prev, nxt in zip(plan.entries, plan.entries[1:]):
+        if prev.clip_path == nxt.clip_path:
+            gap = nxt.source_start - prev.source_end
+            if gap <= 8.0 and (gap >= 0.25 or gap < -1e-6):
+                jumps += 1
+    notes = [n for n in plan.notes if n.startswith("footage variety is low")]
+    if jumps:
+        assert len(notes) == 1
+        assert "jump cuts were unavoidable" in notes[0]
+    else:
+        assert notes == []
 
 
 def test_best_first_puts_top_moment_in_high_section():
@@ -192,7 +253,10 @@ def test_long_moment_sliced_into_fresh_pieces_before_repeating():
         moments=[Moment(0.0, 4.0, 0.9), Moment(5.0, 5.5, 0.5)],
     )
     plan = plan_montage([report], music, order=CHRONOLOGICAL)
-    assert len(plan.entries) == 6
+    # the continuity merge re-joins adjacent slices of the one long take
+    # into continuous shots (nothing repeats, nothing jumps)
+    assert len(plan.entries) < 6
+    assert any(n.startswith("continuity:") for n in plan.notes)
     # all pieces from the long moment are non-overlapping slices
     long_pieces = [
         (e.source_start, e.source_end) for e in plan.entries if e.source_start < 4.0
@@ -200,6 +264,11 @@ def test_long_moment_sliced_into_fresh_pieces_before_repeating():
     long_pieces.sort()
     for (s1, e1), (s2, e2) in zip(long_pieces, long_pieces[1:]):
         assert s2 >= e1 - 1e-9
+    # the record grid still tiles the montage exactly
+    assert plan.entries[0].record_start == 0.0
+    for prev, nxt in zip(plan.entries, plan.entries[1:]):
+        assert nxt.record_start == pytest.approx(prev.record_end)
+    assert plan.entries[-1].record_end == pytest.approx(4.0)
 
 
 # --- timeline rendering ---------------------------------------------------------
@@ -254,7 +323,8 @@ def test_default_auto_style_matches_previous_behavior():
 
 
 def test_travel_phase_beat_densities():
-    plan = plan_montage(make_long_reports(), make_arc_music(), style="travel", cut_lead=0.0)
+    # varied clips: one clip per slot, so no continuity joins hide the grid
+    plan = plan_montage(make_varied_reports(), make_arc_music(), style="travel", cut_lead=0.0)
     assert plan.duration == 40.0
     # phases after phrase snapping: opening 0-8, build 8-16, climax 16-32,
     # outro 32-40. Each phase averages its own density — faster where the
@@ -274,7 +344,9 @@ def test_travel_phase_beat_densities():
     assert opening == pytest.approx([4.0, 2.0, 2.0])
     assert build == pytest.approx([2.0, 1.5, 1.5, 1.0, 1.0, 0.5, 0.5])
     assert outro == pytest.approx([2.0, 2.0, 4.0])
-    assert len(plan.entries) == 3 + 7 + 26 + 3
+    # 39 slots on the grid; the continuity merge joins 4 same-clip reuse
+    # cuts in the climax back into continuous shots
+    assert len(plan.entries) == 3 + 7 + 26 + 3 - 4
     # grid stays contiguous and closes on the montage length
     assert plan.entries[0].record_start == 0.0
     for prev, nxt in zip(plan.entries, plan.entries[1:]):
@@ -284,7 +356,7 @@ def test_travel_phase_beat_densities():
 
 
 def test_phase_boundaries_snap_to_phrase_starts():
-    plan = plan_montage(make_long_reports(), make_arc_music(), style="travel", cut_lead=0.0)
+    plan = plan_montage(make_varied_reports(), make_arc_music(), style="travel", cut_lead=0.0)
     by_start = {round(e.record_start, 6): e for e in plan.entries}
     # raw boundaries 6.0 / 20.0 / 34.0 snap to the phrase grid (multiples of 8)
     assert {8.0, 16.0, 32.0} <= set(by_start)
@@ -573,7 +645,7 @@ def test_rhythm_outro_decelerando():
     # is the longest (up to 2x the outro base) and the total is unchanged.
     for style in ("travel", "wedding", "music_video", "trailer"):
         plan = plan_montage(
-            make_long_reports(), make_arc_music(), style=style, cut_lead=0.0
+            make_varied_reports(), make_arc_music(), style=style, cut_lead=0.0
         )
         outro = [slot_length(e) for e in plan.entries if e.record_start >= 32.0]
         assert outro, style
@@ -764,7 +836,9 @@ def test_fade_fields_for_auto_style():
 
 
 def test_transitions_in_gentle_phases_only():
-    plan = plan_montage(make_long_reports(), make_arc_music(), style="travel")
+    # varied clips: no same-clip continuations, so the classic gentle-phase
+    # dissolves stay observable
+    plan = plan_montage(make_varied_reports(), make_arc_music(), style="travel")
     # phases: opening 0-8 (slow slots), build 8-16, climax 16-32, outro 32-40
     assert plan.entries[0].transition == 0.0  # first entry: its fade is fade_in
     for e in plan.entries[1:]:
@@ -778,7 +852,7 @@ def test_transitions_in_gentle_phases_only():
 
 
 def test_auto_low_sections_get_transitions():
-    plan = plan_montage(make_reports(), make_music())
+    plan = plan_montage(make_varied_reports(), make_music())
     assert plan.entries[0].transition == 0.0
     low = [e for e in plan.entries[1:] if e.record_start < 4.0]
     assert low and all(e.transition == pytest.approx(0.5) for e in low)
@@ -786,7 +860,7 @@ def test_auto_low_sections_get_transitions():
 
 
 def test_timeline_carries_transitions_and_fades():
-    plan = plan_montage(make_long_reports(), make_arc_music(), style="travel")
+    plan = plan_montage(make_varied_reports(), make_arc_music(), style="travel")
     timeline = montage_to_timeline(plan, fps=25.0)
     video = timeline.video_clips()
     assert "transition" not in video[0].metadata  # first clip: no dissolve
@@ -1126,7 +1200,7 @@ def test_pace_scales_a_named_style_proportionally():
 
 def test_pace_without_music_sets_the_interval():
     plan = plan_montage(
-        make_reports(), None, max_duration=18.0, cut_lead=0.0, pace=3.0
+        make_varied_reports(), None, max_duration=18.0, cut_lead=0.0, pace=3.0
     )
     # one flat interval: the pace itself (rounded to whole 0.75s pseudo-beats)
     assert all(slot_length(e) == pytest.approx(3.0) for e in plan.entries)
@@ -1299,7 +1373,12 @@ def test_role_bonus_flips_pick_in_matching_phase():
     # bonus pulls it one window position forward into the slot at 4.0s.
     moments = [Moment(i * 4.0, i * 4.0 + 2.0, 0.8) for i in range(20)]
     moments[2] = sem_moment(8.0, 10.0, 0.8, role="opener")
-    reports = [ClipReport(path="/footage/long.mp4", duration=120.0, moments=moments)]
+    # one clip per moment (clip-name order == moment order): the jump-cut
+    # guard and continuity merge stay out of this semantic-casting test
+    reports = [
+        ClipReport(path=f"/footage/v{i:02d}.mp4", duration=120.0, moments=[m])
+        for i, m in enumerate(moments)
+    ]
     plan = plan_montage(reports, make_arc_music(), style="travel", cut_lead=0.0)
     by_start = {round(e.record_start, 6): e for e in plan.entries}
     # slot 0 keeps the pool leader: the opener sits TWO order steps behind,
@@ -1317,7 +1396,11 @@ def test_first_and_last_slot_prefer_opener_and_closer_in_auto():
     moments = [Moment(i * 4.0, i * 4.0 + 2.0, 0.8) for i in range(16)]
     moments[1] = sem_moment(4.0, 6.0, 0.8, role="opener")
     moments[11] = sem_moment(44.0, 46.0, 0.8, role="closer")
-    reports = [ClipReport(path="/footage/long.mp4", duration=120.0, moments=moments)]
+    # one clip per moment: the continuity merge/jump-cut guard stay out
+    reports = [
+        ClipReport(path=f"/footage/v{i:02d}.mp4", duration=120.0, moments=[m])
+        for i, m in enumerate(moments)
+    ]
     plan = plan_montage(reports, make_music(), cut_lead=0.0)
     assert len(plan.entries) == 11
     assert plan.entries[0].source_start == pytest.approx(4.0)  # the opener opens
@@ -2254,14 +2337,18 @@ def _flat_music(duration: float = 12.0, energy: float = 0.5, drops=None) -> Musi
 
 
 def _alternating_daylight_report(with_daylight: bool = True) -> ClipReport:
-    """Six 2s moments whose daylight alternates day/night in file order."""
+    """Six 2s moments whose daylight alternates day/night in file order.
+
+    Moments sit 12s apart — far enough that neither the jump-cut guard
+    (< 8s gaps) nor the continuity merge (< 3s gaps) interferes, so these
+    tests observe the daylight terms in isolation."""
     moments = []
     for i in range(6):
-        m = Moment(i * 4.0, i * 4.0 + 2.0, 0.8)
+        m = Moment(i * 12.0, i * 12.0 + 2.0, 0.8)
         if with_daylight:
             m.daylight = "day" if i % 2 == 0 else "night"
         moments.append(m)
-    return ClipReport(path="/footage/mixed.mp4", duration=30.0, moments=moments)
+    return ClipReport(path="/footage/mixed.mp4", duration=80.0, moments=moments)
 
 
 def _entry_daylight(entry, reports) -> str:
@@ -2357,14 +2444,14 @@ def test_daylight_arranged_slots_win_and_are_not_flagged():
     report = _alternating_daylight_report(with_daylight=True)
     # The editor demands night first — the arrangement wins outright.
     arrangement = [
-        {"clip": "mixed.mp4", "start": 4.0},   # a night moment
+        {"clip": "mixed.mp4", "start": 12.0},  # a night moment
         {"clip": "mixed.mp4", "start": 0.0},   # then a day moment
     ]
     plan = plan_montage(
         [report], _flat_music(), cut_lead=0.0, arrangement=arrangement
     )
     entries = sorted(plan.entries, key=lambda e: e.record_start)
-    assert entries[0].source_start == pytest.approx(4.0, abs=0.3)
+    assert entries[0].source_start == pytest.approx(12.0, abs=0.3)
     assert entries[1].source_start == pytest.approx(0.0, abs=0.3)
     # Arranged slots are never flagged against the arc.
     assert not any(
@@ -2390,13 +2477,23 @@ def _pacing_music() -> MusicAnalysis:
 
 
 def _pacing_reports(calm_motion=(0.2, 0.0)) -> list[ClipReport]:
-    """A calm clip with long moments + a fast clip (sets the motion peak)."""
+    """Two calm clips (one long moment each) + a fast clip (the motion peak).
+
+    The calm moments live in DIFFERENT clips: same-clip adjacency would be
+    joined by the CONTINUITY merge first — these tests exercise the
+    calm-on-calm PACING merge across clips."""
     calm = ClipReport(
-        path="/f/calm.mp4",
+        path="/f/calm_a.mp4",
         duration=20.0,
         moments=[
             Moment(0.0, 8.0, 0.9, entry_motion=calm_motion, exit_motion=calm_motion),
-            Moment(8.0, 16.0, 0.8, entry_motion=calm_motion, exit_motion=calm_motion),
+        ],
+    )
+    calm_b = ClipReport(
+        path="/f/calm_b.mp4",
+        duration=20.0,
+        moments=[
+            Moment(0.0, 8.0, 0.8, entry_motion=calm_motion, exit_motion=calm_motion),
         ],
     )
     # Plenty of fast moments so the fill never re-slices the calm clip's
@@ -2411,7 +2508,7 @@ def _pacing_reports(calm_motion=(0.2, 0.0)) -> list[ClipReport]:
             for i in range(12)
         ],
     )
-    return [calm, fast]
+    return [calm, calm_b, fast]
 
 
 def test_calm_adjacent_slots_merge_in_the_quiet_section():
@@ -2501,8 +2598,8 @@ def test_merge_spares_arranged_slots():
         plain.entries, key=lambda e: e.record_start
     )
     arrangement = [
-        {"clip": "calm.mp4", "start": 0.0},
-        {"clip": "calm.mp4", "start": 8.0},
+        {"clip": "calm_a.mp4", "start": 0.0},
+        {"clip": "calm_b.mp4", "start": 0.0},
     ]
     arranged = plan_montage(
         _pacing_reports(), _pacing_music(), cut_lead=0.0, arrangement=arrangement
@@ -2601,3 +2698,304 @@ def test_merge_never_swallows_a_smash_dip():
         assert any(
             abs(e.record_end - dip_start) < 1e-3 for e in plan.entries
         )  # every dip still sits on a real entry boundary
+
+
+# --- same-clip continuity (the continuity merge + the jump-cut guard) -----------
+
+
+def _cont_music(duration: float = 12.0) -> MusicAnalysis:
+    """Flat mid-energy track: simple grid, no drops, no phases."""
+    return MusicAnalysis(
+        path="/music/song.wav",
+        duration=duration,
+        tempo=120.0,
+        beats=[i * 0.5 for i in range(int(duration * 2))],
+        sections=[MusicSection(0.0, duration, 0.5, "mid")],
+    )
+
+
+def test_continuity_merge_bridges_a_small_source_gap():
+    # Two moments of ONE clip 1s apart in source: cut on adjacent slots
+    # that is a jump cut — the merge plays straight through the bridge.
+    report = ClipReport(
+        path="/f/ride.mp4",
+        duration=30.0,
+        moments=[Moment(0.0, 1.5, 0.9), Moment(2.5, 4.5, 0.8)],
+    )
+    other = ClipReport(
+        path="/f/z_other.mp4", duration=30.0, moments=[Moment(0.0, 2.0, 0.7)]
+    )
+    plan = plan_montage([report, other], None, max_duration=4.5, cut_lead=0.0)
+    note = [n for n in plan.notes if n.startswith("continuity:")]
+    assert note and "joined" in note[0]
+    merged = plan.entries[0]
+    assert merged.clip_path == "/f/ride.mp4"
+    # continuous playback: source runs 1:1 with the record, INCLUDING the
+    # bridge frames between the two sifted windows
+    assert merged.record_end - merged.record_start == pytest.approx(3.0)
+    assert merged.source_start == pytest.approx(0.0)
+    assert merged.source_end == pytest.approx(3.0)
+    # the record grid still tiles
+    ordered = sorted(plan.entries, key=lambda e: e.record_start)
+    for a, b in zip(ordered, ordered[1:]):
+        assert a.record_end == pytest.approx(b.record_start)
+
+
+def test_continuity_merge_respects_the_cut_ceiling():
+    # One continuous 20s take sliced onto 1.5s slots: joins are capped at
+    # the absolute cut ceiling (8s) — never one giant shot.
+    report = ClipReport(
+        path="/f/ride.mp4", duration=25.0, moments=[Moment(0.0, 20.0, 0.9)]
+    )
+    plan = plan_montage([report], None, max_duration=18.0, cut_lead=0.0)
+    assert any(n.startswith("continuity:") for n in plan.notes)
+    assert len(plan.entries) >= 3
+    for e in plan.entries:
+        assert e.record_end - e.record_start <= 8.0 + 1e-6
+    # sources stay non-overlapping (the zero-repeat promise survives)
+    windows = sorted((e.source_start, e.source_end) for e in plan.entries)
+    for (s1, e1), (s2, e2) in zip(windows, windows[1:]):
+        assert s2 >= e1 - 1e-9
+
+
+def test_continuity_merge_zero_repeat_promise_survives():
+    # Merges + reuse slicing on one clip: no frame is ever on screen twice.
+    report = ClipReport(
+        path="/f/ride.mp4",
+        duration=40.0,
+        moments=[Moment(0.0, 8.0, 0.9), Moment(9.0, 17.0, 0.8)],
+    )
+    plan = plan_montage([report], _cont_music(), cut_lead=0.0)
+    windows = sorted((e.source_start, e.source_end) for e in plan.entries)
+    for (s1, e1), (s2, e2) in zip(windows, windows[1:]):
+        assert s2 >= e1 - 1e-9
+
+
+def test_continuity_merge_never_crosses_an_act_change():
+    # A continuous take through a travel arc: joins stay inside phases, so
+    # every act still opens on its own cut.
+    report = ClipReport(
+        path="/f/ride.mp4", duration=60.0, moments=[Moment(0.0, 44.0, 0.9)]
+    )
+    plan = plan_montage([report], make_arc_music(), style="travel", cut_lead=0.0)
+    assert any(n.startswith("continuity:") for n in plan.notes)
+    starts = {round(e.record_start, 6) for e in plan.entries}
+    # snapped phase boundaries (8 / 16 / 32) all keep their cut
+    assert {8.0, 16.0, 32.0} <= starts
+
+
+def test_continuity_merge_may_hold_the_climax_ride():
+    # UNLIKE the calm merge, the continuity merge works inside the climax:
+    # the same ride continuing over the peak is held, not re-cut.
+    report = ClipReport(
+        path="/f/ride.mp4", duration=60.0, moments=[Moment(0.0, 44.0, 0.9)]
+    )
+    plan = plan_montage([report], make_arc_music(), style="travel", cut_lead=0.0)
+    climax = [
+        e for e in plan.entries if 16.0 - 1e-6 <= e.record_start < 32.0 - 1e-6
+    ]
+    # the climax base is 1 beat (0.5s); a joined shot is strictly longer
+    assert any(e.record_end - e.record_start > 0.5 + 1e-6 for e in climax)
+
+
+def test_continuity_merge_never_absorbs_a_drop_slot():
+    music = _cont_music()
+    music.drops = [6.0]
+    report = ClipReport(
+        path="/f/ride.mp4", duration=40.0, moments=[Moment(0.0, 30.0, 0.9)]
+    )
+    plan = plan_montage([report], music, cut_lead=0.0)
+    # the drop-forced cut survives every join
+    assert any(abs(e.record_start - 6.0) < 1e-6 for e in plan.entries)
+
+
+def test_continuity_merge_never_absorbs_the_final_entry():
+    report = ClipReport(
+        path="/f/ride.mp4", duration=25.0, moments=[Moment(0.0, 20.0, 0.9)]
+    )
+    plan = plan_montage([report], None, max_duration=18.0, cut_lead=0.0)
+    # the closing shot keeps its own cut: the last entry starts where the
+    # second-to-last ends, and is not part of one 8s-capped mega-join that
+    # would swallow the cast closer
+    assert len(plan.entries) >= 2
+    last = plan.entries[-1]
+    assert last.record_end == pytest.approx(plan.duration)
+    assert plan.entries[-2].record_end == pytest.approx(last.record_start)
+
+
+# --- auto pace (pace=None derives the per-phase base) ---------------------------
+
+
+def _paced_reports(calm: bool) -> list[ClipReport]:
+    """20 one-moment clips; calm=True makes 18 of 20 calm (share 0.9)."""
+    motion_calm = (0.2, 0.0)
+    motion_fast = (10.0, 0.0)
+    reports = []
+    for i in range(20):
+        motion = motion_fast if (not calm or i >= 18) else motion_calm
+        reports.append(
+            ClipReport(
+                path=f"/f/v{i:02d}.mp4",
+                duration=30.0,
+                moments=[Moment(4.0, 6.0, 0.8, entry_motion=motion,
+                                exit_motion=motion)],
+            )
+        )
+    return reports
+
+
+def _quiet_arc_music() -> MusicAnalysis:
+    m = make_arc_music()
+    m.sections = [MusicSection(0.0, 40.0, 0.2, "low")]
+    return m
+
+
+def test_auto_pace_calm_content_slows_the_cut():
+    calm = plan_montage(_paced_reports(calm=True), make_arc_music(),
+                        style="travel", cut_lead=0.0)
+    fast = plan_montage(_paced_reports(calm=False), make_arc_music(),
+                        style="travel", cut_lead=0.0)
+    assert any(n.startswith("auto pace: calm footage dominates") for n in calm.notes)
+    assert not any(n.startswith("auto pace:") for n in fast.notes)
+    assert len(calm.entries) < len(fast.entries)
+
+
+def test_auto_pace_quiet_song_slows_the_cut():
+    # No motion data anywhere: the content signal is unknowable; the quiet
+    # song alone slows one notch.
+    plan = plan_montage(make_varied_reports(), _quiet_arc_music(),
+                        style="travel", cut_lead=0.0)
+    assert any(n.startswith("auto pace: a quiet song") for n in plan.notes)
+    loud = plan_montage(make_varied_reports(), make_arc_music(),
+                        style="travel", cut_lead=0.0)
+    assert len(plan.entries) < len(loud.entries)
+
+
+def test_auto_pace_two_signals_slow_two_notches():
+    plan = plan_montage(_paced_reports(calm=True), _quiet_arc_music(),
+                        style="travel", cut_lead=0.0)
+    note = [n for n in plan.notes if n.startswith("auto pace:")]
+    assert note and "two notches" in note[0]
+    assert "calm footage" in note[0] and "quiet song" in note[0]
+
+
+def test_auto_pace_explicit_pace_overrides_the_bias():
+    plan = plan_montage(_paced_reports(calm=True), _quiet_arc_music(),
+                        style="travel", cut_lead=0.0, pace=1.0)
+    assert not any(n.startswith("auto pace:") for n in plan.notes)
+    assert any(n.startswith("cut pace ~1s") for n in plan.notes)
+
+
+def test_auto_pace_skips_auto_and_short_styles():
+    # "auto" reads the song's density directly; "short" never slows down.
+    a = plan_montage(_paced_reports(calm=True), make_music(), cut_lead=0.0)
+    assert not any(n.startswith("auto pace:") for n in a.notes)
+    s = plan_montage(_paced_reports(calm=True), _quiet_arc_music(),
+                     style="short", cut_lead=0.0)
+    assert not any(n.startswith("auto pace:") for n in s.notes)
+
+
+# --- per-cut transitions (the "auto" decision matrix) ---------------------------
+
+
+def _finishing_case(clips, semantics, phase_label="opening"):
+    """Run _plan_finishing over synthetic 2s entries in one travel phase."""
+    from monteur.montage import STYLES, _plan_finishing
+
+    entries = []
+    for i, clip in enumerate(clips):
+        entries.append(
+            MontageEntry(
+                clip_path=clip,
+                source_start=i * 10.0, source_end=i * 10.0 + 2.0,
+                record_start=i * 2.0, record_end=i * 2.0 + 2.0,
+                score=0.8, clip_duration=60.0,
+            )
+        )
+    length = 2.0 * len(clips)
+    phases = [(0.0, length, phase_label)]
+    plan = MontagePlan(music_path="/music/song.wav", duration=length)
+    music = MusicAnalysis(path="/music/song.wav", duration=length, tempo=120.0)
+    _plan_finishing(
+        plan, entries, music, STYLES["travel"], phases, "auto",
+        entry_semantics=semantics,
+    )
+    return plan, entries
+
+
+def test_transition_matrix_same_clip_always_cuts_hard():
+    # Same clip continuing in a GENTLE phase: hard cut, never a dissolve.
+    plan, entries = _finishing_case(
+        ["/f/a.mp4", "/f/a.mp4", "/f/a.mp4"], None, phase_label="opening"
+    )
+    assert all(e.transition == 0.0 for e in entries)
+    assert any(
+        n.startswith("transitions:") and "scene continues" in n for n in plan.notes
+    )
+
+
+def test_transition_matrix_scene_change_dissolves_in_calm_music():
+    plan, entries = _finishing_case(
+        ["/f/a.mp4", "/f/b.mp4", "/f/c.mp4"],
+        [("g1", ""), ("g2", ""), ("g2", "")],
+        phase_label="opening",
+    )
+    assert entries[1].transition == pytest.approx(0.5)  # g1 -> g2: dissolve
+    assert entries[2].transition == 0.0  # same group: two takes, hard cut
+    note = next(n for n in plan.notes if n.startswith("transitions:"))
+    assert "1 dissolve at scene changes" in note
+
+
+def test_transition_matrix_daylight_change_dissolves():
+    # A daylight-block handover dissolves even mid-arc (build phase).
+    plan, entries = _finishing_case(
+        ["/f/a.mp4", "/f/b.mp4"],
+        [("", "day"), ("", "golden")],
+        phase_label="build",
+    )
+    assert entries[1].transition == pytest.approx(0.5)
+    note = next(n for n in plan.notes if n.startswith("transitions:"))
+    assert "1 at daylight changes" in note
+
+
+def test_transition_matrix_climax_cuts_hard_whatever_the_content():
+    plan, entries = _finishing_case(
+        ["/f/a.mp4", "/f/b.mp4"],
+        [("g1", "day"), ("g2", "night")],
+        phase_label="climax",
+    )
+    assert all(e.transition == 0.0 for e in entries)
+
+
+def test_transition_matrix_unknown_groups_keep_the_gentle_dissolve():
+    plan, entries = _finishing_case(
+        ["/f/a.mp4", "/f/b.mp4"], None, phase_label="opening"
+    )
+    assert entries[1].transition == pytest.approx(0.5)
+    # classic behavior, classic note
+    assert any("dissolves in gentle phases" in n for n in plan.notes)
+
+
+def test_transition_overrides_ignore_the_content():
+    # "dissolves" dissolves everything (even same-clip continuations);
+    # "cuts" cuts everything (even scene changes in calm passages).
+    from monteur.montage import STYLES, _plan_finishing
+
+    for mode, expect in (("dissolves", 0.5), ("cuts", 0.0)):
+        entries = [
+            MontageEntry(
+                clip_path="/f/a.mp4",
+                source_start=i * 10.0, source_end=i * 10.0 + 2.0,
+                record_start=i * 2.0, record_end=i * 2.0 + 2.0,
+                score=0.8, clip_duration=60.0,
+            )
+            for i in range(3)
+        ]
+        plan = MontagePlan(music_path="/music/song.wav", duration=6.0)
+        music = MusicAnalysis(path="/music/song.wav", duration=6.0, tempo=120.0)
+        _plan_finishing(
+            plan, entries, music, STYLES["travel"], [(0.0, 6.0, "opening")],
+            mode, entry_semantics=[("g1", "day"), ("g1", "day"), ("g1", "day")],
+        )
+        assert entries[1].transition == pytest.approx(expect)
+        assert entries[2].transition == pytest.approx(expect)

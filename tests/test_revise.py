@@ -227,12 +227,13 @@ def test_calmer_second_half_merges_and_keeps_first_half_bit_identical():
     first_new = [e for e in revised.entries if e.record_end <= 6.0 + 1e-9]
     assert len(first_orig) == 3
     assert entry_dicts(first_new) == entry_dicts(first_orig)
-    # region: 8 slots merged pairwise into 4 (x1.6 rounds to whole slots)
+    # region: 7 slots (the continuity merge already joined one same-clip
+    # pair at planning time) merged into 4 (x1.6 rounds to whole slots)
     region_orig = [e for e in original.entries if e.record_start >= 6.0 - 1e-9]
     region_new = [e for e in revised.entries if e.record_start >= 6.0 - 1e-9]
-    assert len(region_orig) == 8
+    assert len(region_orig) == 7
     assert len(region_new) == 4
-    assert [slot_length(e) for e in region_new] == pytest.approx([2.0, 1.5, 1.0, 1.5])
+    assert [slot_length(e) for e in region_new] == pytest.approx([2.0, 1.5, 2.0, 0.5])
     # cuts in the region are a SUBSET of the original grid positions
     orig_starts = {round(e.record_start, 6) for e in original.entries}
     assert {round(e.record_start, 6) for e in region_new} <= orig_starts
@@ -241,7 +242,7 @@ def test_calmer_second_half_merges_and_keeps_first_half_bit_identical():
         assert nxt.record_start == pytest.approx(prev.record_end)
     assert revised.entries[-1].record_end == pytest.approx(12.0)
     assert any(
-        "revision: calmer 6.0-12.0s (pace x1.6): 8 slots -> 4" in n
+        "revision: calmer 6.0-12.0s (pace x1.6): 7 slots -> 4" in n
         for n in revised.notes
     )
 
@@ -271,11 +272,13 @@ def test_pinned_shot_survives_a_calmed_region_untouched():
     # the pinned entry is verbatim: exact material AND record window
     kept = [e for e in revised.entries if asdict(e) == asdict(donor)]
     assert len(kept) == 1
-    # the merge worked AROUND it: 8 region slots became 5, not 4
+    # the merge worked AROUND it: the pinned 8.0-9.0 slot keeps its own
+    # cut on both sides while the region still calms down around it
     region_new = [e for e in revised.entries if e.record_start >= 6.0 - 1e-9]
-    assert len(region_new) == 5
+    assert len(region_new) == 4
+    assert any(abs(e.record_start - 9.0) < 1e-6 for e in region_new)
     assert any(
-        "revision: calmer 6.0-12.0s (pace x1.6): 8 slots -> 5; 1 pinned shot kept" in n
+        "revision: calmer 6.0-12.0s (pace x1.6): 7 slots -> 4; 1 pinned shot kept" in n
         for n in revised.notes
     )
 
