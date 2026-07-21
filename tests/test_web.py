@@ -5809,7 +5809,9 @@ class TestNoRebuildOnCleanReturn:
             page.screenshot(path=str(shots / "norebuild-03-clean-return.png"))
 
             # ---- change pace: the hint appears, continue rebuilds ------------
+            # (pace lives in the Fine-tune block now — open it first)
             page.click("#cre-back-3")
+            page.evaluate("document.getElementById('cre-finetune').open = true")
             page.click("#pace-2")
             page.wait_for_selector("#cre-next-2-hint", state="visible")
             page.locator("#cre-next-2").scroll_into_view_if_needed()
@@ -5867,5 +5869,281 @@ class TestNoRebuildOnCleanReturn:
             )
             assert page.evaluate(plan_js) == resumed
             page.screenshot(path=str(shots / "norebuild-06-resumed.png"))
+
+            browser.close()
+
+
+# --- Auto-first options (step 2) + the free-running playout music ------------
+
+
+def _step2_html(html):
+    """The Options step's markup (between its section tag and step 3's)."""
+    return html.split('id="cre-step-2"', 1)[1].split('id="cre-step-3"', 1)[0]
+
+
+class TestAutoFirstOptionsUi:
+    """Static asserts: pace + transitions moved INTO the Fine-tune block,
+    both defaulting to Auto — the main Options view keeps only the big
+    decisions (platform, music, audio mode, shape, length, style, fps,
+    brief, ai_cut)."""
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_pace_and_transitions_live_in_the_fine_tune_block(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        step2 = _step2_html(html)
+        finetune = step2.split('id="cre-finetune"', 1)[1].split(
+            "</details>", 1
+        )[0]
+        for needle in (
+            'id="pace-auto"', 'id="pace-1"', 'id="pace-2"', 'id="pace-4"',
+            'id="cre-pace"',
+            'id="trans-auto"', 'id="trans-cuts"', 'id="trans-dissolves"',
+            'id="trans-smash"',
+        ):
+            assert needle in finetune, needle
+        # ...and nowhere in the slim main view above the fine-tune block
+        main_view = step2.split('id="cre-finetune"', 1)[0]
+        for absent in ('id="pace-auto"', 'id="cre-pace"', 'id="trans-auto"'):
+            assert absent not in main_view, absent
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_both_default_to_auto_with_the_auto_copy(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        step2 = _step2_html(html)
+        assert 'id="pace-auto" aria-pressed="true">Auto<' in step2
+        assert 'id="trans-auto" aria-pressed="true">Auto<' in step2
+        # the copy sells the automation instead of asking for numbers
+        assert "Auto (recommended): Monteur cuts to the music" in step2
+        assert "lengths vary like a human edit" in step2
+        assert "Set seconds only to force a feel" in step2
+        assert "Auto (recommended): decided per cut" in step2
+        assert "hard on the beat in action" in step2
+        assert "smash-to-black at act breaks" in step2
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_main_view_keeps_only_the_big_decisions(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        main_view = _step2_html(html).split('id="cre-finetune"', 1)[0]
+        for needle in (
+            'id="cre-platform-row"',   # what are you making?
+            'id="cre-music"',          # the song
+            'id="audio-music"',        # audio mode
+            'id="len-target"',         # length
+            'id="cre-style-cards"',    # style
+            'id="cre-canvas-cards"',   # shape stays where it is
+            'id="cre-fps"',            # frame rate
+            'id="cre-brief"',          # the brief
+            'id="cre-ai-cut"',         # Claude composes the cut
+        ):
+            assert needle in main_view, needle
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_auto_keeps_the_payload_and_fingerprint_unchanged(self):
+        """Auto = the exact same payload as before the move: pace stays null
+        (key omitted from the build body), transitions stays the literal
+        "auto" — settings keys unchanged, so stored drafts round-trip and
+        the no-rebuild fingerprint keeps matching."""
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert '["pace-auto", null]' in html
+        assert 'transitions: "auto"' in html
+        assert "if (cre.pace) body.pace = cre.pace;" in html
+        assert "transitions: cre.transitions," in html
+        # draft restore still reads the same settings keys
+        assert "if (s.transitions && TRANSITION_IDS[s.transitions])" in html
+        assert "var pace = parseFloat(s.pace);" in html
+        # the fingerprint reads VALUES (the payload), never layout
+        assert (
+            "function buildFingerprint() "
+            "{ return buildFingerprintOf(creBuildBody()); }" in html
+        )
+
+
+class TestPlayoutMusicFreeRun:
+    """The song must play straight through the black title dips (dips are
+    VIDEO black, not audio silence) and must never be restarted per
+    segment: static asserts + a real-browser acceptance run."""
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_music_glides_instead_of_reseeking(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        # gentle drift correction: a playbackRate nudge; a hard reseek only
+        # past a REAL desync (0.35 s) or an explicit user seek (force)
+        for needle in (
+            "var drift = (music.currentTime || 0) - want;",
+            "Math.abs(drift) > 0.35",
+            "drift > 0 ? 0.96 : 1.04",
+        ):
+            assert needle in html, needle
+        # the old behavior — reseek the music at the video's 80 ms
+        # threshold, which stalled the element (seek + rebuffer) every
+        # drift check — is gone; 0.08 remains for the VIDEO buffers only
+        assert "Math.abs(music.currentTime - want) > 0.08" not in html
+        assert "Math.abs(po.active.currentTime - want) > 0.08" in html
+
+    # ---- the acceptance run: audio never pauses through a dip --------------
+
+    DEMO = str(_DEMO_FOOTAGE)
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+
+    def test_autofirst_options_and_music_through_dips(self, server, tmp_path):
+        playwright_api = pytest.importorskip(
+            "playwright.sync_api", reason="playwright is not installed"
+        )
+        shots = Path(
+            os.environ.get("MONTEUR_PLAYWRIGHT_SHOTS") or str(tmp_path / "shots")
+        )
+        shots.mkdir(parents=True, exist_ok=True)
+        build_payloads = []
+
+        with playwright_api.sync_playwright() as playwright:
+            browser = _launch_chromium(playwright)
+            if browser is None:
+                pytest.skip("no Chromium browser available for Playwright")
+            page = browser.new_page(viewport={"width": 1440, "height": 960})
+            page.on(
+                "request",
+                lambda request: build_payloads.append(request.post_data)
+                if request.method == "POST"
+                and "/api/create/build" in request.url
+                else None,
+            )
+
+            # ---- step 1: scan ------------------------------------------------
+            page.goto(server)
+            page.click("#tab-create")
+            page.fill("#cre-folder", self.DEMO)
+            page.click("#cre-scan-btn")
+            page.wait_for_selector("#cre-next-1", state="visible", timeout=120_000)
+
+            # ---- step 2: slim options; pace + transitions in Fine-tune -------
+            page.click("#cre-next-1")
+            assert page.is_hidden("#pace-auto")   # tucked away until opened
+            assert page.is_hidden("#trans-auto")
+            page.locator("#cre-finetune").scroll_into_view_if_needed()
+            page.screenshot(path=str(shots / "autofirst-options-slim.png"))
+            page.click("#cre-finetune summary")
+            page.wait_for_selector("#pace-auto", state="visible")
+            # both default to Auto
+            assert page.get_attribute("#pace-auto", "aria-pressed") == "true"
+            assert page.get_attribute("#trans-auto", "aria-pressed") == "true"
+            assert page.text_content("#pace-auto").strip() == "Auto"
+            assert page.text_content("#trans-auto").strip() == "Auto"
+            page.screenshot(path=str(shots / "autofirst-finetune-auto.png"))
+
+            # ---- build WITH music, untouched Auto controls --------------------
+            page.fill("#cre-music", f"{self.DEMO}/song.wav")
+            page.fill("#cre-maxlen", "12")
+            page.click("#cre-next-2")
+            page.wait_for_selector(
+                "#cre-sb-board .sb-card", state="visible", timeout=180_000
+            )
+            page.wait_for_selector("#cre-playout", state="visible")
+            # Auto sends the exact default payload: no pace key, transitions
+            # stays the literal "auto" — the engine decides per cut
+            assert len(build_payloads) == 1
+            body = json.loads(build_payloads[0])
+            assert "pace" not in body
+            assert body["transitions"] == "auto"
+
+            # ---- a dip to cross: take the plan's, or carve one ----------------
+            def sorted_dips():
+                return page.evaluate(
+                    "((window.monteurPlayout.plan().dips) || [])"
+                    ".slice().sort((a, b) => a[0] - b[0])"
+                )
+
+            if not sorted_dips():
+                slot = page.evaluate(
+                    """(() => {
+                      const entries = window.monteurPlayout.entries();
+                      let best = -1, bestLen = 0;
+                      for (let i = 1; i < entries.length; i++) {
+                        const prev = entries[i - 1];
+                        const len = prev.record_end - prev.record_start;
+                        if ((entries[i].transition || 0) > 0) continue;
+                        if (len > bestLen) { best = i; bestLen = len; }
+                      }
+                      return best;
+                    })()"""
+                )
+                assert slot >= 1
+                page.click(f"#cre-strip-blocks .tl-block[data-slot='{slot}']")
+                page.wait_for_selector("#cre-inspector", state="visible")
+                page.click('#cre-insp-trans button[data-trans="smash"]')
+                page.wait_for_function(
+                    "((window.monteurPlayout.plan().dips) || []).length > 0",
+                    timeout=30_000,
+                )
+            page.evaluate(
+                """(() => {
+                  const plan = window.monteurPlayout.plan();
+                  plan.title_texts = (plan.dips || []).map(() => 'ACT BREAK');
+                  window.monteurPlayout.rebuild();
+                })()"""
+            )
+            dip_start, dip_length = sorted_dips()[0]
+            dip_end = dip_start + dip_length
+
+            # ---- play across the dip; the song must NEVER pause ---------------
+            page.evaluate(
+                f"window.monteurPlayout.seek({max(0.0, dip_start - 0.6)})"
+            )
+            page.evaluate("window.monteurPlayout.play()")
+            page.wait_for_function(
+                "!document.getElementById('po-music').paused", timeout=10_000
+            )
+            # count pause/seek events and sample the element from HERE on:
+            # free-running means zero of either while crossing the dip
+            page.evaluate(
+                """(() => {
+                  const m = document.getElementById('po-music');
+                  window.__mus = {pauses: 0, seeks: 0, samples: []};
+                  m.addEventListener('pause', () => { window.__mus.pauses++; });
+                  m.addEventListener('seeking', () => { window.__mus.seeks++; });
+                  window.__musTimer = setInterval(() => {
+                    window.__mus.samples.push({
+                      t: window.monteurPlayout.state.t,
+                      paused: m.paused,
+                      ct: m.currentTime
+                    });
+                  }, 40);
+                })()"""
+            )
+            page.wait_for_function(
+                f"window.monteurPlayout.state.t > {dip_end + 0.5}",
+                timeout=int((1.1 + dip_length) * 1000) + 15_000,
+            )
+            page.evaluate("clearInterval(window.__musTimer)")
+            mus = page.evaluate("window.__mus")
+            page.evaluate("window.monteurPlayout.pause()")
+
+            assert mus["pauses"] == 0, "the song paused while crossing the dip"
+            assert mus["seeks"] == 0, "the song was reseeked mid-play"
+            samples = mus["samples"]
+            assert len(samples) >= 10
+            in_dip = [
+                s for s in samples if dip_start + 0.05 <= s["t"] <= dip_end - 0.05
+            ]
+            assert in_dip, "no samples landed inside the dip window"
+            assert all(s["paused"] is False for s in samples)
+            # currentTime advances monotonically — and really advances
+            cts = [s["ct"] for s in samples]
+            assert all(b >= a for a, b in zip(cts, cts[1:]))
+            span = samples[-1]["t"] - samples[0]["t"]
+            assert cts[-1] - cts[0] >= 0.5 * span
+
+            # the dip itself: black stage, title as DOM text, song running
+            page.evaluate(
+                f"window.monteurPlayout.seek({dip_start + dip_length / 2})"
+            )
+            page.wait_for_function(
+                "!document.getElementById('po-title').hidden", timeout=5_000
+            )
+            assert page.text_content("#po-title") == "ACT BREAK"
+            page.screenshot(path=str(shots / "autofirst-dip-title.png"))
 
             browser.close()

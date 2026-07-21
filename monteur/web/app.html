@@ -1571,28 +1571,6 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             <h3 class="fgroup-title">Style</h3>
             <div class="radio-cards stack compact" role="radiogroup" aria-label="Cutting style" id="cre-style-cards"></div>
             <p class="help-small style-info" id="cre-style-info" aria-live="polite"></p>
-            <h3 class="fgroup-title" id="cre-pace-label">Cut pace</h3>
-            <div class="pace-row" role="group" aria-labelledby="cre-pace-label">
-              <div class="seg-toggle">
-                <button type="button" id="pace-auto" aria-pressed="true">Style default</button>
-                <button type="button" id="pace-1" aria-pressed="false">~1&thinsp;s</button>
-                <button type="button" id="pace-2" aria-pressed="false">~2&thinsp;s</button>
-                <button type="button" id="pace-4" aria-pressed="false">~4&thinsp;s</button>
-              </div>
-              <label class="pace-custom"><span class="sr-only">Custom pace in seconds</span>
-                <input type="number" id="cre-pace" min="0.5" max="20" step="0.5" inputmode="decimal" placeholder="custom">
-                <span class="len-unit">s</span>
-              </label>
-            </div>
-            <p class="help-small">How long each shot stays on screen in the fast parts — ~1&thinsp;s feels snappy, ~4&thinsp;s calm. The seconds are a target: Monteur rounds to whole beats, so cuts always stay on the music. Slow phases keep their proportion, and “Style default” lets each style set its own rhythm.</p>
-            <h3 class="fgroup-title" id="cre-trans-label">Transitions</h3>
-            <div class="seg-toggle" role="group" aria-labelledby="cre-trans-label">
-              <button type="button" id="trans-auto" aria-pressed="true">Style default</button>
-              <button type="button" id="trans-cuts" aria-pressed="false">Cuts only</button>
-              <button type="button" id="trans-dissolves" aria-pressed="false">Dissolves</button>
-              <button type="button" id="trans-smash" aria-pressed="false">Smash to black</button>
-            </div>
-            <p class="help-small">Style default follows each style&rsquo;s habits — calm phases dissolve, the Trailer smashes to black between acts (short black gaps with a “Title slot” marker for your text).</p>
             <h3 class="fgroup-title" id="cre-fps-label">Frame rate</h3>
             <label class="export-field"><span class="sr-only">Frame rate</span>
               <select id="cre-fps" aria-labelledby="cre-fps-label"></select>
@@ -1610,8 +1588,34 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         </label>
         <p class="help-small" style="max-width: 620px; margin-bottom: 14px;">Claude reads the vision labels and your description, writes a story arc, casts every slot and titles the act breaks &mdash; the engine keeps every cut locked on the music. Runs over your Claude connection (with Claude Code: no extra cost). Sharpest when &ldquo;Let Claude watch your clips&rdquo; ran in step 1 &mdash; Monteur suggests it automatically after a labeled scan.</p>
         <details class="fine-tune" id="cre-finetune">
-          <summary>Fine-tune — clip order, cut timing, repeats</summary>
+          <summary>Fine-tune — pace, transitions, clip order, repeats</summary>
           <div class="ft-body">
+            <div class="ft-field">
+              <span class="ft-label" id="cre-pace-label">Cut pace</span>
+              <div class="pace-row" role="group" aria-labelledby="cre-pace-label">
+                <div class="seg-toggle">
+                  <button type="button" id="pace-auto" aria-pressed="true">Auto</button>
+                  <button type="button" id="pace-1" aria-pressed="false">~1&thinsp;s</button>
+                  <button type="button" id="pace-2" aria-pressed="false">~2&thinsp;s</button>
+                  <button type="button" id="pace-4" aria-pressed="false">~4&thinsp;s</button>
+                </div>
+                <label class="pace-custom"><span class="sr-only">Custom pace in seconds</span>
+                  <input type="number" id="cre-pace" min="0.5" max="20" step="0.5" inputmode="decimal" placeholder="custom">
+                  <span class="len-unit">s</span>
+                </label>
+              </div>
+              <p class="help-small">Auto (recommended): Monteur cuts to the music, the clip&rsquo;s content and the local tempo &mdash; lengths vary like a human edit. Set seconds only to force a feel.</p>
+            </div>
+            <div class="ft-field">
+              <span class="ft-label" id="cre-trans-label">Transitions</span>
+              <div class="seg-toggle" role="group" aria-labelledby="cre-trans-label">
+                <button type="button" id="trans-auto" aria-pressed="true">Auto</button>
+                <button type="button" id="trans-cuts" aria-pressed="false">Cuts only</button>
+                <button type="button" id="trans-dissolves" aria-pressed="false">Dissolves</button>
+                <button type="button" id="trans-smash" aria-pressed="false">Smash to black</button>
+              </div>
+              <p class="help-small">Auto (recommended): decided per cut &mdash; hard on the beat in action, a short dissolve on scene changes in calm passages, smash-to-black at act breaks.</p>
+            </div>
             <div class="ft-field">
               <span class="ft-label" id="cre-order-label">Clip order</span>
               <div class="seg-toggle" role="group" aria-labelledby="cre-order-label">
@@ -6451,8 +6455,10 @@ $("cre-insp-thumb").addEventListener("click", function (e) {
    is a separate <audio> on /api/media playing music_start + t inside the
    plan's music window; per-entry ORIGINAL sound is the active video's own
    audio (mix: both, video at 0.6) — matching the build's audio mode. Every
-   500 ms a drift check reseeks any media element more than 80 ms off the
-   clock. The timeline strip IS the scrubber (click/drag = seek; the
+   500 ms a drift check reseeks any VIDEO more than 80 ms off the clock;
+   the music element is free-running (it plays straight through dips and
+   entry swaps, never reseeked per segment) and glides back into sync via
+   playbackRate. The timeline strip IS the scrubber (click/drag = seek; the
    playhead line tracks at 60 fps); ← → jump between cuts, Space plays. */
 
 var po = {
@@ -6630,13 +6636,28 @@ function poMusicPos() {
   return (plan.music_start || 0) + po.t;
 }
 
+/* The song is FREE-RUNNING: it starts once and keeps playing through
+   every cut and every black dip (dips are VIDEO black, not audio
+   silence). Drift against the virtual clock (audio output latency, tab
+   throttling) is corrected WITHOUT interrupting playback: small drift
+   glides back via a few percent of playbackRate; only a real desync
+   (> 0.35 s, e.g. after a long stall) — or an explicit seek/resume
+   (force) — hard-sets currentTime. Reseeking on every check would stall
+   the element each time (seek + rebuffer) and audibly cut the music —
+   worst on the title dips, where nothing else masks it. */
 function poSyncMusic(force) {
   var music = $("po-music");
   if (!music.dataset.url || music.readyState < 1) return;
   var want = poMusicPos();
-  if (force || Math.abs(music.currentTime - want) > 0.08) {
+  var drift = (music.currentTime || 0) - want; // > 0 = the song runs ahead
+  if (force || Math.abs(drift) > 0.35) {
     try { music.currentTime = want; } catch (e) { /* not seekable */ }
+    try { music.playbackRate = 1; } catch (e) { /* rate is best-effort */ }
+    return;
   }
+  var rate = 1;
+  if (Math.abs(drift) > 0.05) rate = drift > 0 ? 0.96 : 1.04; // ≈20 ms/check
+  try { music.playbackRate = rate; } catch (e) { /* rate is best-effort */ }
 }
 
 /* volumes/mute per the build's audio mode; music only inside its window */
@@ -6664,7 +6685,9 @@ function poApplyAudio() {
   }
 }
 
-/* every 500 ms: reseek any media element more than 80 ms off the clock */
+/* every 500 ms: reseek the active VIDEO when > 80 ms off the clock; the
+   music only ever GLIDES (poSyncMusic) — it is never paused or reseeked
+   at segment boundaries, so it runs straight through the black dips */
 function poDriftCheck() {
   var seg = po.segs[po.seg];
   if (seg && seg.kind === "clip" && po.active.readyState >= 1) {
