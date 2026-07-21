@@ -733,10 +733,25 @@ def test_short_cut_music_clip_starts_at_window_offset():
     music = make_windowed_music(drops=[64.0])
     plan = plan_montage(make_long_reports(), music, max_duration=20.0, style="travel")
     timeline = montage_to_timeline(plan, fps=25.0)
-    music_clip = timeline.audio_clips()[0]
-    # A1 spans [music_start, music_start + duration] in frames
-    assert music_clip.source_in == 1525  # 61.0s * 25fps
-    assert music_clip.source_out - music_clip.source_in == 500  # 20s * 25fps
+    beds = [c for c in timeline.audio_clips() if c.track == "A1"]
+    # the drop at record 3.0s earns the deliberate pre-drop silence, so the
+    # bed splits — but the record<->song mapping holds on every piece:
+    # source_in == (music_start + record_in) in frames
+    for bed in beds:
+        assert bed.source_in == 1525 + bed.record_in  # 61.0s * 25fps offset
+        assert bed.source_out - bed.source_in == bed.record_out - bed.record_in
+    assert beds[0].source_in == 1525
+    assert beds[0].record_in == 0
+    assert beds[-1].record_out == 500  # the bed still ends at 20s
+    # with the song forced continuous the old single full-length clip returns
+    continuous = plan_montage(
+        make_long_reports(), music, max_duration=20.0, style="travel",
+        music_flow="continuous",
+    )
+    timeline = montage_to_timeline(continuous, fps=25.0)
+    music_clip = [c for c in timeline.audio_clips() if c.track == "A1"][0]
+    assert music_clip.source_in == 1525
+    assert music_clip.source_out - music_clip.source_in == 500
     assert (music_clip.record_in, music_clip.record_out) == (0, 500)
 
 

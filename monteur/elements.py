@@ -88,6 +88,16 @@ The returned notes say what was placed where; the caller decides whether
 they join ``plan.notes``. :func:`carry_element_files` is the revision
 hook: it copies files from an old plan's cues onto same-kind, same-time
 cues of a re-planned one, so untouched regions keep their sounds.
+
+Ordering contract with deliberate silence (blueprint 1.2): the plan's
+``music_gaps`` are computed at PLAN time, reading the sub-drop/impact
+cues at each dip as the silence's CARRIER — a marker cue counts.
+:func:`assign_elements` runs later and only ever FILES existing cues or
+ADDS new ones (the dip impact, the ramp riser); it never removes a cue,
+so a carrier at plan time stays a carrier and a filed braam simply makes
+the planned silence sound as intended. The "hit out of the black" impact
+lands on the dip's end (the cut) while the song re-enters on the
+following downbeat — the hit owns the black, the band owns the bar.
 """
 
 from __future__ import annotations

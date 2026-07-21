@@ -329,6 +329,31 @@ class TestCreateApi:
             for n in plan_json["notes"]
         )
 
+    def test_build_forwards_music_flow(self, server):
+        # "continuous" passes through untouched — the engine plans zero
+        # deliberate silences and serializes without the music_gaps key.
+        data = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "style": "trailer", "sfx": True,
+             "music_flow": "continuous", "format": "fcpxml"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        plan_json = job["result"]["plan_json"]
+        assert "music_gaps" not in plan_json
+        assert not any(n.startswith("silence:") for n in plan_json["notes"])
+
+    def test_build_unknown_music_flow_is_error_job(self, server):
+        data = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "music_flow": "sometimes"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "unknown music_flow" in job["message"]
+
     def test_build_music_window_without_music_is_error_job(self, server):
         data = _post(
             f"{server}/api/create/build",
@@ -5435,6 +5460,56 @@ class TestPlayoutUi:
         assert "result.proxies_job" in source
 
 
+class TestDeliberateSilenceUi:
+    """Static asserts on app.html: the music-flow Fine-tune select and the
+    playout's volume gating over plan.music_gaps (blueprint 1.2)."""
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_fine_tune_select_and_copy(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            'id="cre-musicflow"',
+            '<option value="deliberate" selected>Deliberate silence (recommended)</option>',
+            '<option value="continuous">Continuous</option>',
+            # the owner-approved copy, verbatim
+            "the song breaks under title cards and for one beat before the "
+            "drop &mdash; silence is a weapon.",
+            "Continuous: the song plays through everything.",
+        ):
+            assert needle in source, needle
+        # only the non-default is sent, so old drafts stay clean
+        assert 'if ($("cre-musicflow").value === "continuous") '\
+            'body.music_flow = "continuous";' in source
+        # ...and the draft restore reads it back (absent = deliberate)
+        assert 's.music_flow === "continuous"' in source
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_playout_gets_the_gap_array_and_volume_gating(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            # the gap array is handed to the playout engine...
+            "musicGaps: []",
+            "plan.music_gaps || []",
+            # ...a plan change in the gaps rebuilds the playout
+            'parts.push(JSON.stringify(plan.music_gaps || []));',
+            # the gain is a pure function of the clock with a 50 ms ramp
+            "var PO_GAP_FADE = 0.05;",
+            "function poMusicGain(t)",
+            "function poApplyMusicGain()",
+            # VOLUME gates, never a pause (the 05032d0 free-running contract)
+            "deliberate silences gate the VOLUME, never pause",
+        ):
+            assert needle in source, needle
+        # the free-running drift sync is untouched: the music element is
+        # still never paused at segment boundaries
+        assert "poSyncMusic(false)" in source
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_revise_carries_the_build_music_flow(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        assert "if (built.music_flow) body.music_flow = built.music_flow;" in source
+
+
 def _launch_chromium(playwright):
     """A Chromium for the acceptance tests: the standard install when
     present, else any pinned browser on the machine. None = skip."""
@@ -5670,6 +5745,81 @@ class TestPlayoutAcceptance:
             t_now = page.evaluate(po + ".t")
             assert dip_start - 0.05 <= t_now <= dip_start + dip_length + 0.3
             page.screenshot(path=str(shots / "playout-dip-title.png"))
+
+            browser.close()
+
+    def test_deliberate_silence_gates_volume_never_pauses(self, server, tmp_path):
+        """Blueprint 1.2: play across a music gap — the free-running audio
+        element is NOT paused, its VOLUME is 0 inside the gap and 1 past
+        it; scrubbing into a gap lands muted, past it unmuted."""
+        playwright_api = pytest.importorskip(
+            "playwright.sync_api", reason="playwright is not installed"
+        )
+        with playwright_api.sync_playwright() as playwright:
+            browser = _launch_chromium(playwright)
+            if browser is None:
+                pytest.skip("no Chromium browser available for Playwright")
+            page = browser.new_page(viewport={"width": 1440, "height": 960})
+            po = "window.monteurPlayout.state"
+            music_el = 'document.getElementById("po-music")'
+
+            # scan -> step 2 with the demo song (audio mode stays "music")
+            page.goto(server)
+            page.click("#tab-create")
+            page.fill("#cre-folder", self.DEMO)
+            page.click("#cre-scan-btn")
+            page.wait_for_selector("#cre-next-1", state="visible", timeout=120_000)
+            page.click("#cre-next-1")
+            page.fill("#cre-music", f"{self.DEMO}/song.wav")
+            page.fill("#cre-maxlen", "12")
+            page.click("#cre-next-2")
+            page.wait_for_selector(
+                "#cre-sb-board .sb-card", state="visible", timeout=180_000
+            )
+            page.wait_for_selector("#cre-playout", state="visible")
+            assert page.evaluate(po + '.audioMode') == "music"
+
+            # inject a known 1s gap and rebuild the playout from the plan
+            page.evaluate(
+                """(() => {
+                  const plan = window.monteurPlayout.plan();
+                  plan.music_gaps = [[1.0, 2.0]];
+                  window.monteurPlayout.rebuild();
+                })()"""
+            )
+            assert page.evaluate(po + ".musicGaps") == [[1.0, 2.0]]
+
+            # scrubbing while paused: into the gap = muted, past it = unmuted
+            page.evaluate("window.monteurPlayout.seek(1.5)")
+            assert page.evaluate(music_el + ".volume") == 0
+            page.evaluate("window.monteurPlayout.seek(2.5)")
+            assert page.evaluate(music_el + ".volume") == 1
+
+            # play ACROSS the gap: the element keeps running, only the
+            # volume gates (the 05032d0 never-pause contract)
+            page.evaluate("window.monteurPlayout.seek(0.4)")
+            page.click("#po-play")  # a real user gesture, so play() sticks
+            page.wait_for_function(
+                music_el + ".paused === false", timeout=10_000
+            )
+            assert page.evaluate(music_el + ".volume") == 1
+            page.wait_for_function(
+                po + ".t > 1.1 && " + po + ".t < 1.95", timeout=10_000
+            )
+            inside = page.evaluate(
+                "({paused: " + music_el + ".paused, volume: "
+                + music_el + ".volume, t: " + po + ".t})"
+            )
+            assert inside["paused"] is False, "the gap must never pause the song"
+            assert inside["volume"] == 0, inside
+            page.wait_for_function(po + ".t > 2.1", timeout=10_000)
+            after = page.evaluate(
+                "({paused: " + music_el + ".paused, volume: "
+                + music_el + ".volume})"
+            )
+            assert after["paused"] is False
+            assert after["volume"] == 1, after
+            page.evaluate("window.monteurPlayout.pause()")
 
             browser.close()
 

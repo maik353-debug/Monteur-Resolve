@@ -2350,38 +2350,80 @@ class ResolveBridge:
             w_end = min(w_out, plan.duration) if w_out > 0 else plan.duration
             if w_end <= w_in:
                 w_in, w_end = 0.0, plan.duration
-            # The plan cuts to the song's BEST window (plan.music_start), not
-            # its intro — starting the audio at source 0 would put every cut
-            # beside the beat.
-            music_in = music_offset + int(
-                round(
-                    (float(getattr(plan, "music_start", 0.0) or 0.0) + w_in)
-                    * music_fps
-                )
-            )
-            music_info = {
-                "mediaPoolItem": music_item,
-                "startFrame": music_in,
-                "endFrame": music_in + int(round((w_end - w_in) * music_fps)) - 1,
-                "mediaType": 2,
-            }
-            if placed:
-                music_info["trackIndex"] = 1
-                music_info["recordFrame"] = record_base + int(round(w_in * fps))
-            elif w_in > 0 and warnings is not None:
-                warnings.append(
-                    "this Resolve build ignored positioned placement, so the "
-                    f"music entry at {w_in:.1f}s only exists in the exported "
-                    "file — the appended song starts with the first clip."
-                )
-            if not pool.AppendToTimeline([music_info]):
-                music_info.pop("recordFrame", None)
-                music_info.pop("trackIndex", None)
-                if not pool.AppendToTimeline([music_info]):
-                    raise MonteurResolveError(
-                        f"Resolve failed to append the music {plan.music_path!r} "
-                        f"to timeline {timeline_name!r}."
+            # Deliberate silence (plan.music_gaps): the window minus the
+            # gaps yields the AUDIBLE spans — one positioned music clip
+            # per span. Each post-gap span reads the song from
+            # music_start + its own record start (the gap's source span
+            # is skipped too), so the beat grid holds. Without gaps this
+            # is the single full-window append, exactly as before.
+            gaps: list[tuple[float, float]] = []
+            for g in getattr(plan, "music_gaps", []) or []:
+                g_lo = max(float(g[0]), w_in)
+                g_hi = min(float(g[1]), w_end)
+                if g_hi - g_lo > 1e-6:
+                    gaps.append((g_lo, g_hi))
+            spans: list[tuple[float, float]] = []
+            cursor = w_in
+            for g_lo, g_hi in sorted(gaps):
+                if g_lo - cursor > 1e-6:
+                    spans.append((cursor, g_lo))
+                cursor = max(cursor, g_hi)
+            if w_end - cursor > 1e-6:
+                spans.append((cursor, w_end))
+            if not spans:
+                spans.append((w_in, w_end))  # defensive: never no bed at all
+            if not placed and warnings is not None:
+                if w_in > 0:
+                    warnings.append(
+                        "this Resolve build ignored positioned placement, so "
+                        f"the music entry at {w_in:.1f}s only exists in the "
+                        "exported file — the appended song starts with the "
+                        "first clip."
                     )
+                if gaps:
+                    warnings.append(
+                        "this Resolve build ignored positioned placement, so "
+                        f"the {len(gaps)} deliberate music silence"
+                        f"{'s' if len(gaps) != 1 else ''} only exist in the "
+                        "exported file — the appended song plays through."
+                    )
+            if not placed and len(spans) > 1:
+                # Gapless appends would butt the spans together and shift
+                # every beat after the first gap — append ONE continuous
+                # bed instead (the warning above says why).
+                spans = [(w_in, w_end)]
+            for span_lo, span_hi in spans:
+                # The plan cuts to the song's BEST window (plan.music_start),
+                # not its intro — starting the audio at source 0 would put
+                # every cut beside the beat.
+                music_in = music_offset + int(
+                    round(
+                        (float(getattr(plan, "music_start", 0.0) or 0.0) + span_lo)
+                        * music_fps
+                    )
+                )
+                music_info = {
+                    "mediaPoolItem": music_item,
+                    "startFrame": music_in,
+                    "endFrame": music_in
+                    + int(round((span_hi - span_lo) * music_fps))
+                    - 1,
+                    "mediaType": 2,
+                }
+                if placed:
+                    music_info["trackIndex"] = 1
+                    music_info["recordFrame"] = record_base + int(
+                        round(span_lo * fps)
+                    )
+                if not pool.AppendToTimeline([music_info]):
+                    music_info.pop("recordFrame", None)
+                    music_info.pop("trackIndex", None)
+                    if not pool.AppendToTimeline([music_info]):
+                        raise MonteurResolveError(
+                            f"Resolve failed to append the music "
+                            f"{plan.music_path!r} to timeline "
+                            f"{timeline_name!r}."
+                        )
         if audio in ("mix", "original"):
             self._append_entry_audio(
                 pool, plan, entries, by_path, fps, record_base, placed, audio,

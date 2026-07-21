@@ -838,6 +838,93 @@ def intro_profile(
     }
 
 
+def outro_profile(
+    music: MusicAnalysis, window_s: float = _INTRO_WINDOW_S, *, end: float | None = None
+) -> dict:
+    """The song's OWN ending character, measured back from ``end``.
+
+    The outro sibling of :func:`intro_profile` — pure, works from the
+    finished :class:`MusicAnalysis` alone. ``end`` is where the cut's use
+    of the song STOPS (callers pass the montage length against a windowed
+    analysis, or ``music_start + duration`` against the raw file); None =
+    the track's end. The window is the last ``window_s`` seconds before
+    ``end``, the "body" is everything before the window.
+
+    Features mirror the intro's exactly (``rel_energy`` — window mean vs
+    body median section energy; ``onset_density`` — beats per second in
+    the window; ``low_presence`` — mean low-band share), they blend with
+    the same weights into ``hardness``, and the label reads the same:
+    ``"ambient"`` (a limp fade/pad tail), ``"hard"`` (the song ends hot;
+    only with low-band evidence — no kick data, no "hard" verdict), else
+    ``"moderate"``. A clearly "ambient" tail is what
+    :func:`monteur.montage.decide_music_out` calls limp.
+    """
+    duration = max(0.0, float(music.duration))
+    hi = duration if end is None else max(0.0, min(float(end), duration))
+    lo = max(0.0, hi - max(float(window_s), _EPS))
+    span = max(hi - lo, _EPS)
+
+    def energy_at(t: float) -> float:
+        for s in music.sections:
+            if s.start - _EPS <= t < s.end - _EPS:
+                return float(s.energy)
+        if music.sections and t >= music.sections[-1].end - _EPS:
+            return float(music.sections[-1].energy)
+        return 0.0
+
+    step = _SECTION_WINDOW_S
+    tail_samples = [energy_at(lo + i * step) for i in range(max(1, int(span / step)))]
+    tail_energy = sum(tail_samples) / len(tail_samples)
+    body_samples = sorted(
+        energy_at(i * step) for i in range(int(lo / step))
+    )
+    if body_samples:
+        mid = len(body_samples) // 2
+        body_energy = (
+            body_samples[mid]
+            if len(body_samples) % 2
+            else (body_samples[mid - 1] + body_samples[mid]) / 2.0
+        )
+    else:
+        body_energy = tail_energy
+    rel_energy = (
+        min(4.0, tail_energy / max(body_energy, 1e-6)) if tail_energy > _EPS else 0.0
+    )
+
+    onset_density = sum(1 for b in music.beats if lo - _EPS <= b < hi) / span
+
+    low_curve = music.low_energy
+    has_low = bool(low_curve)
+    if has_low:
+        i0 = max(0, int(lo / _SECTION_WINDOW_S))
+        i1 = max(i0 + 1, int(round(hi / _SECTION_WINDOW_S)))
+        window = low_curve[i0:i1] or low_curve[-1:]
+        low_presence = sum(float(v) for v in window) / len(window)
+    else:
+        low_presence = 0.0
+
+    hardness = (
+        _INTRO_W_ENERGY * _ramp01(rel_energy, *_INTRO_ENERGY_RAMP)
+        + _INTRO_W_ONSET * _ramp01(onset_density, *_INTRO_ONSET_RAMP)
+        + _INTRO_W_LOW * _ramp01(low_presence, *_INTRO_LOW_RAMP)
+    )
+    if hardness <= _INTRO_AMBIENT_MAX:
+        label = "ambient"
+    elif hardness >= _INTRO_HARD_MIN and has_low:
+        label = "hard"
+    else:
+        label = "moderate"
+    return {
+        "label": label,
+        "hardness": round(hardness, 3),
+        "rel_energy": round(rel_energy, 3),
+        "onset_density": round(onset_density, 3),
+        "low_presence": round(low_presence, 3),
+        "window_s": round(hi - lo, 3),
+        "end": round(hi, 3),
+    }
+
+
 # ----------------------------------------------------------------------------
 # Energy windowing
 # ----------------------------------------------------------------------------

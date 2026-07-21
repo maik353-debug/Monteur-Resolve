@@ -1413,6 +1413,12 @@ def _plan_from_payload(job: dict, payload: dict):
         # engine's own ValueError -> a clear job error). Without it the
         # tool decides when the music enters.
         plan_kwargs["music_window"] = payload["music_window"]
+    if payload.get("music_flow"):
+        # Deliberate silence vs continuous song — passed through untouched;
+        # plan_montage validates the mode (unknown values surface as the
+        # engine's own ValueError -> a clear job error). Absent = the
+        # engine's "deliberate" default.
+        plan_kwargs["music_flow"] = str(payload["music_flow"])
     if payload.get("ai_cut"):
         # Claude composes the cut (monteur.compose): the engine still builds
         # the exact grid plan_montage would, then ONE Claude completion casts
@@ -1469,6 +1475,7 @@ _DRAFT_SETTING_KEYS = (
     "audio", "order", "style", "canvas", "transitions", "fps", "format",
     "max_duration", "pace", "allow_repeats", "sfx", "cut_lead", "see",
     "ai_cut", "brief", "elements", "platform", "arrangement", "music_window",
+    "music_flow",
 )
 
 
@@ -1748,12 +1755,19 @@ def _run_revise_job(job: dict, payload: dict) -> None:
         if job["cancel"].is_set():
             raise SiftCancelled("cancelled")
 
+        revise_kwargs: dict = {}
+        if payload.get("music_flow"):
+            # A continuous-song build stays continuous through the revision
+            # (the plan file stores the cut, not the run flags — the browser
+            # re-sends the build's own choice; plan_montage validates it).
+            revise_kwargs["music_flow"] = str(payload["music_flow"])
         revised = revise_plan(
             plan, reports, music, revision, pinned=pins,
             style=style_from_plan(plan),
             max_duration=plan.duration,
             allow_repeats=True,
             sfx=bool(plan.sfx),
+            **revise_kwargs,
         )
         if not revised.entries:
             raise ValueError(

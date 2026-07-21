@@ -1617,6 +1617,14 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
               <p class="help-small">Auto (recommended): decided per cut &mdash; hard on the beat in action, a short dissolve on scene changes in calm passages, smash-to-black at act breaks.</p>
             </div>
             <div class="ft-field">
+              <label class="ft-label" for="cre-musicflow">Music through breaks</label>
+              <select id="cre-musicflow">
+                <option value="deliberate" selected>Deliberate silence (recommended)</option>
+                <option value="continuous">Continuous</option>
+              </select>
+              <p class="help-small">Deliberate silence (recommended): the song breaks under title cards and for one beat before the drop &mdash; silence is a weapon. Continuous: the song plays through everything.</p>
+            </div>
+            <div class="ft-field">
               <span class="ft-label" id="cre-order-label">Clip order</span>
               <div class="seg-toggle" role="group" aria-labelledby="cre-order-label">
                 <button type="button" id="order-chrono" aria-pressed="true">In order</button>
@@ -5137,6 +5145,8 @@ function creBuildBody() {
   var lead = parseFloat($("cre-cutlead").value);
   if (isFinite(lead) && lead >= 0) body.cut_lead = lead;
   if (cre.pace) body.pace = cre.pace;
+  // deliberate silence is the engine default — only "continuous" is sent
+  if ($("cre-musicflow").value === "continuous") body.music_flow = "continuous";
   var elements = $("cre-elements").value.trim();
   if (elements) {
     // real sound files ride on the SFX cue layer, so the folder implies it
@@ -5510,6 +5520,8 @@ function restoreWizardFromDraft(draft) {
   }
   if (typeof s.allow_repeats === "boolean") $("cre-repeats").checked = s.allow_repeats;
   if (typeof s.sfx === "boolean") $("cre-sfx").checked = s.sfx;
+  // absent = the engine's "deliberate" default (only "continuous" is saved)
+  $("cre-musicflow").value = s.music_flow === "continuous" ? "continuous" : "deliberate";
   if (typeof s.elements === "string") {
     $("cre-elements").value = s.elements;
     if (s.elements) $("cre-sfx").checked = true; // the folder implies the layer
@@ -6458,7 +6470,10 @@ $("cre-insp-thumb").addEventListener("click", function (e) {
    500 ms a drift check reseeks any VIDEO more than 80 ms off the clock;
    the music element is free-running (it plays straight through dips and
    entry swaps, never reseeked per segment) and glides back into sync via
-   playbackRate. The timeline strip IS the scrubber (click/drag = seek; the
+   playbackRate. Deliberate silences (plan.music_gaps) gate the element's
+   VOLUME only — 0 inside a gap with a 50 ms ramp (poMusicGain), never a
+   pause, so the free-running contract holds and the re-entry stays on
+   the beat. The timeline strip IS the scrubber (click/drag = seek; the
    playhead line tracks at 60 fps); ← → jump between cuts, Space plays. */
 
 var po = {
@@ -6476,6 +6491,7 @@ var po = {
   audioMode: "original",
   musicIn: 0,
   musicEnd: 0,
+  musicGaps: [],   // [[start, end]] record-time deliberate silences (plan.music_gaps)
   lastDrift: 0,
   scrubbing: false
 };
@@ -6526,6 +6542,7 @@ function poSignature(plan) {
   parts.push(String(plan.duration || 0), String(plan.music_path || ""),
     String(plan.music_start || 0), String(plan.music_in || 0),
     String(plan.music_out || 0), String(plan.fade_in || 0), String(plan.fade_out || 0));
+  parts.push(JSON.stringify(plan.music_gaps || []));
   return parts.join("|");
 }
 
@@ -6660,6 +6677,32 @@ function poSyncMusic(force) {
   try { music.playbackRate = rate; } catch (e) { /* rate is best-effort */ }
 }
 
+/* Deliberate silence (plan.music_gaps): the song's GAIN at record time t.
+   1 outside every gap, 0 inside, with a 50 ms volume ramp just outside
+   each edge — the same micro-fade the ffmpeg renderers use, so the draft
+   sounds like the export. The element is NEVER paused for a gap (the
+   05032d0 free-running contract stands — pausing would stall + rebuffer
+   and drift the bed); only the VOLUME gates. Scrubbing into a gap lands
+   muted, past it unmuted, because the gain is a pure function of po.t. */
+var PO_GAP_FADE = 0.05;
+function poMusicGain(t) {
+  for (var i = 0; i < po.musicGaps.length; i++) {
+    var lo = po.musicGaps[i][0], hi = po.musicGaps[i][1];
+    var depth = Math.min((t - (lo - PO_GAP_FADE)) / PO_GAP_FADE,
+                         ((hi + PO_GAP_FADE) - t) / PO_GAP_FADE);
+    depth = Math.max(0, Math.min(1, depth));
+    if (depth > 0) return 1 - depth;
+  }
+  return 1;
+}
+
+function poApplyMusicGain() {
+  var music = $("po-music");
+  if (!music.dataset.url) return;
+  var gain = poMusicGain(po.t);
+  if (music.volume !== gain) music.volume = gain;
+}
+
 /* volumes/mute per the build's audio mode; music only inside its window */
 function poApplyAudio() {
   var seg = po.segs[po.seg];
@@ -6674,6 +6717,7 @@ function poApplyAudio() {
     return;
   }
   var inWindow = po.t >= po.musicIn - 0.05 && po.t < po.musicEnd;
+  poApplyMusicGain(); // deliberate silences gate the VOLUME, never pause
   if (po.playing && inWindow) {
     if (music.paused) {
       poSyncMusic(true);
@@ -6705,6 +6749,7 @@ function poDriftCheck() {
 }
 
 function poRender() {
+  poApplyMusicGain(); // runs at 60 fps while playing — the 50 ms ramp is smooth
   $("po-time").textContent = fmtClock(po.t) + " / " + fmtClock(po.duration);
   var head = $("cre-strip-playhead");
   if (po.duration > 0 && po.segs.length && !$("cre-strip").hidden) {
@@ -6855,6 +6900,12 @@ function poRebuild() {
   var out = plan.music_out || 0;
   po.musicEnd = out > 0.01 ? Math.min(out, po.duration) : po.duration;
   if (po.musicEnd <= po.musicIn + 0.01) { po.musicIn = 0; po.musicEnd = po.duration; }
+  // deliberate silences, clamped into the music window (the engine's own
+  // music_bed_gaps reading) — the playout volume-gates the bed over them
+  po.musicGaps = (plan.music_gaps || []).map(function (g) {
+    return [Math.max(+g[0] || 0, po.musicIn), Math.min(+g[1] || 0, po.musicEnd)];
+  }).filter(function (g) { return g[1] - g[0] > 0.01; })
+    .sort(function (a, b) { return a[0] - b[0]; });
   $("po-note").hidden = true;
   host.hidden = false;
   poSeek(Math.min(keepT, Math.max(0, po.duration - 0.001))); // keep t where possible
@@ -6987,6 +7038,8 @@ $("cre-rev-btn").addEventListener("click", function () {
   // the sound library the cut was built with: filed cues survive untouched
   // regions, and the folder lets the server re-place replanned ones
   if (built.elements) body.elements = built.elements;
+  // a continuous-song build stays continuous through the revision
+  if (built.music_flow) body.music_flow = built.music_flow;
   startRevise(body, null);
 });
 $("cre-rev-brief").addEventListener("keydown", function (e) {

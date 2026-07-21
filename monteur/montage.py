@@ -383,6 +383,49 @@ beat; the exports simply mute the bed before ``music_in`` (with a short
 musical fade-in at the entry in the ffmpeg renderers), and the SFX layer
 anchors a riser ENDING exactly on the entry.
 
+Deliberate silence (music gaps)
+-------------------------------
+"Bewusste Stille ist super, versehentlich nie": the song may break — on
+purpose, never by accident. ``plan.music_gaps`` lists record-time windows
+``(start, end)`` where the SONG is deliberately silent while the cut plays
+on. Two silences are planned (``music_flow="deliberate"``, the default):
+
+* **Under every smash-to-black dip** whose silence something CARRIES — a
+  planned sub-drop/impact cue at the dip (a marker cue counts: it records
+  the intent, and :mod:`monteur.elements` files it with a real braam/hit
+  when a library is given; without the SFX layer there is no carrier and
+  the song plays straight through the black, exactly as before). The gap
+  is the dip window, extended to end on the FOLLOWING DOWNBEAT when one
+  lies within ~1 beat past the dip end — the re-entry lands musically,
+  not mid-bar.
+* **One beat of absolute silence before the drop** — the first in-range
+  drop, when the song is already playing there: the gap is
+  ``[drop - 1 beat, drop)`` and the song re-enters EXACTLY on the drop.
+  Never for the "short" style (60 seconds has no room to breathe), never
+  when the beat before the drop reaches into the ``music_in`` dry open
+  (no double silence), never on top of a dip gap. The cut itself carries
+  this one — no cue required, and it never exceeds one beat.
+
+Ordering: gaps are planned LAST in ``plan_montage`` — after
+:func:`_plan_finishing` (which creates the dips), after :func:`_plan_sfx`
+(whose sub-drop cues are the dip carriers) and after the arrangement cues.
+:func:`monteur.elements.assign_elements` runs later (at the caller layer)
+and only ever FILES existing cues or adds new ones, so a carrier at plan
+time stays a carrier. The record<->song mapping never changes — record t
+still plays song time ``music_start + t``; a gap only MUTES that span, so
+after the gap the bed continues from ``music_start + gap end`` and every
+beat stays exactly where it was. Every surface honors the gaps: the
+timeline/FCPXML split the music bed into one clip per audible span
+(:func:`music_bed_segments`), the Resolve append places one positioned
+music clip per span, the ffmpeg renderers gate the bed's volume (50 ms
+micro-fades against clicks, see :mod:`monteur.preview`), and Studio's
+virtual playout volume-gates its free-running audio element. Notes
+narrate every gap. ``music_flow="continuous"`` disables all gating and
+plans byte-identically to before the field existed; plan surgery
+(:func:`adjust_entry_boundary`, :func:`pin_entry`) prunes gaps whose dip
+or drop vanished — a stale gap would be exactly the accidental silence
+this feature exists to prevent.
+
 SFX layer (film mode)
 ---------------------
 ``plan_montage(..., sfx=True)`` plans a sound-design layer on top of the
@@ -991,6 +1034,16 @@ class MontagePlan:
     # the composer); serialized only when set, tolerant like title_texts.
     music_in: float = 0.0
     music_out: float = 0.0
+    # --- deliberate silence (all additive; empty = the song never breaks) --
+    # RECORD-time windows (start, end) where the SONG is deliberately
+    # silent while the cut plays on: under carried smash-to-black dips
+    # (extended to the following downbeat) and for one beat before the
+    # drop (see the module docstring's Deliberate silence section). The
+    # record<->song mapping is unchanged — a gap only mutes its span, the
+    # bed continues from music_start + end. Planned by _plan_music_gaps
+    # (music_flow="deliberate"); serialized only when set, tolerant on
+    # load like title_texts.
+    music_gaps: list[tuple[float, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -3494,6 +3547,24 @@ _WINDOW_STYLE_OPENNESS = {
 _WINDOW_THRESHOLD = 0.5
 # A music entry earlier than this is not worth the move — start at 0.
 _WINDOW_MIN_IN = 2.0
+# Deliberate silence (music gaps; see the module docstring's section).
+# How the song relates to the cut's dramatic breaks: "deliberate" (default)
+# plans music_gaps under carried dips and before the drop, "continuous"
+# keeps the song running through everything (zero gaps, byte-identical
+# plans to before the field existed).
+MUSIC_FLOW_MODES = ("deliberate", "continuous")
+# A dip's silence ends on the FOLLOWING downbeat when one lies within this
+# many beats past the dip end (re-entry lands musically, not mid-bar);
+# further away, the song re-enters right at the cut out of the black.
+_GAP_DOWNBEAT_EXTEND_BEATS = 1.0
+# The pre-drop breath: exactly this many beats of silence, re-entry ON the
+# drop. Never more — a longer hole before the hit reads like an error.
+_PRE_DROP_GAP_BEATS = 1.0
+# Accidental-silence guard: a dip gap needs a CARRIER — a planned cue of
+# one of these kinds whose window comes within this many seconds of the
+# dip window (a marker cue counts; monteur.elements files it later).
+_GAP_CARRIER_KINDS = frozenset({"sub-drop", "impact"})
+_GAP_CARRIER_TOLERANCE = 0.5
 # The music must enter within the first half of the cut, whatever the arc says.
 _WINDOW_MAX_SHARE = 0.5
 # Candidates snap to the nearest downbeat/phrase/beat within this (seconds).
@@ -3602,6 +3673,90 @@ def decide_music_window(
         f"{profile['label']}, the cut opens dry"
     )
     return float(chosen["time"]), note
+
+
+# Ending the music early (decide_music_out): only when the song's tail
+# under the cut is CLEARLY limp — a trailing "low"-energy stretch whose
+# outro profile reads "ambient" — and only conservatively: the music must
+# keep at least this share of the montage, the cut must save at least
+# _OUT_MIN_SAVING seconds, and only arc'd styles (an outro exists to close
+# on the picture; "auto" and "short" never end the music early).
+_OUT_MIN_SHARE = 0.7
+_OUT_MIN_SAVING = 2.0
+
+
+def decide_music_out(
+    music: MusicAnalysis,
+    style: str,
+    phases: list[tuple[float, float, str]],
+    duration: float,
+    *,
+    music_in: float = 0.0,
+) -> tuple[float, str]:
+    """Should the music end before the picture? Returns ``(music_out, note)``.
+
+    The outro sibling of :func:`decide_music_window`, deliberately
+    conservative: only when the song's ending under the cut is a long
+    ambient fade the cut should not drag through. ``music`` is the
+    record-time (windowed) analysis; ``duration`` the montage length.
+    Conditions, all required:
+
+    * the style is arc'd with an outro (the trailer/travel/wedding/
+      music_video family — never "auto", never "short");
+    * :func:`monteur.music.outro_profile` measured at the cut's end
+      window reads ``"ambient"`` — the tail is clearly limp;
+    * the trailing "low"-energy stretch reaches the montage end and its
+      start lies inside the outro phase, at/after
+      :data:`_OUT_MIN_SHARE` of the montage, after ``music_in``, and
+      saves at least :data:`_OUT_MIN_SAVING` seconds;
+    * the cut point snaps to a downbeat/phrase/beat when one is near
+      (:func:`_snap_record_time`).
+
+    ``(0.0, "")`` means the music plays to the end — the default and the
+    overwhelmingly common case.
+    """
+    from monteur.music import outro_profile
+
+    arc_style = STYLES.get(style)
+    if arc_style is None or "outro" not in [lab for _, lab in arc_style.arc]:
+        return 0.0, ""
+    if duration <= _EPS or not music.sections:
+        return 0.0, ""
+    profile = outro_profile(music, end=duration)
+    # "Clearly limp" is BOTH verdicts: the ambient label AND a tail whose
+    # pulse has died (a quiet tail that still drives beats is an outro
+    # groove, not a fade — the cut rides it out).
+    if profile["label"] != "ambient" or profile["onset_density"] >= 1.0 - _EPS:
+        return 0.0, ""
+    # The trailing "low" run under the cut: where the song goes limp.
+    limp: float | None = None
+    for section in music.sections:
+        if section.start >= duration - _EPS:
+            break
+        if section.label == "low":
+            if limp is None:
+                limp = section.start
+        else:
+            limp = None
+    if limp is None or limp <= _EPS:
+        return 0.0, ""  # no limp tail, or the whole cut is quiet — leave it
+    outro_start = next((s for s, _e, lab in phases if lab == "outro"), None)
+    if outro_start is None or limp < outro_start - _EPS:
+        return 0.0, ""
+    snapped, _kind = _snap_record_time(music, limp, music_start=0.0, limit=duration)
+    # Snap only FORWARD (or in place): ending the music before the limp
+    # start would clip a still-hot note — a moment of limp tail playing
+    # past the musical boundary is harmless, the reverse is not.
+    out = snapped if snapped >= limp - _EPS else limp
+    if out < max(outro_start, _OUT_MIN_SHARE * duration) - _EPS:
+        return 0.0, ""
+    if duration - out < _OUT_MIN_SAVING - _EPS or out <= music_in + _EPS:
+        return 0.0, ""
+    note = (
+        f"music ends at {out:.1f}s: the song's tail is a long ambient "
+        "fade — the cut closes on the picture"
+    )
+    return float(out), note
 
 
 # Reuse detection (repeats off): two entries share material when their
@@ -3737,6 +3892,7 @@ def plan_montage(
     sfx: bool = False,
     arrangement: list[dict] | None = None,
     music_window: tuple[float, float] | list[float] | None = None,
+    music_flow: str = "deliberate",
 ) -> MontagePlan:
     """Distribute the best moments across the song, in a cutting style.
 
@@ -3834,6 +3990,16 @@ def plan_montage(
     module-level scoring table has the exact numbers. A delayed entry is
     noted; a 0-entry plan is byte-identical to plans from before the
     window existed.
+
+    ``music_flow`` (keyword-only, default ``"deliberate"``) governs the
+    plan's deliberate silences (:data:`MUSIC_FLOW_MODES`): the default
+    plans ``music_gaps`` — the song breaks under smash-to-black dips that
+    carry a sub-drop/impact cue (re-entering on the following downbeat)
+    and for exactly one beat before the first in-range drop (re-entering
+    ON the hit); the module docstring's Deliberate silence section has
+    the full rules and the accidental-silence guard. ``"continuous"``
+    plans zero gaps and is byte-identical to plans from before the field
+    existed. Unknown values raise ValueError listing both.
     """
     if style not in STYLES:
         valid = ", ".join(sorted(STYLES))
@@ -3850,6 +4016,11 @@ def plan_montage(
         )
     if arrangement is not None and not isinstance(arrangement, list):
         raise ValueError("arrangement must be a list of scene objects")
+    if music_flow not in MUSIC_FLOW_MODES:
+        valid = ", ".join(MUSIC_FLOW_MODES)
+        raise ValueError(
+            f"unknown music_flow {music_flow!r}; valid modes: {valid}"
+        )
     window_override: tuple[float, float] | None = None
     if music_window is not None:
         if music is None:
@@ -4223,6 +4394,16 @@ def plan_montage(
             if decided_in > _EPS:
                 plan.music_in = decided_in
                 plan.notes.append(window_note)
+            # A limp song tail: when the song's ending under the cut is a
+            # long ambient fade, the music may end early (arc'd styles
+            # only, conservative — see decide_music_out).
+            decided_out, out_note = decide_music_out(
+                grid_music, chosen.key, plan.phases, plan.duration,
+                music_in=plan.music_in,
+            )
+            if decided_out > _EPS:
+                plan.music_out = decided_out
+                plan.notes.append(out_note)
     # Per-cut transitions read the cast moments' scene groups and daylight
     # classes (both soft annotations; None when the pool carries neither).
     entry_semantics: list[tuple[str, str]] | None = None
@@ -4245,6 +4426,13 @@ def plan_montage(
         _plan_sfx(plan, phases, drop_starts)
     if arr_entries:
         _arrangement_cues(plan, slots, arr_items, len(arr_entries))
+    # Deliberate silence LAST: the gaps read the finished dips (from
+    # _plan_finishing / the arrangement) and their carrier cues (from
+    # _plan_sfx / _arrangement_cues) — see the module docstring's
+    # Deliberate silence section for the ordering contract with
+    # monteur.elements.assign_elements.
+    if music is not None and music_flow == "deliberate":
+        _plan_music_gaps(plan, grid_music, style)
     return plan
 
 
@@ -4653,6 +4841,184 @@ def music_window_bounds(plan: MontagePlan) -> tuple[float, float]:
 _music_window_bounds = music_window_bounds
 
 
+def music_bed_gaps(plan: MontagePlan) -> list[tuple[float, float]]:
+    """The plan's deliberate silences, clamped into the music window.
+
+    The one shared reading of ``plan.music_gaps`` for every export
+    surface: gaps are clipped to ``music_window_bounds`` (a silence
+    outside the audible window is already silent), sorted, merged when
+    they touch, and zero-length remainders dropped. Defensive like
+    :func:`music_window_bounds` — hand-edited plans must never yield a
+    negative or overlapping mute.
+    """
+    w_in, w_end = music_window_bounds(plan)
+    merged: list[tuple[float, float]] = []
+    for lo, hi in sorted(getattr(plan, "music_gaps", []) or []):
+        lo = max(float(lo), w_in)
+        hi = min(float(hi), w_end)
+        if hi - lo <= _EPS:
+            continue
+        if merged and lo <= merged[-1][1] + _EPS:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def music_bed_segments(plan: MontagePlan) -> list[tuple[float, float]]:
+    """The record windows where the song is AUDIBLE: window minus gaps.
+
+    ``[(start, end), ...]`` in record seconds — the music window
+    (:func:`music_window_bounds`) with the plan's deliberate silences
+    (:func:`music_bed_gaps`) cut out. The record<->song mapping holds on
+    every segment: a segment starting at record ``t`` reads the song from
+    ``music_start + t``, so the bed after a gap CONTINUES (the gap's
+    source span is skipped too) and every beat stays where it was. A plan
+    without gaps yields the single full-window segment — the exact old
+    behavior.
+    """
+    w_in, w_end = music_window_bounds(plan)
+    segments: list[tuple[float, float]] = []
+    cursor = w_in
+    for lo, hi in music_bed_gaps(plan):
+        if lo - cursor > _EPS:
+            segments.append((cursor, lo))
+        cursor = max(cursor, hi)
+    if w_end - cursor > _EPS:
+        segments.append((cursor, w_end))
+    if not segments:
+        segments.append((w_in, w_end))  # defensive: never a silent-only bed
+    return segments
+
+
+def _plan_music_gaps(plan: MontagePlan, music: MusicAnalysis, style: str) -> None:
+    """Plan the deliberate silences onto a finished plan (in place).
+
+    Runs LAST in :func:`plan_montage` (``music_flow="deliberate"``), after
+    the dips, the SFX layer and the arrangement cues exist — the module
+    docstring's Deliberate silence section has the design. ``music`` is
+    the record-time (windowed) analysis. Two moves:
+
+    1. Under every smash-to-black dip that something CARRIES — a planned
+       sub-drop/impact cue at the dip (:data:`_GAP_CARRIER_KINDS` within
+       :data:`_GAP_CARRIER_TOLERANCE`; a marker cue counts — it records
+       the intent and :mod:`monteur.elements` files it with a real
+       braam/hit later, and assign_elements only ever adds to the cue
+       list, so the carrier survives). The gap ends on the following
+       downbeat when one lies within :data:`_GAP_DOWNBEAT_EXTEND_BEATS`
+       past the dip end. No carrier = no gap: the song plays through the
+       black exactly as before — silence never happens by accident.
+    2. One beat before the FIRST in-range drop, re-entry exactly ON the
+       drop. Skipped for "short", skipped when the beat would reach into
+       the ``music_in`` dry open (no double silence), skipped on top of a
+       dip gap, and never longer than :data:`_PRE_DROP_GAP_BEATS` beats.
+
+    Notes narrate every gap. Idempotent input state: reads only
+    ``plan.dips`` / ``plan.sfx`` / the music grid, writes only
+    ``plan.music_gaps`` and notes.
+    """
+    w_in, w_end = music_window_bounds(plan)
+    if w_end - w_in <= _EPS:
+        return
+    beat = _pulse_interval(music)
+    downbeats = sorted(music.downbeats)
+    gaps: list[tuple[float, float]] = []
+    notes: list[str] = []
+
+    def carried(dip_start: float, dip_end: float) -> bool:
+        return any(
+            cue.kind in _GAP_CARRIER_KINDS
+            and cue.time <= dip_end + _GAP_CARRIER_TOLERANCE + _EPS
+            and cue.time + max(cue.duration, 0.0)
+            >= dip_start - _GAP_CARRIER_TOLERANCE - _EPS
+            for cue in plan.sfx
+        )
+
+    # 1. Under every carried smash-to-black dip, extended to the downbeat.
+    for dip_start, dip_len in sorted(plan.dips):
+        dip_end = dip_start + dip_len
+        if not carried(dip_start, dip_end):
+            continue  # nothing carries the silence — the song plays through
+        lo = max(dip_start, w_in)
+        hi = min(dip_end, w_end)
+        if hi - lo <= _EPS:
+            continue  # the dip sits in the dry open / past the music end
+        on_downbeat = False
+        nxt = next((d for d in downbeats if d > dip_end + _EPS), None)
+        if (
+            nxt is not None
+            and nxt <= dip_end + _GAP_DOWNBEAT_EXTEND_BEATS * beat + _EPS
+            and nxt <= w_end + _EPS
+        ):
+            hi = min(nxt, w_end)
+            on_downbeat = abs(hi - nxt) <= _EPS
+        if gaps and lo <= gaps[-1][1] + _EPS:
+            continue  # defensive: dips never overlap, but stay ordered
+        gaps.append((lo, hi))
+        notes.append(
+            f"silence: {hi - lo:.1f}s under the act title at {lo:.1f}s — "
+            + (
+                "music re-enters on the downbeat"
+                if on_downbeat
+                else "music re-enters at the cut"
+            )
+        )
+
+    # 2. One beat of absolute silence before the drop (first in-range one).
+    if style != "short" and len(music.beats) >= 2:
+        drop = next(
+            (d for d in sorted(music.drops) if w_in + _EPS < d < w_end - _EPS),
+            None,
+        )
+        if drop is not None:
+            lo = drop - _PRE_DROP_GAP_BEATS * beat
+            overlaps_dip_gap = any(
+                lo < g_hi + _EPS and drop > g_lo - _EPS for g_lo, g_hi in gaps
+            )
+            # Never into the dry open (double silence), never off the front.
+            if lo >= w_in + _EPS and lo > _EPS and not overlaps_dip_gap:
+                gaps.append((lo, drop))
+                notes.append(
+                    f"silence: 1 beat before the drop at {drop:.1f}s — "
+                    "re-entry on the hit"
+                )
+
+    if not gaps:
+        return
+    gaps.sort(key=lambda g: g[0])
+    plan.music_gaps = gaps
+    plan.notes.extend(notes)
+
+
+def _prune_music_gaps(
+    plan: MontagePlan, *, protect: tuple[float, float] | None = None
+) -> None:
+    """Drop deliberate silences whose reason no longer exists (in place).
+
+    The accidental-silence guard for plan SURGERY (boundary adjustments,
+    pinning, region splices): a gap is kept only while a dip still starts
+    at its start (within :data:`_BOUNDARY_EPS` tolerance) or a drop mark
+    still sits at its end — a gap whose dip or drop was edited away would
+    be exactly the accidental silence the feature exists to prevent.
+    ``protect=(lo, hi)`` additionally drops any gap overlapping that
+    record window (a pinned shot claims its time, song included).
+    Surgery never ADDS gaps: an inserted dip has no carrier cue, so the
+    song plays through it until the next full re-plan.
+    """
+    if not plan.music_gaps:
+        return
+    tolerance = 0.25 + _EPS  # the dip-gap start tolerance (cut-lead safe)
+
+    def keep(lo: float, hi: float) -> bool:
+        if protect is not None and lo < protect[1] - _EPS and hi > protect[0] + _EPS:
+            return False
+        if any(abs(d_start - lo) <= tolerance for d_start, _len in plan.dips):
+            return True
+        return any(abs(d - hi) <= tolerance for d in plan.drop_marks)
+
+    plan.music_gaps = [(lo, hi) for lo, hi in plan.music_gaps if keep(lo, hi)]
+
+
 def montage_to_timeline(
     plan: MontagePlan,
     fps: float,
@@ -4669,7 +5035,10 @@ def montage_to_timeline(
       the A1 clip at record ``music_in`` for ``(music_out or duration) -
       music_in`` seconds, sourced from ``music_start + music_in`` — the
       record<->song mapping is unchanged, the bed is simply silent under
-      the dry open.
+      the dry open. A plan with deliberate silences (``music_gaps``)
+      splits the bed into ONE A1 clip per audible span
+      (:func:`music_bed_segments`); each post-gap clip continues from
+      ``music_start + its record start``, so the beat grid holds.
     * ``"mix"`` — the song on A1 PLUS one A2 audio clip per video entry
       carrying the clip's own sound (same source range and source_name as
       the video entry), e.g. engine sound recorded straight into the clips.
@@ -4812,47 +5181,54 @@ def montage_to_timeline(
         timeline.metadata["fade_out_frames"] = seconds_to_frames(plan.fade_out, fps)
     if audio != "original":
         music_stem = PurePath(plan.music_path).stem
-        # Adaptive music window: the song enters at record music_in and ends
-        # at music_out (0 = the montage end). The record<->song mapping is
-        # untouched — record t always plays song time music_start + t — so
-        # every cut stays on the beat; a delayed entry just mutes the bed
-        # under the dry open.
-        w_in, w_out = _music_window_bounds(plan)
-        rec_in_frames = seconds_to_frames(w_in, fps)
-        rec_out_frames = seconds_to_frames(w_out, fps)
-        duration_frames = rec_out_frames - rec_in_frames
-        # The music clip starts at the song offset the cut was built against,
-        # so a short montage plays the song's strongest passage rather than
-        # its intro.
-        music_in = seconds_to_frames(plan.music_start + w_in, fps)
-        # Keep the source range inside the song: if independent rounding of the
-        # offset and the length would read one frame past the end, shift the
-        # start back so the clip length stays exact and never over-reads the
-        # media.
-        if plan.song_duration > 0:
-            song_end = seconds_to_frames(plan.song_duration, fps)
-            if music_in + duration_frames > song_end:
-                music_in = max(0, song_end - duration_frames)
-        timeline.clips.append(
-            Clip(
-                name=music_stem,
-                track="A1",
-                kind=AUDIO,
-                source_in=music_in,
-                source_out=music_in + duration_frames,
-                record_in=rec_in_frames,
-                record_out=rec_out_frames,
-                source_name=music_stem,
-                source_file=plan.music_path,
-                # Music has no embedded start timecode we can probe here, so
-                # no media_start_seconds; the real song length still lets the
-                # FCPXML writer claim an honest asset duration.
-                metadata={"media_duration_seconds": plan.song_duration},
+        # Adaptive music window + deliberate silence: the song enters at
+        # record music_in, ends at music_out (0 = the montage end), and
+        # breaks over the plan's music_gaps — ONE clip per audible span
+        # (music_bed_segments). The record<->song mapping is untouched —
+        # record t always plays song time music_start + t — so a segment
+        # after a gap CONTINUES from music_start + segment start (the
+        # gap's source span is skipped too) and every cut stays on the
+        # beat; a delayed entry just mutes the bed under the dry open.
+        for seg_index, (seg_lo, seg_hi) in enumerate(music_bed_segments(plan)):
+            rec_in_frames = seconds_to_frames(seg_lo, fps)
+            rec_out_frames = seconds_to_frames(seg_hi, fps)
+            duration_frames = rec_out_frames - rec_in_frames
+            if duration_frames <= 0:
+                continue
+            # The music clip starts at the song offset the cut was built
+            # against, so a short montage plays the song's strongest
+            # passage rather than its intro.
+            music_in = seconds_to_frames(plan.music_start + seg_lo, fps)
+            # Keep the source range inside the song: if independent rounding
+            # of the offset and the length would read one frame past the
+            # end, shift the start back so the clip length stays exact and
+            # never over-reads the media.
+            if plan.song_duration > 0:
+                song_end = seconds_to_frames(plan.song_duration, fps)
+                if music_in + duration_frames > song_end:
+                    music_in = max(0, song_end - duration_frames)
+            timeline.clips.append(
+                Clip(
+                    name=music_stem,
+                    track="A1",
+                    kind=AUDIO,
+                    source_in=music_in,
+                    source_out=music_in + duration_frames,
+                    record_in=rec_in_frames,
+                    record_out=rec_out_frames,
+                    source_name=music_stem,
+                    source_file=plan.music_path,
+                    # Music has no embedded start timecode we can probe
+                    # here, so no media_start_seconds; the real song length
+                    # still lets the FCPXML writer claim an honest asset
+                    # duration.
+                    metadata={"media_duration_seconds": plan.song_duration},
+                )
             )
-        )
-        timeline.markers.append(
-            Marker(frame=rec_in_frames, name=f"Cut to {music_stem}")
-        )
+            if seg_index == 0:
+                timeline.markers.append(
+                    Marker(frame=rec_in_frames, name=f"Cut to {music_stem}")
+                )
     for dip_index, (dip_start, dip_len) in enumerate(plan.dips):
         # A composed act title (monteur.compose) names the marker outright;
         # otherwise, when the vision pass labeled the shot that hits out of
@@ -5008,6 +5384,11 @@ def plan_to_dict(plan: MontagePlan) -> dict:
         data["music_in"] = plan.music_in
     if plan.music_out > 0:
         data["music_out"] = plan.music_out
+    # Deliberate silences, only when set (title_texts pattern): plans
+    # without gaps — and every music_flow="continuous" plan — serialize
+    # exactly as before the field existed.
+    if plan.music_gaps:
+        data["music_gaps"] = [[start, end] for start, end in plan.music_gaps]
     # Timeline-strip metadata (phases / music_energy / beat_marks /
     # drop_marks) is written only when set — exactly like title_texts, so
     # plans saved before the strip existed (and plans without music or
@@ -5069,6 +5450,12 @@ def plan_from_dict(data: dict) -> MontagePlan:
             # music window existed simply have neither key.
             music_in=float(data.get("music_in", 0.0)),
             music_out=float(data.get("music_out", 0.0)),
+            # Tolerant like title_texts: plans saved before deliberate
+            # silence existed simply have no such key.
+            music_gaps=[
+                (float(start), float(end))
+                for start, end in data.get("music_gaps", [])
+            ],
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"malformed plan JSON: {exc}") from exc
@@ -5206,7 +5593,7 @@ def adjust_entry_boundary(
             entry.transition = 0.0
             added.append(f"boundary: hard cut into slot {slot + 1}")
 
-    return replace(
+    adjusted = replace(
         plan,
         entries=entries,
         dips=dips,
@@ -5217,7 +5604,13 @@ def adjust_entry_boundary(
         music_energy=list(plan.music_energy),
         beat_marks=list(plan.beat_marks),
         drop_marks=list(plan.drop_marks),
+        music_gaps=list(plan.music_gaps),
     )
+    # Accidental-silence guard: a removed dip takes its deliberate silence
+    # with it (a gap without its dip is exactly the accident the feature
+    # forbids); an inserted dip gets NO gap — surgery plans no carrier cue.
+    _prune_music_gaps(adjusted)
+    return adjusted
 
 
 def pin_entry(plan: MontagePlan, entry: MontageEntry) -> None:
@@ -5256,3 +5649,7 @@ def pin_entry(plan: MontagePlan, entry: MontageEntry) -> None:
         for start, length in plan.dips
         if start + length <= lo + _EPS or start >= hi - _EPS
     ]
+    # Accidental-silence guard: the pinned shot claims its time, song
+    # included — gaps overlapping it (and gaps whose dip just vanished)
+    # are dropped, never left behind as unexplained silence.
+    _prune_music_gaps(plan, protect=(lo, hi))

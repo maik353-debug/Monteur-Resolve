@@ -85,6 +85,7 @@ from monteur.montage import (
     MontageEntry,
     MontagePlan,
     _find_unused_window,
+    _prune_music_gaps,
     _shares_material,
     pin_entry,
     plan_montage,
@@ -619,6 +620,11 @@ def revise_plan(
                     f"{dedup_dropped} dropped (no unused footage left)"
                 )
             extra_notes.append("no repeats: " + ", ".join(bits))
+
+    # Accidental-silence guard: the splice/merge/pin mechanics may have
+    # moved or removed the dips a deliberate music gap belonged to — a
+    # gap without its dip (or drop) is dropped, never left behind.
+    _prune_music_gaps(revised)
 
     dropped = _prune_stale_whooshes(revised)
     if dropped:

@@ -65,7 +65,7 @@ import time
 from pathlib import Path
 
 from monteur.media import MonteurMediaError, find_ffmpeg, probe
-from monteur.montage import MontagePlan, music_window_bounds
+from monteur.montage import MontagePlan, music_bed_gaps, music_window_bounds
 
 # Fixed "mix" levels (documented above): the song stays at full level, the
 # clips' own sound is ducked under it.
@@ -76,6 +76,20 @@ MIX_ORIGINAL_LEVEL = 0.6
 # gets a short musical fade-in so the slam does not click; the bed is
 # trimmed and delayed (adelay) to its record window in both renderers.
 _MUSIC_FADE_IN = 0.5
+# Deliberate silence (plan.music_gaps): the bed's volume is gated to 0
+# inside every gap via one `volume` filter per gap, chained linearly
+# (chained volume envelopes multiply, so the gates compose). Each gate is
+# a trapezoid with a _GAP_FADE micro-fade on both edges — 50 ms sits in
+# the click-free 30-60 ms band while the re-entry still reads SHARP (the
+# 0.5 s _MUSIC_FADE_IN stays exclusive to the music_in entry). The
+# expression is evaluated per audio frame (eval=frame), so an
+# `asetnsamples` in front forces _GAP_GATE_SAMPLES-sample frames (~5 ms
+# at 48 kHz — ~10 evaluation steps across each micro-fade, inaudible
+# stepping). Chosen over an asplit/atrim/amix segment graph: one linear
+# chain works identically in the preview's -af string, the mix chain and
+# the export's filter_complex, with no per-gap stream bookkeeping.
+_GAP_FADE = 0.05
+_GAP_GATE_SAMPLES = 256
 
 # Preview encode: speed over size — this is a look, not a deliverable.
 _PRESET = "ultrafast"
@@ -243,6 +257,33 @@ def _has_audio(path: str) -> bool:
         return probe(path).has_audio
     except MonteurMediaError:
         return False
+
+
+def _gap_gate_filters(gaps: list[tuple[float, float]]) -> list[str]:
+    """Filter-chain pieces muting the music bed over the deliberate gaps.
+
+    ``gaps`` are RECORD-time windows (:func:`monteur.montage.
+    music_bed_gaps` — already clamped and merged); the returned filters
+    expect the stream's ``t`` to BE record time, i.e. they belong AFTER
+    the music window's ``adelay`` (or directly on the bed when no window
+    is set). One ``volume`` gate per gap — a trapezoid that is exactly 0
+    over ``[start, end]`` with a :data:`_GAP_FADE` micro-fade ramping
+    just OUTSIDE each edge, so the mute covers the full gap and the
+    re-entry lands at the gap end (+50 ms ramp against clicks). Chained
+    volume envelopes multiply, so multiple gaps compose. Empty gaps =
+    empty list: the untouched old chains stay byte-identical.
+    """
+    if not gaps:
+        return []
+    filters = [f"asetnsamples=n={_GAP_GATE_SAMPLES}"]
+    fade = _GAP_FADE
+    for lo, hi in gaps:
+        expr = (
+            f"1-min(1,max(0,min((t-{lo - fade:.3f})/{fade:.3f},"
+            f"({hi + fade:.3f}-t)/{fade:.3f})))"
+        )
+        filters.append(f"volume=volume={_fq(expr)}:eval=frame")
+    return filters
 
 
 def render_preview(
@@ -417,6 +458,12 @@ def render_preview(
                     f"adelay={ms}|{ms}",
                     f"afade=t=in:st={m_in:.3f}:d={_MUSIC_FADE_IN:.3f}",
                 ]
+        # Deliberate silence: gate the bed's volume to 0 over every
+        # music gap (after adelay, so t is record time). The song keeps
+        # RUNNING underneath — only the volume breaks, so the re-entry
+        # continues exactly on the beat grid.
+        if audio in ("music", "mix"):
+            music_filters += _gap_gate_filters(music_bed_gaps(plan))
 
         final = ["-f", "concat", "-safe", "0", "-i", str(list_path)]
         if audio in ("music", "mix"):
@@ -602,6 +649,7 @@ def _export_audio_graph(
     *,
     music_in: float = 0.0,
     music_len: float = 0.0,
+    music_gaps: list[tuple[float, float]] | None = None,
 ) -> str:
     """The filter_complex audio chain, ending in the output label ``[a]``.
 
@@ -630,9 +678,17 @@ def _export_audio_graph(
     non-zero entry — a short :data:`_MUSIC_FADE_IN` musical fade-in. The
     caller reads the song from ``music_start + music_in``, so the beat
     grid alignment is untouched.
+
+    ``music_gaps`` (keyword-only, None/empty = untouched old graph)
+    additionally gates the SONG's volume to 0 over the plan's deliberate
+    silences (:func:`_gap_gate_filters` — record-time windows, applied
+    after the adelay so ``t`` is record time). Only the song: placed SFX
+    (the braam under the title) and the original-sound bed play through
+    the gap — that is what carries it.
     """
     parts: list[str] = []
-    if music_label is not None and (music_in > 0 or music_len > 0):
+    gates = _gap_gate_filters(list(music_gaps or []))
+    if music_label is not None and (music_in > 0 or music_len > 0 or gates):
         filters: list[str] = []
         if music_len > 0:
             filters.append(f"atrim=0:{music_len:.3f}")
@@ -643,6 +699,7 @@ def _export_audio_graph(
                 f"adelay={ms}|{ms}",
                 f"afade=t=in:st={music_in:.3f}:d={_MUSIC_FADE_IN:.3f}",
             ]
+        filters += gates
         parts.append(f"[{music_label}]{','.join(filters)}[xmw]")
         music_label = "xmw"
     if audio == "music":
@@ -802,6 +859,11 @@ def render_export(
       the montage end — when headroom exists the tail rings out rather
       than being hard-trimmed to the planned cue length. A missing or
       unreadable file is a note, not an error.
+    * **Deliberate silence** — the plan's ``music_gaps`` gate the SONG's
+      volume to 0 over their record windows (50 ms micro-fades against
+      clicks, re-entry exactly at the gap end; see
+      :func:`_gap_gate_filters`). Only the song: placed SFX and the
+      original-sound bed play through — they carry the silence.
     * **Loudness** — the audio chain finishes with single-pass
       ``loudnorm`` at YouTube's target (-14 LUFS, -1 dBTP, LRA 11).
     * **Fades** — the plan's ``fade_in``/``fade_out``, exactly as in
@@ -1047,6 +1109,7 @@ def render_export(
                 fade_in, fade_out, plan.duration,
                 music_in=m_in if windowed else 0.0,
                 music_len=(m_end - m_in) if windowed else 0.0,
+                music_gaps=music_bed_gaps(plan),
             )
         )
         final += [

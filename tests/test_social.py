@@ -385,14 +385,31 @@ def _parity_reports() -> list[ClipReport]:
 # pseudo-climax stays under two phrase groups, are byte-identical). The
 # parity pool carries no sift envelopes, so blueprint 1.1's peak aim is
 # provably inactive here (no "cut on action" note in any parity plan).
+# Regenerated 2026-07 for magie-blueprint 1.2 (deliberate silence): the
+# default music_flow="deliberate" plans music_gaps — under carried
+# smash-to-black dips and for one beat before the drop — a deliberate
+# default change for every parity plan with music. The OLD hashes live on
+# in _PARITY_GOLDEN_CONTINUOUS: music_flow="continuous" must reproduce
+# the pre-wave plans byte-identically (the parity fixture the wave's
+# contract demands), so the two tables together pin BOTH behaviors.
 _PARITY_GOLDEN = {
+    "auto": "fa747bd06ecd7e7d21920a0259a5615d2a52272918f4427db46d3c43e08d55ad",
+    "travel": "dd89a87fcef93209c10c47048e95ec3f506092ac25c7fc459568725e3b67f4da",
+    "wedding": "bc3780121a56035e21a023f167e46b8ac2024cf1658103c6d1a382e6b2db6262",
+    "music_video": "1b9835d2fe20e6c9750c99f48417a41d0f154119d96685d67325848a2db213b0",
+    "trailer": "63f56c408c94f1bfa889526b36804758d3b9d2da4541c794e91c7af121e70654",
+    "trailer-best-paced": "2632d9a1793f0c4dfb1e72816a1ca53407046b46e15678bea924d85041fc6090",
+    "travel-no-music": "645cc4b7fffe1795a6aeba05785e836c2dc9f600ebd5ffb5b4fce44aba769baf",
+}
+# The engine BEFORE deliberate silence existed, byte for byte — what
+# music_flow="continuous" promises to keep producing forever.
+_PARITY_GOLDEN_CONTINUOUS = {
     "auto": "f9d843f342b27ddde52eb44b387259e2664c538e3d93de108deb1096df015c18",
     "travel": "e0a9ef81e6bc145f98d11fa795804f26cc34e330c6b60a6a212de089c6af4f48",
     "wedding": "0c3e4e4c5afe90b3b05a0b0a2a988186ba1ded67864f31151f6e7c50ec03aa7b",
     "music_video": "b837650cce63b2284ea0c0f4152f82025d956ec3b98d2805429072f603ee1eef",
     "trailer": "bb5be518fdf056711ccd9a9593ee7eaaa19eb8839e4e3605887d78e519e6be70",
     "trailer-best-paced": "3cb042ebd97b6430c550775f5fe7ea74ed056b66777f893595a0690bf17330c4",
-    "travel-no-music": "645cc4b7fffe1795a6aeba05785e836c2dc9f600ebd5ffb5b4fce44aba769baf",
 }
 
 
@@ -410,12 +427,32 @@ class TestExistingStylesParity:
         plan = plan_montage(_parity_reports(), _parity_music(), style=style, sfx=True)
         assert _digest(plan) == _PARITY_GOLDEN[style]
 
+    @pytest.mark.parametrize(
+        "style", ["auto", "travel", "wedding", "music_video", "trailer"]
+    )
+    def test_continuous_music_flow_reproduces_the_pre_gap_engine(self, style):
+        # The wave's parity contract: music_flow="continuous" = zero gaps
+        # AND byte-identical plans to before deliberate silence existed.
+        plan = plan_montage(
+            _parity_reports(), _parity_music(), style=style, sfx=True,
+            music_flow="continuous",
+        )
+        assert plan.music_gaps == []
+        assert _digest(plan) == _PARITY_GOLDEN_CONTINUOUS[style]
+
     def test_paced_best_first_trailer_byte_identical(self):
         plan = plan_montage(
             _parity_reports(), _parity_music(), style="trailer", order=BEST_FIRST,
             max_duration=30.0, pace=1.0, transitions="smash",
         )
         assert _digest(plan) == _PARITY_GOLDEN["trailer-best-paced"]
+        continuous = plan_montage(
+            _parity_reports(), _parity_music(), style="trailer", order=BEST_FIRST,
+            max_duration=30.0, pace=1.0, transitions="smash",
+            music_flow="continuous",
+        )
+        assert continuous.music_gaps == []
+        assert _digest(continuous) == _PARITY_GOLDEN_CONTINUOUS["trailer-best-paced"]
 
     def test_no_music_travel_byte_identical(self):
         plan = plan_montage(_parity_reports(), None, style="travel", max_duration=24.0)
