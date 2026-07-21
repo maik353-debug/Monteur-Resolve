@@ -17,7 +17,7 @@ API (all JSON):
 * ``POST /api/resolve/analyze`` {"timeline"?, "save"?}          -> {"stats", "version"?}
 * ``POST /api/create/scan``   {"folder", "see"?}                -> {"job": id}
 * ``POST /api/create/build``  {"folder", "music"?, "see"?,
-  "ai_cut"?, "brief"?, "elements"?, ...}                        -> {"job": id}
+  "ai_cut"?, "brief"?, "elements"?, "platform"?, ...}           -> {"job": id}
 * ``POST /api/create/pick``   {"folder", "music_dir",
   "max_duration"?}                                              -> {"job": id}
 * ``POST /api/create/kit``    {build payload + "kit_dir"}       -> {"job": id}
@@ -79,7 +79,8 @@ API (all JSON):
 * ``POST /api/youtube/disconnect``                              -> the status view
 * ``POST /api/youtube/upload`` {"path", "title",
   "description"?, "tags"?, "privacy"?, "thumbnail"?}            -> {"job": id}
-* ``POST /api/youtube/prefill`` {"plan_json", "name"?}          -> {"title", "description", "tags"}
+* ``POST /api/youtube/prefill`` {"plan_json", "name"?,
+  "canvas"?}                                                    -> {"title", "description", "tags"}
 
 Timeline content is passed as text (EDL/FCPXML are text formats); ``fps`` is
 required for EDL files.
@@ -1171,6 +1172,30 @@ def _validate_arrangement(payload: dict) -> None:
                 )
 
 
+def _validate_platform(payload: dict) -> None:
+    """400 on an unknown "platform" BEFORE the job starts (build/kit).
+
+    The actual resolution — canvas forced, "short" style unless an explicit
+    style was chosen, length capped — happens in :func:`_plan_from_payload`
+    via :func:`monteur.montage.resolve_platform`; here only the key is
+    checked so a typo never becomes a half-started job. A missing/empty
+    platform is fine — the key is simply removed.
+    """
+    if "platform" not in payload:
+        return
+    platform = payload.get("platform")
+    if not platform:
+        payload.pop("platform", None)
+        return
+    from monteur.montage import PLATFORMS
+
+    if platform not in PLATFORMS:
+        valid = ", ".join(PLATFORMS)
+        raise ApiError(
+            400, f"unknown platform {platform!r} — valid platforms: {valid}"
+        )
+
+
 def _plan_from_payload(job: dict, payload: dict):
     """Shared plan construction for build and kit jobs.
 
@@ -1187,6 +1212,31 @@ def _plan_from_payload(job: dict, payload: dict):
     music_path = payload.get("music") or ""
     see = bool(payload.get("see"))
     vision = {"ran": False, "notes": [], "error": ""}
+
+    # Platform preset ("What are you making?"): resolved HERE, at the
+    # caller layer — plan_montage never takes a platform. The payload is
+    # updated in place so the same resolved canvas reaches the timeline
+    # renderer and the drafts autosave. Precedence lives in ONE place
+    # (monteur.montage.resolve_platform): the platform always sets the
+    # canvas and caps the length; an explicit style wins over the preset's
+    # "short", with a note explaining what was kept.
+    platform_notes: list[str] = []
+    if payload.get("platform"):
+        from monteur.montage import resolve_platform
+
+        raw_max = payload.get("max_duration")
+        resolved = resolve_platform(
+            str(payload["platform"]),
+            style=payload.get("style") or None,
+            canvas=payload.get("canvas") or None,
+            max_duration=float(raw_max) if raw_max else None,
+        )
+        if resolved["style"]:
+            payload["style"] = resolved["style"]
+        payload["canvas"] = resolved["canvas"]
+        if resolved["max_duration"] is not None:
+            payload["max_duration"] = resolved["max_duration"]
+        platform_notes = resolved["notes"]
 
     reports, cached = _sift_or_cached(job, folder)
     if not cached and see:  # fresh sift: annotate before planning (soft-fail)
@@ -1266,6 +1316,8 @@ def _plan_from_payload(job: dict, payload: dict):
         plan = plan_montage(reports, music, **plan_kwargs)
     if not plan.entries:
         raise ValueError("no usable material found — check the scan results")
+    if platform_notes:
+        plan.notes.extend(platform_notes)
     if elements_dir:
         _apply_elements(job, plan, music, elements_dir)
     return plan, reports, music, vision
@@ -1295,7 +1347,7 @@ def _apply_elements(job: dict, plan, music, elements_dir: str) -> None:
 _DRAFT_SETTING_KEYS = (
     "audio", "order", "style", "canvas", "transitions", "fps", "format",
     "max_duration", "pace", "allow_repeats", "sfx", "cut_lead", "see",
-    "ai_cut", "brief", "elements", "arrangement",
+    "ai_cut", "brief", "elements", "platform", "arrangement",
 )
 
 
@@ -2942,6 +2994,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
         if not payload.get("folder"):
             raise ApiError(400, "missing 'folder' (path to your footage)")
         _validate_arrangement(payload)
+        _validate_platform(payload)
         job = _new_job("build")
         threading.Thread(
             target=_run_build_job,
@@ -2973,6 +3026,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
         if not payload.get("kit_dir"):
             raise ApiError(400, "missing 'kit_dir' (folder to write the publish kit into)")
         _validate_arrangement(payload)
+        _validate_platform(payload)
         job = _new_job("kit")
         threading.Thread(
             target=_run_kit_job,
@@ -3891,6 +3945,13 @@ class MonteurHandler(BaseHTTPRequestHandler):
         "story:" note, description = story + the plan's own chapter lines
         (starting 0:00, nothing invented), tags mined by
         :func:`monteur.publish.plan_tags`.
+
+        A vertical short gets YouTube's Shorts routing: when the optional
+        ``"canvas"`` is a ``vertical*`` preset AND the plan runs 60 s or
+        less, " #Shorts" is appended to the title (inside the 100-char
+        limit) and "#Shorts" becomes the description's first line. Any
+        other canvas or length keeps the metadata untouched — a 16:9
+        video must never be routed as a Short.
         """
         from monteur.montage import plan_from_dict
         from monteur.publish import plan_chapters, plan_tags
@@ -3917,9 +3978,20 @@ class MonteurHandler(BaseHTTPRequestHandler):
             parts.append(story)
         if chapter_lines:
             parts.append("\n".join(chapter_lines))
+        title = (name or story)[:100]  # YouTube's title limit
+        canvas = str(payload.get("canvas") or "")
+        if canvas.startswith("vertical") and plan.duration <= 60.0 + 1e-6:
+            # Shorts routing: the tag in the title AND the description's
+            # first line tells YouTube this vertical <= 60s cut is a Short.
+            base = (name or story).strip()
+            if "#shorts" not in base.lower():
+                title = (
+                    f"{base[: 100 - len(' #Shorts')]} #Shorts" if base else "#Shorts"
+                )
+            parts.insert(0, "#Shorts")
         self._send_json(
             {
-                "title": (name or story)[:100],  # YouTube's title limit
+                "title": title,
                 "description": "\n\n".join(parts),
                 "tags": plan_tags(plan),
             }

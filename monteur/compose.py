@@ -149,6 +149,16 @@ CRAFT_BRIEFS: dict[str, str] = {
         "on attitude — a freeze-worthy hero image or an abrupt cut, not a "
         "fade."
     ),
+    "short": (
+        "Hook in the FIRST second: slot 0 takes the boldest, most arresting "
+        "image in the footage — the pattern interrupt, not the prettiest or "
+        "widest shot. Shorts never establish; the viewer decides in one "
+        "second whether to stay. Punch relentlessly on the beat through the "
+        "body — motion, faces, impact — every shot earning its slot. End on "
+        "a frame that loops back into the opening: cast the last slot from "
+        "the hook's own scene (or matching motion) so a replay feels "
+        "seamless, and never wind down into a slow fade."
+    ),
     "auto": (
         "Follow the song. Calm sections carry calm, wide images; loud "
         "sections carry motion and action; the strongest material lands "

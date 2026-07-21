@@ -50,6 +50,20 @@ downbeats, then beats, when phrases are unknown), slow phases
 beat grid; with neither beats nor downbeats the fixed 2 s grid is used,
 exactly as in "auto".
 
+The "short" style is the anti-canon for vertical platforms: its arc is
+hook (8%) -> punch (72%) -> loop (20%), and it never establishes — the
+first cut stays at its base, absolutely capped at :data:`_MAX_HOOK_SECONDS`
+(~2 s) via :attr:`MontageStyle.no_opening_hold`. Slot 0 is reserved for
+the PATTERN INTERRUPT — the moment with the highest hook score (motion +
+hero + score; the "opener" role preference does not apply) — and the LAST
+slot prefers a moment from the hook's own scene group (else the closest
+motion energy), so the ending cuts seamlessly back into the opening on
+replay; both moves are noted ("hook: ...", "loop: ..."). :data:`PLATFORMS`
+maps publish targets (youtube / short / reel / tiktok) onto canvas +
+style + a length CAP, resolved at the CALLER layer by
+:func:`resolve_platform` — ``plan_montage`` itself never takes a platform,
+so the engine stays orthogonal.
+
 Rhythm
 ------
 Within a phase the beat step is a BASE, not a metronome — real editing
@@ -359,8 +373,22 @@ _MOTION_MIN_MAGNITUDE = 0.5
 # Sized like _ROLE_WEIGHT: enough to flip ONE order position, never two.
 _ENERGY_MATCH_WEIGHT = 0.2
 # Nominal music energy per arc phase (arc styles have no section data).
-_PHASE_ENERGY = {"opening": 0.35, "build": 0.65, "climax": 1.0, "outro": 0.3}
+# hook/punch/loop are the "short" style's phases: the hook wants maximum
+# motion (the pattern interrupt), the punch stays hot, the loop cools only
+# slightly — a short never winds down like an outro does.
+_PHASE_ENERGY = {
+    "opening": 0.35, "build": 0.65, "climax": 1.0, "outro": 0.3,
+    "hook": 1.0, "punch": 0.85, "loop": 0.5,
+}
 _ROLE_WEIGHT = 0.2
+# Hook casting (the "short" style; see the module docstring): slot 0 is
+# reserved for the PATTERN INTERRUPT — the moment with the highest
+# hook_score = 0.5 x motion (normalised to the pool's fastest moment)
+# + 0.3 x hero + 0.2 x score. The "opener" role preference does NOT apply
+# to that slot: a short opens on the boldest image, not the prettiest.
+_HOOK_MOTION_WEIGHT = 0.5
+_HOOK_HERO_WEIGHT = 0.3
+_HOOK_SCORE_WEIGHT = 0.2
 # Hero bonus: this x moment.hero on drop-reserved and climax-phase slots.
 # A full hero (1.0) outweighs the motion term plus one order step, so the
 # real hero shot wins the drop even against better motion continuity.
@@ -470,6 +498,13 @@ class MontageStyle:
     # build accelerando, drop hold, stutter, outro decelerando) are applied
     # by the grid builders on top and are the same for every style.
     rhythm: dict[str, tuple[float, ...]] = field(default_factory=dict)
+    # Anti-canon for social shorts: True DISABLES the establishing hold —
+    # the montage's first cut stays at its phase's base, additionally
+    # capped at :data:`_MAX_HOOK_SECONDS` absolute. Vertical viewers decide
+    # in the first second; a short must hook, never establish. Consumed by
+    # :func:`_style_rhythm_specs`; False keeps every existing style
+    # byte-identical.
+    no_opening_hold: bool = False
 
 
 _ARC_STANDARD = [(0.15, "opening"), (0.35, "build"), (0.35, "climax"), (0.15, "outro")]
@@ -536,7 +571,97 @@ STYLES: dict[str, MontageStyle] = {
         # Aggressive: three snaps, then a 2-beat slam.
         rhythm={"climax": (1, 1, 1, 2)},
     ),
+    "short": MontageStyle(
+        key="short",
+        name="Social Short",
+        description=(
+            "Vertical 9:16 attention: a 1-beat hook up front (shorts do NOT "
+            "establish), a relentless 1-2-beat punch body, and a short loop "
+            "outro that returns to the hook's scene (8/72/20 arc)."
+        ),
+        # hook = the pattern interrupt, punch = the whole body, loop = a
+        # short outro whose last shot cuts back into the hook (see the
+        # hook/loop casting in _fill).
+        arc=[(0.08, "hook"), (0.72, "punch"), (0.2, "loop")],
+        beats_per_cut={"hook": 1, "punch": 1, "loop": 2},
+        prefer_highlights_in="punch",
+        # Punchy like the music video: a 2-beat slam every fourth punch cut.
+        rhythm={"punch": (1, 1, 2, 1)},
+        no_opening_hold=True,
+    ),
 }
+
+
+# Platform presets: what "I'm making a TikTok" means in engine terms —
+# pure data, resolved by the CALLER (web server, CLI) via
+# :func:`resolve_platform`. plan_montage never sees a platform, so the
+# engine stays orthogonal. "canvas" is a :data:`CANVASES` key, "style" a
+# :data:`STYLES` key (None = the user's own choice stands), "max_seconds"
+# a CAP on the requested/derived duration (min of both, never an
+# extension; None = no cap).
+PLATFORMS: dict[str, dict] = {
+    "youtube": {"canvas": "uhd", "style": None, "max_seconds": None},
+    "short": {"canvas": "vertical-uhd", "style": "short", "max_seconds": 60.0},
+    "reel": {"canvas": "vertical-uhd", "style": "short", "max_seconds": 90.0},
+    "tiktok": {"canvas": "vertical-uhd", "style": "short", "max_seconds": 60.0},
+}
+
+
+def resolve_platform(
+    platform: str,
+    style: str | None = None,
+    canvas: str | None = None,
+    max_duration: float | None = None,
+) -> dict:
+    """Resolve a :data:`PLATFORMS` preset onto the existing kwargs.
+
+    The one shared precedence rule set (web server and CLI both call this,
+    so a "Short" means the same thing everywhere):
+
+    * **canvas** — the platform always sets it: the frame IS the platform
+      (a 16:9 TikTok is not a TikTok). The incoming ``canvas`` is ignored.
+    * **style** — an EXPLICIT style wins over the preset's: any incoming
+      style other than ``None``/``""``/``"auto"`` (the default)/the
+      preset's own style is kept, and a note explains that the platform
+      then only sets the canvas and caps the length. Otherwise the
+      preset's style applies; presets with ``style: None`` (YouTube)
+      always keep the user's choice.
+    * **duration** — ``max_seconds`` CAPS the request: the resolved value
+      is ``min(requested, cap)``, or the cap itself when nothing was
+      requested (the cap then bounds the song-derived length). Never an
+      extension; an actual cap is noted.
+
+    Returns ``{"style", "canvas", "max_duration", "notes"}`` — drop the
+    notes into ``plan.notes`` after planning so the result says what the
+    preset did. Unknown platforms raise ValueError listing the valid ones.
+    """
+    if platform not in PLATFORMS:
+        valid = ", ".join(PLATFORMS)
+        raise ValueError(f"unknown platform {platform!r}; valid platforms: {valid}")
+    preset = PLATFORMS[platform]
+    notes: list[str] = []
+    resolved_style = style
+    preset_style = preset["style"]
+    if preset_style:
+        if style in (None, "", "auto", preset_style):
+            resolved_style = preset_style
+        else:
+            notes.append(
+                f'platform "{platform}": keeping your "{style}" style — the '
+                f"preset only sets the {preset['canvas']} canvas and caps "
+                "the length"
+            )
+    cap = preset["max_seconds"]
+    resolved_max = max_duration
+    if cap is not None and (max_duration is None or max_duration > cap + _EPS):
+        resolved_max = float(cap)
+        notes.append(f'platform "{platform}": length capped at {cap:g}s')
+    return {
+        "style": resolved_style,
+        "canvas": preset["canvas"],
+        "max_duration": resolved_max,
+        "notes": notes,
+    }
 
 
 @dataclass
@@ -884,6 +1009,11 @@ def _phase_steps(style: MontageStyle) -> list[int]:
 # so a deliberately slow pace still wins.
 _MAX_HOLD_SECONDS = 6.0
 _MAX_CUT_SECONDS = 8.0
+# A no_opening_hold style's FIRST cut (the hook) never exceeds this many
+# seconds, even when a slow pace inflates the phase base past it — the one
+# place an absolute ceiling is allowed to undercut the base: a short's
+# hook that arrives after 4 seconds is no hook at all.
+_MAX_HOOK_SECONDS = 2.0
 
 
 def _cap_units(value: int, base: int, unit_s: float, cap_s: float) -> int:
@@ -1029,7 +1159,9 @@ def _style_rhythm_specs(
     ``factors`` the beats-per-unit of each entry's grid (1 = beats,
     ``_BEATS_PER_BAR`` = downbeats), ``n_units_list`` the units each phase
     spans and ``pinned`` the arc indices whose start was pinned to a drop.
-    Encodes the canon: establishing hold on the montage's first phase,
+    Encodes the canon: establishing hold on the montage's first phase —
+    unless ``style.no_opening_hold`` (the shorts anti-canon: the first cut
+    stays at the base, capped at :data:`_MAX_HOOK_SECONDS` absolute) —
     build runs ramping from the previous phase's base to the following
     phase's (with a stutter burst into a pinned climax when the ramp ends
     fast enough), drop hold on a pinned climax, per-style pattern texture,
@@ -1113,11 +1245,22 @@ def _style_rhythm_specs(
         specs.append(spec)
         i += 1
     if specs and "first_hold" not in specs[0]:
-        hold = _opening_hold(specs[0]["base"], specs[0]["n_units"])
-        hold = _cap_units(hold, specs[0]["base"], unit_s(0), _MAX_HOLD_SECONDS)
-        if hold > specs[0]["base"]:
-            specs[0]["first_hold"] = hold
-            bits.insert(0, f"opening hold {hold * factors[0]} beats")
+        if style.no_opening_hold:
+            # Anti-canon (social shorts): NO establishing hold — the first
+            # cut stays at the phase's base, capped at _MAX_HOOK_SECONDS
+            # absolute. This cap deliberately undercuts the base on slow
+            # paces: the hook must land inside the first ~2 seconds.
+            first = specs[0]["base"]
+            if unit_s(0) > 0:
+                first = max(1, min(first, int(_MAX_HOOK_SECONDS / unit_s(0))))
+            specs[0]["first_hold"] = first
+            bits.insert(0, "no opening hold (the hook cuts at its base)")
+        else:
+            hold = _opening_hold(specs[0]["base"], specs[0]["n_units"])
+            hold = _cap_units(hold, specs[0]["base"], unit_s(0), _MAX_HOLD_SECONDS)
+            if hold > specs[0]["base"]:
+                specs[0]["first_hold"] = hold
+                bits.insert(0, f"opening hold {hold * factors[0]} beats")
     if ramp_span is not None:
         pos = 1 if bits and bits[0].startswith("opening hold") else 0
         bits.insert(pos, f"build ramps {ramp_span[0]}->{ramp_span[1]} beats")
@@ -1533,10 +1676,13 @@ def _wanted_roles(
 
     The slot's arc phase maps through :data:`_ROLE_FOR_PHASE`; on top of
     that the montage's FIRST slot always asks for an "opener" and its LAST
-    slot for a "closer", in every style (also the arc-less "auto").
+    slot for a "closer", in every style (also the arc-less "auto") — with
+    ONE exception: a montage that opens on a "hook" phase (the "short"
+    style) never asks for an opener. Shorts do not establish; slot 0 is
+    cast by hook score instead (see :func:`_fill`).
     """
     wanted: set[str] = set()
-    if slot_idx == 0:
+    if slot_idx == 0 and not (phases and phases[0][2] == "hook"):
         wanted.add("opener")
     if slot_idx == n_slots - 1:
         wanted.add("closer")
@@ -1558,6 +1704,7 @@ def _fill(
     slot_energies: list[float] | None = None,
     pre_used: set[int] | frozenset[int] = frozenset(),
     preset: dict[int, "_PoolItem"] | None = None,
+    hook_loop: bool = False,
 ) -> tuple[list[MontageEntry], list[str]]:
     """Assign pool moments to slots.
 
@@ -1596,6 +1743,27 @@ def _fill(
     penalty see the arranged slots. Both default to empty, which is
     byte-identical to the behavior before they existed.
 
+    ``hook_loop=True`` (the "short" style — its arc opens on a "hook"
+    phase) reserves two slots up front, before the drop reservation:
+
+    * **Slot 0 — the hook.** The unused moment with the highest
+      ``hook_score = _HOOK_MOTION_WEIGHT x motion + _HOOK_HERO_WEIGHT x
+      hero + _HOOK_SCORE_WEIGHT x score`` (motion = the moment's mean
+      entry/exit magnitude normalised to the pool's fastest; ties go to
+      the earlier pool position). The "opener" role preference does NOT
+      apply — a short opens on the pattern interrupt, not the prettiest
+      establishing shot (:func:`_wanted_roles` skips "opener" for hook
+      openings).
+    * **The LAST slot — the loop.** Prefers a moment from the hook's own
+      scene ``group`` (highest score among them), so the ending cuts
+      seamlessly back into the opening on replay; without a group match
+      it takes the moment whose motion energy is closest to the hook's.
+      With neither signal (no groups, an all-static pool) the slot is
+      left to the normal fill — graceful, no fake note.
+
+    Both reservations skip slots an arrangement already cast (``preset``)
+    and are reported in the notes ("hook: ...", "loop: ...").
+
     ``semantic=True`` (any pool moment carries vision annotations) layers
     the semantic-casting bonuses onto the candidate blend: a fitting role
     adds ``_ROLE_WEIGHT``, climax-phase candidates add ``_HERO_WEIGHT`` x
@@ -1609,9 +1777,10 @@ def _fill(
     notes: list[str] = []
     n = len(pool)
     # Energy-motion matching: candidate motion magnitudes normalised to the
-    # pool's fastest moment (empty = all static = term disabled).
+    # pool's fastest moment (empty = all static = term disabled). Hook
+    # casting reads the same normalisation.
     motion_norm: list[float] = []
-    if slot_energies is not None:
+    if slot_energies is not None or hook_loop:
         mags = [
             (math.hypot(*it.moment.entry_motion) + math.hypot(*it.moment.exit_motion)) / 2.0
             for it in pool
@@ -1623,10 +1792,60 @@ def _fill(
     # Pool indices not yet placed, in pool order (an arrangement's picks
     # are already placed and start consumed).
     unused = [i for i in range(n) if i not in pre_used]
-    reserved: dict[int, int] = {}  # slot index -> pool index held for a drop
+    reserved: dict[int, int] = {}  # slot index -> pool index held for it
+    taken = preset or {}
+    if hook_loop and unused and slots and 0 not in taken:
+        # Hook casting ("short" style): slot 0 takes the PATTERN INTERRUPT
+        # — the boldest moment by motion + hero + score, opener role be
+        # damned. Reserved FIRST, before the drop reservation: nothing
+        # outranks the hook on a vertical platform.
+        def _hook_score(idx: int) -> float:
+            motion = motion_norm[idx] if motion_norm else 0.0
+            return (
+                _HOOK_MOTION_WEIGHT * motion
+                + _HOOK_HERO_WEIGHT * pool[idx].hero
+                + _HOOK_SCORE_WEIGHT * pool[idx].moment.score
+            )
+
+        pos = max(range(len(unused)), key=lambda p: (_hook_score(unused[p]), -unused[p]))
+        hook_idx = unused.pop(pos)
+        reserved[0] = hook_idx
+        notes.append("hook: opening on the boldest moment (motion + hero + score)")
+        # Loop ending: the LAST slot prefers a moment from the hook's own
+        # scene group — the short then cuts seamlessly back into its
+        # opening on replay — or, without one, the closest motion energy
+        # to the hook's. With neither signal the normal fill decides.
+        last = len(slots) - 1
+        if last > 0 and unused and last not in taken:
+            hook_group = pool[hook_idx].group
+            same_scene = [
+                p for p in range(len(unused))
+                if hook_group and pool[unused[p]].group == hook_group
+            ]
+            loop_pos: int | None = None
+            if same_scene:
+                loop_pos = max(
+                    same_scene,
+                    key=lambda p: (pool[unused[p]].moment.score, -unused[p]),
+                )
+                notes.append("loop: last shot matches the hook's scene")
+            elif motion_norm:
+                hook_motion = motion_norm[hook_idx]
+                loop_pos = min(
+                    range(len(unused)),
+                    key=lambda p: (
+                        abs(motion_norm[unused[p]] - hook_motion),
+                        unused[p],
+                    ),
+                )
+                notes.append("loop: last shot matches the hook's motion energy")
+            if loop_pos is not None:
+                reserved[last] = unused.pop(loop_pos)
     for drop_slot in sorted(drop_slots):
         if not unused:
             break
+        if drop_slot in reserved:
+            continue  # the hook/loop reservation got there first
         pos = max(
             range(len(unused)),
             key=lambda p: (
@@ -2389,6 +2608,10 @@ def plan_montage(
         slots, slot_order, pool, phases, highlight_phase, drop_slots,
         semantic=semantic, slot_energies=slot_energies,
         pre_used=arr_pre_used, preset=arr_preset or None,
+        # Hook/loop casting: any style whose arc OPENS on a "hook" phase
+        # (the "short" style) gets the pattern-interrupt slot 0 and the
+        # loop-friendly last slot (see _fill's docstring).
+        hook_loop=bool(phases) and phases[0][2] == "hook",
     )
     entries = arr_entries + entries
     entries.sort(key=lambda e: e.record_start)

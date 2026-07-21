@@ -1394,6 +1394,15 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             <p class="wiz-lead">Pick the song your cut should follow and how the finished cut should feel. Monteur reads the song&rsquo;s beat and places every cut on the rhythm.</p>
           </div>
         </div>
+        <h3 class="fgroup-title">What are you making?</h3>
+        <div class="seg-toggle" role="group" aria-label="What are you making?" id="cre-platform-row">
+          <button type="button" id="plat-youtube" aria-pressed="false">YouTube</button>
+          <button type="button" id="plat-short" aria-pressed="false">Short</button>
+          <button type="button" id="plat-reel" aria-pressed="false">Reel</button>
+          <button type="button" id="plat-tiktok" aria-pressed="false">TikTok</button>
+          <button type="button" id="plat-custom" aria-pressed="true">Custom</button>
+        </div>
+        <p class="help-small" id="cre-platform-info" aria-live="polite">Your own mix &mdash; shape, length and style stay exactly as you set them below.</p>
         <div class="wiz-cols">
           <div>
             <h3 class="fgroup-title">Soundtrack</h3>
@@ -3730,6 +3739,7 @@ var cre = {
   style: "auto",
   shape: "wide",          // "wide" | "vertical" | "cine"
   res: "uhd",             // "uhd" | "hd" — 4K by default
+  platform: "custom",     // "custom" | a PLATFORM_PRESETS key — the "What are you making?" chip
   pace: null,             // seconds per clip in the fastest phase; null = style default
   transitions: "auto",    // "auto" | "cuts" | "dissolves" | "smash"
   order: "chronological", // "chronological" | "best_first"
@@ -4427,6 +4437,8 @@ var STYLES = [
     "Same four acts, but never faster than every 2 beats — faces and gestures get room to breathe. Dissolves in the calm phases; soft fades to black at both ends."],
   ["music_video", "Music video", "Fast from bar one.",
     "Cuts every 1–2 beats from the very first bar for constant energy, hard cuts throughout, highlights in the climax. Fades to black at both ends."],
+  ["short", "Social Short", "Hook, punch, loop.",
+    "Built for vertical attention (8/72/20 arc): a bold 1-beat hook — shorts never establish, the first cut stays under ~2 s — a relentless 1–2-beat punch body, and a short loop outro whose last shot returns to the hook's scene so the ending cuts seamlessly back into the opening. No fades: the video is made to replay."],
   ["trailer", "Trailer", "Tease, build, hit.",
     "Five acts (20/50/20/10): long tease, accelerating build (every 2 beats, then every beat), hard climax, snap outro. Smashes to black between acts — short black gaps with a “Title slot” marker for your text — and fades to black in and out."]
 ];
@@ -4499,11 +4511,62 @@ SHAPES.forEach(function (spec) {
   title.appendChild(document.createTextNode(spec[1]));
   cardBtn.appendChild(title);
   cardBtn.appendChild(el("span", "rc-desc", spec[2]));
-  cardBtn.addEventListener("click", function () { setShape(spec[0]); });
+  cardBtn.addEventListener("click", function () {
+    setShape(spec[0]);
+    // a hand-picked shape is a Custom decision — the platform preset
+    // would force its own canvas back at build time
+    var plat = PLATFORM_PRESETS[cre.platform];
+    if (plat && plat.shape && plat.shape !== spec[0]) setPlatform("custom", false);
+  });
   $("cre-canvas-cards").appendChild(cardBtn);
 });
 $("res-uhd").addEventListener("click", function () { setRes("uhd"); });
 $("res-hd").addEventListener("click", function () { setRes("hd"); });
+
+/* ---- step 2: platform presets ("What are you making?") -----------------
+   A shortcut, not a lock: picking a platform sets the shape/length/style
+   controls below (all still editable) and rides along in the build
+   payload as `platform`. The server resolves the preset with ONE shared
+   rule set (monteur.montage.resolve_platform): the platform always sets
+   the canvas and caps the length; an explicit style wins over the
+   preset's "short" and a plan note explains what was kept. Changing the
+   Shape by hand switches back to Custom — the platform would force its
+   own canvas back at build time. */
+var PLATFORM_PRESETS = {
+  youtube: { info: "16:9 in 4K — length and style stay yours.",
+    shape: "wide", res: "uhd" },
+  short: { info: "9:16, max 60s, hook-first cutting, loop-friendly ending.",
+    shape: "vertical", res: "uhd", style: "short", max: 60 },
+  reel: { info: "9:16, max 90s, hook-first cutting, loop-friendly ending.",
+    shape: "vertical", res: "uhd", style: "short", max: 90 },
+  tiktok: { info: "9:16, max 60s, hook-first cutting, loop-friendly ending.",
+    shape: "vertical", res: "uhd", style: "short", max: 60 },
+  custom: { info: "Your own mix — shape, length and style stay exactly as you set them below." }
+};
+function setPlatform(key, apply) {
+  if (!PLATFORM_PRESETS[key]) key = "custom";
+  cre.platform = key;
+  Object.keys(PLATFORM_PRESETS).forEach(function (k) {
+    var btn = $("plat-" + k);
+    if (btn) btn.setAttribute("aria-pressed", String(k === key));
+  });
+  $("cre-platform-info").textContent = PLATFORM_PRESETS[key].info;
+  if (!apply) return;
+  var spec = PLATFORM_PRESETS[key];
+  if (spec.shape) setShape(spec.shape);
+  if (spec.res) setRes(spec.res);
+  if (spec.style) setStyle(spec.style);
+  if (spec.max) {
+    // the platform caps the length: prefill the cap, keep a shorter target
+    cre.lenTouched = true;
+    setLenMode("target");
+    if (!targetLen() || targetLen() > spec.max) $("cre-maxlen").value = String(spec.max);
+  }
+}
+Object.keys(PLATFORM_PRESETS).forEach(function (key) {
+  var btn = $("plat-" + key);
+  if (btn) btn.addEventListener("click", function () { setPlatform(key, true); });
+});
 
 function setOrder(order) {
   cre.order = order;
@@ -4891,6 +4954,9 @@ function creBuildBody() {
     ai_cut: $("cre-ai-cut").checked,
     brief: $("cre-brief").value.trim()
   };
+  // the "What are you making?" chip: the server re-resolves the preset
+  // (canvas forced, length capped, style unless explicitly overridden)
+  if (cre.platform && cre.platform !== "custom") body.platform = cre.platform;
   if (seeEnabled()) body.see = true;
   var music = $("cre-music").value.trim();
   if (cre.audio !== "original" && music) body.music = music;
@@ -5152,7 +5218,7 @@ function draftSettingsFromState() {
   var settings = {};
   ["audio", "order", "style", "canvas", "transitions", "fps", "format",
    "max_duration", "pace", "allow_repeats", "sfx", "cut_lead", "see",
-   "ai_cut", "brief", "elements", "arrangement"].forEach(function (key) {
+   "ai_cut", "brief", "elements", "platform", "arrangement"].forEach(function (key) {
     if (body[key] !== undefined) settings[key] = body[key];
   });
   return settings;
@@ -5269,6 +5335,9 @@ function restoreWizardFromDraft(draft) {
     select.value = matched.value;
   }
   if (s.format === "edl" || s.format === "fcpxml") setCreFormat(s.format);
+  // the platform chip — restored WITHOUT re-applying its preset: style,
+  // canvas and length were just restored from the draft's own settings
+  setPlatform(typeof s.platform === "string" && s.platform ? s.platform : "custom", false);
 }
 
 function resumeDraft(draftId, btn) {
@@ -6919,6 +6988,12 @@ function initYouTubeUpload(prefix, path, source) {
     els.form.hidden = !s.connected;
     if (!s.connected || !planJson) return;
     var body = { plan_json: planJson, name: name };
+    // the canvas the cut was built with: a vertical <= 60s plan then gets
+    // the "#Shorts" routing in the suggested title/description
+    var builtCanvas = source
+      ? String(source.canvas || "")
+      : ((cre.result && cre.result.body && cre.result.body.canvas) || canvasKey());
+    if (builtCanvas) body.canvas = builtCanvas;
     api("/api/youtube/prefill", { method: "POST", body: body }).then(function (meta) {
       if (!els.title.value.trim()) els.title.value = meta.title || "";
       if (!els.desc.value.trim()) els.desc.value = meta.description || "";

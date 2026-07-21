@@ -739,6 +739,33 @@ def cmd_create(args: argparse.Namespace) -> None:
             f"  -> style {args.style}, order {args.order}, "
             f"max duration {args.max_duration if args.max_duration else 'full song'}"
         )
+    # Platform preset ("--platform tiktok"): resolved here at the caller
+    # layer — plan_montage never takes a platform. One shared precedence
+    # rule set (monteur.montage.resolve_platform, same as the Studio):
+    # the platform sets the canvas and caps the length; an explicit
+    # --style (or a brief-derived one) wins over the preset's "short".
+    # Runs AFTER the brief (so a brief style counts as explicit) and
+    # BEFORE the no-music check (the cap can supply the required length).
+    platform_notes: list[str] = []
+    if args.platform:
+        from monteur.montage import resolve_platform
+
+        resolved = resolve_platform(
+            args.platform, style=args.style, canvas=args.canvas,
+            max_duration=args.max_duration,
+        )
+        if resolved["style"]:
+            args.style = resolved["style"]
+        args.canvas = resolved["canvas"]
+        args.max_duration = resolved["max_duration"]
+        platform_notes = resolved["notes"]
+        print(
+            f"Platform {args.platform}: canvas {args.canvas}, style "
+            f"{args.style}, max duration "
+            f"{args.max_duration if args.max_duration else 'full song'}"
+        )
+        for note in platform_notes:
+            print(f"  {note}")
     # A sound-elements folder rides on the SFX layer: the cues are the
     # places the elements go, so --elements implies --sfx.
     if args.elements and not args.sfx:
@@ -824,6 +851,8 @@ def cmd_create(args: argparse.Namespace) -> None:
         _fail(str(exc))
     if not plan.entries:
         _fail("no usable material found — run 'monteur sift' to see why")
+    if platform_notes:
+        plan.notes.extend(platform_notes)
     if args.elements:
         # Rate the user's sound library offline and place the snippets as
         # real clips on the plan's SFX layer (riser into the drop, impact
@@ -1503,7 +1532,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-duration", type=float, default=None, help="cap the cut length (seconds)")
     p.add_argument(
         "--style", default="auto",
-        help="montage style: auto, travel, wedding, music_video, trailer",
+        help="montage style: auto, travel, wedding, music_video, trailer, "
+             "short (the hook-first vertical style)",
+    )
+    p.add_argument(
+        "--platform", choices=["youtube", "short", "reel", "tiktok"],
+        default=None,
+        help="publish-target preset: sets the canvas (youtube 16:9 4K; "
+             "short/reel/tiktok 9:16 4K) and CAPS the length (short/tiktok "
+             "60s, reel 90s — min of cap and --max-duration, never longer). "
+             "Vertical platforms also pick the hook-first 'short' style — "
+             "an explicit --style wins over that, the platform then only "
+             "sets canvas and cap. The platform always sets the canvas "
+             "(--canvas is ignored with it)",
     )
     p.add_argument(
         "--audio", choices=["music", "mix", "original"], default="music",
