@@ -153,6 +153,9 @@ class FakeTimeline:
             "audio": audio_tracks or [],
         }
         self._markers = markers or {}
+        # Extra GetSetting values (e.g. timelineResolutionWidth/Height on a
+        # timeline "imported" from an FCPXML file).
+        self._settings: dict[str, str] = {}
         self.added_markers: list[tuple] = []
         self.fail_marker_frames: set[int] = set()
         # --- canvas behavior knobs (build_timeline_from_plan tests) ---
@@ -212,8 +215,9 @@ class FakeTimeline:
         return self._name
 
     def GetSetting(self, key: str) -> str:
-        assert key == "timelineFrameRate"
-        return self._fps
+        if key == "timelineFrameRate":
+            return self._fps
+        return str(self._settings.get(key, ""))
 
     def SetSetting(self, key: str, value: str) -> bool:
         self.settings_set.append((key, value))
@@ -275,6 +279,19 @@ class FakeMediaPool:
         self.imported_media: list[str] = []
         self.import_calls: list[list[str]] = []
         self.fail_timeline_import = False
+        # Raised by ImportTimelineFromFile (hybrid must fall back cleanly).
+        self.raise_on_timeline_import: Exception | None = None
+        # True = an older Resolve: ImportTimelineFromFile returns a truthy
+        # flag instead of the timeline object (the import becomes current).
+        self.import_returns_bool = False
+        self.import_rename: str | None = None  # Resolve renamed the import
+        self.imported_timeline_fps: str | None = None  # read-back override
+        self.imported_timeline_resolution: tuple[int, int] | None = None
+        # Every ImportTimelineFromFile call: path, options, whether the file
+        # existed AT CALL TIME and its byte size (the bridge deletes its temp
+        # file afterwards, so this is the only honest record).
+        self.timeline_import_calls: list[dict] = []
+        self.imported_fcpxml: list[str] = []  # captured file content
         self.import_media_result: list | None | str = "default"
         self.fail_append = False
         # True = this Resolve build rejects positioned placement: any
@@ -285,11 +302,99 @@ class FakeMediaPool:
         # False = the appended clips' SetProperty refuses (canvas crop tests)
         self.append_clip_property_result = True
 
-    def ImportTimelineFromFile(self, path: str):
+    def ImportTimelineFromFile(self, path: str, options: dict | None = None):
+        # Capture the file BEFORE returning (or raising): the hybrid build
+        # removes its temp FCPXML in a finally, so this is when it must be
+        # read.
+        existed = os.path.isfile(path)
+        content = ""
+        if existed:
+            with open(path, encoding="utf-8") as handle:
+                content = handle.read()
+        self.timeline_import_calls.append(
+            {
+                "path": path,
+                "options": dict(options) if options is not None else None,
+                "existed": existed,
+                "size": len(content.encode("utf-8")),
+            }
+        )
+        if self.raise_on_timeline_import is not None:
+            raise self.raise_on_timeline_import
         if self.fail_timeline_import:
             return None
         self.imported_timelines.append(path)
-        return FakeTimeline(name="Imported")
+        self.imported_fcpxml.append(content)
+        timeline = self._timeline_from_fcpxml(content, options)
+        if self._project is not None:
+            self._project._timelines.append(timeline)
+            self._project._current = timeline
+        return True if self.import_returns_bool else timeline
+
+    def _timeline_from_fcpxml(
+        self, content: str, options: dict | None
+    ) -> FakeTimeline:
+        """Minimally "load" an FCPXML like Resolve would.
+
+        Name from the timelineName option (unless the pool is told the
+        import was renamed), frame rate and resolution from the <format>
+        element, one video item per spine asset-clip and one audio item per
+        connected (lane-carrying) asset-clip — enough for the finishing
+        steps (fps read-back, titles, canvas crop) to run against it.
+        """
+        import xml.etree.ElementTree as ET
+        from fractions import Fraction
+
+        name = str((options or {}).get("timelineName") or "Imported")
+        if self.import_rename:
+            name = self.import_rename
+        fps = "24"
+        settings: dict[str, str] = {}
+        video_items: list = []
+        audio_items: list = []
+        if content:
+            root = ET.fromstring(content)
+            fmt = root.find("resources/format")
+            if fmt is not None:
+                frame_dur = fmt.get("frameDuration", "")
+                if frame_dur.endswith("s"):
+                    fps = f"{float(1 / Fraction(frame_dur[:-1])):g}"
+                if fmt.get("width"):
+                    settings["timelineResolutionWidth"] = fmt.get("width")
+                if fmt.get("height"):
+                    settings["timelineResolutionHeight"] = fmt.get("height")
+            spine = root.find(".//spine")
+            for clip_el in spine.findall("asset-clip") if spine is not None else []:
+                video_items.append(
+                    FakeTimelineClip(
+                        {"name": clip_el.get("name")},
+                        set_property_result=self.append_clip_property_result,
+                    )
+                )
+                for connected in clip_el.findall("asset-clip"):
+                    audio_items.append(
+                        FakeTimelineClip(
+                            {
+                                "name": connected.get("name"),
+                                "lane": connected.get("lane"),
+                            }
+                        )
+                    )
+        if self.imported_timeline_fps is not None:
+            fps = self.imported_timeline_fps
+        if self.imported_timeline_resolution is not None:
+            width, height = self.imported_timeline_resolution
+            settings["timelineResolutionWidth"] = str(width)
+            settings["timelineResolutionHeight"] = str(height)
+        timeline = FakeTimeline(
+            name=name,
+            fps=fps,
+            start_frame=0,
+            video_tracks=[video_items],
+            audio_tracks=[audio_items],
+        )
+        timeline._settings.update(settings)
+        return timeline
 
     def ImportMedia(self, paths: list[str]):
         self.import_calls.append(list(paths))
@@ -458,6 +563,20 @@ def make_bridge(
 ) -> tuple[ResolveBridge, FakeProject]:
     project = FakeProject(timelines=timelines, current=current)
     return ResolveBridge(FakeResolve(project)), project
+
+
+def build_append(bridge: ResolveBridge, *args, **kwargs) -> str:
+    """build_timeline_from_plan pinned to the clip-by-clip append flow.
+
+    The historical build-flow tests below assert the append path's exact
+    behavior (ImportMedia calls, AppendToTimeline frames, gapless
+    fallbacks). That path is now ``mode="append"`` — still fully supported
+    as the forced mode and as the hybrid build's automatic fallback — so
+    these tests pin it explicitly and keep every assertion byte-identical.
+    The hybrid default has its own test battery further down.
+    """
+    kwargs.setdefault("mode", "append")
+    return bridge.build_timeline_from_plan(*args, **kwargs)
 
 
 def standard_timeline() -> FakeTimeline:
@@ -699,7 +818,7 @@ def make_plan() -> MontagePlan:
 def test_build_timeline_from_plan_at_24fps() -> None:
     bridge, project = make_bridge([standard_timeline()])
     pool = project.media_pool
-    name = bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+    name = build_append(bridge, make_plan(), fps=24.0)
     assert name == "Monteur Montage"
     assert pool.created_timeline_names == ["Monteur Montage"]
 
@@ -726,7 +845,7 @@ def test_build_timeline_from_plan_at_24fps() -> None:
 def test_build_timeline_from_plan_at_25fps() -> None:
     bridge, project = make_bridge([standard_timeline()])
     pool = project.media_pool
-    bridge.build_timeline_from_plan(make_plan(), fps=25.0)
+    build_append(bridge, make_plan(), fps=25.0)
     frames = [(c["startFrame"], c["endFrame"]) for c in pool.appended]
     assert frames == [(25, 74), (15, 39), (125, 149), (0, 99)]
 
@@ -735,7 +854,7 @@ def test_build_timeline_from_plan_uniquifies_name() -> None:
     taken = FakeTimeline(name="Monteur Montage", start_frame=0)
     taken2 = FakeTimeline(name="Monteur Montage 2", start_frame=0)
     bridge, project = make_bridge([taken, taken2])
-    name = bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+    name = build_append(bridge, make_plan(), fps=24.0)
     assert name == "Monteur Montage 3"
     assert project.media_pool.created_timeline_names == ["Monteur Montage 3"]
     assert bridge.list_timelines() == [
@@ -745,7 +864,7 @@ def test_build_timeline_from_plan_uniquifies_name() -> None:
 
 def test_build_timeline_from_plan_custom_name() -> None:
     bridge, _ = make_bridge([standard_timeline()])
-    assert bridge.build_timeline_from_plan(make_plan(), 24.0, name="Holiday") == "Holiday"
+    assert build_append(bridge, make_plan(), 24.0, name="Holiday") == "Holiday"
 
 
 def test_build_timeline_falls_back_to_name_matching() -> None:
@@ -759,7 +878,7 @@ def test_build_timeline_falls_back_to_name_matching() -> None:
         FakePoolClip("/elsewhere/song.wav", with_file_path=False),
         FakePoolClip("/elsewhere/extra.mov", with_file_path=False),
     ]
-    name = bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+    name = build_append(bridge, make_plan(), fps=24.0)
     assert name == "Monteur Montage"
     assert pool.appended[0]["mediaPoolItem"].path == "/elsewhere/a.mov"
     assert pool.appended[3]["mediaPoolItem"].path == "/elsewhere/song.wav"
@@ -769,7 +888,7 @@ def test_build_timeline_import_none_raises() -> None:
     bridge, project = make_bridge([standard_timeline()])
     project.media_pool.import_media_result = None
     with pytest.raises(MonteurResolveError) as excinfo:
-        bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+        build_append(bridge, make_plan(), fps=24.0)
     assert "/media/a.mov" in str(excinfo.value)
 
 
@@ -777,7 +896,7 @@ def test_build_timeline_import_empty_raises() -> None:
     bridge, project = make_bridge([standard_timeline()])
     project.media_pool.import_media_result = []
     with pytest.raises(MonteurResolveError):
-        bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+        build_append(bridge, make_plan(), fps=24.0)
 
 
 def test_build_timeline_unmatched_path_raises() -> None:
@@ -790,7 +909,7 @@ def test_build_timeline_unmatched_path_raises() -> None:
         FakePoolClip("/media/unrelated2.mov"),
     ]
     with pytest.raises(MonteurResolveError) as excinfo:
-        bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+        build_append(bridge, make_plan(), fps=24.0)
     assert "/music/song.wav" in str(excinfo.value)
 
 
@@ -798,7 +917,7 @@ def test_build_timeline_append_failure_raises() -> None:
     bridge, project = make_bridge([standard_timeline()])
     project.media_pool.fail_append = True
     with pytest.raises(MonteurResolveError) as excinfo:
-        bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+        build_append(bridge, make_plan(), fps=24.0)
     assert "append" in str(excinfo.value)
 
 
@@ -808,7 +927,7 @@ def test_build_timeline_append_failure_raises() -> None:
 def test_build_timeline_canvas_cine_sets_resolution_and_crop() -> None:
     bridge, project = make_bridge([standard_timeline()])
     warnings: list[str] = []
-    name = bridge.build_timeline_from_plan(
+    name = build_append(bridge, 
         make_plan(), fps=24.0, canvas="cine-uhd", warnings=warnings
     )
     assert name == "Monteur Montage"
@@ -837,7 +956,7 @@ def test_build_timeline_canvas_cine_sets_resolution_and_crop() -> None:
 def test_build_timeline_canvas_uhd_sets_resolution_and_fill() -> None:
     bridge, project = make_bridge([standard_timeline()])
     warnings: list[str] = []
-    bridge.build_timeline_from_plan(
+    build_append(bridge, 
         make_plan(), fps=24.0, canvas="uhd", warnings=warnings
     )
     created = project._timelines[-1]
@@ -857,7 +976,7 @@ def test_build_timeline_canvas_uhd_sets_resolution_and_fill() -> None:
 
 def test_build_timeline_without_canvas_touches_no_settings() -> None:
     bridge, project = make_bridge([standard_timeline()])
-    bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+    build_append(bridge, make_plan(), fps=24.0)
     created = project._timelines[-1]
     # Only the frame-rate pin: no canvas means no resolution/scaling calls.
     assert created.settings_set == [
@@ -872,7 +991,7 @@ def test_build_timeline_without_canvas_touches_no_settings() -> None:
 def test_build_timeline_unknown_canvas_raises_before_any_resolve_work() -> None:
     bridge, project = make_bridge([standard_timeline()])
     with pytest.raises(ValueError) as excinfo:
-        bridge.build_timeline_from_plan(make_plan(), fps=24.0, canvas="imax")
+        build_append(bridge, make_plan(), fps=24.0, canvas="imax")
     message = str(excinfo.value)
     assert "unknown canvas 'imax'" in message
     assert "cine-uhd" in message  # the valid presets are listed
@@ -891,7 +1010,7 @@ def test_build_timeline_canvas_falls_back_to_project_setting() -> None:
     bridge, project = make_bridge([standard_timeline()])
     project.media_pool = RefusesSettingsPool(project)
     warnings: list[str] = []
-    bridge.build_timeline_from_plan(
+    build_append(bridge, 
         make_plan(), fps=24.0, canvas="hd", warnings=warnings
     )
     # The project-level fallback took the resolution — no warning.
@@ -913,7 +1032,7 @@ def test_build_timeline_canvas_refused_everywhere_warns_and_succeeds() -> None:
     project.media_pool = RefusesSettingsPool(project)
     project.set_setting_result = False  # project level refuses too
     warnings: list[str] = []
-    name = bridge.build_timeline_from_plan(
+    name = build_append(bridge, 
         make_plan(), fps=24.0, canvas="cine-uhd", warnings=warnings
     )
     assert name == "Monteur Montage"  # non-fatal by design
@@ -933,7 +1052,7 @@ def test_build_timeline_canvas_crop_failures_warn_once_summarized() -> None:
     bridge, project = make_bridge([standard_timeline()])
     project.media_pool.append_clip_property_result = False  # items refuse
     warnings: list[str] = []
-    name = bridge.build_timeline_from_plan(
+    name = build_append(bridge, 
         make_plan(), fps=24.0, canvas="cine", warnings=warnings
     )
     assert name == "Monteur Montage"
@@ -963,7 +1082,7 @@ def test_build_timeline_places_filed_cues_on_the_sfx_track() -> None:
     bridge, project = make_bridge([standard_timeline()])
     pool = project.media_pool
     warnings: list[str] = []
-    bridge.build_timeline_from_plan(
+    build_append(bridge, 
         make_plan_with_elements(), fps=24.0, warnings=warnings
     )
     assert warnings == []
@@ -987,7 +1106,7 @@ def test_build_timeline_places_filed_cues_on_the_sfx_track() -> None:
 
 def test_build_timeline_sfx_track_is_a3_in_mix_mode() -> None:
     bridge, project = make_bridge([standard_timeline()])
-    bridge.build_timeline_from_plan(
+    build_append(bridge, 
         make_plan_with_elements(), fps=24.0, audio="mix"
     )
     sfx = project.media_pool.appended[4:]
@@ -997,7 +1116,7 @@ def test_build_timeline_sfx_track_is_a3_in_mix_mode() -> None:
 def test_build_timeline_without_filed_cues_imports_once() -> None:
     # The compatibility bar: no filed cues -> exactly the old single import.
     bridge, project = make_bridge([standard_timeline()])
-    bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+    build_append(bridge, make_plan(), fps=24.0)
     assert len(project.media_pool.import_calls) == 1
 
 
@@ -1011,7 +1130,7 @@ def test_build_timeline_sfx_append_failures_warn_once() -> None:
     bridge, project = make_bridge([standard_timeline()])
     project.media_pool = SfxRejectingPool(project)
     warnings: list[str] = []
-    name = bridge.build_timeline_from_plan(
+    name = build_append(bridge, 
         make_plan_with_elements(), fps=24.0, warnings=warnings
     )
     assert name == "Monteur Montage"  # per-cue failures NEVER fail the build
@@ -1032,7 +1151,7 @@ def test_build_timeline_sfx_import_miss_warns_once() -> None:
     bridge, project = make_bridge([standard_timeline()])
     project.media_pool = ElementlessPool(project)
     warnings: list[str] = []
-    bridge.build_timeline_from_plan(
+    build_append(bridge, 
         make_plan_with_elements(), fps=24.0, warnings=warnings
     )
     assert len([w for w in warnings if "sound-element" in w]) == 1
@@ -1044,7 +1163,7 @@ def test_build_timeline_sfx_skipped_when_placement_rejected() -> None:
     bridge, project = make_bridge([standard_timeline()])
     project.media_pool.reject_record_placement = True
     warnings: list[str] = []
-    bridge.build_timeline_from_plan(
+    build_append(bridge, 
         make_plan_with_elements(), fps=24.0, warnings=warnings
     )
     # gapless appends would land the elements at the wrong times — skipped,
@@ -1323,7 +1442,7 @@ def test_build_timeline_from_plan_inserts_titles_at_plan_time() -> None:
     bridge, project = make_bridge([standard_timeline()])
     plan = trailer_plan()
     titles = resolve.titles_from_plan(plan, texts=["ONE", "TWO"])
-    bridge.build_timeline_from_plan(plan, fps=25.0, titles=titles)
+    build_append(bridge, plan, fps=25.0, titles=titles)
     created = project._timelines[-1]  # the montage timeline (now current)
     assert created.inserted_fusion_titles == ["Text+", "Text+"]
     # A title track was added above the montage footage.
@@ -1343,7 +1462,7 @@ def test_build_timeline_gapless_fallback_shifts_titles_and_warns() -> None:
     plan = trailer_plan()
     titles = resolve.titles_from_plan(plan, texts=["ONE", "TWO"])
     warnings: list[str] = []
-    bridge.build_timeline_from_plan(plan, fps=25.0, titles=titles, warnings=warnings)
+    build_append(bridge, plan, fps=25.0, titles=titles, warnings=warnings)
     # Every appended clip fell back to the gapless form (no recordFrame).
     assert all("recordFrame" not in c for c in project.media_pool.appended)
     created = project._timelines[-1]
@@ -1378,7 +1497,7 @@ def test_build_timeline_uses_clip_native_frame_space() -> None:
         return items
 
     pool.ImportMedia = import_media
-    bridge.build_timeline_from_plan(make_plan(), fps=25.0)
+    build_append(bridge, make_plan(), fps=25.0)
     video = pool.appended[:3]
     # 1.0-3.0s at 50 fps from the TC anchor; record positions at 25 fps.
     assert (video[0]["startFrame"], video[0]["endFrame"]) == (
@@ -1402,7 +1521,7 @@ def test_build_timeline_music_starts_at_the_plans_song_window() -> None:
     bridge, project = make_bridge([standard_timeline()])
     plan = make_plan()
     plan.music_start = 42.0
-    bridge.build_timeline_from_plan(plan, fps=25.0)
+    build_append(bridge, plan, fps=25.0)
     music = project.media_pool.appended[-1]
     assert music["mediaType"] == 2
     # 42.0s into the song at 25 fps (audio has no FPS property -> timeline
@@ -1433,7 +1552,7 @@ def test_build_timeline_tiles_without_one_frame_gaps() -> None:
             ),
         ],
     )
-    bridge.build_timeline_from_plan(plan, fps=25.0)
+    build_append(bridge, plan, fps=25.0)
     video = project.media_pool.appended[:3]
     # Record positions and source lengths tile exactly: each item's record
     # frame plus its frame count is the next item's record frame.
@@ -1461,7 +1580,7 @@ def test_build_timeline_repositions_at_the_timelines_real_fps() -> None:
 
     pool.CreateEmptyTimeline = create
     warnings: list[str] = []
-    bridge.build_timeline_from_plan(make_plan(), fps=25.0, warnings=warnings)
+    build_append(bridge, make_plan(), fps=25.0, warnings=warnings)
     video = pool.appended[:3]
     # Record positions and source frames in 50 fps: 0/2/3 s -> 0/100/150.
     assert [c["recordFrame"] for c in video] == [0, 100, 150]
@@ -1482,7 +1601,7 @@ def test_build_timeline_record_base_uses_timeline_start_frame() -> None:
         return timeline
 
     pool.CreateEmptyTimeline = create
-    bridge.build_timeline_from_plan(make_plan(), fps=25.0)
+    build_append(bridge, make_plan(), fps=25.0)
     assert [c["recordFrame"] for c in pool.appended] == [
         90000, 90050, 90075, 90000,
     ]
@@ -1490,7 +1609,7 @@ def test_build_timeline_record_base_uses_timeline_start_frame() -> None:
 
 def test_build_timeline_from_plan_without_titles_adds_none() -> None:
     bridge, project = make_bridge([standard_timeline()])
-    bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+    build_append(bridge, make_plan(), fps=24.0)
     assert project._timelines[-1].inserted_fusion_titles == []
 
 
@@ -2881,12 +3000,12 @@ class _FakeBuildBridge:
 
     def build_timeline_from_plan(
         self, plan, fps, name="Monteur Montage", titles=None, canvas=None,
-        warnings=None, audio="music",
+        warnings=None, audio="music", mode="hybrid",
     ):
         self.calls.append(
             {
                 "plan": plan, "fps": fps, "name": name, "titles": titles,
-                "canvas": canvas, "audio": audio,
+                "canvas": canvas, "audio": audio, "mode": mode,
             }
         )
         if warnings is not None:
@@ -2903,6 +3022,9 @@ def build_plan_request(plan=None, **overrides) -> dict:
         "name": "Monteur Montage",
         "titles": None,
         "canvas": None,
+        # The historical worker tests assert the append flow's exact
+        # behavior; the hybrid default has its own wire tests.
+        "mode": "append",
     }
     request.update(overrides)
     return request
@@ -4267,9 +4389,331 @@ def test_build_creates_the_sfx_audio_track() -> None:
         SfxCue(time=1.0, duration=0.5, kind="impact", query="hit",
                note="drop", file="/sfx/hit.wav"),
     ]
-    bridge.build_timeline_from_plan(plan, fps=24.0)
+    build_append(bridge, plan, fps=24.0)
     created = project._timelines[-1]
     # One audio track existed (the music append created it); the SFX
     # placement added the second.
     assert "audio" in created.added_tracks
     assert created.GetTrackCount("audio") >= 2
+
+
+# --- hybrid build: FCPXML import + API finishing ----------------------------------
+
+
+def hybrid_plan() -> MontagePlan:
+    """A plan exercising everything only the timeline FILE can carry.
+
+    A dissolve into the second entry, head/tail black fades, the trailer
+    dips (real gaps) and a placed SFX element (its own audio lane).
+    """
+    from monteur.montage import SfxCue
+
+    plan = trailer_plan()
+    plan.fade_in = 0.5
+    plan.fade_out = 1.0
+    plan.entries[1].transition = 0.5
+    plan.sfx = [
+        SfxCue(1.0, 0.8, "impact", "hit", "on the drop", file="/sfx/hit.wav"),
+    ]
+    return plan
+
+
+def test_hybrid_build_imports_the_written_fcpxml() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    pool = project.media_pool
+    warnings: list[str] = []
+    name = bridge.build_timeline_from_plan(
+        hybrid_plan(), fps=25.0, warnings=warnings
+    )
+    assert name == "Monteur Montage"
+    assert warnings == []
+    # ONE timeline-file import, with the documented options.
+    assert len(pool.timeline_import_calls) == 1
+    call = pool.timeline_import_calls[0]
+    assert call["options"]["timelineName"] == "Monteur Montage"
+    assert call["options"]["importSourceClips"] is True
+    # Best-effort media linking: the folder of the first clip.
+    assert call["options"]["sourceClipsPath"] == "/media"
+    # The temp FCPXML existed (non-empty) at import time and is gone now.
+    assert call["existed"] is True
+    assert call["size"] > 0
+    assert not os.path.exists(call["path"])
+    # NOTHING was placed clip-by-clip: no media imports, no appends, no
+    # empty timeline — the file already carries the montage, the music
+    # AND the placed SFX element (no double-placing).
+    assert pool.import_calls == []
+    assert pool.appended == []
+    assert pool.created_timeline_names == []
+
+
+def test_hybrid_fcpxml_carries_dissolves_fades_and_audio_lanes() -> None:
+    import xml.etree.ElementTree as ET
+
+    bridge, project = make_bridge([standard_timeline()])
+    pool = project.media_pool
+    bridge.build_timeline_from_plan(hybrid_plan(), fps=25.0)
+    # The fake captured the file content before the bridge deleted it.
+    root = ET.fromstring(pool.imported_fcpxml[0])
+    spine = root.find(".//spine")
+    # Head fade, the plan's dissolve, tail fade — in spine order.
+    transitions = spine.findall("transition")
+    assert [t.get("name") for t in transitions] == ["Cross Dissolve"] * 3
+    # The montage's clips are in the spine, with real black gaps: the head
+    # fade shift, the two trailer dips, and the tail fade gap.
+    assert len(spine.findall("asset-clip")) == 3
+    assert len(spine.findall("gap")) == 4
+    # All audio lanes made it: the music bed on lane -1 (role "music") and
+    # the placed SFX element on lane -2 (role "effects").
+    connected = spine.findall("asset-clip/asset-clip")
+    lanes = {c.get("lane"): c.get("audioRole") for c in connected}
+    assert lanes == {"-1": "music", "-2": "effects"}
+
+
+def test_hybrid_titles_land_unshifted_at_plan_time() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    plan = trailer_plan()
+    titles = resolve.titles_from_plan(plan, texts=["ONE", "TWO"])
+    name = bridge.build_timeline_from_plan(plan, fps=25.0, titles=titles)
+    assert name == "Monteur Montage"
+    imported = project._timelines[-1]
+    assert imported.GetName() == "Monteur Montage"
+    # The bridge made the import current before finishing it.
+    assert project.GetCurrentTimeline() is imported
+    assert imported.inserted_fusion_titles == ["Text+", "Text+"]
+    first, second = imported.created_title_items
+    # The imported timeline HAS the real gaps: titles land at their
+    # plan-time positions UNSHIFTED (2.6s -> 65, 5.0s -> 125 at 25 fps).
+    assert (first.start, first.end) == (65, 65 + 50)
+    assert (second.start, second.end) == (125, 125 + 50)
+    assert first._comp._tools[0].inputs["StyledText"] == "ONE"
+    assert second._comp._tools[0].inputs["StyledText"] == "TWO"
+
+
+def test_hybrid_canvas_verifies_resolution_and_always_crops() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    warnings: list[str] = []
+    bridge.build_timeline_from_plan(
+        trailer_plan(), fps=25.0, canvas="cine-uhd", warnings=warnings
+    )
+    imported = project._timelines[-1]
+    # The FCPXML format element already carried 3840x1608 — verified, so
+    # the resolution is never re-set (no SetSetting fights, no fallback).
+    assert imported.GetSetting("timelineResolutionWidth") == "3840"
+    assert imported.GetSetting("timelineResolutionHeight") == "1608"
+    assert imported.settings_set == []
+    assert project.settings_set == []
+    # The per-clip crop is what the file CANNOT carry: always applied.
+    video_items = imported._tracks["video"][0]
+    assert len(video_items) == 3
+    assert all(item.properties == [("Scaling", 1)] for item in video_items)
+    assert warnings == []
+
+
+def test_hybrid_canvas_sets_resolution_when_import_differs() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    # This Resolve ignored the file's format element (or a project default
+    # won): the verify step sees the mismatch and sets it explicitly.
+    project.media_pool.imported_timeline_resolution = (1920, 1080)
+    bridge.build_timeline_from_plan(trailer_plan(), fps=25.0, canvas="cine-uhd")
+    imported = project._timelines[-1]
+    assert imported.settings_set == [
+        ("useCustomSettings", "1"),
+        ("timelineResolutionWidth", "3840"),
+        ("timelineResolutionHeight", "1608"),
+    ]
+
+
+def test_hybrid_refusal_falls_back_to_append_with_one_warning() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    pool = project.media_pool
+    pool.fail_timeline_import = True  # ImportTimelineFromFile returns None
+    warnings: list[str] = []
+    name = bridge.build_timeline_from_plan(
+        make_plan(), fps=24.0, warnings=warnings
+    )
+    assert name == "Monteur Montage"
+    # The append flow ran, unchanged: media imported, clips + music appended.
+    assert pool.import_calls == [["/media/a.mov", "/media/b.mov", "/music/song.wav"]]
+    assert len(pool.appended) == 4
+    assert pool.created_timeline_names == ["Monteur Montage"]
+    # Exactly ONE honest warning about the degradation.
+    fallback = [w for w in warnings if "refused the timeline file import" in w]
+    assert len(fallback) == 1
+    assert "clip-by-clip" in fallback[0]
+    assert "dissolves and fades" in fallback[0]
+    # The hybrid attempt really offered a non-empty file, then cleaned up.
+    call = pool.timeline_import_calls[0]
+    assert call["existed"] is True and call["size"] > 0
+    assert not os.path.exists(call["path"])
+
+
+def test_hybrid_import_exception_falls_back_to_append() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    pool = project.media_pool
+    pool.raise_on_timeline_import = RuntimeError("importer exploded")
+    warnings: list[str] = []
+    name = bridge.build_timeline_from_plan(
+        make_plan(), fps=24.0, warnings=warnings
+    )
+    assert name == "Monteur Montage"
+    assert len(pool.appended) == 4  # clip-by-clip build took over
+    assert len([w for w in warnings if "refused the timeline file import" in w]) == 1
+    # The temp file is removed on the exception path too.
+    call = pool.timeline_import_calls[0]
+    assert call["existed"] is True
+    assert not os.path.exists(call["path"])
+
+
+def test_hybrid_import_returning_true_uses_current_timeline() -> None:
+    # Older Resolve builds return only a truthy flag; the import becomes
+    # the current timeline and the finishing steps run against that.
+    bridge, project = make_bridge([standard_timeline()])
+    project.media_pool.import_returns_bool = True
+    plan = trailer_plan()
+    titles = resolve.titles_from_plan(plan, texts=["ONE", "TWO"])
+    name = bridge.build_timeline_from_plan(plan, fps=25.0, titles=titles)
+    assert name == "Monteur Montage"
+    imported = project._timelines[-1]
+    assert imported.inserted_fusion_titles == ["Text+", "Text+"]
+    assert project.media_pool.appended == []
+
+
+def test_hybrid_returns_the_renamed_timeline_name() -> None:
+    # Resolve may rename an import; the REAL name is what callers get back.
+    bridge, project = make_bridge([standard_timeline()])
+    project.media_pool.import_rename = "Monteur Montage 1"
+    name = bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+    assert name == "Monteur Montage 1"
+
+
+def test_hybrid_uniquifies_the_timeline_name() -> None:
+    taken = FakeTimeline(name="Monteur Montage", start_frame=0)
+    bridge, project = make_bridge([taken])
+    name = bridge.build_timeline_from_plan(make_plan(), fps=24.0)
+    assert name == "Monteur Montage 2"
+    options = project.media_pool.timeline_import_calls[0]["options"]
+    assert options["timelineName"] == "Monteur Montage 2"
+
+
+def test_hybrid_fps_mismatch_trusts_the_import_and_warns() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    # The imported timeline reports 50 fps although the plan says 25: the
+    # import wins — titles are placed in the timeline's own currency.
+    project.media_pool.imported_timeline_fps = "50"
+    plan = trailer_plan()
+    titles = resolve.titles_from_plan(plan, texts=["ONE", "TWO"])
+    warnings: list[str] = []
+    bridge.build_timeline_from_plan(
+        plan, fps=25.0, titles=titles, warnings=warnings
+    )
+    mismatch = [w for w in warnings if "50 fps" in w]
+    assert len(mismatch) == 1
+    assert "trusting the import" in mismatch[0]
+    imported = project._timelines[-1]
+    first, second = imported.created_title_items
+    assert (first.start, first.end) == (130, 130 + 100)  # 2.6s/2.0s at 50 fps
+    assert (second.start, second.end) == (250, 250 + 100)
+    # No SetSetting fight: the rate was only read back, never written.
+    assert ("timelineFrameRate", "25") not in imported.settings_set
+
+
+def test_mode_append_never_touches_the_file_import() -> None:
+    # mode="append" forced = exactly today's clip-by-clip behavior; the
+    # whole historical append battery above runs pinned to it, and the file
+    # import is never even attempted.
+    bridge, project = make_bridge([standard_timeline()])
+    warnings: list[str] = []
+    name = bridge.build_timeline_from_plan(
+        make_plan(), fps=24.0, warnings=warnings, mode="append"
+    )
+    assert name == "Monteur Montage"
+    assert project.media_pool.timeline_import_calls == []
+    assert warnings == []
+    assert len(project.media_pool.appended) == 4
+
+
+def test_unknown_build_mode_raises_before_any_resolve_work() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    with pytest.raises(ValueError) as excinfo:
+        bridge.build_timeline_from_plan(make_plan(), fps=24.0, mode="teleport")
+    assert "unknown build mode 'teleport'" in str(excinfo.value)
+    assert project.media_pool.timeline_import_calls == []
+    assert project.media_pool.import_calls == []
+    assert project.media_pool.created_timeline_names == []
+
+
+# --- hybrid build: worker + isolated wire format -----------------------------------
+
+
+def test_worker_build_plan_mode_defaults_to_hybrid(monkeypatch) -> None:
+    # Backward-compatible wire: an old request WITHOUT a "mode" key builds
+    # hybrid — the default upgrade reaches every caller automatically.
+    from monteur import _resolve_worker
+
+    fake = _FakeBuildBridge()
+    monkeypatch.setattr(resolve, "connect", lambda app=None: fake)
+    request = build_plan_request()
+    del request["mode"]
+    response = _resolve_worker.handle("build_plan", request)
+    assert response["ok"] is True
+    assert fake.calls[0]["mode"] == "hybrid"
+    # An explicit null means the same thing.
+    request = build_plan_request(mode=None)
+    _resolve_worker.handle("build_plan", request)
+    assert fake.calls[1]["mode"] == "hybrid"
+
+
+def test_worker_build_plan_forwards_mode(monkeypatch) -> None:
+    from monteur import _resolve_worker
+
+    fake = _FakeBuildBridge()
+    monkeypatch.setattr(resolve, "connect", lambda app=None: fake)
+    response = _resolve_worker.handle("build_plan", build_plan_request(mode="append"))
+    assert response["ok"] is True
+    assert fake.calls[0]["mode"] == "append"
+
+
+def test_worker_build_plan_unknown_mode_is_clean(monkeypatch) -> None:
+    from monteur import _resolve_worker
+
+    bridge, _ = make_bridge([standard_timeline()])
+    monkeypatch.setattr(resolve, "connect", lambda app=None: bridge)
+    response = _resolve_worker.handle(
+        "build_plan", build_plan_request(mode="teleport")
+    )
+    assert response["ok"] is False
+    assert "unknown build mode 'teleport'" in response["error"]
+
+
+def test_worker_main_build_plan_hybrid_wire_round_trip(monkeypatch, capsys) -> None:
+    # The real wire with the hybrid default: stdin JSON (no "mode" key) ->
+    # real fake bridge -> the FCPXML was imported, nothing was appended.
+    from monteur import _resolve_worker
+
+    bridge, project = make_bridge([standard_timeline()])
+    monkeypatch.setattr(resolve, "connect", lambda app=None: bridge)
+    request = build_plan_request()
+    del request["mode"]
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+    code = _resolve_worker.main(["build_plan"])
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data == {"ok": True, "timeline": "Monteur Montage", "warnings": []}
+    pool = project.media_pool
+    assert len(pool.timeline_import_calls) == 1
+    assert pool.appended == []
+    assert pool.created_timeline_names == []
+
+
+def test_build_plan_isolated_sends_mode(monkeypatch) -> None:
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["input"] = kwargs.get("input")
+        return _completed(0, json.dumps({"ok": True, "timeline": "T", "warnings": []}))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    resolve.build_plan_isolated(make_plan(), fps=25.0)
+    assert json.loads(captured["input"])["mode"] == "hybrid"  # the default
+    resolve.build_plan_isolated(make_plan(), fps=25.0, mode="append")
+    assert json.loads(captured["input"])["mode"] == "append"

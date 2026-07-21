@@ -66,7 +66,9 @@ The worker commands are ``status``, ``info`` (crash-free environment
 forensics), ``load_test`` (staged, line-per-stage native load test that
 pinpoints WHERE a crash happens — see :func:`load_test_isolated`),
 ``read_timeline``, ``build_plan`` (build a montage timeline from a
-serialized MontagePlan, optionally with Fusion titles) and ``render``
+serialized MontagePlan, optionally with Fusion titles — by default the
+hybrid FCPXML-import build that carries dissolves/fades/audio lanes,
+falling back to the clip-by-clip append build) and ``render``
 (streamed: drive Resolve's Deliver engine to a finished video file — see
 :func:`render_isolated`; the child only MONITORS the render, so killing it
 on a timeout leaves Resolve rendering on) — see
@@ -1404,6 +1406,7 @@ def build_plan_isolated(
     titles: list[dict] | None = None,
     canvas: str | None = None,
     audio: str = "music",
+    mode: str = "hybrid",
     timeout: float = 180.0,
 ) -> dict:
     """Build a montage timeline in Resolve from a child process; never raises.
@@ -1426,8 +1429,16 @@ def build_plan_isolated(
     built timeline like the file exports do — cinemascope presets also set
     "scale full frame with crop" on the footage; see
     :meth:`ResolveBridge.build_timeline_from_plan`. ``audio`` (the montage
-    audio mode, default ``"music"``) only picks the SFX track for placed
-    sound elements — index 3 in "mix", index 2 otherwise.
+    audio mode, default ``"music"``) picks the sound layout of the built
+    timeline (and, in the append fallback, the SFX track for placed sound
+    elements — index 3 in "mix", index 2 otherwise). ``mode`` (default
+    ``"hybrid"``) picks the build path: hybrid writes the plan as FCPXML
+    and imports it (dissolves, fades, gaps and every audio lane arrive
+    with the file), then finishes titles/canvas via the API, falling back
+    to the clip-by-clip ``"append"`` build — with one warning — when this
+    Resolve refuses the import; ``mode="append"`` forces the old
+    clip-by-clip build outright. Workers without a ``"mode"`` key in the
+    request behave as hybrid (backward-compatible wire format).
 
     Returns ``{"ok": True, "timeline": <created name>, "warnings": [...]}``
     — ``warnings`` are the non-fatal messages from
@@ -1452,6 +1463,7 @@ def build_plan_isolated(
         "titles": titles,
         "canvas": canvas,
         "audio": audio,
+        "mode": mode,
     }
     ok, payload = _run_worker("build_plan", timeout, request=request)
     if not ok:
@@ -2083,28 +2095,63 @@ class ResolveBridge:
         canvas: str | None = None,
         warnings: list[str] | None = None,
         audio: str = "music",
+        mode: str = "hybrid",
     ) -> str:
         """Build a montage timeline in Resolve from a MontagePlan.
 
-        Steps: import the distinct clip paths (plus the music) into the media
-        pool, create an empty timeline (name uniquified with " 2", " 3", ...
-        on a clash), append one video clip per plan entry at its record
-        position (``recordFrame`` = timeline start + record seconds, so the
-        plan's smash-to-black dips exist as REAL black gaps), then append the
-        music as one audio clip at record 0. Source ranges are expressed in
-        each media pool item's OWN frame space — the clip's native frame
-        rate and its embedded start timecode (see :func:`_clip_native_fps` /
-        :func:`_clip_source_offset`); timeline-fps frames would make Resolve
-        clamp every cut to a sliver. When a Resolve build rejects positioned
-        placement, the build falls back to the old gapless append (dips then
-        only exist in the file exports; one warning). Returns the created
-        timeline's name.
+        ``mode`` picks how the timeline gets into Resolve:
+
+        * ``"hybrid"`` (default) — write the plan as an FCPXML file
+          (:func:`monteur.montage.montage_to_timeline` +
+          :func:`monteur.io.save_timeline`, to a temp file that is always
+          removed) and import it via
+          ``MediaPool.ImportTimelineFromFile(path, {"timelineName": ...,
+          "importSourceClips": True, "sourceClipsPath": <first clip's
+          folder>})``, then finish the imported timeline through the API:
+          Fusion Text+ titles (:meth:`add_titles`, plan-time positions —
+          the imported timeline has the REAL black gaps), the canvas
+          (resolution verified against what the file's format element
+          already set; the per-clip Scaling crop/fill is ALWAYS applied —
+          the one canvas piece the file cannot carry) and a frame-rate
+          read-back (the file carries the rate; a differing imported rate
+          is trusted, with one warning). Nothing is appended clip-by-clip
+          and no music/SFX appends happen — the file already carries every
+          audio lane, the dissolves, and the head/tail black fades.
+        * ``"append"`` — the clip-by-clip API build described below. Also
+          the automatic FALLBACK when this Resolve build refuses the file
+          import (None return or an exception): one warning says so, and
+          the append flow runs unchanged.
+
+        The honest capability matrix behind the hybrid synthesis: the
+        FCPXML file carries dissolves, head/tail black fades, real gaps
+        and all audio lanes, but not Fusion Text+ (titles exist only as
+        markers there); the append build places everything positionally
+        and creates real Text+/crop/resolution, but Resolve's scripting
+        API has no way to add transitions or fades. Hybrid = the file's
+        transitions + the API's finishing, in one click.
+
+        Append flow: import the distinct clip paths (plus the music) into
+        the media pool, create an empty timeline (name uniquified with
+        " 2", " 3", ... on a clash), append one video clip per plan entry
+        at its record position (``recordFrame`` = timeline start + record
+        seconds, so the plan's smash-to-black dips exist as REAL black
+        gaps), then append the music as one audio clip at record 0. Source
+        ranges are expressed in each media pool item's OWN frame space —
+        the clip's native frame rate and its embedded start timecode (see
+        :func:`_clip_native_fps` / :func:`_clip_source_offset`);
+        timeline-fps frames would make Resolve clamp every cut to a
+        sliver. When a Resolve build rejects positioned placement, the
+        build falls back to the old gapless append (dips then only exist
+        in the file exports; one warning). Returns the created timeline's
+        name in every mode.
 
         ``titles`` (optional, ``[{"start": s, "duration": s, "text": ...}]``
         in plan-time seconds — e.g. from :func:`titles_from_plan`; the caller
         decides the texts, nothing is derived from the plan) are inserted via
         :meth:`add_titles` after the montage is built, at their plan-time
-        positions (the black gaps are real). Only in the gapless fallback are
+        positions (the black gaps are real — in hybrid because the file
+        carries them, in append thanks to recordFrame placement). Only in
+        the gapless append fallback are
         title starts shifted earlier by the summed lengths of the dips before
         them, so each title still lands exactly on its act change. Title
         placement problems are non-fatal (see add_titles); pass a
@@ -2118,7 +2165,9 @@ class ResolveBridge:
         timeline resolution is set via timeline-level custom settings
         (``SetSetting("useCustomSettings", "1")`` then the
         ``timelineResolution*`` keys, string values), falling back to the
-        project-level ``SetSetting`` when the timeline refuses; and every
+        project-level ``SetSetting`` when the timeline refuses — in hybrid
+        the resolution is VERIFIED first and only set when the imported
+        format didn't already match; and every
         video-track-1 clip gets explicit scaling — "scale full frame with
         crop" for the cinemascope presets (16:9 footage fills the 2.39:1
         frame instead of showing side bars), "fill" for everything else
@@ -2126,10 +2175,12 @@ class ResolveBridge:
         Both steps are defensive: refusals are summarized into ``warnings``
         (one message per step, never per clip) and the build still succeeds.
 
-        Limitation: dissolves and the black fade-in/out cannot be created
-        here — Resolve's scripting API has no way to add transitions. Those
-        exist only in the FCPXML export; import the file (or drag a fade in
-        Resolve by hand) when you want them.
+        Limitation: dissolves and the head/tail black fades can only reach
+        Resolve through the timeline FILE — the scripting API has no way
+        to add transitions. The default hybrid mode carries them (that is
+        its point); the append mode (or the automatic fallback when the
+        import is refused) cannot, and the honest warning points at the
+        downloaded/exported file instead.
 
         Imported media-pool items are mapped back to file paths by, in order:
         ``GetClipProperty("File Path")``; positional order when Resolve
@@ -2138,7 +2189,9 @@ class ResolveBridge:
         MonteurResolveError.
 
         SFX cues carrying a concrete ``file`` (placed sound elements,
-        :mod:`monteur.elements`) are appended after the music as audio
+        :mod:`monteur.elements`) are appended (append mode only — the
+        hybrid file already carries them as connected clips) after the
+        music as audio
         clips at ``recordFrame = timeline start + cue.time`` on the SFX
         track — audio track index 3 in ``audio="mix"`` (song on A1,
         camera sound on A2), index 2 otherwise, the same layout
@@ -2152,6 +2205,11 @@ class ResolveBridge:
         summarized warning (gapless appends would land them at the wrong
         times).
         """
+        if mode not in ("hybrid", "append"):
+            raise ValueError(
+                f"unknown build mode {mode!r}; valid modes: hybrid, append"
+            )
+        canvas_size: tuple[int, int] | None = None
         if canvas is not None:
             # Lazy import: monteur.montage pulls in numpy, and this module
             # must stay importable by the stdlib-only worker bootstrap.
@@ -2163,6 +2221,18 @@ class ResolveBridge:
                     f"unknown canvas {canvas!r}; valid canvases: {valid}"
                 )
             canvas_size = CANVASES[canvas]
+        if mode == "hybrid":
+            built = self._build_via_timeline_import(
+                plan, fps, name, titles, canvas, canvas_size, warnings, audio
+            )
+            if built is not None:
+                return built
+            if warnings is not None:
+                warnings.append(
+                    "this Resolve build refused the timeline file import — "
+                    "built clip-by-clip instead; dissolves and fades live "
+                    "in the downloaded file."
+                )
         entries = sorted(plan.entries, key=lambda e: e.record_start)
         paths: list[str] = []
         for entry in entries:
@@ -2309,6 +2379,120 @@ class ResolveBridge:
             )
         return timeline_name
 
+    def _build_via_timeline_import(
+        self,
+        plan,
+        fps: float,
+        name: str,
+        titles: list[dict] | None,
+        canvas: str | None,
+        canvas_size: tuple[int, int] | None,
+        warnings: list[str] | None,
+        audio: str,
+    ) -> str | None:
+        """The hybrid build: write the plan as FCPXML, import it, finish it.
+
+        Returns the imported timeline's REAL name (Resolve may rename), or
+        ``None`` when this Resolve build (or the file generation itself)
+        refused — the caller then emits the one honest warning and falls
+        back to the append flow. Everything up to and including the import
+        is guarded: any exception means "this path is unavailable", never a
+        crash — the append fallback either succeeds or raises the real
+        error. The temp file is removed in every outcome. Exceptions from
+        the FINISHING steps (titles/canvas) propagate exactly like the
+        append flow's do: at that point the timeline exists and rebuilding
+        it clip-by-clip would duplicate it.
+        """
+        import tempfile
+
+        try:
+            # Lazy, worker-safe imports (montage pulls in numpy; this module
+            # must stay importable by the stdlib-only worker bootstrap).
+            from monteur.io import save_timeline
+            from monteur.montage import montage_to_timeline
+
+            pool = self._media_pool()
+            existing = set(self.list_timelines())
+            timeline_name = name
+            suffix = 2
+            while timeline_name in existing:
+                timeline_name = f"{name} {suffix}"
+                suffix += 1
+            file_timeline = montage_to_timeline(
+                plan,
+                fps=fps,
+                name=timeline_name,
+                audio=audio,
+                canvas=canvas if canvas is not None else "hd",
+            )
+            entries = sorted(plan.entries, key=lambda e: e.record_start)
+            source_dir = os.path.dirname(
+                entries[0].clip_path if entries else (plan.music_path or "")
+            )
+            options: dict = {
+                "timelineName": timeline_name,
+                "importSourceClips": True,
+            }
+            if source_dir:
+                # Best-effort media linking: point Resolve at the folder of
+                # the first clip (montage folders hold the footage together).
+                options["sourceClipsPath"] = source_dir
+            handle, tmp_path = tempfile.mkstemp(
+                prefix="monteur-timeline-", suffix=".fcpxml"
+            )
+            os.close(handle)
+            try:
+                save_timeline(file_timeline, tmp_path)
+                imported = pool.ImportTimelineFromFile(tmp_path, options)
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+        except Exception:  # noqa: BLE001 - refusal, not failure: fall back
+            return None
+        if not imported:
+            return None
+        # Resolve the created timeline: recent builds return the timeline
+        # object, older ones only a truthy flag — the import then made it
+        # the current timeline.
+        timeline = imported if hasattr(imported, "GetName") else None
+        if timeline is None:
+            try:
+                timeline = self._project().GetCurrentTimeline()
+            except Exception:  # noqa: BLE001 - unlocatable -> fall back
+                timeline = None
+        if timeline is None:
+            return None
+        try:
+            actual_name = str(timeline.GetName() or "") or timeline_name
+        except Exception:  # noqa: BLE001 - a nameless timeline keeps ours
+            actual_name = timeline_name
+        try:
+            # add_titles works on the CURRENT timeline; most Resolve builds
+            # already switched to the import, this makes sure of it.
+            self._project().SetCurrentTimeline(timeline)
+        except Exception:  # noqa: BLE001 - best-effort; import stays current
+            pass
+        # The FCPXML format element carries the rate: read back and CONFIRM
+        # instead of fighting — a differing imported rate wins (titles are
+        # placed in the timeline's own currency) with one warning.
+        fps = _confirm_timeline_fps(timeline, fps, warnings)
+        if titles:
+            # The imported timeline HAS the real black gaps, so titles land
+            # at their plan-time positions unshifted.
+            self.add_titles(titles, fps, warnings=warnings)
+        if canvas is not None and canvas_size is not None:
+            # The file's format element usually set the resolution already —
+            # verify instead of blindly setting. The per-clip Scaling
+            # crop/fill is the part the file cannot carry: ALWAYS applied.
+            self._apply_canvas(
+                timeline, canvas, canvas_size,
+                warnings if warnings is not None else [],
+                verify_resolution=True,
+            )
+        return actual_name
+
     def _append_sfx_elements(
         self,
         pool: Any,
@@ -2403,6 +2587,7 @@ class ResolveBridge:
         canvas: str,
         size: tuple[int, int],
         warnings: list[str],
+        verify_resolution: bool = False,
     ) -> None:
         """Size a freshly built timeline to a canvas preset, defensively.
 
@@ -2411,15 +2596,24 @@ class ResolveBridge:
         ``timelineResolutionWidth``/``Height`` keys — Resolve's SetSetting
         takes STRING values), falling back to the project-level
         ``SetSetting`` when the timeline refuses (older Resolve versions
-        return False there). Then every clip on video track 1 gets explicit
+        return False there). With ``verify_resolution`` (the hybrid build's
+        imported timelines) the resolution is READ first and only set when
+        it doesn't already match — the FCPXML format element usually
+        carried it. Then every clip on video track 1 gets explicit
         scaling: ``SetProperty("Scaling", 1)`` ("scale full frame with
         crop") for the cinemascope presets, ``("Scaling", 3)`` (fill) for
         everything else, so mismatched footage never sits small in the
-        frame or behind bars. Every refusal is non-fatal: each step
+        frame or behind bars — always applied, verified or not (the one
+        canvas piece a timeline file cannot carry). Every refusal is
+        non-fatal: each step
         contributes at most ONE summarized message to ``warnings``.
         """
         width, height = size
-        if not _set_timeline_resolution(timeline, width, height):
+        already = (
+            verify_resolution
+            and _timeline_resolution(timeline) == (width, height)
+        )
+        if not already and not _set_timeline_resolution(timeline, width, height):
             if not _set_project_resolution(self._project(), width, height):
                 warnings.append(
                     f"could not set the timeline resolution to "
@@ -2531,6 +2725,56 @@ def _pin_timeline_fps(timeline: Any, fps: float, warnings) -> float:
             )
         return actual
     return fps
+
+
+def _confirm_timeline_fps(timeline: Any, fps: float, warnings) -> float:
+    """Read back an IMPORTED timeline's frame rate; trust it, warn on drift.
+
+    The hybrid build's counterpart of :func:`_pin_timeline_fps`: the FCPXML
+    format element already carried the rate, so this only CONFIRMS — no
+    SetSetting, no fighting the import. When the imported timeline reports
+    a rate different from the plan's, the import wins: the returned rate is
+    what the caller positions titles in, and one warning says so. An
+    unreadable rate is trusted to be the requested one.
+    """
+    getter = getattr(timeline, "GetSetting", None)
+    actual: float | None = None
+    if callable(getter):
+        try:
+            raw = str(getter("timelineFrameRate") or "").split()
+            actual = float(raw[0]) if raw else None
+        except Exception:  # noqa: BLE001 - unreadable rate: trust the request
+            actual = None
+    if actual and actual > 0 and abs(actual - fps) > 1e-3:
+        if warnings is not None:
+            warnings.append(
+                f"the imported timeline runs at {actual:g} fps, not the "
+                f"plan's {fps:g} — trusting the import; titles were placed "
+                f"at {actual:g} fps."
+            )
+        return actual
+    return fps
+
+
+def _timeline_resolution(timeline: Any) -> tuple[int, int] | None:
+    """The timeline's current resolution via GetSetting, or None.
+
+    Used by the hybrid build to VERIFY the resolution the FCPXML format
+    element set instead of blindly re-setting it. Fully guarded — a missing
+    GetSetting, an exception or unparseable values simply mean "unknown"
+    (None), and the caller falls back to setting explicitly.
+    """
+    getter = getattr(timeline, "GetSetting", None)
+    if not callable(getter):
+        return None
+    try:
+        width = int(str(getter("timelineResolutionWidth") or "").strip())
+        height = int(str(getter("timelineResolutionHeight") or "").strip())
+    except Exception:  # noqa: BLE001 - unreadable resolution = unknown
+        return None
+    if width > 0 and height > 0:
+        return (width, height)
+    return None
 
 
 def _set_timeline_resolution(timeline: Any, width: int, height: int) -> bool:

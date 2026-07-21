@@ -107,14 +107,20 @@ stdin.
                    | null,                                # optional Fusion titles
          "canvas": <str> | null,                          # optional CANVASES key
                                                           # (e.g. "uhd", "cine-uhd")
-         "audio": <str> | null}                           # montage audio mode:
-                                                          # picks the SFX track for
-                                                          # placed sound elements
+         "audio": <str> | null,                           # montage audio mode
                                                           # (default "music")
+         "mode": "hybrid" | "append" | null}              # build path; null or a
+                                                          # missing key = "hybrid"
+                                                          # (backward compatible)
 
     Rebuilds the MontagePlan (``plan_from_dict``) and runs
     ``connect().build_timeline_from_plan(plan, fps=fps, name=name,
-    titles=titles, canvas=canvas, audio=audio)`` — a canvas sets the
+    titles=titles, canvas=canvas, audio=audio, mode=mode)`` — the default
+    hybrid mode writes the plan as FCPXML and imports it (dissolves, black
+    fades, gaps and all audio lanes ride in with the file), then finishes
+    titles/canvas via the API, falling back to the clip-by-clip append
+    build (one warning) when this Resolve refuses the import;
+    ``"append"`` forces the clip-by-clip build. A canvas sets the
     timeline resolution, and the cinemascope presets also put "scale full
     frame with crop" on the footage. Response on success::
 
@@ -282,16 +288,20 @@ def handle(command: str, request: dict) -> dict:
         titles = request.get("titles") or None
         canvas = request.get("canvas") or None
         audio = str(request.get("audio") or "music")
+        # Backward-compatible wire format: requests without a "mode" key
+        # (older callers) get the hybrid default.
+        mode = str(request.get("mode") or "hybrid")
         warnings: list[str] = []
         try:
             bridge = connect()
             timeline_name = bridge.build_timeline_from_plan(
                 plan, fps=fps, name=name, titles=titles, canvas=canvas,
-                warnings=warnings, audio=audio,
+                warnings=warnings, audio=audio, mode=mode,
             )
             return {"ok": True, "timeline": timeline_name, "warnings": warnings}
         except (MonteurResolveError, ValueError) as exc:
-            # ValueError: an unknown canvas preset — a clean, handled failure.
+            # ValueError: an unknown canvas preset or build mode — a clean,
+            # handled failure.
             return {"ok": False, "error": str(exc)}
 
     return {"error": f"Unknown worker command: {command!r}"}
