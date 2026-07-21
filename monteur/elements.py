@@ -40,13 +40,22 @@ Extends a plan's SFX layer (:class:`monteur.montage.SfxCue`) with concrete
 files — every decision deterministic:
 
 * existing cues get the best-matching file: kind match (impact->impact,
-  whoosh->whoosh, riser->riser, sub-drop->braam; ambience cues stay
-  search-query markers), best duration fit, confidence as the tiebreak.
-  A filed cue's duration becomes the file's play length, clamped to the
-  montage end (with a trim note when the file is longer than fits).
-* **riser**: one through the build ENDING exactly on the drop — start =
-  drop − riser duration, clamped into the montage; the riser whose length
-  best fits the run-up wins. Only when the music has an in-range drop.
+  whoosh->whoosh, sub-drop->braam; ambience cues stay search-query
+  markers), best duration fit, confidence as the tiebreak. A filed cue's
+  duration becomes the file's play length, clamped to the montage end
+  (with a trim note when the file is longer than fits).
+* **riser — one per TENSION RAMP, never one per boundary**: a riser ends
+  exactly on each ramp target — the plan's delayed music entry
+  (``plan.music_in`` > 0: the cold open's riser ends where the song
+  slams in — THE trailer moment), the first in-range drop, or (with
+  neither) the biggest act change read from ``plan.phases`` (so no-music
+  plans get their riser too). Integrity beats coverage: a riser plays at
+  least ``max(2 s, 70% of its file)`` or a shorter riser is preferred;
+  when none fits the run-up the spot is skipped with an honest note — a
+  9.5 s riser trimmed to 0.2 s kills the whole idea of a riser. One cue
+  = one contiguous play of one file, always. Act-change riser cues away
+  from the ramps stay search-query markers; title dips get braams and
+  impacts, not risers.
 * **impact**: ON the drop, and right AFTER each smash-to-black dip (the
   hit out of the black).
 * **whoosh**: on the fast-cut spots the plan already marked —
@@ -54,12 +63,16 @@ files — every decision deterministic:
   those cues, it never invents new whoosh spots.
 
 Style-aware density (the plan's own ``style "<key>"`` note): **trailer**
-and **music_video** run the full program (all whoosh cues, dip impacts);
+and **music_video** run the full program (all whoosh cues, dip impacts —
+with a well-stocked library a 35 s trailer lands roughly 5-7 accents);
 **travel** stays sparse (one whoosh at most, none within 4 s before the
 drop — the stutter burst lives there); **wedding** is minimal (no
 whooshes, no dip impacts, and nothing at all in the quiet opening/outro
-shares of the arc). Two rules always hold: no two placed elements of the
-same kind ever overlap, and no file is reused within 10 seconds.
+shares of the arc). Reuse spacing is per KIND, not blanket: the same
+impact file may hit again after ~4 s, the same whoosh after ~6 s,
+braams after ~6 s, risers once per ramp — different files of the same
+kind may sit closer. One rule always holds: no two placed elements of
+the same kind ever overlap.
 
 The returned notes say what was placed where; the caller decides whether
 they join ``plan.notes``. :func:`carry_element_files` is the revision
@@ -76,7 +89,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from monteur.media import AUDIO_EXTENSIONS, MonteurMediaError, find_ffmpeg, read_audio
-from monteur.montage import MontagePlan, SfxCue
+from monteur.montage import _PHASE_ENERGY, MontagePlan, SfxCue
 from monteur.music import MusicAnalysis
 
 CACHE_FILENAME = ".monteur-elements.json"
@@ -110,8 +123,18 @@ _WHOOSH_EDGE_MAX = 0.6  # whoosh: edges at most this share of the peak
 _CONFIDENCE_FLOOR = 0.1  # a classified element is never 0-confidence
 
 # --- assignment tuning -------------------------------------------------------------
-_REUSE_GAP = 10.0  # s: the same file never plays twice within this
-_NEAR_CUE = 0.5  # s: an existing cue this close to the drop is "the drop cue"
+# Per-kind same-FILE spacing (seconds) — replaces the old blanket 10 s rule.
+# Impacts may hit again quickly (two dips in a row want two hits), whooshes
+# breathe a little longer, braams ring out; risers are once-per-ramp by
+# construction, the gap only guards pathological plans. Unknown kinds keep
+# the old conservative gap.
+_KIND_REUSE_GAP = {"impact": 4.0, "whoosh": 6.0, "braam": 6.0, "riser": 8.0}
+_DEFAULT_REUSE_GAP = 10.0
+# Riser integrity: a riser plays at least max(_RISER_MIN_PLAY seconds,
+# _RISER_MIN_SHARE of its file) or it is not placed there at all.
+_RISER_MIN_PLAY = 2.0
+_RISER_MIN_SHARE = 0.7
+_NEAR_CUE = 0.5  # s: an existing cue this close to a target is "that cue"
 
 _EPS = 1e-6
 
@@ -405,6 +428,49 @@ def _drop_in_plan(plan: MontagePlan, music: MusicAnalysis | None) -> float | Non
     return None
 
 
+def _ramp_targets(
+    plan: MontagePlan, music: MusicAnalysis | None
+) -> list[tuple[float, str]]:
+    """The plan's tension ramps: ``(target time, wording)`` — one riser each.
+
+    A ramp is a run-up that DESERVES a riser ending exactly on its target:
+
+    * the delayed music entry (``plan.music_in`` > 0) — the cold open's
+      riser ends where the song slams in,
+    * the first in-range drop (music present),
+    * else the single biggest act change by nominal phase energy
+      (``plan.phases`` — this is what anchors risers on no-music plans;
+      no drops exist without music).
+
+    Near-coincident targets (within 1 s) collapse into the earlier one, so
+    a music entry sitting on the drop gets ONE riser, not two.
+    """
+    targets: list[tuple[float, str]] = []
+    music_in = getattr(plan, "music_in", 0.0) or 0.0
+    if _EPS < music_in < plan.duration - _EPS:
+        targets.append((music_in, "the music entry"))
+    drop = _drop_in_plan(plan, music)
+    if drop is not None:
+        targets.append((drop, "the drop"))
+    else:
+        phases = list(getattr(plan, "phases", []) or [])
+        best: tuple[float, str] | None = None
+        best_jump = 0.0
+        for (_s, end, label), (_s2, _e2, nxt) in zip(phases, phases[1:]):
+            if nxt == label:
+                continue
+            jump = _PHASE_ENERGY.get(nxt, 0.5) - _PHASE_ENERGY.get(label, 0.5)
+            if jump > best_jump + _EPS:
+                best_jump, best = jump, (end, f"the {nxt} start")
+        if best is not None and _EPS < best[0] < plan.duration - _EPS:
+            targets.append(best)
+    deduped: list[tuple[float, str]] = []
+    for t, why in sorted(targets):
+        if all(abs(t - u) > 1.0 for u, _ in deduped):
+            deduped.append((t, why))
+    return deduped
+
+
 def assign_elements(
     plan: MontagePlan, music: MusicAnalysis | None, elements: list[SoundElement]
 ) -> list[str]:
@@ -444,8 +510,9 @@ def assign_elements(
     def in_quiet(t: float) -> bool:
         return any(lo - _EPS <= t < hi - _EPS for lo, hi in quiet)
 
-    def reusable(path: str, t: float) -> bool:
-        return all(abs(t - u) >= _REUSE_GAP - _EPS for u in uses.get(path, []))
+    def reusable(element: SoundElement, t: float) -> bool:
+        gap = _KIND_REUSE_GAP.get(element.kind, _DEFAULT_REUSE_GAP)
+        return all(abs(t - u) >= gap - _EPS for u in uses.get(element.path, []))
 
     def overlaps_same_kind(kind: str, t: float, length: float) -> bool:
         for cue in plan.sfx:
@@ -462,7 +529,7 @@ def assign_elements(
         element_kind: str, at: float, target: float | None = None
     ) -> SoundElement | None:
         candidates = [
-            e for e in pool if e.kind == element_kind and reusable(e.path, at)
+            e for e in pool if e.kind == element_kind and reusable(e, at)
         ]
         if not candidates:
             return None
@@ -493,54 +560,73 @@ def assign_elements(
 
     drop = _drop_in_plan(plan, music)
 
-    # 1. The riser through the build, ENDING exactly on the drop. An existing
-    #    riser cue already aimed at the drop is re-timed to the file; without
-    #    one a new cue is added. The riser whose length best fits the run-up
-    #    wins; a longer file is clamped (it still ends on the drop).
-    if drop is not None and not in_quiet(drop):
-        candidates = [
-            e
-            for e in pool
-            if e.kind == "riser" and reusable(e.path, max(0.0, drop - e.duration))
-        ]
-        candidates.sort(key=lambda e: (abs(e.duration - drop), -e.confidence, e.path))
-        chosen = candidates[0] if candidates else None
-        if chosen is not None and not overlaps_same_kind(
-            "riser", max(0.0, drop - chosen.duration), min(chosen.duration, drop)
-        ):
-            cue = next(
-                (
-                    c
-                    for c in plan.sfx
-                    if c.kind == "riser"
-                    and not c.file
-                    and abs(c.time + c.duration - drop) <= _NEAR_CUE
-                ),
-                None,
-            )
-            if cue is None:
-                cue = SfxCue(
-                    time=0.0,
-                    duration=0.0,
-                    kind="riser",
-                    query=Path(chosen.path).stem,
-                    note="riser into the drop",
+    # 1. One riser per TENSION RAMP, ENDING exactly on its target: the
+    #    delayed music entry, the drop, or the biggest act change (see
+    #    _ramp_targets). Integrity first: the riser must play at least
+    #    max(_RISER_MIN_PLAY, _RISER_MIN_SHARE x its file) — a shorter
+    #    riser is preferred over butchering a long one, and with none
+    #    fitting the spot is skipped with an honest note. One cue = one
+    #    contiguous play of one file; an existing riser cue aimed at the
+    #    target is re-timed to the file, otherwise a cue is added.
+    for target, why in _ramp_targets(plan, music):
+        if in_quiet(target):
+            continue
+        run_up = target  # seconds available before the target
+        risers = [e for e in pool if e.kind == "riser"]
+        fitting: list[tuple[SoundElement, float]] = []
+        for e in risers:
+            play = min(e.duration, run_up)
+            if play + _EPS < max(_RISER_MIN_PLAY, _RISER_MIN_SHARE * e.duration):
+                continue
+            if not reusable(e, target - play):
+                continue
+            fitting.append((e, play))
+        if not fitting:
+            if risers:
+                shortest = min(e.duration for e in risers)
+                notes.append(
+                    f"riser skipped at {target:.1f}s ({why}): the "
+                    f"{run_up:.1f}s run-up would cut every riser below "
+                    f"{_RISER_MIN_SHARE:.0%} of its length "
+                    f"(shortest file is {shortest:.1f}s)"
                 )
-                plan.sfx.append(cue)
-            length = min(chosen.duration, drop)  # clamped into the montage
-            cue.time = drop - length
-            cue.duration = length
-            cue.file = chosen.path
-            uses.setdefault(chosen.path, []).append(cue.time)
-            line = (
-                f"riser {Path(chosen.path).name} ends on the drop at {drop:.1f}s"
+            continue
+        fitting.sort(
+            key=lambda ep: (abs(ep[0].duration - run_up), -ep[0].confidence, ep[0].path)
+        )
+        chosen, play = fitting[0]
+        start = target - play
+        if overlaps_same_kind("riser", start, play):
+            continue
+        cue = next(
+            (
+                c
+                for c in plan.sfx
+                if c.kind == "riser"
+                and not c.file
+                and abs(c.time + c.duration - target) <= _NEAR_CUE
+            ),
+            None,
+        )
+        if cue is None:
+            cue = SfxCue(
+                time=start,
+                duration=play,
+                kind="riser",
+                query=Path(chosen.path).stem,
+                note=f"riser into {why}",
             )
-            if chosen.duration > drop + _EPS:
-                line += (
-                    f" — trimmed to {length:.1f}s "
-                    f"(the file is {chosen.duration:.1f}s)"
-                )
-            notes.append(line)
+            plan.sfx.append(cue)
+        cue.time = start
+        cue.duration = play
+        cue.file = chosen.path
+        uses.setdefault(chosen.path, []).append(cue.time)
+        line = f"riser {Path(chosen.path).name} ends on {why} at {target:.1f}s"
+        if chosen.duration > play + _EPS:
+            line += (
+                f" — trimmed to {play:.1f}s (the file is {chosen.duration:.1f}s)"
+            )
+        notes.append(line)
 
     # 2. An impact ON the drop: the plan's own drop/climax impact cue gets the
     #    best-fitting file (kind match + duration fit); without one a new cue
@@ -593,13 +679,16 @@ def assign_elements(
 
     # 4. The remaining planned cues, in time order: kind match + duration fit.
     #    Whooshes respect the style budget and the stutter guard before the
-    #    drop; ambience cues have no snippet kind and stay markers.
+    #    drop; ambience cues have no snippet kind and stay markers. Riser
+    #    cues are NEVER filed here — one riser per tension ramp (step 1),
+    #    not one per act boundary; the other riser cues stay honest
+    #    search-query markers.
     whoosh_budget = rules.max_whooshes
     for cue in sorted(plan.sfx, key=lambda c: (c.time, c.kind)):
         if cue.file:
             continue
         element_kind = _CUE_TO_ELEMENT.get(cue.kind)
-        if element_kind is None or in_quiet(cue.time):
+        if element_kind is None or cue.kind == "riser" or in_quiet(cue.time):
             continue
         if cue.kind == "whoosh":
             if whoosh_budget <= 0:
@@ -613,29 +702,6 @@ def assign_elements(
                 continue  # the stutter burst owns the run-in to the drop
         element = pick(element_kind, cue.time, target=cue.duration)
         if element is None:
-            continue
-        if cue.kind == "riser":
-            # A riser builds INTO its boundary: keep the cue's END anchored
-            # and let the file run up to it (clamped at the montage start).
-            end = cue.time + cue.duration
-            length = min(element.duration, end)
-            if length <= _EPS or overlaps_same_kind("riser", end - length, length):
-                continue
-            trimmed = element.duration > end + _EPS
-            cue.time = end - length
-            cue.duration = length
-            cue.file = element.path
-            uses.setdefault(element.path, []).append(cue.time)
-            line = (
-                f"riser {Path(element.path).name} ends at {end:.1f}s "
-                f"({cue.note or 'act change'})"
-            )
-            if trimmed:
-                line += (
-                    f" — trimmed to {length:.1f}s "
-                    f"(the file is {element.duration:.1f}s)"
-                )
-            notes.append(line)
             continue
         if overlaps_same_kind(
             cue.kind, cue.time, min(element.duration, duration - cue.time)

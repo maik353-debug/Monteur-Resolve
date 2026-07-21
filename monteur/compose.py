@@ -109,9 +109,23 @@ COMPOSE_SCHEMA: dict = {
             "items": {"type": "string"},
             "description": "one short line of reasoning per act",
         },
+        # Optional: seconds into the cut where the music should enter. Must
+        # be one of the dossier's `music_in_candidates`; anything else is
+        # rejected with a note and the engine's own choice stands.
+        "music_in": {
+            "type": "number",
+            "description": (
+                "optional: when the music enters (seconds into the cut) — "
+                "one of the dossier's music_in_candidates"
+            ),
+        },
     },
     "required": ["story", "cast", "titles", "why"],
 }
+
+#: A composer music_in within this many seconds of a candidate snaps to it;
+#: anything further off is an invalid pick (kept the engine's choice).
+_MUSIC_IN_MATCH = 0.75
 
 #: Per-style craft briefs: what a real editor knows about cutting each form.
 #: These are the grammar the montage styles already encode (arcs, dips,
@@ -272,6 +286,13 @@ def compose_context(
     slots ``"locked": true`` in the dossier — the prompt tells Claude to
     compose around them, and :func:`_apply_cast` ignores any cast for
     them regardless. Empty (the default) leaves the dossier unchanged.
+
+    With music, the dossier also carries the adaptive music window:
+    ``music_opening`` (the song's own opening character from
+    :func:`monteur.music.intro_profile`, measured at the cut's source
+    window), ``music_in`` (the engine's decision, 0 = first frame) and
+    ``music_in_candidates`` (the musical entry points the composer may
+    choose between — :func:`monteur.montage.music_window_candidates`).
     """
     chosen = _montage.STYLES.get(style, _montage.STYLES["auto"])
     phases = _phases_for(plan, music, chosen)
@@ -335,7 +356,7 @@ def compose_context(
                 item["group"] = m.group
             inventory.append(item)
 
-    return {
+    context = {
         "style": chosen.key,
         "duration": _r(plan.duration),
         "slots": slots,
@@ -343,6 +364,22 @@ def compose_context(
         "inventory": inventory,
         "vision": _has_vision(reports),
     }
+    if music is not None:
+        from monteur.music import intro_profile
+
+        profile = intro_profile(music, start=plan.music_start)
+        context["music_opening"] = {
+            key: profile[key]
+            for key in ("label", "rel_energy", "onset_density", "low_presence")
+        }
+        context["music_in"] = _r(getattr(plan, "music_in", 0.0) or 0.0)
+        context["music_in_candidates"] = [
+            _r(c["time"])
+            for c in _montage.music_window_candidates(
+                music, phases, music_start=plan.music_start
+            )
+        ]
+    return context
 
 
 def _build_prompt(context: dict, style: str, brief: str) -> str:
@@ -377,6 +414,16 @@ def _build_prompt(context: dict, style: str, brief: str) -> str:
         "inventory is every usable moment):\n"
         + json.dumps(context, ensure_ascii=False)
     )
+    if len(context.get("music_in_candidates") or []) > 1:
+        parts.append(
+            "MUSIC ENTRY: `music_opening` describes how the song itself "
+            "opens; `music_in` is the engine's current choice of when the "
+            "music enters (0 = with the first frame — everything before it "
+            "is a dry cold open carried by sound design). You may override "
+            "it by answering with `music_in` set to one of "
+            "`music_in_candidates` (seconds); omit the field to keep the "
+            "engine's choice."
+        )
     parts.append(
         "Compose the cut:\n"
         "- cast EVERY slot: pick the clip and the `start` second whose "
@@ -424,6 +471,7 @@ def _apply_cast(
     data: dict,
     reports: list[ClipReport],
     locked: set[int] | frozenset[int] = frozenset(),
+    music_in_candidates: list[float] | None = None,
 ) -> None:
     """Apply a parsed composer reply to the plan, in place.
 
@@ -438,6 +486,12 @@ def _apply_cast(
     touched: any cast Claude sends for them is dropped silently — one
     summary note says how many slots the arrangement holds — and a
     missing cast for them is NOT a fallback.
+
+    ``music_in_candidates`` (the dossier's musical entry points) validates
+    an optional composer ``music_in``: the value snaps to the nearest
+    candidate within :data:`_MUSIC_IN_MATCH` seconds and lands in
+    ``plan.music_in`` with a note; anything else keeps the engine's own
+    window with a note saying why.
     """
     by_name: dict[str, ClipReport] = {}
     for report in reports:
@@ -569,6 +623,34 @@ def _apply_cast(
             f"composer: slot {i + 1} kept the heuristic pick ({reason})"
         )
 
+    # Optional composer music entry: valid only against the dossier's own
+    # candidate list, snapped onto the matched candidate.
+    raw_music_in = data.get("music_in")
+    if raw_music_in is not None and music_in_candidates:
+        try:
+            want = float(raw_music_in)
+        except (TypeError, ValueError):
+            want = None
+        matched: float | None = None
+        if want is not None:
+            nearest = min(music_in_candidates, key=lambda t: abs(t - want))
+            if abs(nearest - want) <= _MUSIC_IN_MATCH:
+                matched = float(nearest)
+        if matched is not None:
+            plan.music_in = matched
+            if matched > _EPS:
+                plan.notes.append(
+                    f"composer: music enters at {matched:.1f}s"
+                )
+            else:
+                plan.notes.append("composer: music enters with the first frame")
+        else:
+            plan.notes.append(
+                f"composer: music_in {raw_music_in!r} is not one of the "
+                f"candidates — kept "
+                f"{(getattr(plan, 'music_in', 0.0) or 0.0):.1f}s"
+            )
+
     # Act titles for the dips: aligned by index, "" where Claude gave none.
     if plan.dips:
         texts = [""] * len(plan.dips)
@@ -657,7 +739,15 @@ def compose_montage(
         plan.notes.append(f"composer unavailable: {exc}; heuristic cut")
         return plan
 
-    _apply_cast(plan, data, reports, locked=locked)
+    _apply_cast(
+        plan,
+        data,
+        reports,
+        locked=locked,
+        music_in_candidates=[
+            float(t) for t in context.get("music_in_candidates") or []
+        ],
+    )
     if not context.get("vision"):
         plan.notes.append(
             'no vision labels — run "Let Claude watch your clips" '

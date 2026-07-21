@@ -216,6 +216,25 @@ takes ``audio=``: "music" (song on A1, today's behavior), "mix" (song on
 A1 plus each entry's own audio on A2) or "original" (no song clip; each
 entry's own audio on A1). A no-music plan only renders with "original".
 
+Adaptive music window
+---------------------
+The song does not have to play over the full length: ``plan.music_in`` /
+``plan.music_out`` (record seconds; 0 = full length) carry an adaptive
+music window. The TOOL decides when the music enters — never a rigid
+per-style rule: :func:`decide_music_window` scores the song's own opening
+character (:func:`monteur.music.intro_profile`, measured at the cut's
+source window) against the style's openness to a dry cold open (the
+scoring table sits above the function). An ambient intro starts at 0 in
+every style; a hard, kick-driven intro slams in at the build start (a
+trailer's dry open — and the mismatch penalty delays it under calm styles
+too); "short" always starts at 0. A ``music_window=(in, out)`` kwarg
+overrides (validated + snapped), and the composer may pick one of the
+dossier's candidates. The record<->song mapping never changes — record t
+always plays song time ``music_start + t`` — so every cut stays on the
+beat; the exports simply mute the bed before ``music_in`` (with a short
+musical fade-in at the entry in the ffmpeg renderers), and the SFX layer
+anchors a riser ENDING exactly on the entry.
+
 SFX layer (film mode)
 ---------------------
 ``plan_montage(..., sfx=True)`` plans a sound-design layer on top of the
@@ -300,7 +319,12 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import PurePath
 
 from monteur.model import AUDIO, VIDEO, Clip, Marker, Timeline, seconds_to_frames
-from monteur.music import MusicAnalysis, MusicSection, best_energy_window
+from monteur.music import (
+    MusicAnalysis,
+    MusicSection,
+    best_energy_window,
+    intro_profile,
+)
 from monteur.sift import ClipReport, Moment
 
 CHRONOLOGICAL = "chronological"  # keep footage order (travel/event films)
@@ -705,6 +729,16 @@ class MontagePlan:
     # Drop/chorus impact times in RECORD time (usually 0-3 values) — the
     # strip's accent markers. Written only when music exists and in range.
     drop_marks: list[float] = field(default_factory=list)
+    # --- adaptive music window (all additive; 0 = the full-length default) --
+    # RECORD-time seconds where the music ENTERS (0 = with the first frame)
+    # and where it ENDS (0 = the montage end). The record<->song mapping is
+    # unchanged: record t always plays song time music_start + t — a
+    # non-zero music_in simply mutes the song's first music_in seconds so
+    # the cut opens dry and the music slams in ON the grid. Decided by
+    # :func:`decide_music_window` (or the ``music_window`` override /
+    # the composer); serialized only when set, tolerant like title_texts.
+    music_in: float = 0.0
+    music_out: float = 0.0
 
 
 @dataclass
@@ -2317,6 +2351,157 @@ def _arrangement_cues(
         )
 
 
+# --- adaptive music window (the tool decides when the music enters) -------------
+#
+# Field feedback: "the song always plays over the full length — in a trailer
+# it might only start in part 2, and the TOOL must decide, not a per-style
+# rule". The decision is a SCORE, never a rigid rule:
+#
+#   delay_pull = _WINDOW_INTRO_PULL[intro label] x _WINDOW_STYLE_OPENNESS[style]
+#   music enters late  iff  delay_pull >= _WINDOW_THRESHOLD  (and a musical
+#   candidate exists)
+#
+# Scoring table (the intro label comes from monteur.music.intro_profile,
+# measured at the cut's own source window):
+#
+#   intro \ style   trailer  music_video  auto   travel  wedding  short
+#   ambient (0.0)     0.00      0.00      0.00    0.00     0.00    0.00
+#   moderate (0.4)    0.36      0.30      0.24    0.24     0.22    0.00
+#   hard (1.0)        0.90      0.75      0.60    0.60     0.55    0.00
+#
+# Threshold 0.5: an AMBIENT intro starts at 0 under every style (even a
+# trailer's cold open earns nothing from silencing an ambient pad), a HARD
+# intro is delayed everywhere except "short" (60 seconds has no room for a
+# dry open — the one absolute in the table) — including the calm styles,
+# where the delay is the mismatch penalty (hard music slamming over a calm
+# opening reads wrong). MODERATE intros always start at 0. Styles absent
+# from the table weigh in at the "auto" openness. Candidates are musical:
+# 0.0, the first act boundary and the build start, each snapped to the
+# nearest downbeat (falling back to phrase starts, then beats) in RECORD
+# time; the arc-less "auto" style has no boundaries and always stays at 0.
+
+_WINDOW_INTRO_PULL = {"ambient": 0.0, "moderate": 0.4, "hard": 1.0}
+_WINDOW_STYLE_OPENNESS = {
+    "trailer": 0.9,
+    "music_video": 0.75,
+    "auto": 0.6,
+    "travel": 0.6,
+    "wedding": 0.55,
+    "short": 0.0,
+}
+_WINDOW_THRESHOLD = 0.5
+# A music entry earlier than this is not worth the move — start at 0.
+_WINDOW_MIN_IN = 2.0
+# The music must enter within the first half of the cut, whatever the arc says.
+_WINDOW_MAX_SHARE = 0.5
+# Candidates snap to the nearest downbeat/phrase/beat within this (seconds).
+_WINDOW_SNAP = 1.5
+
+
+def _snap_record_time(
+    music: MusicAnalysis, t: float, *, music_start: float = 0.0, limit: float | None = None
+) -> tuple[float, str]:
+    """Snap a RECORD-time position to the nearest downbeat/phrase/beat.
+
+    Musical positions live in song time; record time shifts by
+    ``music_start``. Returns ``(snapped, kind)`` — the original ``t`` with
+    kind ``""`` when no grid point lies within :data:`_WINDOW_SNAP`.
+    """
+    hi = limit if limit is not None else music.duration - music_start
+    for cand, kind in (
+        (music.downbeats, "downbeat"),
+        (music.phrases, "phrase"),
+        (music.beats, "beat"),
+    ):
+        pts = sorted(p - music_start for p in cand if _EPS < p - music_start < hi - _EPS)
+        if not pts:
+            continue
+        nearest = _nearest(pts, t)
+        if abs(nearest - t) <= _WINDOW_SNAP + _EPS:
+            return nearest, kind
+        # This grid exists but its nearest point is too far — try a denser one.
+    return t, ""
+
+
+def music_window_candidates(
+    music: MusicAnalysis,
+    phases: list[tuple[float, float, str]],
+    *,
+    music_start: float = 0.0,
+) -> list[dict]:
+    """The musical positions where the music could enter, in RECORD time.
+
+    Always contains ``{"time": 0.0, "label": "with the first frame"}``.
+    With arc ``phases``: the first act boundary and the build start (they
+    coincide on the standard arcs), each snapped to the nearest downbeat
+    (fallback: phrase starts, then beats) and kept only when it lands at
+    or after :data:`_WINDOW_MIN_IN` and inside the first
+    :data:`_WINDOW_MAX_SHARE` of the cut. Deterministic and duplicate-free;
+    the composer sees exactly this list in its dossier.
+    """
+    candidates: list[dict] = [{"time": 0.0, "label": "with the first frame", "snap": ""}]
+    if not phases:
+        return candidates
+    duration = phases[-1][1]
+    raw: list[tuple[float, str]] = []
+    build = next((s for s, _e, lab in phases if lab == "build"), None)
+    if build is not None and build > _EPS:
+        raw.append((build, "build start"))
+    if len(phases) > 1:
+        raw.append((phases[0][1], "first act boundary"))
+    seen: list[float] = [0.0]
+    for t, label in raw:
+        snapped, kind = _snap_record_time(
+            music, t, music_start=music_start, limit=duration
+        )
+        if snapped < _WINDOW_MIN_IN - _EPS or snapped > duration * _WINDOW_MAX_SHARE + _EPS:
+            continue
+        if any(abs(snapped - s) <= 0.25 for s in seen):
+            continue
+        seen.append(snapped)
+        candidates.append({"time": snapped, "label": label, "snap": kind})
+    return candidates
+
+
+def decide_music_window(
+    music: MusicAnalysis,
+    style: str,
+    phases: list[tuple[float, float, str]],
+    *,
+    music_start: float = 0.0,
+) -> tuple[float, str]:
+    """When should the music enter? Returns ``(music_in, note)``.
+
+    Implements the scoring table above: the song's own opening character
+    (:func:`monteur.music.intro_profile`, measured at ``music_start`` —
+    the cut's source window) sets the pull toward a delayed entry, the
+    style weighs it, and only a score at/above :data:`_WINDOW_THRESHOLD`
+    delays the music — onto the build start (preferred) or the first act
+    boundary from :func:`music_window_candidates`. ``(0.0, "")`` means
+    the music plays from the first frame; the note (only for a delayed
+    entry) narrates the decision.
+    """
+    candidates = [
+        c for c in music_window_candidates(music, phases, music_start=music_start)
+        if c["time"] > _EPS
+    ]
+    if not candidates:
+        return 0.0, ""
+    profile = intro_profile(music, start=music_start)
+    pull = _WINDOW_INTRO_PULL.get(profile["label"], 0.4) * _WINDOW_STYLE_OPENNESS.get(
+        style, _WINDOW_STYLE_OPENNESS["auto"]
+    )
+    if pull < _WINDOW_THRESHOLD - _EPS:
+        return 0.0, ""
+    chosen = next((c for c in candidates if c["label"] == "build start"), candidates[0])
+    where = chosen["label"] + (f", snapped to {chosen['snap']}" if chosen["snap"] else "")
+    note = (
+        f"music enters at {chosen['time']:.1f}s ({where}): the song opens "
+        f"{profile['label']}, the cut opens dry"
+    )
+    return float(chosen["time"]), note
+
+
 # --- public API ---------------------------------------------------------------
 
 
@@ -2334,6 +2519,7 @@ def plan_montage(
     *,
     sfx: bool = False,
     arrangement: list[dict] | None = None,
+    music_window: tuple[float, float] | list[float] | None = None,
 ) -> MontagePlan:
     """Distribute the best moments across the song, in a cutting style.
 
@@ -2406,6 +2592,19 @@ def plan_montage(
     (the module docstring's SFX layer section has the exact rules and the
     density cap). False leaves ``plan.sfx`` empty and everything else
     byte-identical to before.
+
+    ``music_window`` (keyword-only, default None) overrides the adaptive
+    music-window decision: ``(music_in, music_out)`` in RECORD seconds
+    (0 = "from the first frame" / "to the montage end"). ``music_in`` is
+    snapped to the nearest downbeat/phrase/beat; values outside the cut,
+    a music_out at/before music_in, or a window without music raise
+    ValueError. ``None`` lets :func:`decide_music_window` score it (music
+    present only): an ambient opening keeps the music at 0 in every style,
+    a hard opening delays it onto the build in dramatic (and, as the
+    mismatch penalty, calm) styles, "short" always starts at 0 — the
+    module-level scoring table has the exact numbers. A delayed entry is
+    noted; a 0-entry plan is byte-identical to plans from before the
+    window existed.
     """
     if style not in STYLES:
         valid = ", ".join(sorted(STYLES))
@@ -2422,6 +2621,25 @@ def plan_montage(
         )
     if arrangement is not None and not isinstance(arrangement, list):
         raise ValueError("arrangement must be a list of scene objects")
+    window_override: tuple[float, float] | None = None
+    if music_window is not None:
+        if music is None:
+            raise ValueError("music_window needs music — a no-music plan has no song to delay")
+        try:
+            w_in, w_out = float(music_window[0]), float(music_window[1])
+        except (TypeError, ValueError, IndexError):
+            raise ValueError(
+                "music_window must be (music_in, music_out) in seconds "
+                "(0 = full length)"
+            )
+        if w_in < 0 or w_out < 0:
+            raise ValueError("music_window times must not be negative")
+        if w_out > _EPS and w_out <= w_in + _EPS:
+            raise ValueError(
+                "music_window: music_out must lie after music_in "
+                "(or be 0 for the montage end)"
+            )
+        window_override = (w_in, w_out)
 
     if music is None:
         requested = max_duration
@@ -2621,6 +2839,46 @@ def plan_montage(
         plan.notes.extend(arr_notes)
     used = sum(1 for it in pool if it.uses)
     plan.notes.append(f"{len(slots)} slots filled, {used} of {len(pool)} moments used")
+    # Adaptive music window: the tool decides when the music enters (the
+    # override wins; "auto" has no arc boundaries and always stays at 0).
+    if music is not None:
+        if window_override is not None:
+            w_in, w_out = window_override
+            if w_in >= plan.duration - _EPS:
+                raise ValueError(
+                    f"music_window: music_in {w_in:g}s is at/after the "
+                    f"{plan.duration:.1f}s montage end"
+                )
+            w_out = min(w_out, plan.duration) if w_out > _EPS else 0.0
+            snap_kind = ""
+            if w_in > _EPS:
+                w_in, snap_kind = _snap_record_time(
+                    grid_music, w_in, music_start=0.0, limit=plan.duration
+                )
+            if w_out > _EPS and w_out <= w_in + _EPS:
+                raise ValueError(
+                    "music_window: music_out must lie after music_in "
+                    "(or be 0 for the montage end)"
+                )
+            if w_in > _EPS or w_out > _EPS:
+                plan.music_in = w_in
+                plan.music_out = w_out
+                pieces = []
+                if w_in > _EPS:
+                    entered = f"enters at {w_in:.1f}s"
+                    if snap_kind:
+                        entered += f" (snapped to {snap_kind})"
+                    pieces.append(entered)
+                if w_out > _EPS:
+                    pieces.append(f"ends at {w_out:.1f}s")
+                plan.notes.append("music window: " + ", ".join(pieces) + " (your setting)")
+        else:
+            decided_in, window_note = decide_music_window(
+                music, chosen.key, plan.phases, music_start=music_start
+            )
+            if decided_in > _EPS:
+                plan.music_in = decided_in
+                plan.notes.append(window_note)
     _plan_finishing(plan, entries, grid_music, chosen, phases, transitions)
     if arr_entries:
         _arrangement_boundaries(plan, entries, arr_items, len(arr_entries))
@@ -2891,12 +3149,63 @@ def _plan_sfx(
         )
         room -= 1
 
+    # A delayed music entry IS the tension ramp of the cold open: a riser
+    # cue must END exactly on it (the trailer moment — dry open, riser,
+    # slam). The nearest act-change riser is retimed onto the entry; when
+    # none sits close enough a dedicated cue is added (it is backbone, not
+    # subject to the density cap). monteur.elements anchors the real file
+    # to this cue.
+    if plan.music_in > _EPS:
+        near = min(
+            (c for c in cues if c.kind == "riser"),
+            key=lambda c: abs(c.time + c.duration - plan.music_in),
+            default=None,
+        )
+        if near is not None and abs(near.time + near.duration - plan.music_in) <= 1.0 + _EPS:
+            near.time = max(0.0, plan.music_in - near.duration)
+            near.duration = plan.music_in - near.time
+            near.note += " — into the music entry"
+        else:
+            length = min(_SFX_RISER_MAX, plan.music_in)
+            if length > _EPS:
+                cues.append(
+                    SfxCue(
+                        time=plan.music_in - length,
+                        duration=length,
+                        kind="riser",
+                        query="riser build up",
+                        note="into the music entry",
+                    )
+                )
+
     cues.sort(key=lambda c: c.time)
     plan.sfx = cues
     plan.notes.append(
         f"sfx layer: {len(cues)} cues planned "
         "(markers on the timeline; queries for your SFX library)"
     )
+
+
+def music_window_bounds(plan: MontagePlan) -> tuple[float, float]:
+    """``(music_in, music_end)`` in record seconds, clamped into the montage.
+
+    The one shared reading of the plan's adaptive music window, used by
+    every export surface: ``music_in`` 0 = from the first frame,
+    ``music_out`` 0 = to the montage end; a degenerate window (end at or
+    before start after clamping) falls back to the full length —
+    defensive, a hand-edited plan must never yield a zero-length bed.
+    """
+    duration = max(0.0, plan.duration)
+    w_in = min(max(getattr(plan, "music_in", 0.0) or 0.0, 0.0), duration)
+    w_out = getattr(plan, "music_out", 0.0) or 0.0
+    w_end = min(w_out, duration) if w_out > _EPS else duration
+    if w_end <= w_in + _EPS:
+        return 0.0, duration
+    return w_in, w_end
+
+
+# Backwards-friendly private alias used inside this module.
+_music_window_bounds = music_window_bounds
 
 
 def montage_to_timeline(
@@ -2910,7 +3219,12 @@ def montage_to_timeline(
 
     ``audio`` picks what plays under the pictures:
 
-    * ``"music"`` (default) — the song on A1, exactly as before.
+    * ``"music"`` (default) — the song on A1, exactly as before. A plan
+      with an adaptive music window (``music_in`` / ``music_out``) places
+      the A1 clip at record ``music_in`` for ``(music_out or duration) -
+      music_in`` seconds, sourced from ``music_start + music_in`` — the
+      record<->song mapping is unchanged, the bed is simply silent under
+      the dry open.
     * ``"mix"`` — the song on A1 PLUS one A2 audio clip per video entry
       carrying the clip's own sound (same source range and source_name as
       the video entry), e.g. engine sound recorded straight into the clips.
@@ -3053,11 +3367,19 @@ def montage_to_timeline(
         timeline.metadata["fade_out_frames"] = seconds_to_frames(plan.fade_out, fps)
     if audio != "original":
         music_stem = PurePath(plan.music_path).stem
-        duration_frames = seconds_to_frames(plan.duration, fps)
+        # Adaptive music window: the song enters at record music_in and ends
+        # at music_out (0 = the montage end). The record<->song mapping is
+        # untouched — record t always plays song time music_start + t — so
+        # every cut stays on the beat; a delayed entry just mutes the bed
+        # under the dry open.
+        w_in, w_out = _music_window_bounds(plan)
+        rec_in_frames = seconds_to_frames(w_in, fps)
+        rec_out_frames = seconds_to_frames(w_out, fps)
+        duration_frames = rec_out_frames - rec_in_frames
         # The music clip starts at the song offset the cut was built against,
         # so a short montage plays the song's strongest passage rather than
         # its intro.
-        music_in = seconds_to_frames(plan.music_start, fps)
+        music_in = seconds_to_frames(plan.music_start + w_in, fps)
         # Keep the source range inside the song: if independent rounding of the
         # offset and the length would read one frame past the end, shift the
         # start back so the clip length stays exact and never over-reads the
@@ -3073,8 +3395,8 @@ def montage_to_timeline(
                 kind=AUDIO,
                 source_in=music_in,
                 source_out=music_in + duration_frames,
-                record_in=0,
-                record_out=duration_frames,
+                record_in=rec_in_frames,
+                record_out=rec_out_frames,
                 source_name=music_stem,
                 source_file=plan.music_path,
                 # Music has no embedded start timecode we can probe here, so
@@ -3083,7 +3405,9 @@ def montage_to_timeline(
                 metadata={"media_duration_seconds": plan.song_duration},
             )
         )
-        timeline.markers.append(Marker(frame=0, name=f"Cut to {music_stem}"))
+        timeline.markers.append(
+            Marker(frame=rec_in_frames, name=f"Cut to {music_stem}")
+        )
     for dip_index, (dip_start, dip_len) in enumerate(plan.dips):
         # A composed act title (monteur.compose) names the marker outright;
         # otherwise, when the vision pass labeled the shot that hits out of
@@ -3226,6 +3550,12 @@ def plan_to_dict(plan: MontagePlan) -> dict:
     }
     if plan.title_texts:
         data["title_texts"] = [str(text) for text in plan.title_texts]
+    # The adaptive music window is written only when set (tolerant like
+    # title_texts): full-length plans serialize exactly as before.
+    if plan.music_in > 0:
+        data["music_in"] = plan.music_in
+    if plan.music_out > 0:
+        data["music_out"] = plan.music_out
     # Timeline-strip metadata (phases / music_energy / beat_marks /
     # drop_marks) is written only when set — exactly like title_texts, so
     # plans saved before the strip existed (and plans without music or
@@ -3283,6 +3613,10 @@ def plan_from_dict(data: dict) -> MontagePlan:
             music_energy=[float(v) for v in data.get("music_energy", [])],
             beat_marks=[float(t) for t in data.get("beat_marks", [])],
             drop_marks=[float(t) for t in data.get("drop_marks", [])],
+            # Tolerant like title_texts: plans saved before the adaptive
+            # music window existed simply have neither key.
+            music_in=float(data.get("music_in", 0.0)),
+            music_out=float(data.get("music_out", 0.0)),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"malformed plan JSON: {exc}") from exc

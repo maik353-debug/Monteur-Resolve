@@ -83,6 +83,13 @@ class MusicAnalysis:
     downbeats: list[float] = field(default_factory=list)  # bar starts ("the one")
     phrases: list[float] = field(default_factory=list)  # phrase starts (4/8 bars)
     drops: list[float] = field(default_factory=list)  # drop/chorus impact points
+    # Low-band presence per 0.5 s window: the share (0..1) of that window's
+    # energy below ~150 Hz — kick/bass evidence, consumed by
+    # :func:`intro_profile` to tell a hard, kick-driven opening from a pad.
+    # Filled by :func:`analyze_music`; empty on analyses built by hand or
+    # saved before the field existed (the profile then stays conservative
+    # and never reports a "hard" intro — no kick evidence, no slam).
+    low_energy: list[float] = field(default_factory=list)
 
 
 # ----------------------------------------------------------------------------
@@ -678,6 +685,159 @@ def detect_drops(
     return sorted(drops)
 
 
+def detect_low_band(samples, rate: int) -> list[float]:
+    """Low-band energy share per 0.5 s window (0..1 each).
+
+    Value ``i`` is the share of window ``[i*0.5s, (i+1)*0.5s)``'s RMS energy
+    that lives below :data:`_LOW_BAND_HZ` (~150 Hz) — the kick/bass register.
+    Uses the same FFT low-pass as :func:`detect_downbeats`. A silent window
+    reports 0.0; silence or empty input yields an all-zero (or empty) list.
+    """
+    x = np.asarray(samples, dtype=np.float32)
+    if x.size == 0:
+        return []
+    spectrum = np.fft.rfft(x.astype(np.float64))
+    freqs = np.fft.rfftfreq(x.size, 1.0 / rate)
+    spectrum[freqs > _LOW_BAND_HZ] = 0.0
+    low = np.fft.irfft(spectrum, n=x.size)
+
+    win = max(int(_SECTION_WINDOW_S * rate), 1)
+    n_windows = int(np.ceil(x.size / win))
+    padded_full = np.zeros(n_windows * win, dtype=np.float64)
+    padded_full[: x.size] = x.astype(np.float64)
+    padded_low = np.zeros(n_windows * win, dtype=np.float64)
+    padded_low[: low.size] = low
+    full_ms = (padded_full.reshape(n_windows, win) ** 2).mean(axis=1)
+    low_ms = (padded_low.reshape(n_windows, win) ** 2).mean(axis=1)
+    out: list[float] = []
+    for f, lo in zip(full_ms, low_ms):
+        share = float(min(lo, f) / f) if f > 1e-12 else 0.0
+        out.append(round(share, 4))
+    return out
+
+
+# ----------------------------------------------------------------------------
+# Intro profile (the song's own opening character)
+# ----------------------------------------------------------------------------
+
+# How long the "intro" window is by default (seconds).
+_INTRO_WINDOW_S = 12.0
+# Hardness is a 0..1 blend of three ramped features (weights below); the
+# label thresholds cut it into ambient / moderate / hard. "hard" is only
+# ever reported when low-band evidence EXISTS (music.low_energy non-empty):
+# a hard opening means kick/bass from bar one, and without spectral data
+# the profile stays conservative — synthetic analyses built by hand (and
+# saved analyses from before the field existed) top out at "moderate".
+_INTRO_W_ENERGY = 0.4  # relative intro energy (first window vs body median)
+_INTRO_W_ONSET = 0.3  # onset (beat) density in the window
+_INTRO_W_LOW = 0.3  # low-band presence (kick/bass share)
+_INTRO_AMBIENT_MAX = 0.35  # hardness at/below this -> "ambient"
+_INTRO_HARD_MIN = 0.65  # hardness at/above this (with low-band data) -> "hard"
+# Feature ramps: 0 at the first value, 1 at the second (linear between).
+_INTRO_ENERGY_RAMP = (0.4, 1.0)  # intro/body energy ratio
+_INTRO_ONSET_RAMP = (0.5, 2.5)  # beats per second
+_INTRO_LOW_RAMP = (0.1, 0.4)  # low-band energy share
+
+
+def _ramp01(value: float, at_zero: float, at_one: float) -> float:
+    if abs(at_one - at_zero) < _EPS:
+        return 1.0
+    return max(0.0, min(1.0, (value - at_zero) / (at_one - at_zero)))
+
+
+def intro_profile(
+    music: MusicAnalysis, window_s: float = _INTRO_WINDOW_S, *, start: float = 0.0
+) -> dict:
+    """The song's OWN opening character, measured from ``start``.
+
+    Pure — works from the finished :class:`MusicAnalysis` alone. ``start``
+    is the source-window offset the cut was built against (callers pass
+    ``plan.music_start`` so a montage cut from the song's strongest passage
+    profiles THAT window's opening, not the file's).
+
+    Features (returned raw, rounded):
+
+    * ``rel_energy`` — mean section energy over the first ``window_s``
+      seconds vs the MEDIAN section energy of the body after it (1.0 =
+      the intro is as loud as the song; a body-less window reports 1.0).
+    * ``onset_density`` — detected beats per second inside the window
+      (ambient pads yield none; four-on-the-floor at 120 BPM yields 2.0).
+    * ``low_presence`` — mean low-band energy share (``music.low_energy``)
+      inside the window: kick/bass from bar one. 0.0 when the analysis
+      carries no low-band curve.
+
+    They blend into ``hardness`` (0..1, weights :data:`_INTRO_W_ENERGY` /
+    :data:`_INTRO_W_ONSET` / :data:`_INTRO_W_LOW`) and a ``label``:
+    ``"ambient"`` (<= :data:`_INTRO_AMBIENT_MAX`), ``"hard"``
+    (>= :data:`_INTRO_HARD_MIN` — only with low-band evidence, see
+    :data:`_INTRO_W_LOW`'s comment), else ``"moderate"``.
+    """
+    duration = max(0.0, float(music.duration))
+    lo = max(0.0, min(float(start), duration))
+    hi = min(lo + max(float(window_s), _EPS), duration)
+    span = max(hi - lo, _EPS)
+
+    # Relative intro energy: window mean vs body median (section-based).
+    def energy_at(t: float) -> float:
+        for s in music.sections:
+            if s.start - _EPS <= t < s.end - _EPS:
+                return float(s.energy)
+        if music.sections and t >= music.sections[-1].end - _EPS:
+            return float(music.sections[-1].energy)
+        return 0.0
+
+    step = _SECTION_WINDOW_S
+    intro_samples = [energy_at(lo + i * step) for i in range(max(1, int(span / step)))]
+    intro_energy = sum(intro_samples) / len(intro_samples)
+    body_samples = sorted(
+        energy_at(t)
+        for t in (hi + i * step for i in range(int(max(0.0, duration - hi) / step)))
+    )
+    if body_samples:
+        mid = len(body_samples) // 2
+        body_energy = (
+            body_samples[mid]
+            if len(body_samples) % 2
+            else (body_samples[mid - 1] + body_samples[mid]) / 2.0
+        )
+    else:
+        body_energy = intro_energy
+    rel_energy = min(4.0, intro_energy / max(body_energy, 1e-6)) if intro_energy > _EPS else 0.0
+
+    onset_density = sum(1 for b in music.beats if lo - _EPS <= b < hi) / span
+
+    low_curve = music.low_energy
+    has_low = bool(low_curve)
+    if has_low:
+        i0 = max(0, int(lo / _SECTION_WINDOW_S))
+        i1 = max(i0 + 1, int(round(hi / _SECTION_WINDOW_S)))
+        window = low_curve[i0:i1] or low_curve[-1:]
+        low_presence = sum(float(v) for v in window) / len(window)
+    else:
+        low_presence = 0.0
+
+    hardness = (
+        _INTRO_W_ENERGY * _ramp01(rel_energy, *_INTRO_ENERGY_RAMP)
+        + _INTRO_W_ONSET * _ramp01(onset_density, *_INTRO_ONSET_RAMP)
+        + _INTRO_W_LOW * _ramp01(low_presence, *_INTRO_LOW_RAMP)
+    )
+    if hardness <= _INTRO_AMBIENT_MAX:
+        label = "ambient"
+    elif hardness >= _INTRO_HARD_MIN and has_low:
+        label = "hard"
+    else:
+        label = "moderate"
+    return {
+        "label": label,
+        "hardness": round(hardness, 3),
+        "rel_energy": round(rel_energy, 3),
+        "onset_density": round(onset_density, 3),
+        "low_presence": round(low_presence, 3),
+        "window_s": round(hi - lo, 3),
+        "start": round(lo, 3),
+    }
+
+
 # ----------------------------------------------------------------------------
 # Energy windowing
 # ----------------------------------------------------------------------------
@@ -784,4 +944,5 @@ def analyze_music(path: str, rate: int = 22050) -> MusicAnalysis:
         downbeats=downbeats,
         phrases=phrases,
         drops=drops,
+        low_energy=detect_low_band(samples, rate),
     )

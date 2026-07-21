@@ -2209,6 +2209,11 @@ class ResolveBridge:
             raise ValueError(
                 f"unknown build mode {mode!r}; valid modes: hybrid, append"
             )
+        # A plan without music cannot carry a song bed: coerce the audio
+        # mode so no-music builds work end to end (clip sound on A1, SFX
+        # on A2) instead of failing on a missing song.
+        if not getattr(plan, "music_path", "") and audio in ("music", "mix"):
+            audio = "original"
         canvas_size: tuple[int, int] | None = None
         if canvas is not None:
             # Lazy import: monteur.montage pulls in numpy, and this module
@@ -2238,7 +2243,10 @@ class ResolveBridge:
         for entry in entries:
             if entry.clip_path not in paths:
                 paths.append(entry.clip_path)
-        if plan.music_path not in paths:
+        # audio="original" carries no song bed (and a no-music plan has no
+        # song at all) — only import the music when it will be appended.
+        with_music = bool(plan.music_path) and audio != "original"
+        if with_music and plan.music_path not in paths:
             paths.append(plan.music_path)
 
         pool = self._media_pool()
@@ -2328,32 +2336,57 @@ class ResolveBridge:
                     f"({entry.source_start:.2f}-{entry.source_end:.2f}s) to "
                     f"timeline {timeline_name!r}."
                 )
-        music_item = by_path[plan.music_path]
-        music_fps = _clip_native_fps(music_item, fps)
-        music_offset = _clip_source_offset(music_item, 0.0, music_fps)
-        # The plan cuts to the song's BEST window (plan.music_start), not
-        # its intro — starting the audio at source 0 would put every cut
-        # beside the beat.
-        music_in = music_offset + int(
-            round(float(getattr(plan, "music_start", 0.0) or 0.0) * music_fps)
-        )
-        music_info = {
-            "mediaPoolItem": music_item,
-            "startFrame": music_in,
-            "endFrame": music_in + int(round(plan.duration * music_fps)) - 1,
-            "mediaType": 2,
-        }
-        if placed:
-            music_info["trackIndex"] = 1
-            music_info["recordFrame"] = record_base
-        if not pool.AppendToTimeline([music_info]):
-            music_info.pop("recordFrame", None)
-            music_info.pop("trackIndex", None)
-            if not pool.AppendToTimeline([music_info]):
-                raise MonteurResolveError(
-                    f"Resolve failed to append the music {plan.music_path!r} "
-                    f"to timeline {timeline_name!r}."
+        if with_music:
+            music_item = by_path[plan.music_path]
+            music_fps = _clip_native_fps(music_item, fps)
+            music_offset = _clip_source_offset(music_item, 0.0, music_fps)
+            # The plan's adaptive music window: the song enters at record
+            # music_in and ends at music_out (0 = full length). The
+            # record<->song mapping is unchanged (record t plays song time
+            # music_start + t), so every cut stays on the beat.
+            w_in = float(getattr(plan, "music_in", 0.0) or 0.0)
+            w_out = float(getattr(plan, "music_out", 0.0) or 0.0)
+            w_in = min(max(w_in, 0.0), plan.duration)
+            w_end = min(w_out, plan.duration) if w_out > 0 else plan.duration
+            if w_end <= w_in:
+                w_in, w_end = 0.0, plan.duration
+            # The plan cuts to the song's BEST window (plan.music_start), not
+            # its intro — starting the audio at source 0 would put every cut
+            # beside the beat.
+            music_in = music_offset + int(
+                round(
+                    (float(getattr(plan, "music_start", 0.0) or 0.0) + w_in)
+                    * music_fps
                 )
+            )
+            music_info = {
+                "mediaPoolItem": music_item,
+                "startFrame": music_in,
+                "endFrame": music_in + int(round((w_end - w_in) * music_fps)) - 1,
+                "mediaType": 2,
+            }
+            if placed:
+                music_info["trackIndex"] = 1
+                music_info["recordFrame"] = record_base + int(round(w_in * fps))
+            elif w_in > 0 and warnings is not None:
+                warnings.append(
+                    "this Resolve build ignored positioned placement, so the "
+                    f"music entry at {w_in:.1f}s only exists in the exported "
+                    "file — the appended song starts with the first clip."
+                )
+            if not pool.AppendToTimeline([music_info]):
+                music_info.pop("recordFrame", None)
+                music_info.pop("trackIndex", None)
+                if not pool.AppendToTimeline([music_info]):
+                    raise MonteurResolveError(
+                        f"Resolve failed to append the music {plan.music_path!r} "
+                        f"to timeline {timeline_name!r}."
+                    )
+        if audio in ("mix", "original"):
+            self._append_entry_audio(
+                pool, plan, entries, by_path, fps, record_base, placed, audio,
+                warnings,
+            )
         self._append_sfx_elements(
             pool, plan, fps, record_base, placed, audio, warnings
         )
@@ -2492,6 +2525,82 @@ class ResolveBridge:
                 verify_resolution=True,
             )
         return actual_name
+
+    def _append_entry_audio(
+        self,
+        pool: Any,
+        plan,
+        entries,
+        by_path: dict,
+        fps: float,
+        record_base: int,
+        placed: bool,
+        audio: str,
+        warnings: list[str] | None,
+    ) -> None:
+        """Append each entry's own camera sound as positioned audio clips.
+
+        The append-mode counterpart of :func:`monteur.montage.
+        montage_to_timeline`'s own-audio tracks: ``audio="original"`` puts
+        the clips' sound on audio track 1 (no song bed exists in that
+        mode — the ride-POV/no-music layout), ``"mix"`` on track 2 under
+        the song. Requires positioned placement (gapless appends would
+        land the sound at the wrong times) — the fallback skips with one
+        summarized warning, exactly like the SFX elements. Per-entry
+        refusals are best-effort: ONE summarized warning, never a failed
+        build (video-only sources have no audio stream to append).
+        """
+        if not entries:
+            return
+
+        def warn(message: str) -> None:
+            if warnings is not None:
+                warnings.append(message)
+
+        if not placed:
+            warn(
+                "this Resolve build ignored positioned placement, so the "
+                "clips' own sound was skipped — it is in the FCPXML export."
+            )
+            return
+        track_index = 1 if audio == "original" else 2
+        try:
+            _ensure_audio_tracks(self._current_timeline(), track_index)
+        except Exception:  # noqa: BLE001 - track creation is best-effort
+            pass
+        failures = 0
+        for entry in entries:
+            item = by_path.get(entry.clip_path)
+            if item is None:
+                failures += 1
+                continue
+            try:
+                clip_fps = _clip_native_fps(item, fps)
+                offset = _clip_source_offset(
+                    item, getattr(entry, "media_start", 0.0) or 0.0, clip_fps
+                )
+                start = offset + int(round(entry.source_start * clip_fps))
+                rec_in = int(round(entry.record_start * fps))
+                rec_out = int(round(entry.record_end * fps))
+                src_frames = max(1, int(round((rec_out - rec_in) * clip_fps / fps)))
+                info = {
+                    "mediaPoolItem": item,
+                    "startFrame": start,
+                    "endFrame": start + src_frames - 1,
+                    "mediaType": 2,
+                    "trackIndex": track_index,
+                    "recordFrame": record_base + rec_in,
+                }
+                if not pool.AppendToTimeline([info]):
+                    failures += 1
+            except Exception:  # noqa: BLE001 - one silent clip must not kill the rest
+                failures += 1
+        if failures:
+            warn(
+                f"{failures} of {len(entries)} original-sound clips could "
+                "not be placed — import the FCPXML export for the full "
+                "audio layout."
+            )
 
     def _append_sfx_elements(
         self,

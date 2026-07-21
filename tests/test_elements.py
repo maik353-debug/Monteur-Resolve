@@ -275,14 +275,43 @@ class TestAssignElements:
         assert cue.file == "/sfx/rise_long.wav"
         assert cue.time + cue.duration == pytest.approx(6.0)
 
-    def test_riser_longer_than_the_run_up_is_clamped_with_note(self) -> None:
+    def test_riser_never_butchered_below_its_own_length(self) -> None:
+        # The field bug: a 9.5s riser trimmed to 0.2s "kills the whole idea
+        # of a riser". A riser must play >= max(2s, 70% of its file) or it
+        # is NOT placed there — skipped with an honest note instead.
         plan = make_plan(duration=10.0)
         music = make_music(duration=10.0, drops=(2.0,))
+        pool = [element("/sfx/rise.wav", "riser", 9.5)]
+        notes = assign_elements(plan, music, pool)
+        assert not any(c.kind == "riser" and c.file for c in plan.sfx)
+        skip = next(n for n in notes if n.startswith("riser skipped"))
+        assert "2.0s" in skip and "70%" in skip and "9.5s" in skip
+
+    def test_riser_prefers_a_shorter_file_over_butchering(self) -> None:
+        # With a short riser in the library the ramp still gets its riser —
+        # the shorter file plays WHOLE instead of the long one fragmented.
+        plan = make_plan(duration=10.0)
+        music = make_music(duration=10.0, drops=(3.0,))
+        pool = [
+            element("/sfx/rise_long.wav", "riser", 9.5, confidence=0.99),
+            element("/sfx/rise_short.wav", "riser", 2.5, confidence=0.4),
+        ]
+        assign_elements(plan, music, pool)
+        cue = next(c for c in plan.sfx if c.kind == "riser" and c.file)
+        assert cue.file == "/sfx/rise_short.wav"
+        assert cue.duration == pytest.approx(2.5)  # one contiguous, full play
+        assert cue.time + cue.duration == pytest.approx(3.0)  # ends ON the drop
+
+    def test_riser_trim_within_thirty_percent_is_allowed(self) -> None:
+        # A 6s riser into a 5s run-up plays 5s (83% of the file): a light
+        # trim keeps the build; the honest trim note stays.
+        plan = make_plan(duration=12.0)
+        music = make_music(duration=12.0, drops=(5.0,))
         pool = [element("/sfx/rise.wav", "riser", 6.0)]
         notes = assign_elements(plan, music, pool)
         cue = next(c for c in plan.sfx if c.kind == "riser" and c.file)
-        assert cue.time == pytest.approx(0.0)  # clamped into the montage
-        assert cue.duration == pytest.approx(2.0)  # still ends on the drop
+        assert cue.time == pytest.approx(0.0)
+        assert cue.duration == pytest.approx(5.0)  # still ends on the drop
         assert any("trimmed" in n for n in notes)
 
     def test_existing_drop_cues_get_the_files(self) -> None:
@@ -468,6 +497,133 @@ class TestAssignElements:
         assert ("sub-drop", 32.0) in kinds
         assert sum(1 for k, _ in kinds if k == "whoosh") == 3  # full budget
         assert notes[0].startswith("sound elements:")
+        assert "trailer density" in notes[0]
+
+    def test_one_riser_per_tension_ramp_not_per_boundary(self) -> None:
+        # Three act-change riser cues, but only ONE ramp (the run-up into
+        # the drop) gets a real file — the other cues stay honest markers.
+        plan = make_plan()
+        plan.sfx = [
+            SfxCue(6.0, 2.0, "riser", "riser build up", "opening -> build"),
+            SfxCue(18.0, 2.0, "riser", "riser build up", "build -> climax"),
+            SfxCue(30.0, 2.0, "riser", "riser build up", "climax -> outro"),
+        ]
+        pool = [
+            element("/sfx/rise_a.wav", "riser", 2.5),
+            element("/sfx/rise_b.wav", "riser", 3.0),
+        ]
+        assign_elements(plan, make_music(), pool)
+        filed = [c for c in plan.sfx if c.kind == "riser" and c.file]
+        assert len(filed) == 1
+        assert filed[0].time + filed[0].duration == pytest.approx(20.0)  # the drop
+        markers = [c for c in plan.sfx if c.kind == "riser" and not c.file]
+        assert len(markers) == 2
+
+    def test_no_music_riser_anchors_on_the_biggest_act_change(self) -> None:
+        # Without music there are no drops: the riser anchors on the phase
+        # boundary with the biggest energy jump (build -> climax).
+        plan = make_plan(style="travel")
+        plan.music_path = ""
+        plan.phases = [
+            (0.0, 8.0, "opening"),
+            (8.0, 16.0, "build"),
+            (16.0, 32.0, "climax"),
+            (32.0, 40.0, "outro"),
+        ]
+        pool = [element("/sfx/rise.wav", "riser", 3.0)]
+        notes = assign_elements(plan, None, pool)
+        cue = next(c for c in plan.sfx if c.kind == "riser" and c.file)
+        assert cue.time + cue.duration == pytest.approx(16.0)  # climax start
+        assert cue.duration == pytest.approx(3.0)  # one contiguous full play
+        assert any("ends on the climax start" in n for n in notes)
+
+    def test_no_music_places_whooshes_and_dip_impacts(self) -> None:
+        # The no-music program: fast-cut whooshes and hits out of the black
+        # still land without a single drop in sight.
+        plan = make_plan(style="trailer")
+        plan.music_path = ""
+        plan.dips = [(12.0, 0.4), (24.0, 0.4)]
+        plan.sfx = [
+            SfxCue(5.7, 0.6, "whoosh", "q", "fast cut"),
+            SfxCue(17.7, 0.6, "whoosh", "q", "fast cut"),
+        ]
+        pool = [
+            element("/sfx/w1.wav", "whoosh", 0.6),
+            element("/sfx/w2.wav", "whoosh", 0.6),
+            element("/sfx/hit.wav", "impact", 0.8),
+        ]
+        assign_elements(plan, None, pool)
+        filed = sorted((c.kind, round(c.time, 1)) for c in plan.sfx if c.file)
+        assert ("whoosh", 5.7) in filed and ("whoosh", 17.7) in filed
+        assert ("impact", 12.4) in filed and ("impact", 24.4) in filed
+
+    def test_riser_ends_exactly_at_the_music_entry(self) -> None:
+        # THE trailer moment: a delayed music entry (plan.music_in > 0) is
+        # a tension ramp of its own — the cold open's riser ends where the
+        # song slams in.
+        plan = make_plan()
+        plan.music_in = 8.0
+        pool = [
+            element("/sfx/rise_a.wav", "riser", 4.0),
+            element("/sfx/rise_b.wav", "riser", 6.0),
+        ]
+        notes = assign_elements(plan, make_music(), pool)
+        risers = [c for c in plan.sfx if c.kind == "riser" and c.file]
+        ends = sorted(round(c.time + c.duration, 3) for c in risers)
+        assert 8.0 in ends  # the music entry
+        assert 20.0 in ends  # the drop keeps its own ramp
+        assert any("ends on the music entry at 8.0s" in n for n in notes)
+
+    def test_impact_file_may_repeat_after_four_seconds(self) -> None:
+        # Per-kind spacing replaced the blanket 10s rule: the same impact
+        # file hits out of both dips 6s apart.
+        plan = make_plan()
+        plan.dips = [(10.0, 0.4), (16.0, 0.4)]
+        pool = [element("/sfx/hit.wav", "impact", 0.8)]
+        assign_elements(plan, MusicAnalysis("/m.wav", 40.0, 120.0), pool)
+        impacts = sorted(c.time for c in plan.sfx if c.kind == "impact" and c.file)
+        assert impacts == pytest.approx([10.4, 16.4])
+
+    def test_trailer_density_hits_five_plus_accents(self) -> None:
+        # The field complaint: "only 2 sound effects used out of 9 usable —
+        # too sparse". A 35s trailer cut with a 9-file library must land at
+        # least 5 real accents, and the riser must play >= 70% of its file.
+        plan = make_plan(style="trailer", duration=35.0)
+        plan.dips = [(8.0, 0.4), (26.0, 0.4), (31.0, 0.4)]
+        plan.sfx = [
+            SfxCue(18.0, 2.0, "riser", "riser build up", "build -> climax"),
+            SfxCue(20.0, 1.0, "impact", "cinematic impact hit", "climax start"),
+            SfxCue(8.0, 0.4, "sub-drop", "sub drop boom", "title slot"),
+            SfxCue(26.0, 0.4, "sub-drop", "sub drop boom", "title slot"),
+            SfxCue(31.0, 0.4, "sub-drop", "sub drop boom", "title slot"),
+            SfxCue(13.7, 0.6, "whoosh", "whoosh transition fast", "fast cut"),
+            SfxCue(23.7, 0.6, "whoosh", "whoosh transition fast", "fast cut"),
+        ]
+        library = [  # 9 usable files
+            element("/sfx/rise_a.wav", "riser", 2.0),
+            element("/sfx/rise_b.wav", "riser", 4.0),
+            element("/sfx/hit_a.wav", "impact", 0.8),
+            element("/sfx/hit_b.wav", "impact", 0.9),
+            element("/sfx/hit_c.wav", "impact", 1.1),
+            element("/sfx/w1.wav", "whoosh", 0.6),
+            element("/sfx/w2.wav", "whoosh", 0.6),
+            element("/sfx/boom_a.wav", "braam", 1.5),
+            element("/sfx/boom_b.wav", "braam", 1.5),
+        ]
+        music = make_music(duration=35.0, drops=(20.0,))
+        notes = assign_elements(plan, music, library)
+        filed = [c for c in plan.sfx if c.file]
+        assert len(filed) >= 5, [(c.kind, c.time) for c in filed]
+        riser = next(c for c in filed if c.kind == "riser")
+        riser_file = next(e for e in library if e.path == riser.file)
+        assert riser.duration >= 0.7 * riser_file.duration - 1e-6
+        # the no-overlap-per-kind invariant holds throughout
+        for kind in ("riser", "impact", "whoosh", "sub-drop"):
+            spans = sorted(
+                (c.time, c.time + c.duration) for c in filed if c.kind == kind
+            )
+            for (s1, e1), (s2, e2) in zip(spans, spans[1:]):
+                assert s2 >= e1 - 1e-6
         assert "trailer density" in notes[0]
 
     def test_no_usable_elements_is_an_honest_note(self) -> None:

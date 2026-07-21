@@ -273,6 +273,50 @@ class TestCreateApi:
         assert 'height="1920"' in job["result"]["content"]
         assert any("hard cuts only" in n for n in job["result"]["plan"]["notes"])
 
+    def test_build_without_music_carries_clip_sound(self, server):
+        # Field bug: "built without music — the sound track is missing
+        # entirely". Without an explicit audio mode, a no-music build
+        # resolves to "original": the clips' own sound rides in the export
+        # instead of the job failing on a missing song.
+        data = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "max_duration": 10, "format": "fcpxml"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        result = job["result"]
+        assert result["plan_json"]["music_path"] == ""
+        assert 'hasAudio="1"' in result["content"]  # the clips' own sound
+        assert "song.wav" not in result["content"]  # no phantom song
+
+    def test_build_forwards_music_window(self, server):
+        # The adaptive-window override passes through untouched; the
+        # engine validates, snaps to the song's own grid and notes it.
+        data = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "style": "travel", "music_window": [5.0, 0],
+             "format": "fcpxml"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        plan_json = job["result"]["plan_json"]
+        assert 3.5 <= plan_json["music_in"] <= 6.5  # 5s snapped to the grid
+        assert any(
+            "music window" in n and "your setting" in n
+            for n in plan_json["notes"]
+        )
+
+    def test_build_music_window_without_music_is_error_job(self, server):
+        data = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "max_duration": 10,
+             "music_window": [2.0, 0]},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "music_window needs music" in job["message"]
+
     def test_build_unknown_style_is_error_job(self, server):
         data = _post(
             f"{server}/api/create/build",
@@ -2363,6 +2407,21 @@ class TestResolveBuildApi:
         job = self._resolve(server, plan_json=self._plan_json())
         assert job["state"] == "done"
         assert calls[1]["audio"] == "music"
+
+    def test_resolve_build_no_music_plan_defaults_to_original(
+        self, server, monkeypatch
+    ):
+        # A plan without music must not be built with a phantom song bed:
+        # without an explicit mode the endpoint resolves to "original"
+        # (clip sound on A1, SFX on A2).
+        calls = self._patch_build(
+            monkeypatch, {"ok": True, "timeline": "Monteur Montage", "warnings": []}
+        )
+        plan_json = self._plan_json()
+        plan_json["music_path"] = ""
+        job = self._resolve(server, plan_json=plan_json)
+        assert job["state"] == "done"
+        assert calls[0]["audio"] == "original"
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_app_sends_canvas_with_resolve_build(self):

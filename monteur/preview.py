@@ -61,12 +61,17 @@ import time
 from pathlib import Path
 
 from monteur.media import MonteurMediaError, find_ffmpeg, probe
-from monteur.montage import MontagePlan
+from monteur.montage import MontagePlan, music_window_bounds
 
 # Fixed "mix" levels (documented above): the song stays at full level, the
 # clips' own sound is ducked under it.
 MIX_MUSIC_LEVEL = 1.0
 MIX_ORIGINAL_LEVEL = 0.6
+
+# Adaptive music window (plan.music_in / plan.music_out): a delayed entry
+# gets a short musical fade-in so the slam does not click; the bed is
+# trimmed and delayed (adelay) to its record window in both renderers.
+_MUSIC_FADE_IN = 0.5
 
 # Preview encode: speed over size — this is a look, not a deliverable.
 _PRESET = "ultrafast"
@@ -344,10 +349,28 @@ def render_preview(
             vf.append(f"fade=t=out:st={st:.3f}:d={fade_out:.3f}")
             af.append(f"afade=t=out:st={st:.3f}:d={fade_out:.3f}")
 
+        # Adaptive music window: the song is read from music_start + music_in,
+        # trimmed to its record window, delayed to music_in and faded in
+        # briefly at a non-zero entry — the cut opens dry, the music slams
+        # in on the grid. A full-length window builds the exact old command.
+        m_in, m_end = music_window_bounds(plan)
+        windowed = audio in ("music", "mix") and (
+            m_in > _MIN_GAP or m_end < plan.duration - _MIN_GAP
+        )
+        music_filters: list[str] = []
+        if windowed:
+            music_filters.append(f"atrim=0:{m_end - m_in:.3f}")
+            if m_in > _MIN_GAP:
+                ms = int(round(m_in * 1000))
+                music_filters += [
+                    f"adelay={ms}|{ms}",
+                    f"afade=t=in:st={m_in:.3f}:d={_MUSIC_FADE_IN:.3f}",
+                ]
+
         final = ["-f", "concat", "-safe", "0", "-i", str(list_path)]
         if audio in ("music", "mix"):
             final += [
-                "-ss", f"{max(0.0, plan.music_start):.3f}",
+                "-ss", f"{max(0.0, plan.music_start + m_in):.3f}",
                 "-i", str(plan.music_path),
             ]
         final += ["-map", "0:v:0"]
@@ -356,8 +379,8 @@ def render_preview(
         final += encode
         if audio == "music":
             final += ["-map", "1:a:0"]
-            if af:
-                final += ["-af", ",".join(af)]
+            if music_filters or af:
+                final += ["-af", ",".join(music_filters + af)]
             final += audio_encode
         elif audio == "original":
             final += ["-map", "0:a:0"]
@@ -365,8 +388,9 @@ def render_preview(
                 final += ["-af", ",".join(af)]
             final += audio_encode
         else:  # mix: music at MIX_MUSIC_LEVEL + own sound at MIX_ORIGINAL_LEVEL
+            music_chain = ",".join(music_filters + [f"volume={MIX_MUSIC_LEVEL:g}"])
             chain = (
-                f"[1:a]volume={MIX_MUSIC_LEVEL:g}[m];"
+                f"[1:a]{music_chain}[m];"
                 f"[0:a]volume={MIX_ORIGINAL_LEVEL:g}[o];"
                 "[m][o]amix=inputs=2:duration=first:dropout_transition=0"
                 ":normalize=0"
@@ -524,6 +548,9 @@ def _export_audio_graph(
     fade_in: float,
     fade_out: float,
     duration: float,
+    *,
+    music_in: float = 0.0,
+    music_len: float = 0.0,
 ) -> str:
     """The filter_complex audio chain, ending in the output label ``[a]``.
 
@@ -538,8 +565,29 @@ def _export_audio_graph(
     single-pass ``loudnorm`` at YouTube's -14 LUFS / -1 dBTP / LRA 11
     target, then a resample back to :data:`_AUDIO_RATE` (loudnorm
     upsamples internally).
+
+    ``music_in`` / ``music_len`` (keyword-only, both 0 by default = the
+    old full-length graph, byte-identical) apply the plan's adaptive
+    music window to the song stream BEFORE it becomes the bed: trim to
+    ``music_len`` seconds, delay by ``music_in`` (adelay) and — at a
+    non-zero entry — a short :data:`_MUSIC_FADE_IN` musical fade-in. The
+    caller reads the song from ``music_start + music_in``, so the beat
+    grid alignment is untouched.
     """
     parts: list[str] = []
+    if music_label is not None and (music_in > 0 or music_len > 0):
+        filters: list[str] = []
+        if music_len > 0:
+            filters.append(f"atrim=0:{music_len:.3f}")
+        if music_in > 0:
+            ms = max(0, int(round(music_in * 1000)))
+            filters += [
+                f"aresample={_AUDIO_RATE}",
+                f"adelay={ms}|{ms}",
+                f"afade=t=in:st={music_in:.3f}:d={_MUSIC_FADE_IN:.3f}",
+            ]
+        parts.append(f"[{music_label}]{','.join(filters)}[xmw]")
+        music_label = "xmw"
     if audio == "music":
         base = f"[{music_label}]"
     elif audio == "original":
@@ -888,9 +936,14 @@ def render_export(
         idx = len(paths)
         music_label: str | None = None
         bed_label: str | None = None
+        # Adaptive music window: read the song from music_start + music_in
+        # (the record<->song mapping is unchanged); the audio graph trims,
+        # delays and fades the bed into its record window.
+        m_in, m_end = music_window_bounds(plan)
+        windowed = m_in > _MIN_GAP or m_end < plan.duration - _MIN_GAP
         if audio in ("music", "mix"):
             final += [
-                "-ss", f"{max(0.0, plan.music_start):.3f}",
+                "-ss", f"{max(0.0, plan.music_start + m_in):.3f}",
                 "-i", str(plan.music_path),
             ]
             music_label = f"{idx}:a"
@@ -930,6 +983,8 @@ def render_export(
             + _export_audio_graph(
                 audio, music_label, bed_label, sfx_specs,
                 fade_in, fade_out, plan.duration,
+                music_in=m_in if windowed else 0.0,
+                music_len=(m_end - m_in) if windowed else 0.0,
             )
         )
         final += [

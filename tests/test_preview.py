@@ -353,6 +353,69 @@ def test_render_export_high_profile(tmp_path):
 
 @needs_ffmpeg
 @needs_demo
+def test_render_preview_no_music_original_carries_sound(tmp_path):
+    # Field bug: no-music builds lost their sound. The preview of a plan
+    # without a song renders the clips' own audio.
+    out = tmp_path / "nomusic.mp4"
+    result = render_preview(demo_plan(music=False), str(out), audio="original")
+    assert out.is_file()
+    assert probe(out).has_audio
+    assert result["duration"] == pytest.approx(6.0, abs=0.3)
+
+
+@needs_ffmpeg
+@needs_demo
+def test_render_preview_with_music_window(tmp_path):
+    # A delayed music entry renders: bed trimmed/delayed, still 6s long.
+    plan = demo_plan()
+    plan.music_in = 2.0
+    plan.music_out = 5.0
+    out = tmp_path / "windowed.mp4"
+    result = render_preview(plan, str(out), audio="music")
+    assert out.is_file()
+    info = probe(out)
+    assert info.has_audio
+    assert result["duration"] == pytest.approx(info.duration)
+    assert info.duration == pytest.approx(6.0, abs=0.3)
+
+
+@needs_ffmpeg
+@needs_demo
+def test_render_export_no_music_with_placed_sfx(tmp_path):
+    # The full no-music program: clips' own sound bed + a placed SFX file
+    # mixed on top, no song anywhere.
+    plan = demo_plan(music=False)
+    plan.sfx = [
+        SfxCue(1.0, 0.5, "impact", "hit", "on the cut",
+               file=_tiny_wav(tmp_path / "hit.wav")),
+    ]
+    out = tmp_path / "nomusic_export.mp4"
+    result = render_export(
+        plan, str(out), size=(320, 180), audio="original", quality="medium"
+    )
+    assert out.is_file()
+    assert result["notes"] == []  # the SFX file exists and was mixed in
+    assert probe(out).has_audio
+
+
+@needs_ffmpeg
+@needs_demo
+def test_render_export_with_music_window(tmp_path):
+    plan = demo_plan()
+    plan.music_in = 2.0
+    out = tmp_path / "windowed_export.mp4"
+    result = render_export(
+        plan, str(out), size=(320, 180), audio="music", quality="medium"
+    )
+    assert out.is_file()
+    assert result["notes"] == []
+    info = probe(out)
+    assert info.has_audio
+    assert info.duration == pytest.approx(6.0, abs=0.3)
+
+
+@needs_ffmpeg
+@needs_demo
 def test_render_export_size_override_is_forced_even(tmp_path):
     out = tmp_path / "odd.mp4"
     result = render_export(

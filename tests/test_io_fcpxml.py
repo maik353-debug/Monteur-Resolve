@@ -511,6 +511,37 @@ def test_sfx_element_round_trips_on_its_own_track():
     assert (music.record_in, music.record_out) == (0, 250)
 
 
+def test_no_music_montage_carries_clip_sound_and_sfx():
+    """A no-music plan's timeline (audio="original") writes valid FCPXML:
+    the clips' own sound folds into the asset-clips (hasAudio), the placed
+    SFX element rides as a connected effects clip — no song asset at all."""
+    from monteur.io.fcpxml import read_fcpxml, write_fcpxml
+    from monteur.montage import MontageEntry, MontagePlan, SfxCue, montage_to_timeline
+
+    plan = MontagePlan(music_path="", duration=10.0)
+    plan.entries = [
+        MontageEntry(
+            clip_path="/footage/a.mp4", source_start=0.0, source_end=6.0,
+            record_start=0.0, record_end=6.0, score=0.9,
+        ),
+        MontageEntry(
+            clip_path="/footage/b.mp4", source_start=1.0, source_end=5.0,
+            record_start=6.0, record_end=10.0, score=0.8,
+        ),
+    ]
+    plan.sfx = [SfxCue(2.0, 0.8, "impact", "hit", "n", file="/sfx/hit.wav")]
+    timeline = montage_to_timeline(plan, fps=25.0, audio="original")
+    xml = write_fcpxml(timeline)
+    assert 'hasAudio="1"' in xml  # the clips' own sound rides along
+    assert 'audioRole="effects"' in xml and 'lane="-2"' in xml
+    assert 'audioRole="music"' not in xml  # there IS no song
+    back = read_fcpxml(xml)
+    a1 = [c for c in back.audio_clips() if c.track == "A1"]
+    assert len(a1) == 2  # camera sound, one per entry
+    hit = next(c for c in back.audio_clips() if c.track == "A2")
+    assert (hit.record_in, hit.record_out) == (50, 70)
+
+
 def test_write_three_audio_tracks_mix_mode_layout():
     """mix mode: camera sound pairs into the asset-clips, song on A1 and the
     SFX element on A3 both come back on their own tracks."""

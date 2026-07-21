@@ -1789,6 +1789,38 @@ def test_filed_cues_land_on_a3_in_mix_mode():
     assert sfx.source_file == "/sfx/hit.wav"
 
 
+def test_no_music_plan_carries_sound_on_every_track():
+    # Field bug: "built without music — the sound track is missing entirely
+    # (no clip sound, no SFX track)". A no-music plan must yield the clips'
+    # own audio on A1 PLUS placed SFX on A2 in the rendered timeline.
+    from monteur.model import AUDIO
+    from monteur.montage import plan_montage
+
+    plan = plan_montage(
+        make_long_reports(), None, max_duration=20.0, style="travel",
+        cut_lead=0.0, sfx=True,
+    )
+    assert plan.music_path == "" and plan.sfx
+    # file one cue like monteur.elements would
+    filed = plan.sfx[-1]
+    filed.file = "/sfx/hit.wav"
+    filed.duration = 0.8
+    timeline = montage_to_timeline(plan, fps=25.0, audio="original")
+    a1 = [c for c in timeline.clips if c.kind == AUDIO and c.track == "A1"]
+    assert len(a1) == len(plan.entries)  # the clips' own sound, per entry
+    for audio_clip, entry in zip(a1, plan.entries):
+        assert audio_clip.source_file == entry.clip_path
+        assert audio_clip.record_in == round(entry.record_start * 25.0)
+    a2 = [c for c in timeline.clips if c.track == "A2"]
+    assert [c.source_file for c in a2] == ["/sfx/hit.wav"]
+    # every cue keeps its Green marker, filed or not
+    sfx_markers = [m for m in timeline.markers if m.name.startswith("SFX: ")]
+    assert len(sfx_markers) == len(plan.sfx)
+    # and there is NO phantom song clip anywhere
+    assert all(c.track != "A3" for c in timeline.clips)
+    assert not any(m.name.startswith("Cut to") for m in timeline.markers)
+
+
 def test_filed_cue_clamps_to_the_montage_end():
     from monteur.montage import MontagePlan, MontageEntry, SfxCue
 

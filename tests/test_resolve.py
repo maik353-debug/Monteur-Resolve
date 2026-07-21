@@ -1106,11 +1106,23 @@ def test_build_timeline_places_filed_cues_on_the_sfx_track() -> None:
 
 def test_build_timeline_sfx_track_is_a3_in_mix_mode() -> None:
     bridge, project = make_bridge([standard_timeline()])
-    build_append(bridge, 
+    build_append(bridge,
         make_plan_with_elements(), fps=24.0, audio="mix"
     )
-    sfx = project.media_pool.appended[4:]
-    assert [c["trackIndex"] for c in sfx] == [3, 3]
+    appended = project.media_pool.appended
+    # "mix" now ALSO places the clips' own camera sound on audio track 2
+    # (the no-music/own-audio fix: append builds carry sound everywhere) —
+    # the SFX elements sit above it on track 3, same layout as the file
+    # exports (song A1, camera A2, SFX A3).
+    camera = [
+        c for c in appended
+        if c.get("mediaType") == 2 and c.get("trackIndex") == 2
+    ]
+    assert len(camera) == 3  # one per plan entry
+    sfx = [c for c in appended if c.get("trackIndex") == 3]
+    assert [c["mediaPoolItem"].path for c in sfx] == [
+        "/sfx/hit.wav", "/sfx/whoosh.wav",
+    ]
 
 
 def test_build_timeline_without_filed_cues_imports_once() -> None:
@@ -1172,6 +1184,94 @@ def test_build_timeline_sfx_skipped_when_placement_rejected() -> None:
     assert len(project.media_pool.import_calls) == 1
     assert all(info.get("trackIndex", 1) == 1 or "trackIndex" not in info
                for info in project.media_pool.appended)
+
+
+def make_no_music_plan_with_elements() -> MontagePlan:
+    plan = make_plan_with_elements()
+    plan.music_path = ""
+    return plan
+
+
+def test_build_append_no_music_carries_clip_sound_and_sfx() -> None:
+    # Field bug: "built without music — the sound track is missing
+    # entirely". The append build must place the clips' own sound on audio
+    # track 1 and the SFX elements on track 2, and never try to import a
+    # song that does not exist.
+    bridge, project = make_bridge([standard_timeline()])
+    pool = project.media_pool
+    warnings: list[str] = []
+    name = build_append(
+        bridge, make_no_music_plan_with_elements(), fps=24.0, warnings=warnings
+    )
+    assert name == "Monteur Montage"
+    assert warnings == []
+    # no "" path, no song import — only the clips, then the element files
+    assert pool.import_calls == [
+        ["/media/a.mov", "/media/b.mov"],
+        ["/sfx/hit.wav", "/sfx/whoosh.wav"],
+    ]
+    video = [c for c in pool.appended if c.get("mediaType") == 1]
+    assert len(video) == 3
+    camera = [
+        c for c in pool.appended
+        if c.get("mediaType") == 2 and c.get("trackIndex") == 1
+    ]
+    # the clips' own sound: one per entry, same source range and position
+    assert [
+        (c["startFrame"], c["endFrame"], c["recordFrame"]) for c in camera
+    ] == [(v["startFrame"], v["endFrame"], v["recordFrame"]) for v in video]
+    sfx = [c for c in pool.appended if c.get("trackIndex") == 2]
+    assert [c["mediaPoolItem"].path for c in sfx] == [
+        "/sfx/hit.wav", "/sfx/whoosh.wav",
+    ]
+
+
+def test_build_append_original_mode_skips_the_song() -> None:
+    # audio="original" means NO song bed — even when the plan has music,
+    # matching montage_to_timeline's layout (camera sound on A1, SFX A2).
+    bridge, project = make_bridge([standard_timeline()])
+    pool = project.media_pool
+    build_append(bridge, make_plan_with_elements(), fps=24.0, audio="original")
+    assert pool.import_calls[0] == ["/media/a.mov", "/media/b.mov"]
+    assert not any(
+        c["mediaPoolItem"].path == "/music/song.wav" for c in pool.appended
+    )
+    assert any(
+        c.get("mediaType") == 2 and c.get("trackIndex") == 1
+        for c in pool.appended
+    )
+
+
+def test_build_append_no_music_gapless_fallback_warns() -> None:
+    bridge, project = make_bridge([standard_timeline()])
+    project.media_pool.reject_record_placement = True
+    warnings: list[str] = []
+    build_append(
+        bridge, make_no_music_plan_with_elements(), fps=24.0, warnings=warnings
+    )
+    # gapless appends cannot place the camera sound or the elements — both
+    # say so honestly, nothing raises
+    assert any("clips' own sound was skipped" in w for w in warnings)
+    assert any("sound-element" in w and "skipped" in w for w in warnings)
+
+
+def test_hybrid_build_no_music_file_carries_all_audio() -> None:
+    # The hybrid (default) path for a no-music plan: the written FCPXML
+    # carries the clips' own sound and the SFX lane, and no song asset.
+    bridge, project = make_bridge([standard_timeline()])
+    pool = project.media_pool
+    warnings: list[str] = []
+    name = bridge.build_timeline_from_plan(
+        make_no_music_plan_with_elements(), fps=25.0, warnings=warnings
+    )
+    assert name == "Monteur Montage"
+    assert warnings == []
+    assert len(pool.timeline_import_calls) == 1
+    content = pool.imported_fcpxml[0]
+    assert 'hasAudio="1"' in content  # clip sound folded into the asset-clips
+    assert 'audioRole="effects"' in content  # the placed SFX element
+    assert "song.wav" not in content  # no phantom song
+    assert pool.appended == []  # nothing placed clip-by-clip
 
 
 def test_worker_build_plan_forwards_audio(monkeypatch) -> None:

@@ -17,7 +17,8 @@ API (all JSON):
 * ``POST /api/resolve/analyze`` {"timeline"?, "save"?}          -> {"stats", "version"?}
 * ``POST /api/create/scan``   {"folder", "see"?}                -> {"job": id}
 * ``POST /api/create/build``  {"folder", "music"?, "see"?,
-  "ai_cut"?, "brief"?, "elements"?, "platform"?, ...}           -> {"job": id}
+  "ai_cut"?, "brief"?, "elements"?, "platform"?,
+  "music_window"?: [in, out], ...}                              -> {"job": id}
 * ``POST /api/create/pick``   {"folder", "music_dir",
   "max_duration"?}                                              -> {"job": id}
 * ``POST /api/create/kit``    {build payload + "kit_dir"}       -> {"job": id}
@@ -1292,6 +1293,12 @@ def _plan_from_payload(job: dict, payload: dict):
         # already 400-ed malformed payloads; unknown clip paths surface
         # here as the engine's own ValueError -> a clear job error.
         plan_kwargs["arrangement"] = payload["arrangement"]
+    if payload.get("music_window") is not None:
+        # The adaptive music window override, passed through untouched —
+        # plan_montage validates and snaps it (bad values surface as the
+        # engine's own ValueError -> a clear job error). Without it the
+        # tool decides when the music enters.
+        plan_kwargs["music_window"] = payload["music_window"]
     if payload.get("ai_cut"):
         # Claude composes the cut (monteur.compose): the engine still builds
         # the exact grid plan_montage would, then ONE Claude completion casts
@@ -1347,7 +1354,7 @@ def _apply_elements(job: dict, plan, music, elements_dir: str) -> None:
 _DRAFT_SETTING_KEYS = (
     "audio", "order", "style", "canvas", "transitions", "fps", "format",
     "max_duration", "pace", "allow_repeats", "sfx", "cut_lead", "see",
-    "ai_cut", "brief", "elements", "platform", "arrangement",
+    "ai_cut", "brief", "elements", "platform", "arrangement", "music_window",
 )
 
 
@@ -1402,9 +1409,11 @@ def _run_build_job(job: dict, payload: dict) -> None:
         plan, reports, music, vision = _plan_from_payload(job, payload)
 
         fps = float(payload.get("fps") or 25)
-        timeline_kwargs: dict = {}
-        if payload.get("audio"):
-            timeline_kwargs["audio"] = payload["audio"]
+        # Audio mode resolution must not drop the ball for no-music plans:
+        # without an explicit mode, a plan without music renders its clips'
+        # own sound (plus placed SFX) instead of failing on a missing song.
+        audio = payload.get("audio") or ("music" if plan.music_path else "original")
+        timeline_kwargs: dict = {"audio": audio}
         if payload.get("canvas"):
             timeline_kwargs["canvas"] = payload["canvas"]
         timeline = montage_to_timeline(plan, fps=fps, **timeline_kwargs)
@@ -2004,9 +2013,11 @@ def _run_resolve_build_job(job: dict, payload: dict) -> None:
         fps = float(payload.get("fps") or 25)
         name = str(payload.get("name") or "Monteur Montage")
         canvas = payload.get("canvas") or None
-        # The audio mode only picks the SFX track for placed sound elements
-        # (A3 in "mix", A2 otherwise) — same layout as the file download.
-        audio = str(payload.get("audio") or "music")
+        # The audio mode picks the sound layout (song bed, camera sound,
+        # SFX track) — a no-music plan defaults to its clips' own sound.
+        audio = str(
+            payload.get("audio") or ("music" if plan.music_path else "original")
+        )
         titles = titles_from_plan(plan) if plan.dips else None
         with _JOBS_LOCK:
             job["progress"].append(
