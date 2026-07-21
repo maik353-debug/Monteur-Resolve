@@ -392,24 +392,45 @@ def _parity_reports() -> list[ClipReport]:
 # in _PARITY_GOLDEN_CONTINUOUS: music_flow="continuous" must reproduce
 # the pre-wave plans byte-identically (the parity fixture the wave's
 # contract demands), so the two tables together pin BOTH behaviors.
+# Regenerated 2026-07 for magie-blueprint 1.5 + 1.7 (frame hygiene &
+# drop intelligence) — sanctioned default changes, verified field by
+# field against the pre-wave engine before regenerating:
+#   * travel: the outro's dissolving boundary returns to its unshifted
+#     grid position (1.7 dissolve lead 0) — one boundary, 33.96 -> 34.0;
+#   * trailer / trailer-best-paced: the smash-to-black dip is now
+#     beat-quantized (0.4s -> 0.5s = one beat at 120bpm; 1.7), its gap,
+#     sub-drop cue and notes follow, plus the same dissolve-lead-0 move;
+#     the paced trailer's early drop pin additionally triggers the 1.5
+#     arc-squeeze floor (noted in the plan);
+#   * travel-no-music: the pseudo grid carried two sub-0.3s sliver slots
+#     at phase boundaries — eliminated per 1.7 (absorbed into their
+#     neighbours), so the slot count drops 15 -> 14.
+# auto / wedding / music_video plans are BYTE-IDENTICAL across the wave
+# (no dips, no dissolves on shifted boundaries, no slivers): byte-parity
+# protects the untouched paths, not the sanctioned default changes.
 _PARITY_GOLDEN = {
     "auto": "fa747bd06ecd7e7d21920a0259a5615d2a52272918f4427db46d3c43e08d55ad",
-    "travel": "dd89a87fcef93209c10c47048e95ec3f506092ac25c7fc459568725e3b67f4da",
+    "travel": "1bc57f56a18b14ada91a4afe5e7b3dd79d4b590538d7f7113dab0b4ecd1cc43b",
     "wedding": "bc3780121a56035e21a023f167e46b8ac2024cf1658103c6d1a382e6b2db6262",
     "music_video": "1b9835d2fe20e6c9750c99f48417a41d0f154119d96685d67325848a2db213b0",
-    "trailer": "63f56c408c94f1bfa889526b36804758d3b9d2da4541c794e91c7af121e70654",
-    "trailer-best-paced": "2632d9a1793f0c4dfb1e72816a1ca53407046b46e15678bea924d85041fc6090",
-    "travel-no-music": "645cc4b7fffe1795a6aeba05785e836c2dc9f600ebd5ffb5b4fce44aba769baf",
+    "trailer": "c07e61cbdb0642b6d149456dd53effc73ef830f25c62f0f1f741fab48c98e69d",
+    "trailer-best-paced": "665e32ea72468cd56358926da0ca498dd4f2723d15975c3dd91a78972ddbc9d9",
+    "travel-no-music": "2bdeb6c1d0e6752e4d81715255874393a5ac7a13308a27367025a588a5d8d00f",
 }
-# The engine BEFORE deliberate silence existed, byte for byte — what
-# music_flow="continuous" promises to keep producing forever.
+# music_flow="continuous" = the SAME engine with gap planning disabled:
+# zero music_gaps, byte-identical otherwise. (Until blueprint 1.5/1.7 it
+# also happened to equal the pre-1.2 engine byte for byte; the sanctioned
+# 1.7 dip quantization and dissolve-lead-0 apply regardless of the flow,
+# so the continuous table was regenerated alongside _PARITY_GOLDEN —
+# same wave, same field-by-field verification. "continuous" keeps
+# promising exactly one thing: the song never breaks.)
 _PARITY_GOLDEN_CONTINUOUS = {
     "auto": "f9d843f342b27ddde52eb44b387259e2664c538e3d93de108deb1096df015c18",
-    "travel": "e0a9ef81e6bc145f98d11fa795804f26cc34e330c6b60a6a212de089c6af4f48",
+    "travel": "d7aa65ec1f19fd3d8abaf349cfec41753916a87021106ef4564b3b1f2428574b",
     "wedding": "0c3e4e4c5afe90b3b05a0b0a2a988186ba1ded67864f31151f6e7c50ec03aa7b",
     "music_video": "b837650cce63b2284ea0c0f4152f82025d956ec3b98d2805429072f603ee1eef",
-    "trailer": "bb5be518fdf056711ccd9a9593ee7eaaa19eb8839e4e3605887d78e519e6be70",
-    "trailer-best-paced": "3cb042ebd97b6430c550775f5fe7ea74ed056b66777f893595a0690bf17330c4",
+    "trailer": "49ac59c2f4ac7f630e265fb26c9b78a8ed6e9c2f7dba3036c7bcc796ad865466",
+    "trailer-best-paced": "ff3a45ca4973dec78b04c3e2d5d292b232dfb12b341d24c60ca942662943f35b",
 }
 
 

@@ -273,6 +273,60 @@ class TestDetectDrops:
         assert detect_drops(np.zeros(0, dtype=np.float32), RATE) == []
 
 
+class TestDropLowBandRefinement:
+    """Blueprint 1.5: low-band onset refinement of the drop instant —
+    ONLY behind these regression fixtures. The refinement replaces the
+    downbeat snap exactly when the kick evidence is decisive; the classic
+    snap fixtures above (TestDetectDrops) must keep passing unchanged."""
+
+    RATE = RATE
+
+    def _highpassed_jump(self, thump_at: float | None) -> np.ndarray:
+        """Quiet->loud noise at 20.0s with the low band REMOVED (no kick
+        evidence in the material itself), optionally plus one strong
+        60 Hz kick thump at ``thump_at``."""
+        samples = _quiet_then_loud(quiet_s=20.0, loud_s=20.0).astype(np.float64)
+        spectrum = np.fft.rfft(samples)
+        freqs = np.fft.rfftfreq(samples.size, 1.0 / self.RATE)
+        spectrum[freqs < 150.0] = 0.0
+        samples = np.fft.irfft(spectrum, n=samples.size)
+        if thump_at is not None:
+            length = int(0.25 * self.RATE)
+            t = np.arange(length) / self.RATE
+            thump = np.sin(2 * np.pi * 60.0 * t) * np.exp(-t / 0.08)
+            start = int(thump_at * self.RATE)
+            samples[start : start + length] += 0.9 * thump
+        return samples.astype(np.float32)
+
+    GRID = dict(
+        downbeats=[2.0 * i for i in range(20)],
+        beats=[0.5 * i for i in range(80)],
+    )
+
+    def test_decisive_kick_beats_the_downbeat_snap(self):
+        # The hit lands 60 ms AFTER the counted downbeat: the low-band
+        # onset is decisive, so the drop snaps to the KICK, not the grid.
+        samples = self._highpassed_jump(thump_at=20.06)
+        drops = detect_drops(samples, self.RATE, **self.GRID)
+        assert len(drops) == 1
+        assert abs(drops[0] - 20.06) <= 0.05
+        assert abs(drops[0] - 20.0) > 0.01  # NOT the downbeat
+
+    def test_no_kick_evidence_keeps_the_downbeat_snap(self):
+        # High-passed material: the low-band onset floor is flat residue,
+        # never decisive — the classic downbeat snap stands byte-for-byte.
+        samples = self._highpassed_jump(thump_at=None)
+        drops = detect_drops(samples, self.RATE, **self.GRID)
+        assert drops == [20.0]
+
+    def test_kick_on_the_downbeat_is_the_downbeat(self):
+        # Kick and grid agree (within the 10 ms honesty window): the
+        # refinement yields to the snap — same answer, cleaner witness.
+        samples = self._highpassed_jump(thump_at=20.0)
+        drops = detect_drops(samples, self.RATE, **self.GRID)
+        assert drops == [20.0]
+
+
 class TestStructureGracefulDegradation:
     def test_all_three_empty_on_silence(self):
         silence = np.zeros(10 * RATE, dtype=np.float32)

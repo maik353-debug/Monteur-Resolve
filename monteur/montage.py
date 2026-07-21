@@ -112,16 +112,32 @@ algorithm above.
 Drops
 -----
 With a named style that has a climax phase, the climax start is aligned to
-the FIRST drop: boundaries before it are scaled by ``drop / original``,
-boundaries after it are scaled toward the end by
-``(length - drop) / (length - original)``. Limits: only the first drop is
-used, and only when it lies within 5%..95% of the montage — otherwise a
-note explains why alignment was skipped. In "auto", every in-range drop
-forces a cut exactly on the drop and the slot starting there is reserved
-for the unused moment with the highest (highlight, score), so the impact
-lands on the strongest material. In both cases the drop slot is a HOLD
+the BEST in-range drop (blueprint 1.5: the heaviest by
+:func:`monteur.music.drop_weight` — envelope jump into the hottest payoff;
+ties keep the earliest, so single-drop songs behave exactly as always):
+boundaries before it are scaled by ``drop / original``, boundaries after
+it are scaled toward the end by ``(length - drop) / (length - original)``,
+and the arc-squeeze floor then guarantees every squeezed neighbour phase
+at least :data:`_ARC_MIN_PHASE_SHARE` (5%) of the montage — a deliberate
+1.5 default change; the pin itself never moves. Only drops within 5%..95%
+of the montage qualify — none in range, and a note explains the skip. In
+"auto", every in-range drop forces a cut exactly on the drop and the slot
+starting there is reserved for the unused moment with the highest
+(highlight, score), so the impact lands on the strongest material. The
+"short" style pins ONE cut the same way — on the best in-range drop,
+which is exactly the drop :func:`monteur.music.best_energy_window` placed
+inside the window with its 15% lead-in (co-designed, blueprint 1.5).
+Secondary-drop forced cuts in arc styles stay out (wave 2: they need
+their own phase-hold clearing). In all cases the drop slot is a HOLD
 (see Rhythm above): a pinned climax opens on a 2-4 beat held shot, and
-"auto" clears grid cuts inside ~2 beats after the forced cut.
+"auto"/"short" clear grid cuts inside ~2 beats after the forced cut.
+
+Loop seam (blueprint 1.5, "short" style): a windowed short chooses its
+song-window END on a phrase boundary (:func:`_loop_seam_start` — the wrap
+from the window's last note back to its first then connects musically;
+the drop pin stays in range), and the LAST slot's casting earns an
+exit→hook-entry motion-continuity bonus so the final shot hands its
+motion back into the hook on replay. The notes narrate both halves.
 
 Highlights and motion matching
 ------------------------------
@@ -330,7 +346,27 @@ late. ``cut_lead`` (default ``_DEFAULT_CUT_LEAD`` = 0.04 s, ~1 frame at
 amount after the grid is built, clamped so ordering is preserved, no
 slot drops below ``_LEAD_MIN_SLOT`` (0.25 s, or its own original length
 if shorter), the first cut stays at 0 and the final boundary stays at
-the montage length.
+the montage length. Blueprint 1.7 refinements: ``plan_montage(fps=...)``
+types the lead in frames (:func:`cut_lead_for` — exactly one frame at
+the delivery rate, explicit leads quantized to whole frames; the one
+shared decision), and DISSOLVING boundaries take no lead at all
+(dissolve lead 0): after :func:`_plan_finishing` decides the dissolves,
+:func:`_undo_lead_on_dissolves` moves each dissolving boundary back to
+its unshifted grid position — a dissolve ramps ACROSS the beat, so
+starting it early is starting it off the grid.
+
+Frame hygiene (blueprint 1.7)
+-----------------------------
+No generated slot below ``_MIN_SLOT_SECONDS`` (~0.3 s): grid remainders,
+phase-bound adjacency and drop-cut insertion run through
+:func:`_absorb_slivers` (slivers merge into a neighbour, pinned cuts
+win), the dip carving keeps a beat-aware remainder floor and the
+no-repeats truncation drops a sub-floor tail shot. Dips, dissolves and
+the renderers' title fades take BEAT-QUANTIZED durations via the one
+shared :func:`quantize_finish` helper against :func:`plan_pulse` (the
+plan's persisted downbeat marks — the tempo witness surgery and the
+renderers share with the planner); beatless plans keep the classic
+fixed values byte-for-byte.
 
 Cut on action (peak-on-beat)
 ----------------------------
@@ -515,6 +551,7 @@ from monteur.model import AUDIO, VIDEO, Clip, Marker, Timeline, seconds_to_frame
 from monteur.music import (
     MusicAnalysis,
     MusicSection,
+    best_drop,
     best_energy_window,
     intro_profile,
 )
@@ -562,9 +599,35 @@ _VARIETY_SHARE = 0.6
 _PSEUDO_BEAT = 0.75
 # Cut-ahead lead (seconds, ~1 frame at 25 fps): interior cuts are shifted this
 # far BEFORE the beat so the incoming shot is on screen when the beat lands.
+# Blueprint 1.7 (typed fps-aware leads): 0.04 s is the SECONDS APPROXIMATION
+# of one frame that stands when no fps is known; ``plan_montage(fps=...)``
+# resolves the lead through :func:`cut_lead_for` instead — exactly one frame
+# at the delivery rate, and any explicit lead quantized to whole frames.
+# ONE decision, applied everywhere the lead is read.
 _DEFAULT_CUT_LEAD = 0.04
 # Lead shifting never squeezes a slot below this (seconds).
 _LEAD_MIN_SLOT = 0.25
+# Frame hygiene (blueprint 1.7): no generated slot below this floor —
+# ~0.3 s (>= 2 frames at any delivery rate up to 60 fps *with margin*; a
+# shot shorter than this reads as a glitch, not a cut). Enforced at every
+# slot-producing site: grid remainders and phase-bound adjacency
+# (:func:`_absorb_slivers`), drop-forced cut insertion (same pass), the
+# dip carving (via :data:`_DIP_MIN_REMAINDER`, raised to this floor) and
+# the no-repeats truncation's straddle trim. Pinned drops beat the floor
+# (a sliver next to two protected boundaries stays, honestly).
+_MIN_SLOT_SECONDS = 0.3
+# Loop seam (blueprint 1.5, "short" style): the LAST slot's casting earns a
+# motion-continuity bonus for handing its EXIT motion back to the hook's
+# ENTRY motion — the visual half of the loop seam. Sized like the fill's
+# regular motion term (_MOTION_WEIGHT): it breaks ties, it does not
+# overrule scores.
+_LOOP_HANDBACK_WEIGHT = 0.3
+# Arc-squeeze floor (blueprint 1.5): when the drop pin squeezes the phase
+# boundaries on one side of the climax, every phase on that side keeps at
+# least this share of the montage (redistributed from the side's larger
+# phases). When even the side's whole span cannot afford everyone the
+# floor, the proportional squeeze stands — the pin always wins.
+_ARC_MIN_PHASE_SHARE = 0.05
 # Peak-on-beat (blueprint 1.1): when a fresh moment carries a sifted
 # ``peak_time``, its in-point is chosen so the peak lands on the slot's
 # beat (record_start + cut lead; the montage's first slot has no lead).
@@ -734,9 +797,20 @@ _FADE_IN = 0.5
 _MAX_FADE_OUT = 2.0
 _AUTO_FADE_OUT = 1.0
 # Smash to black: black-gap length at act changes, and the minimum slot
-# length the shortened outgoing clip must keep.
+# length the shortened outgoing clip must keep. Blueprint 1.7: both are
+# TARGETS, not gospel — when the plan knows its tempo (persisted downbeat
+# marks, :func:`plan_pulse`) the dip length is beat-quantized through the
+# shared :func:`quantize_finish` helper (nearest half-beat inside
+# [_DIP_QUANT_MIN, _DIP_QUANT_MAX]) so the black spans a musical duration
+# ending on the on-grid boundary, and the remainder floor rises to a
+# half-beat (never below the raw floor). Beatless plans keep the classic
+# fixed values byte-for-byte. _DIP_MIN_REMAINDER itself was raised
+# 0.25 -> 0.3 to match the sliver floor (_MIN_SLOT_SECONDS): the carved
+# outgoing remainder is a slot like any other.
 _DIP_SECONDS = 0.4
-_DIP_MIN_REMAINDER = 0.25
+_DIP_MIN_REMAINDER = _MIN_SLOT_SECONDS
+_DIP_QUANT_MIN = 0.2
+_DIP_QUANT_MAX = 0.8
 # Samples per second in MontagePlan.music_energy (the timeline strip's
 # energy lane): sample i covers record time i / MUSIC_ENERGY_RATE.
 MUSIC_ENERGY_RATE = 2.0
@@ -1668,6 +1742,46 @@ def _style_rhythm_specs(
     return specs, note
 
 
+def _enforce_phase_floor(
+    bounds: list[float], climax_i: int, length: float
+) -> bool:
+    """Arc-squeeze floor (blueprint 1.5): minimum shares around a drop pin.
+
+    The pin scales the boundaries on each side of the climax
+    proportionally; an extreme (but in-range) drop can crush a side's
+    phases to slivers of story. Per SIDE of the pinned climax start
+    (before: phases 0..climax_i tiling ``[0, drop]``; after: the
+    climax+outro tiling ``[drop, length]``), every phase is raised to at
+    least :data:`_ARC_MIN_PHASE_SHARE` x ``length``, the surplus taken
+    from the side's above-floor phases proportionally to their surplus —
+    the side's total (and the pin itself) never moves. A side whose whole
+    span cannot afford every phase the floor keeps the proportional
+    squeeze (the pin wins). Mutates ``bounds`` in place; returns whether
+    anything changed.
+    """
+    floor = _ARC_MIN_PHASE_SHARE * length
+    changed = False
+    for lo_i, hi_i in ((0, climax_i), (climax_i, len(bounds) - 1)):
+        n = hi_i - lo_i
+        if n < 2:
+            continue  # one phase fills the side: nothing to redistribute
+        span = bounds[hi_i] - bounds[lo_i]
+        if span < n * floor - _EPS:
+            continue  # the side cannot afford the floor: the pin wins
+        lens = [bounds[i + 1] - bounds[i] for i in range(lo_i, hi_i)]
+        if all(ln >= floor - _EPS for ln in lens):
+            continue
+        raised = [max(ln, floor) for ln in lens]
+        surplus = sum(r - floor for r in raised)
+        scale = (span - n * floor) / surplus if surplus > _EPS else 0.0
+        acc = bounds[lo_i]
+        for k, r in enumerate(raised[:-1]):
+            acc += floor + (r - floor) * scale
+            bounds[lo_i + 1 + k] = acc
+        changed = True
+    return changed
+
+
 def _build_style_grid(
     music: MusicAnalysis, length: float, style: MontageStyle
 ) -> tuple[list[float], list[tuple[float, float, str]], list[str]]:
@@ -1696,27 +1810,44 @@ def _build_style_grid(
         bounds.append(length * acc / total_share)
     bounds[-1] = length
 
-    # Drop = climax: pin the climax start to the first drop.
+    # Drop = climax: pin the climax start to the BEST in-range drop
+    # (blueprint 1.5 — the heaviest by musical weight, not merely the
+    # first; a single-drop song behaves exactly as before).
     pinned: set[int] = set()
     drops = sorted(d for d in music.drops)
     if drops and "climax" in labels:
-        drop = drops[0]
         climax_i = labels.index("climax")
         orig = bounds[climax_i]
-        if not (_DROP_ALIGN_MARGIN * length <= drop <= (1 - _DROP_ALIGN_MARGIN) * length):
+        in_range = [
+            d
+            for d in drops
+            if _DROP_ALIGN_MARGIN * length <= d <= (1 - _DROP_ALIGN_MARGIN) * length
+        ]
+        if not in_range:
             notes.append(
-                f"drop at {drop:.1f}s outside 5-95% of the montage; climax not aligned"
+                f"drop at {drops[0]:.1f}s outside 5-95% of the montage; climax not aligned"
             )
         elif climax_i == 0 or orig <= _EPS or orig >= length - _EPS:
             notes.append("climax phase starts at the montage edge; drop alignment skipped")
         else:
+            drop = best_drop(music, in_range)
             for i in range(1, climax_i):
                 bounds[i] *= drop / orig
             bounds[climax_i] = drop
             for i in range(climax_i + 1, len(bounds) - 1):
                 bounds[i] = length - (length - bounds[i]) * (length - drop) / (length - orig)
             pinned.add(climax_i)
-            notes.append(f"climax aligned to drop at {drop:.1f}s")
+            note = f"climax aligned to drop at {drop:.1f}s"
+            if len(in_range) > 1:
+                note += f" (the strongest of {len(in_range)})"
+            notes.append(note)
+            # Arc-squeeze floor (blueprint 1.5): an extreme pin must not
+            # crush the neighbouring phases into slivers of story.
+            if _enforce_phase_floor(bounds, climax_i, length):
+                notes.append(
+                    "drop pin: squeezed phases keep at least "
+                    f"{_ARC_MIN_PHASE_SHARE:.0%} of the montage"
+                )
 
     # Snap the remaining interior boundaries to musical positions:
     # phrases, else downbeats, else beats.
@@ -2017,6 +2148,163 @@ def _unique_material(reports: list[ClipReport]) -> float:
     return total
 
 
+def cut_lead_for(fps: float | None, requested: float | None = None) -> float:
+    """The ONE fps-aware cut-lead decision (blueprint 1.7, typed leads).
+
+    * ``fps`` known, no explicit request → exactly ONE frame (``1/fps``):
+      the editor's "cut a frame or two before the beat", typed in frames
+      instead of approximated in seconds.
+    * ``fps`` known, explicit ``requested`` seconds → the request
+      quantized to WHOLE frames (never below one frame unless the request
+      was 0, which stays 0 — "disable" keeps meaning disable).
+    * ``fps`` unknown → the request, or the classic
+      :data:`_DEFAULT_CUT_LEAD` seconds approximation (~1 frame at 25 fps).
+
+    Every consumer of a cut lead resolves it through this function, so the
+    lead means the same thing in the planner, the CLI and the web layer.
+    """
+    if fps is not None and fps <= 0:
+        raise ValueError("fps must be positive")
+    if fps is None:
+        return _DEFAULT_CUT_LEAD if requested is None else max(0.0, requested)
+    frame = 1.0 / fps
+    if requested is None:
+        return frame
+    if requested <= 0:
+        return 0.0
+    return max(frame, round(requested * fps) * frame)
+
+
+def plan_pulse(plan: MontagePlan) -> float:
+    """Seconds per BEAT from the plan's own persisted downbeat marks.
+
+    The one tempo witness every consumer of a finished plan has — the
+    planner's finishing pass, the arrangement's boundary requests,
+    :func:`adjust_entry_boundary`'s surgery and the renderers' title
+    fades all quantize against these same marks (blueprint 1.7: ONE
+    shared helper, no site left behind), so a boundary adjusted after
+    planning gets exactly the length the planner would have chosen.
+    Returns 0.0 when the plan carries fewer than two marks (no-music
+    plans, hand-built plans, songs without downbeats) — quantization is
+    then off and the classic fixed values stand byte-for-byte.
+    """
+    marks = sorted(float(t) for t in getattr(plan, "beat_marks", []) or [])
+    gaps = sorted(b - a for a, b in zip(marks, marks[1:]) if b - a > _EPS)
+    if not gaps:
+        return 0.0
+    return gaps[len(gaps) // 2] / _BEATS_PER_BAR
+
+
+def quantize_finish(
+    seconds: float, pulse: float, *, max_s: float | None = None
+) -> float:
+    """Snap a dip/dissolve/fade DURATION onto the beat grid (blueprint 1.7).
+
+    The shared quantization helper behind every finishing duration: the
+    smash-to-black dip length (all three carving sites), the dissolve
+    length (:func:`_plan_finishing`, the arrangement's ``after`` requests,
+    :func:`adjust_entry_boundary`), the dip remainder floor and the
+    renderers' title fade. Because the boundary these finishes hang off is
+    already ON the musical grid, a half-beat-multiple duration puts their
+    OTHER edge on a beat subdivision too — the dip starts a musical unit
+    before the act, the dissolve ramps in over a musical unit.
+
+    ``seconds`` is the craft target; the result is the nearest positive
+    multiple of half a ``pulse``. ``max_s`` is a hard craft ceiling (half
+    the slot, the 0.5 s dissolve cap): when the nearest multiple exceeds
+    it, the largest multiple at/below it wins, and when not even half a
+    beat fits, the raw target survives (too short to quantize is too
+    short to matter). ``pulse <= 0`` — no tempo witness — returns
+    ``seconds`` unchanged, so beatless plans stay byte-identical.
+    """
+    if pulse <= _EPS or seconds <= _EPS:
+        return seconds
+    unit = pulse / 2.0
+    k = max(1, round(seconds / unit))
+    q = k * unit
+    if max_s is not None and q > max_s + _EPS:
+        k = int((max_s + _EPS) / unit)
+        if k < 1:
+            return min(seconds, max_s)  # not even half a beat fits
+        q = k * unit
+    return q
+
+
+def _dip_seconds(plan: MontagePlan) -> float:
+    """The smash-to-black dip length for THIS plan (blueprint 1.7).
+
+    :data:`_DIP_SECONDS` beat-quantized through :func:`quantize_finish`
+    against the plan's own pulse, clamped to
+    [:data:`_DIP_QUANT_MIN`, :data:`_DIP_QUANT_MAX`]. All three carving
+    sites (the style's act changes, the arrangement's ``smash`` requests,
+    :func:`adjust_entry_boundary`) read this one value, so a dip carved
+    by surgery is indistinguishable from a planned one.
+    """
+    q = quantize_finish(_DIP_SECONDS, plan_pulse(plan), max_s=_DIP_QUANT_MAX)
+    return min(max(q, _DIP_QUANT_MIN), _DIP_QUANT_MAX)
+
+
+def _dip_min_remainder(plan: MontagePlan) -> float:
+    """The floor the carved-down outgoing slot must keep (blueprint 1.7).
+
+    At least the sliver floor (:data:`_DIP_MIN_REMAINDER` ==
+    :data:`_MIN_SLOT_SECONDS`), raised to a half-beat when the plan knows
+    its tempo — the remainder is a slot like any other and should stay a
+    musical duration.
+    """
+    pulse = plan_pulse(plan)
+    if pulse <= _EPS:
+        return _DIP_MIN_REMAINDER
+    return max(_DIP_MIN_REMAINDER, pulse / 2.0)
+
+
+def _dissolve_seconds(plan: MontagePlan, entry: "MontageEntry") -> float:
+    """The dissolve length INTO ``entry`` (blueprint 1.7, shared by all
+    three dissolve sites): the classic ``min(0.5 s, half the slot)``
+    craft rule, beat-quantized through :func:`quantize_finish` — the
+    craft rule stays the ceiling, the beat grid picks the value under it.
+    """
+    target = min(_MAX_DISSOLVE, (entry.record_end - entry.record_start) / 2.0)
+    return quantize_finish(target, plan_pulse(plan), max_s=target)
+
+
+def _absorb_slivers(
+    cuts: list[float], protected: set[float] | frozenset[float] = frozenset()
+) -> list[float]:
+    """Remove interior cut boundaries that leave a slot under the floor.
+
+    Blueprint 1.7, sliver elimination: no generated slot may be shorter
+    than :data:`_MIN_SLOT_SECONDS` — grid remainders (a beat just before
+    the montage end), phase-boundary cuts landing next to a grid cut, and
+    drop-forced cut insertion all can produce one. Deterministic
+    absorption: a sliver merges into the PRECEDING slot (its left
+    boundary is removed); when that boundary is ``protected`` (a pinned
+    drop cut, a phase bound the caller wants kept) the sliver merges into
+    the FOLLOWING slot instead; when both edges are protected the sliver
+    stays — pins beat the floor, honestly. The first and last boundary
+    (montage start/end) are always protected.
+    """
+    if len(cuts) <= 2:
+        return list(cuts)
+    prot = {round(p, 6) for p in protected}
+    prot.add(round(cuts[0], 6))
+    prot.add(round(cuts[-1], 6))
+    out = list(cuts)
+    i = 0
+    while i < len(out) - 1:
+        if out[i + 1] - out[i] >= _MIN_SLOT_SECONDS - _EPS:
+            i += 1
+            continue
+        if round(out[i], 6) not in prot:
+            del out[i]  # the sliver joins the slot before it
+            i = max(i - 1, 0)
+        elif round(out[i + 1], 6) not in prot:
+            del out[i + 1]  # ...or the one after it
+        else:
+            i += 1  # both edges pinned: the sliver survives, honestly
+    return out
+
+
 def _apply_cut_lead(cuts: list[float], lead: float) -> list[float]:
     """Shift every INTERIOR cut point ``lead`` seconds earlier.
 
@@ -2034,6 +2322,62 @@ def _apply_cut_lead(cuts: list[float], lead: float) -> list[float]:
         shifted.append(min(max(cuts[i] - lead, floor), cuts[i]))
     shifted.append(cuts[-1])
     return shifted
+
+
+def _undo_lead_on_dissolves(
+    entries: list["MontageEntry"],
+    shifted_cuts: list[float],
+    raw_cuts: list[float],
+    protected: int = 0,
+) -> int:
+    """Dissolve lead 0 (blueprint 1.7): dissolving boundaries lose the lead.
+
+    The cut-ahead lead serves HARD cuts — the incoming shot must already
+    be standing when the beat lands. A dissolve is a ramp ACROSS the
+    beat; shifting its boundary early just starts the ramp off the grid.
+    Because :func:`_plan_finishing` decides the dissolves AFTER the grid
+    lead was applied, the clean reorder the blueprint names would have to
+    rebuild the whole fill — this documented workaround is equivalent:
+    each boundary that ended up dissolving is moved BACK to its unshifted
+    grid position (looked up in the pre-lead grid), the outgoing entry
+    playing ``lead`` seconds longer and the incoming one starting that
+    much later (sources move 1:1, so the incoming peak aim — placed
+    against ``record_start + lead`` — still lands its peak exactly on
+    the beat). Honest fallbacks: a boundary whose outgoing clip has no
+    material left (``clip_duration`` known and exhausted), a boundary
+    separated by a black dip, and the first ``protected`` entries (the
+    editor's arrangement stays bit-identical) all keep their lead.
+    Returns how many boundaries moved.
+    """
+    if not entries or len(shifted_cuts) != len(raw_cuts):
+        return 0
+    back = {
+        round(s, 6): r
+        for s, r in zip(shifted_cuts, raw_cuts)
+        if r > s + _EPS
+    }
+    moved = 0
+    for i in range(max(1, protected + 1), len(entries)):
+        entry = entries[i]
+        if entry.transition <= _EPS:
+            continue
+        raw = back.get(round(entry.record_start, 6))
+        if raw is None:
+            continue
+        prev = entries[i - 1]
+        if abs(prev.record_end - entry.record_start) > _EPS:
+            continue  # a dip sits on this boundary: the smash keeps its lead
+        delta = raw - entry.record_start
+        if delta <= _EPS or entry.record_end - raw < _MIN_SLOT_SECONDS - _EPS:
+            continue  # never squeeze the incoming slot under the sliver floor
+        if prev.clip_duration > _EPS and prev.source_end + delta > prev.clip_duration + _EPS:
+            continue  # the outgoing clip has no material for the extension
+        prev.record_end = raw
+        prev.source_end += delta
+        entry.record_start = raw
+        entry.source_start = min(entry.source_start + delta, entry.source_end)
+        moved += 1
+    return moved
 
 
 # --- slot filling -------------------------------------------------------------
@@ -2545,28 +2889,48 @@ def _fill(
         last = len(slots) - 1
         if last > 0 and unused and last not in taken:
             hook_group = pool[hook_idx].group
+            # Loop seam, visual half (blueprint 1.5): the LAST shot's EXIT
+            # motion should hand back into the hook's ENTRY motion — the
+            # replay wrap then reads as one continuous move. The bonus is
+            # a tie-breaker (_LOOP_HANDBACK_WEIGHT, sized like the fill's
+            # motion term); with no usable vectors it is exactly 0 and the
+            # classic picks stand byte-identically.
+            hook_entry = pool[hook_idx].moment.entry_motion
+
+            def _handback(idx: int) -> float:
+                return _motion_continuity(pool[idx].moment.exit_motion, hook_entry)
+
             same_scene = [
                 p for p in range(len(unused))
                 if hook_group and pool[unused[p]].group == hook_group
             ]
             loop_pos: int | None = None
+            loop_note = ""
             if same_scene:
                 loop_pos = max(
                     same_scene,
-                    key=lambda p: (pool[unused[p]].moment.score, -unused[p]),
-                )
-                notes.append("loop: last shot matches the hook's scene")
-            elif motion_norm:
-                hook_motion = motion_norm[hook_idx]
-                loop_pos = min(
-                    range(len(unused)),
                     key=lambda p: (
-                        abs(motion_norm[unused[p]] - hook_motion),
-                        unused[p],
+                        pool[unused[p]].moment.score
+                        + _LOOP_HANDBACK_WEIGHT * _handback(unused[p]),
+                        -unused[p],
                     ),
                 )
-                notes.append("loop: last shot matches the hook's motion energy")
+                loop_note = "loop: last shot matches the hook's scene"
+            elif motion_norm:
+                hook_motion = motion_norm[hook_idx]
+                loop_pos = max(
+                    range(len(unused)),
+                    key=lambda p: (
+                        _LOOP_HANDBACK_WEIGHT * _handback(unused[p])
+                        - abs(motion_norm[unused[p]] - hook_motion),
+                        -unused[p],
+                    ),
+                )
+                loop_note = "loop: last shot matches the hook's motion energy"
             if loop_pos is not None:
+                if _handback(unused[loop_pos]) > _EPS:
+                    loop_note += " — and hands its motion back to the hook"
+                notes.append(loop_note)
                 reserved[last] = unused.pop(loop_pos)
     for drop_slot in sorted(drop_slots):
         if not unused:
@@ -3406,6 +3770,11 @@ def _arrangement_boundaries(
     counts what was applied.
     """
     cuts = dissolves = smashes = 0
+    # Blueprint 1.7: the arrangement's boundaries quantize through the
+    # same shared helpers as the planner's own finishing — a user-asked
+    # dissolve/smash is indistinguishable from a planned one.
+    dip_len = _dip_seconds(plan)
+    remainder_floor = _dip_min_remainder(plan)
     for i in range(min(k, len(entries) - 1)):
         after = items[i]["after"]
         if not after:
@@ -3415,24 +3784,22 @@ def _arrangement_boundaries(
             incoming.transition = 0.0
             cuts += 1
         elif after == "dissolve":
-            incoming.transition = min(
-                _MAX_DISSOLVE, (incoming.record_end - incoming.record_start) / 2.0
-            )
+            incoming.transition = _dissolve_seconds(plan, incoming)
             dissolves += 1
         elif after == "smash":
             outgoing = entries[i]
             if any(abs(ds - outgoing.record_end) <= 0.25 + _EPS for ds, _ in plan.dips):
                 continue  # the style already dipped this boundary
             slot = outgoing.record_end - outgoing.record_start
-            if slot - _DIP_SECONDS < _DIP_MIN_REMAINDER:
+            if slot - dip_len < remainder_floor:
                 plan.notes.append(
                     f"arrangement: scene {i + 1} is too short for a smash to "
                     "black — kept the straight cut"
                 )
                 continue
-            outgoing.record_end -= _DIP_SECONDS
-            outgoing.source_end -= _DIP_SECONDS
-            plan.dips.append((outgoing.record_end, _DIP_SECONDS))
+            outgoing.record_end -= dip_len
+            outgoing.source_end -= dip_len
+            plan.dips.append((outgoing.record_end, dip_len))
             smashes += 1
     if plan.dips:
         plan.dips.sort(key=lambda d: d[0])
@@ -3759,6 +4126,56 @@ def decide_music_out(
     return float(out), note
 
 
+def _loop_seam_start(
+    music: MusicAnalysis, length: float, start: float
+) -> tuple[float, float, str]:
+    """Shift a short's song window so its END sits on a phrase boundary.
+
+    Loop seam (blueprint 1.5): a short loops — the window's last note
+    wraps back to its first, and that wrap only connects MUSICALLY when
+    the window ends where a phrase ends (the next phrase would begin,
+    i.e. the music resolves back toward a section head — the same place
+    the window start lives near). The window keeps its length (the cut's
+    duration is untouched); only ``music_start`` shifts, by at most
+    ±:data:`_END_SNAP_TOLERANCE` (12%) of the length. Falls back from
+    phrase starts to downbeats; the shift is refused (returns ``start``
+    unchanged, kind ``""``) when no boundary is near enough or when it
+    would push the window's BEST drop out of the pinnable 5–95% range —
+    the drop pin and the seam are co-designed with
+    :data:`monteur.music._WINDOW_DROP_LEAD`, and the pin wins.
+
+    Returns ``(new_start, seam_point_in_song_time, boundary_kind)``.
+    """
+    end = start + length
+    tolerance = _END_SNAP_TOLERANCE * length
+    max_start = max(0.0, music.duration - length)
+    drop = best_drop(music, sorted(music.drops)) if music.drops else None
+    for cand, kind in ((music.phrases, "phrase"), (music.downbeats, "downbeat")):
+        pts = sorted(p for p in cand if _EPS < p <= music.duration + _EPS)
+        best: float | None = None
+        for p in pts:
+            d = abs(p - end)
+            if d > tolerance + _EPS:
+                continue
+            if not (0.0 - _EPS <= p - length <= max_start + _EPS):
+                continue
+            if drop is not None:
+                rec = drop - (p - length)  # the drop in the shifted record time
+                if not (
+                    _DROP_ALIGN_MARGIN * length
+                    <= rec
+                    <= (1 - _DROP_ALIGN_MARGIN) * length
+                ):
+                    continue  # the seam must not cost the drop pin
+            if best is None or d < abs(best - end) - _EPS:
+                best = p  # ties keep the earlier boundary (checked in order)
+        if best is not None:
+            if abs(best - end) <= _EPS:
+                return start, best, kind  # already seated on the boundary
+            return min(max(best - length, 0.0), max_start), best, kind
+    return start, 0.0, ""
+
+
 # Reuse detection (repeats off): two entries share material when their
 # source windows on the same clip overlap by at least this share of the
 # shorter window — identical picks overlap fully, padding slivers don't.
@@ -3857,6 +4274,15 @@ def _shorten_no_repeats(
         delta = last.record_end - cut
         last.record_end = cut
         last.source_end = max(last.source_start, last.source_end - delta)
+    if (
+        kept
+        and kept[-1].record_end - kept[-1].record_start < _MIN_SLOT_SECONDS - _EPS
+    ):
+        # Sliver floor (blueprint 1.7): the straddle trim must not leave a
+        # sub-floor tail shot — the montage ends at the previous boundary
+        # (still a grid cut) instead of on a glitch-length final frame.
+        cut = kept[-1].record_start
+        kept.pop()
     plan.duration = cut
     plan.phases = [
         (s, min(e, cut), lab) for s, e, lab in plan.phases if s < cut - _EPS
@@ -3893,6 +4319,7 @@ def plan_montage(
     arrangement: list[dict] | None = None,
     music_window: tuple[float, float] | list[float] | None = None,
     music_flow: str = "deliberate",
+    fps: float | None = None,
 ) -> MontagePlan:
     """Distribute the best moments across the song, in a cutting style.
 
@@ -3949,7 +4376,18 @@ def plan_montage(
     ``cut_lead`` (default 0.04 s, ~1 frame at 25 fps; 0 disables) shifts
     every interior cut earlier so the incoming shot lands ON the beat
     instead of starting there — cuts exactly on the beat read late (see
-    :func:`_apply_cut_lead` for the clamping rules).
+    :func:`_apply_cut_lead` for the clamping rules). ``fps``
+    (keyword-only, default None) makes the lead FPS-AWARE (blueprint
+    1.7, resolved through :func:`cut_lead_for` — the one shared
+    decision): with a known delivery rate the default lead is exactly
+    one frame (``1/fps`` — byte-identical at 25 fps) and an explicit
+    ``cut_lead`` is quantized to whole frames; ``None`` keeps the 0.04 s
+    seconds approximation. Dissolving boundaries take NO lead either way
+    (dissolve lead 0, blueprint 1.7): a dissolve is a ramp ACROSS the
+    beat, so after :func:`_plan_finishing` decides the dissolves each
+    dissolving boundary is moved back onto its unshifted grid position
+    (the documented workaround for finishing running after the grid
+    lead; see :func:`_undo_lead_on_dissolves`).
 
     ``end_on_phrase`` (default True) gives a truncated montage a musical
     ending: when the montage is shorter than the song, the length is
@@ -4021,6 +4459,13 @@ def plan_montage(
         raise ValueError(
             f"unknown music_flow {music_flow!r}; valid modes: {valid}"
         )
+    if fps is not None:
+        # Typed fps-aware lead (blueprint 1.7): one frame at the delivery
+        # rate, explicit requests quantized to whole frames. fps=25 is
+        # byte-identical to the classic 0.04 s approximation.
+        cut_lead = cut_lead_for(
+            fps, None if cut_lead == _DEFAULT_CUT_LEAD else cut_lead
+        )
     window_override: tuple[float, float] | None = None
     if music_window is not None:
         if music is None:
@@ -4077,8 +4522,23 @@ def plan_montage(
     # A montage cut shorter than the song uses the song's strongest passage,
     # not its intro: shift the whole grid onto [music_start, music_start+length].
     music_start = 0.0
+    seam_note: str | None = None
     if music is not None and _EPS < length < music.duration - _EPS:
         music_start = best_energy_window(music, length)
+        if chosen.arc and chosen.arc[0][1] == "hook":
+            # Loop seam (blueprint 1.5, "short"): the window END lands on
+            # a phrase boundary so the loop's wrap connects musically —
+            # the window shifts, the drop (and its _WINDOW_DROP_LEAD
+            # lead-in) stays pinnable inside it.
+            music_start, seam_point, seam_kind = _loop_seam_start(
+                music, length, music_start
+            )
+            if seam_kind:
+                seam_note = (
+                    f"loop seam: the song window ends on the {seam_kind} "
+                    f"boundary at {seam_point:.1f}s — the ending wraps "
+                    "back into the hook"
+                )
     if music is None:
         grid_music = MusicAnalysis(path="", duration=max(length, 0.0), tempo=0.0)
     elif music_start > _EPS:
@@ -4101,6 +4561,8 @@ def plan_montage(
         plan.notes.append(
             f"using the song's strongest {length:.0f}s (from {_mmss(music_start)})"
         )
+    if seam_note:
+        plan.notes.append(seam_note)
     if length <= _EPS:
         plan.notes.append("montage length is zero; nothing planned")
         return plan
@@ -4141,6 +4603,39 @@ def plan_montage(
     elif chosen.arc:
         cuts, phases, grid_notes = _build_style_grid(grid_music, length, chosen)
         highlight_phase = chosen.prefer_highlights_in
+        if phases and phases[0][2] == "hook":
+            # Short drop pin (blueprint 1.5): the hook/punch/loop arc has
+            # no climax phase to align, but the drop still deserves a cut
+            # — pinned on the BEST in-range drop, which is exactly the
+            # drop best_energy_window placed inside this window with its
+            # _WINDOW_DROP_LEAD (15%) lead-in (co-designed: the window
+            # carries the drop, the pin cuts on it, the loop seam keeps
+            # both). The slot starting there is reserved for the
+            # strongest moment via the drop-slot machinery, and grid cuts
+            # inside ~2 beats after the pin are cleared — the hit holds,
+            # exactly like "auto"'s drop-forced cuts.
+            in_range = [
+                d
+                for d in sorted(grid_music.drops)
+                if _DROP_ALIGN_MARGIN * length <= d <= (1 - _DROP_ALIGN_MARGIN) * length
+            ]
+            pin = best_drop(grid_music, in_range) if in_range else None
+            if pin is not None:
+                if not any(abs(c - pin) <= _EPS for c in cuts):
+                    bisect.insort(cuts, pin)
+                drop_starts.append(pin)
+                hold = 2 * _pulse_interval(grid_music)
+                cuts = [
+                    c
+                    for c in cuts
+                    if c >= length - _EPS
+                    or abs(c - pin) <= _EPS
+                    or not (pin + _EPS < c < pin + hold - _EPS)
+                ]
+                grid_notes.append(
+                    f"short: cut pinned on the drop at {pin:.1f}s; "
+                    "strongest moment assigned"
+                )
     else:
         cuts, grid_notes = _build_grid(grid_music, length, auto_steps)
         # Auto style: every in-range drop forces a cut exactly on the drop;
@@ -4176,9 +4671,21 @@ def plan_montage(
         plan.drop_marks = [
             round(t, 2) for t in grid_music.drops if -_EPS <= t <= length + _EPS
         ]
+    # Sliver elimination (blueprint 1.7): no generated slot under the
+    # ~0.3 s floor, from ANY producing site — grid remainders, phase
+    # bounds landing next to grid cuts, drop-forced insertions. Pinned
+    # drop cuts and phase starts are protected; a sliver is absorbed
+    # into its preceding slot (into the following one when the left
+    # edge is protected).
+    cuts = _absorb_slivers(
+        cuts, set(drop_starts) | {s for s, _e, _l in phases[1:]}
+    )
     # Cut-ahead lead: interior cuts move slightly BEFORE their beat so the
     # incoming shot is on screen when the beat lands. Drop-slot matching
     # below tolerates the shift (slots start cut_lead before their drop).
+    # ``raw_cuts`` (the unshifted grid) survives for the dissolve-lead-0
+    # workaround (blueprint 1.7, _undo_lead_on_dissolves).
+    raw_cuts = list(cuts)
     cuts = _apply_cut_lead(cuts, cut_lead)
     slots = list(zip(cuts, cuts[1:]))
     drop_slots = {
@@ -4422,6 +4929,11 @@ def plan_montage(
     )
     if arr_entries:
         _arrangement_boundaries(plan, entries, arr_items, len(arr_entries))
+    if cut_lead > _EPS:
+        # Dissolve lead 0 (blueprint 1.7): after every transition decision
+        # (finishing + arrangement), dissolving boundaries return to their
+        # unshifted grid position — before the SFX layer reads the cuts.
+        _undo_lead_on_dissolves(entries, cuts, raw_cuts, protected=len(arr_entries))
     if sfx:
         _plan_sfx(plan, phases, drop_starts)
     if arr_entries:
@@ -4541,9 +5053,11 @@ def _plan_finishing(
             else:
                 want = False
         if want:
-            entry.transition = min(
-                _MAX_DISSOLVE, (entry.record_end - entry.record_start) / 2.0
-            )
+            # Beat-quantized dissolve length (blueprint 1.7): the classic
+            # min(0.5s, half the slot) ceiling, snapped to the beat grid
+            # via the shared helper — identical at all three dissolve
+            # sites (here, the arrangement, adjust_entry_boundary).
+            entry.transition = _dissolve_seconds(plan, entry)
             if entry.transition > _EPS:
                 dissolves += 1
                 if reason == "daylight":
@@ -4588,6 +5102,10 @@ def _plan_finishing(
         transitions == "auto" and style.smash_to_black
     )
     if smash:
+        # Beat-quantized dip length + remainder floor (blueprint 1.7):
+        # the same _dip_seconds/_dip_min_remainder every carving site uses.
+        dip_len = _dip_seconds(plan)
+        remainder_floor = _dip_min_remainder(plan)
         if phases:
             bounds = [p_start for p_start, _, _ in phases[1:]]
         else:  # arc-less "auto": the song's section changes are the acts
@@ -4603,15 +5121,15 @@ def _plan_finishing(
             if abs(outgoing.record_end - bound) > 0.25 + _EPS:
                 continue
             slot = outgoing.record_end - outgoing.record_start
-            if slot - _DIP_SECONDS < _DIP_MIN_REMAINDER:
+            if slot - dip_len < remainder_floor:
                 continue
-            outgoing.record_end -= _DIP_SECONDS
-            outgoing.source_end -= _DIP_SECONDS
-            plan.dips.append((outgoing.record_end, _DIP_SECONDS))
+            outgoing.record_end -= dip_len
+            outgoing.source_end -= dip_len
+            plan.dips.append((outgoing.record_end, dip_len))
         if plan.dips:
             plan.notes.append(
                 f"{len(plan.dips)} smash-cuts to black at act changes "
-                f"({_DIP_SECONDS:g}s each) — title slots, exported as markers"
+                f"({dip_len:g}s each) — title slots, exported as markers"
             )
 
     if plan.fade_in > _EPS or plan.fade_out > _EPS:
@@ -5474,13 +5992,18 @@ def adjust_entry_boundary(
       dip sitting on the boundary is removed (the outgoing shot gets its
       carved-off tail back — the exact reverse of the smash below).
     * ``"dissolve"`` — the entry dissolves in with the planner's own rule:
-      ``min(_MAX_DISSOLVE, half the slot length)`` (the 0.5 s rule from
-      :func:`_plan_finishing`). A dip on the boundary is removed first — a
-      shot cannot both smash out of black and dissolve.
+      ``min(_MAX_DISSOLVE, half the slot length)``, beat-quantized through
+      the shared :func:`quantize_finish` helper against the plan's own
+      pulse (blueprint 1.7 — the surgery contract: an adjusted boundary
+      gets exactly the length :func:`_plan_finishing` would have chosen).
+      A dip on the boundary is removed first — a shot cannot both smash
+      out of black and dissolve.
     * ``"smash"`` — the classic trailer breath: the OUTGOING entry gives
-      up its last :data:`_DIP_SECONDS` to a black gap (a title slot) and
-      the entry hits out of black; its dissolve is cleared. Already
-      smashed boundaries are left alone (noted, not an error).
+      up its last :func:`_dip_seconds` (the :data:`_DIP_SECONDS` target,
+      beat-quantized like the planner's carving — same contract) to a
+      black gap (a title slot) and the entry hits out of black; its
+      dissolve is cleared. Already smashed boundaries are left alone
+      (noted, not an error).
 
     Everything else — the record grid, every other entry, the SFX cues —
     stays bit-identical; ``title_texts`` stays aligned with ``dips`` (an
@@ -5533,28 +6056,33 @@ def adjust_entry_boundary(
     )
 
     if transition == "smash":
+        # Blueprint 1.7 (the adjust_entry_boundary contract): surgery
+        # carves with the SAME beat-quantized dip length and remainder
+        # floor the planner used — one shared helper, so an adjusted
+        # boundary is indistinguishable from a planned one.
+        dip_len = _dip_seconds(plan)
         if dip_at is not None:
             added.append(
                 f"boundary: slot {slot + 1} already smashes in from black — kept"
             )
         else:
             length = prev.record_end - prev.record_start
-            if length - _DIP_SECONDS < _DIP_MIN_REMAINDER:
+            if length - dip_len < _dip_min_remainder(plan):
                 raise ValueError(
                     f"slot {slot} is too short ({length:.2f}s) to give up "
-                    f"{_DIP_SECONDS:g}s for a smash to black"
+                    f"{dip_len:g}s for a smash to black"
                 )
-            prev.record_end -= _DIP_SECONDS
-            prev.source_end -= _DIP_SECONDS
+            prev.record_end -= dip_len
+            prev.source_end -= dip_len
             insert_at = bisect.bisect_left(
                 [d_start for d_start, _ in dips], prev.record_end
             )
-            dips.insert(insert_at, (prev.record_end, _DIP_SECONDS))
+            dips.insert(insert_at, (prev.record_end, dip_len))
             if titles:
                 titles.insert(insert_at, "")
             added.append(
                 f"boundary: smash to black into slot {slot + 1} "
-                f"({_DIP_SECONDS:g}s title gap)"
+                f"({dip_len:g}s title gap)"
             )
         entry.transition = 0.0
     else:  # "cut" / "dissolve"
@@ -5583,9 +6111,9 @@ def adjust_entry_boundary(
                 del titles[dip_at]
             added.append(f"boundary: removed the black dip before slot {slot + 1}")
         if transition == "dissolve":
-            entry.transition = min(
-                _MAX_DISSOLVE, (entry.record_end - entry.record_start) / 2.0
-            )
+            # The planner's own rule, beat-quantized (blueprint 1.7) —
+            # the shared _dissolve_seconds keeps the surgery contract.
+            entry.transition = _dissolve_seconds(plan, entry)
             added.append(
                 f"boundary: dissolve into slot {slot + 1} ({entry.transition:g}s)"
             )

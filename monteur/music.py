@@ -533,6 +533,29 @@ _DROP_SUSTAIN_LEVEL = 0.65
 _DROP_BUILD_S = 4.0  # the preceding stretch must be quieter on average
 _DROP_BUILD_MAX = 0.55
 _DROP_MERGE_S = 8.0  # candidates closer than this are one drop
+# Drop weighting (blueprint 1.5): a drop's MUSICAL weight is its envelope
+# jump (mean section energy right after it minus right before it, over
+# this many seconds each way) plus the following-section energy itself —
+# how hard it hits plus how hot it stays. Consumers pick the BEST drop by
+# this weight (ties to the earliest), not merely the first one.
+_DROP_WEIGHT_SPAN_S = 4.0
+# Low-band onset refinement of drop instants (blueprint 1.5): where a
+# kick/bass onset inside the snap window is DECISIVE evidence, the drop
+# snaps to that onset instead of the nearest downbeat. Decisive means the
+# strongest low-band onset in the window is at least _DROP_LOWBAND_DECISIVE
+# times the onset at the downbeat target, carries at least
+# _DROP_LOWBAND_MIN of the track's own peak low-band onset, and sits more
+# than _DROP_REFINE_EPS away from the downbeat (closer = the downbeat IS
+# the onset). Anything less keeps the classic downbeat snap byte-for-byte.
+_DROP_LOWBAND_DECISIVE = 2.0
+_DROP_LOWBAND_MIN = 0.1
+# ...and a real KICK: at least this many times the track's median positive
+# low-band onset. A track without low-band hits (high-passed content,
+# residual leakage) has a flat onset floor whose random peaks stay well
+# under this — no kick evidence, no refinement, the downbeat snap stands.
+_DROP_LOWBAND_OVER_MEDIAN = 8.0
+_DROP_REFINE_EPS = 0.01
+_DROP_REFINE_HOP = 512  # samples per low-band onset step (~23 ms at 22050)
 
 
 def detect_downbeats(samples, rate: int, beats: list[float]) -> list[float]:
@@ -666,7 +689,12 @@ def detect_drops(
         group.append(cand)
     flush()
 
-    # Snap to the nearest downbeat within +/- one beat.
+    # Snap to the nearest downbeat within +/- one beat. Where the low-band
+    # evidence is DECISIVE (blueprint 1.5), the snap refines onto the
+    # kick/bass onset instead — the hit instant beats the counted grid,
+    # but only when the kick unambiguously says so; everything else keeps
+    # the classic downbeat snap byte-for-byte (regression fixtures in
+    # tests/test_music.py pin both behaviors).
     if downbeats:
         if beats and len(beats) > 1:
             beat_period = float(np.median(np.diff(beats)))
@@ -676,13 +704,134 @@ def detect_drops(
             beat_period = 0.0
         if beat_period > 0:
             grid = np.asarray(downbeats, dtype=np.float64)
+            low_env: np.ndarray | None = None  # built lazily, only when a snap fires
             snapped = []
             for t in drops:
                 nearest = float(grid[int(np.argmin(np.abs(grid - t)))])
-                snapped.append(nearest if abs(nearest - t) <= beat_period else t)
+                if abs(nearest - t) > beat_period:
+                    snapped.append(t)  # too far to snap: time unchanged
+                    continue
+                if low_env is None:
+                    low_env = _low_band_onset(x, rate)
+                refined = _refine_drop_lowband(
+                    low_env, _DROP_REFINE_HOP / rate, t, nearest, beat_period
+                )
+                snapped.append(nearest if refined is None else refined)
             drops = snapped
 
     return sorted(drops)
+
+
+def _low_band_onset(samples: np.ndarray, rate: int) -> np.ndarray:
+    """Half-wave-rectified RMS onset of the < ~150 Hz band, one value per
+    :data:`_DROP_REFINE_HOP` samples — the kick evidence behind the drop
+    refinement (blueprint 1.5). Uses the same FFT low-pass as
+    :func:`detect_downbeats`; value ``i`` describes the step starting at
+    ``i * hop`` seconds."""
+    x = np.asarray(samples, dtype=np.float64)
+    if x.size < 2 * _DROP_REFINE_HOP:
+        return np.zeros(0)
+    spectrum = np.fft.rfft(x)
+    freqs = np.fft.rfftfreq(x.size, 1.0 / rate)
+    spectrum[freqs > _LOW_BAND_HZ] = 0.0
+    low = np.fft.irfft(spectrum, n=x.size)
+    hop = _DROP_REFINE_HOP
+    count = x.size // hop
+    rms = np.sqrt((low[: count * hop].reshape(count, hop) ** 2).mean(axis=1))
+    return np.maximum(np.diff(rms, prepend=rms[:1]), 0.0)
+
+
+def _refine_drop_lowband(
+    env: np.ndarray, hop_s: float, drop: float, target: float, beat_period: float
+) -> float | None:
+    """The decisive low-band onset near ``drop``, or None (keep the snap).
+
+    Searches ``drop ± beat_period`` (the same window the downbeat snap
+    honors) for the strongest low-band onset. It replaces the downbeat
+    ``target`` only when it is DECISIVE: at least
+    :data:`_DROP_LOWBAND_DECISIVE` x the onset at the downbeat itself,
+    at least :data:`_DROP_LOWBAND_MIN` of the track's peak onset, and
+    more than :data:`_DROP_REFINE_EPS` away from the downbeat (within
+    that, the downbeat IS the hit). Sub-step precision via the same
+    parabolic interpolation the beat tracker uses.
+    """
+    if env.size < 3 or hop_s <= 0:
+        return None
+    peak_global = float(env.max())
+    if peak_global <= _EPS:
+        return None
+    lo = max(int((drop - beat_period) / hop_s), 1)
+    hi = min(int((drop + beat_period) / hop_s) + 1, env.size - 1)
+    if hi <= lo:
+        return None
+    best = lo + int(np.argmax(env[lo:hi]))
+    ti = min(max(int(round(target / hop_s)), 1), env.size - 2)
+    at_target = float(env[ti - 1 : ti + 2].max())  # ±1 step: placement honesty
+    strength = float(env[best])
+    if strength < _DROP_LOWBAND_MIN * peak_global - _EPS:
+        return None
+    positive = env[env > _EPS]
+    if positive.size and strength < _DROP_LOWBAND_OVER_MEDIAN * float(
+        np.median(positive)
+    ):
+        return None  # no kick towers here — a flat onset floor is no evidence
+    if strength < _DROP_LOWBAND_DECISIVE * max(at_target, _EPS) - _EPS:
+        return None
+    # Parabolic sub-step refinement around the integer peak.
+    frame = float(best)
+    a, b, c = env[best - 1], env[best], env[best + 1]
+    denom = a - 2 * b + c
+    if denom < 0:
+        shift = 0.5 * (a - c) / denom
+        if abs(shift) <= 1:
+            frame += float(shift)
+    refined = frame * hop_s
+    if abs(refined - target) <= _DROP_REFINE_EPS:
+        return None  # the downbeat is the hit: keep the classic snap
+    return refined
+
+
+def _mean_section_energy(
+    sections: list[MusicSection], lo: float, hi: float
+) -> float:
+    """Duration-weighted mean section energy over ``[lo, hi]`` (0.0 empty)."""
+    total = span = 0.0
+    for s in sections:
+        a = max(lo, s.start)
+        b = min(hi, s.end)
+        if b > a:
+            total += s.energy * (b - a)
+            span += b - a
+    return total / span if span > _EPS else 0.0
+
+
+def drop_weight(music: MusicAnalysis, drop: float) -> float:
+    """The MUSICAL weight of a drop (blueprint 1.5): jump + payoff.
+
+    ``envelope jump`` is the mean section energy over the
+    :data:`_DROP_WEIGHT_SPAN_S` seconds right after the drop minus the
+    mean over the span right before it (half-wave rectified — a "drop"
+    into a quieter section weighs nothing); the ``following-section
+    energy`` is that after-mean itself. Pure — works from the finished
+    analysis's coarse sections, so montage-time consumers (climax
+    pinning, the short's drop pin, :func:`best_energy_window`) all score
+    identically. A section-less analysis weighs every drop 0.0, so ties
+    resolve to the earliest drop — the exact pre-1.5 choice.
+    """
+    before = _mean_section_energy(
+        music.sections, drop - _DROP_WEIGHT_SPAN_S, drop
+    )
+    after = _mean_section_energy(
+        music.sections, drop, drop + _DROP_WEIGHT_SPAN_S
+    )
+    return max(after - before, 0.0) + after
+
+
+def best_drop(music: MusicAnalysis, drops: list[float]) -> float | None:
+    """The heaviest drop of ``drops`` by :func:`drop_weight` (ties earliest)."""
+    if not drops:
+        return None
+    return max(sorted(drops), key=lambda d: (drop_weight(music, d), -d))
 
 
 def detect_low_band(samples, rate: int) -> list[float]:
@@ -945,10 +1094,16 @@ def best_energy_window(music: MusicAnalysis, length: float) -> float:
     (each a stretch carrying a single 0..1 energy) rather than recomputing it:
 
     * When ``music.drops`` is non-empty the window is placed to CONTAIN the
-      first drop with a short lead-in (``drop - 15% of length``) so the build
-      into the drop rides along — a drop is the strongest moment a section
-      summary can point at. The start is clamped to ``[0, duration - length]``,
-      which always keeps the drop inside the window.
+      BEST drop (blueprint 1.5: the heaviest by :func:`drop_weight` — the
+      biggest envelope jump into the hottest payoff; ties keep the
+      earliest, which on section-less analyses reproduces the old
+      first-drop choice exactly) with a short lead-in (``drop - 15% of
+      length``, :data:`_WINDOW_DROP_LEAD`) so the build into the drop
+      rides along — a drop is the strongest moment a section summary can
+      point at. The start is clamped to ``[0, duration - length]``, which
+      always keeps the drop inside the window. The "short" style's drop
+      pin (:mod:`monteur.montage`) is co-designed with this lead: the pin
+      lands on exactly the drop this window carries.
     * Otherwise the window whose section-energy-weighted average over
       ``[start, start + length]`` is highest is chosen. That average is
       piecewise-linear in ``start`` with breakpoints at section boundaries, so
@@ -964,7 +1119,7 @@ def best_energy_window(music: MusicAnalysis, length: float) -> float:
     max_start = duration - length
 
     if music.drops:
-        drop = min(music.drops)
+        drop = best_drop(music, music.drops)  # blueprint 1.5: the heaviest
         start = drop - _WINDOW_DROP_LEAD * length
         return float(min(max(start, 0.0), max_start))
 

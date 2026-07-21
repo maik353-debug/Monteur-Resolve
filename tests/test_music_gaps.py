@@ -127,8 +127,15 @@ class TestGapComputation:
     def test_pre_drop_gap_is_exactly_one_beat_ending_on_the_drop(self):
         plan = trailer_plan()
         beat = 0.5
+        # Blueprint 1.7: the beat-quantized dips are now exactly one beat
+        # long on this 120bpm grid too, so gap LENGTH alone no longer
+        # identifies the pre-drop breath — exclude the dip gaps by their
+        # dip start.
         pre_drop = [
-            (lo, hi) for lo, hi in plan.music_gaps if abs(hi - lo - beat) < 1e-6
+            (lo, hi)
+            for lo, hi in plan.music_gaps
+            if abs(hi - lo - beat) < 1e-6
+            and not any(abs(d_start - lo) < 0.26 for d_start, _l in plan.dips)
         ]
         assert len(pre_drop) == 1
         lo, hi = pre_drop[0]

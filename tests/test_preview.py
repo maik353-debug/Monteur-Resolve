@@ -36,6 +36,18 @@ needs_demo = pytest.mark.skipif(
 )
 
 
+def non_loudness(notes: list[str]) -> list[str]:
+    """Notes minus the informational loudness line (blueprint 1.4).
+
+    The demo footage's synthetic audio has an extreme crest factor, so
+    the two-pass loudnorm honestly reports that its linear gain had no
+    true-peak headroom (dynamic fallback). Tests about OTHER degradations
+    filter it; the loudness behavior itself is pinned in
+    tests/test_magie_wave1.py.
+    """
+    return [n for n in notes if not n.startswith("loudness:")]
+
+
 def demo_plan(music: bool = True) -> MontagePlan:
     """A tiny 6 s plan: three entries with a 0.4 s record gap (black dip)."""
     entries = [
@@ -340,7 +352,7 @@ def test_render_export_high_profile(tmp_path):
     assert result["path"] == str(out)
     assert result["width"] == 480 and result["height"] == 270
     assert result["seconds"] > 0
-    assert result["notes"] == []  # nothing degraded in this plan
+    assert non_loudness(result["notes"]) == []  # nothing degraded in this plan
     info = probe(out)
     assert info.duration == pytest.approx(6.0, abs=0.3)
     assert result["duration"] == pytest.approx(info.duration)
@@ -394,7 +406,7 @@ def test_render_export_no_music_with_placed_sfx(tmp_path):
         plan, str(out), size=(320, 180), audio="original", quality="medium"
     )
     assert out.is_file()
-    assert result["notes"] == []  # the SFX file exists and was mixed in
+    assert non_loudness(result["notes"]) == []  # the SFX file exists and was mixed in
     assert probe(out).has_audio
 
 
@@ -408,7 +420,7 @@ def test_render_export_with_music_window(tmp_path):
         plan, str(out), size=(320, 180), audio="music", quality="medium"
     )
     assert out.is_file()
-    assert result["notes"] == []
+    assert non_loudness(result["notes"]) == []
     info = probe(out)
     assert info.has_audio
     assert info.duration == pytest.approx(6.0, abs=0.3)
@@ -457,7 +469,7 @@ def test_render_export_dissolve_with_handles(tmp_path):
     plan.entries[1].clip_duration = 8.0
     out = tmp_path / "dissolve.mp4"
     result = render_export(plan, str(out), size=(320, 180), audio="music")
-    assert result["notes"] == []
+    assert non_loudness(result["notes"]) == []
     assert result["duration"] == pytest.approx(6.0, abs=0.3)
 
 
@@ -483,7 +495,7 @@ def test_render_export_dissolve_out_of_a_black_dip_always_works(tmp_path):
     plan.entries[1].transition = 0.3  # clip_C enters from the 2.0..2.4 dip
     out = tmp_path / "fromblack.mp4"
     result = render_export(plan, str(out), size=(320, 180), audio="music")
-    assert result["notes"] == []
+    assert non_loudness(result["notes"]) == []
     assert result["duration"] == pytest.approx(6.0, abs=0.3)
 
 
@@ -557,13 +569,15 @@ def test_render_export_progress_stages(tmp_path):
         audio="mix",
         progress=lambda done, total, label: calls.append((done, total, label)),
     )
-    # 4 segments + the original-sound bed + the final transitions/mux pass
+    # 4 segments + the original-sound bed + the loudness measurement pass
+    # (blueprint 1.4: two-pass loudnorm's first pass) + the final mux
     totals = {total for _, total, _ in calls}
-    assert totals == {6}
-    assert [done for done, _, _ in calls] == list(range(1, 7))
+    assert totals == {7}
+    assert [done for done, _, _ in calls] == list(range(1, 8))
     labels = [label for _, _, label in calls]
     assert labels[-1] == "mux"
-    assert labels[-2] == "audio bed"
+    assert labels[-2] == "loudness"
+    assert labels[-3] == "audio bed"
     assert "black" in labels  # the dip segment ticked too
 
 
@@ -671,5 +685,5 @@ def test_export_original_dip_is_silent_but_the_braam_lands(tmp_path):
     out = tmp_path / "dip_braam.mp4"
     result = render_export(plan, str(out), size=(320, 180), audio="original",
                            quality="medium")
-    assert result["notes"] == []
+    assert non_loudness(result["notes"]) == []
     assert _rms_db(out, 2.05, 2.35) > -60.0  # the braam is audible in the dip

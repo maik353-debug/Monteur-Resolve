@@ -859,22 +859,36 @@ def test_transitions_in_gentle_phases_only():
     plan = plan_montage(make_varied_reports(), make_arc_music(), style="travel")
     # phases: opening 0-8 (slow slots), build 8-16, climax 16-32, outro 32-40
     assert plan.entries[0].transition == 0.0  # first entry: its fade is fade_in
+    # Blueprint 1.7 (dissolve lead 0): dissolving boundaries return to
+    # their UNSHIFTED grid positions — the same five gentle boundaries as
+    # always (2 opening interiors, the opening->build handover, 2 outro
+    # interiors), now sitting exactly ON the grid while the hard cuts
+    # keep the 0.04s cut-ahead lead.
+    dissolve_starts = {
+        round(e.record_start, 3) for e in plan.entries if e.transition > 0
+    }
+    assert dissolve_starts == {4.0, 6.0, 8.0, 34.0, 36.0}
     for e in plan.entries[1:]:
-        if e.record_start < 8.0 or e.record_start >= 32.0:  # opening / outro
+        if round(e.record_start, 3) in dissolve_starts:
             assert e.transition == pytest.approx(0.5)  # min(0.5, half the slot)
-        else:  # build / climax cut hard
+        else:  # build / climax (and the lead-shifted hard cuts)
             assert e.transition == 0.0
     dissolves = sum(1 for e in plan.entries if e.transition > 0)
-    assert dissolves == 5  # 3 opening (minus the first) + 3 outro
+    assert dissolves == 5
     assert any(f"{dissolves} dissolves in gentle phases" in n for n in plan.notes)
 
 
 def test_auto_low_sections_get_transitions():
     plan = plan_montage(make_varied_reports(), make_music())
     assert plan.entries[0].transition == 0.0
-    low = [e for e in plan.entries[1:] if e.record_start < 4.0]
+    # Blueprint 1.7 (dissolve lead 0): the dissolving boundaries — the
+    # "low"-section interiors plus the low->mid handover — sit exactly ON
+    # the grid (2.0, 4.0), no longer 0.04s early; everything from the mid
+    # section on cuts hard.
+    low = [e for e in plan.entries[1:] if e.record_start <= 4.0]
     assert low and all(e.transition == pytest.approx(0.5) for e in low)
-    assert all(e.transition == 0.0 for e in plan.entries if e.record_start >= 4.0)
+    assert {round(e.record_start, 3) for e in low} == {2.0, 4.0}
+    assert all(e.transition == 0.0 for e in plan.entries if e.record_start > 4.0)
 
 
 def test_timeline_carries_transitions_and_fades():

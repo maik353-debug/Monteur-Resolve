@@ -205,6 +205,9 @@ def test_more_scenes_than_slots_drops_excess_from_the_end_with_note():
 
 
 def test_after_dissolve_sets_the_boundary_transition():
+    # (make_music carries no downbeats, so the blueprint-1.7 beat
+    # quantization stays off here — the classic 0.5s rule is asserted;
+    # the dual quantized fixture lives in TestQuantizedFinishes below.)
     plan = plan_montage(
         make_big_reports(), make_music(), cut_lead=0.0,
         arrangement=[
@@ -282,6 +285,64 @@ def test_after_accepts_bare_string_and_smash_skips_existing_dip():
     )
     starts = [round(s, 3) for s, _ in plan.dips]
     assert len(starts) == len(set(starts))  # no doubled dip on one boundary
+
+
+# --- quantized boundaries (blueprint 1.7 dual fixtures) ---------------------------
+
+
+def make_downbeat_music(bar: float = 2.0) -> MusicAnalysis:
+    """The 12s grid WITH downbeats (every ``bar`` seconds): plan_montage
+    persists them as beat_marks, so the shared quantize_finish helper is
+    ACTIVE — the dual sibling of the beatless make_music fixtures above."""
+    beat = bar / 4.0
+    return MusicAnalysis(
+        path="/music/song.wav",
+        duration=12.0,
+        tempo=60.0 / beat,
+        beats=[i * beat for i in range(int(12.0 / beat))],
+        sections=[
+            MusicSection(0.0, 4.0, 0.2, "low"),
+            MusicSection(4.0, 8.0, 0.5, "mid"),
+            MusicSection(8.0, 12.0, 0.9, "high"),
+        ],
+        downbeats=[i * bar for i in range(int(12.0 / bar))],
+    )
+
+
+class TestQuantizedFinishes:
+    """Blueprint 1.7: the arrangement's smash/dissolve boundaries take
+    beat-quantized lengths from the SAME shared helper the planner and
+    the surgery use — these are the dual fixtures to the beatless
+    classics above (test_after_smash_* asserts 0.4s, test_after_dissolve_*
+    asserts 0.5s: without downbeat marks nothing quantizes)."""
+
+    def test_smash_dip_is_one_beat_on_a_120bpm_grid(self):
+        # pulse 0.5s: the 0.4s dip target quantizes to 0.5s — the black
+        # spans exactly one beat and ends on the on-grid boundary.
+        plan = plan_montage(
+            make_big_reports(), make_downbeat_music(), cut_lead=0.0,
+            arrangement=[
+                {"clip": "a.mp4", "start": 0.0, "after": {"transition": "smash"}},
+                {"clip": "b.mp4", "start": 0.0},
+            ],
+        )
+        entries = sorted(plan.entries, key=lambda e: e.record_start)
+        boundary = entries[1].record_start
+        assert plan.dips == [(pytest.approx(boundary - 0.5), pytest.approx(0.5))]
+        assert entries[0].record_end == pytest.approx(boundary - 0.5)
+
+    def test_dissolve_floors_to_the_half_beat_under_its_ceiling(self):
+        # pulse 0.8s (75 bpm, bars of 3.2s): the 0.5s dissolve ceiling is
+        # off-grid; the largest half-beat multiple under it (0.4s) wins.
+        plan = plan_montage(
+            make_big_reports(), make_downbeat_music(bar=3.2), cut_lead=0.0,
+            arrangement=[
+                {"clip": "a.mp4", "start": 0.0, "after": {"transition": "dissolve"}},
+                {"clip": "b.mp4", "start": 0.0},
+            ],
+        )
+        entries = sorted(plan.entries, key=lambda e: e.record_start)
+        assert entries[1].transition == pytest.approx(0.4)
 
 
 # --- "sfx" boundary cues -----------------------------------------------------------

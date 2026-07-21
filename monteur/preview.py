@@ -64,8 +64,18 @@ import tempfile
 import time
 from pathlib import Path
 
+import json
+import math
+import re
+
 from monteur.media import MonteurMediaError, find_ffmpeg, probe
-from monteur.montage import MontagePlan, music_bed_gaps, music_window_bounds
+from monteur.montage import (
+    MontagePlan,
+    music_bed_gaps,
+    music_window_bounds,
+    plan_pulse,
+    quantize_finish,
+)
 
 # Fixed "mix" levels (documented above): the song stays at full level, the
 # clips' own sound is ducked under it.
@@ -124,11 +134,47 @@ EXPORT_QUALITIES: dict[str, dict[str, str]] = {
 _SEG_PRESET = "faster"
 # Act titles on the dips: plain white, centered, sized from the canvas
 # height; when the dip is long enough the text fades in/out this long.
+# Blueprint 1.7: 0.3 s is the TARGET — a plan that knows its tempo
+# (persisted downbeat marks) beat-quantizes the fade through the shared
+# monteur.montage.quantize_finish helper (capped at _TITLE_FADE_MAX so a
+# slow song cannot eat the dip); beatless plans keep 0.3 s byte-for-byte.
 _TITLE_FADE = 0.3
-# Loudness finish: single-pass loudnorm at YouTube's streaming target
-# (-14 LUFS integrated, -1 dBTP true peak, LRA 11) — the platform then
-# leaves the level alone instead of turning it down.
+_TITLE_FADE_MAX = 0.5
+# Loudness finish (blueprint 1.4): render_export runs TRUE two-pass
+# loudnorm at YouTube's streaming target (-14 LUFS integrated, -1 dBTP
+# true peak, LRA 11) — pass 1 renders the finished audio chain into a
+# null muxer with print_format=json and measures it, pass 2 feeds the
+# measured values back with linear=true, so the correction is one clean
+# gain instead of a dynamic compressor chasing the mix. The measurement
+# is cached only inside the one render call (same-call, never across
+# calls — the chain's inputs define it). A failed/unparseable
+# measurement degrades to this single-pass string with an honest note;
+# render_preview stays a single pass with no loudness finish at all —
+# it is a look, not a deliverable, and speed wins there.
 _EXPORT_LOUDNORM = "loudnorm=I=-14:TP=-1:LRA=11"
+_LOUDNORM_I = -14.0
+_LOUDNORM_TP = -1.0
+_LOUDNORM_LRA = 11.0
+# --- Bed ducking (blueprint 1.4) ---------------------------------------------
+# The MUSIC bed ducks under every placed SFX accent and (mix mode) under
+# prominent original-sound moments — multiplying volume envelopes in the
+# same linear chain as the music-gap gates: chained `volume` filters
+# multiply per sample, so gates (x0) and ducks (x0.5) compose without any
+# stream splitting, and a duck inside a gap simply multiplies into the
+# mute. Fixed, documented depths, deterministic by construction.
+# W2 seam (O-Ton pops): the same envelope machinery can LIFT the original
+# bed over the song for a marked original-sound moment — the window
+# builders below are the seam; wave 2 only adds a positive-gain window
+# source on the original chain.
+_DUCK_ACCENT_DB = -6.0  # impact / sub-drop (braam): the hit owns its window
+_DUCK_RISER_DB = -4.0  # riser: a gentler shelf — it must READ above the bed
+_DUCK_OTON_DB = -4.0  # mix mode: prominent original sound gets room
+_DUCK_ACCENT_MAX_S = 1.5  # an accent duck never dips longer than this
+_DUCK_FADE = 0.05  # accent edges: the gap gates' click-free micro-fade
+_DUCK_SHELF_FADE = 0.25  # riser/O-Ton edges: a shelf eases, it does not dip
+# Mix mode: a bed part whose mean level stands this many dB above the
+# median of all sounding parts is a "prominent" original-sound moment.
+_DUCK_OTON_STANDOUT_DB = 6.0
 # Dissolves shorter than this are rounding noise, not transitions.
 _MIN_TRANSITION = 0.01
 # Font candidates for drawtext, probed in order (Linux, macOS, Windows).
@@ -154,6 +200,28 @@ def _run_ffmpeg(args: list[str], label: str) -> None:
     if result.returncode != 0:
         tail = result.stderr.decode("utf-8", "replace")[-_STDERR_TAIL:]
         raise MonteurMediaError(f"ffmpeg failed while {label}: {tail}")
+
+
+def _run_ffmpeg_capture(args: list[str], label: str) -> str:
+    """Like :func:`_run_ffmpeg` but at ``-loglevel info``, returning stderr.
+
+    The measurement runs need what ffmpeg PRINTS: loudnorm's
+    ``print_format=json`` block (the two-pass first pass, blueprint 1.4)
+    and ``volumedetect``'s levels (the mix-mode prominence measure) both
+    land on stderr at info level. Failures raise exactly like
+    :func:`_run_ffmpeg`.
+    """
+    cmd = [find_ffmpeg(), "-hide_banner", "-nostats", "-loglevel", "info", "-y", *args]
+    try:
+        result = subprocess.run(cmd, capture_output=True)
+    except OSError as exc:
+        raise MonteurMediaError(f"could not run ffmpeg while {label}: {exc}") from exc
+    stderr = result.stderr.decode("utf-8", "replace")
+    if result.returncode != 0:
+        raise MonteurMediaError(
+            f"ffmpeg failed while {label}: {stderr[-_STDERR_TAIL:]}"
+        )
+    return stderr
 
 
 def _even(n: float) -> int:
@@ -286,6 +354,104 @@ def _gap_gate_filters(gaps: list[tuple[float, float]]) -> list[str]:
     return filters
 
 
+def ducking_windows(
+    cues: list,
+    duration: float,
+    *,
+    prominent: list[tuple[float, float]] | None = None,
+) -> list[tuple[float, float, float, float]]:
+    """Bed-ducking windows ``(start, end, floor_gain, edge_fade)`` — 1.4.
+
+    Built from the plan's PLACED sound elements (cues with a ``file`` —
+    a marker cue makes no sound and ducks nothing) plus, in mix mode, the
+    caller-measured ``prominent`` original-sound record windows:
+
+    * **impact / sub-drop** — a :data:`_DUCK_ACCENT_DB` (−6 dB) dip over
+      the accent window (``cue.time`` for ``min(cue.duration,
+      _DUCK_ACCENT_MAX_S)`` — the hit and its first ring, not the whole
+      tail), gap-gate micro-fade edges;
+    * **riser** — a gentler :data:`_DUCK_RISER_DB` (−4 dB) SHELF over the
+      riser's full play window with eased :data:`_DUCK_SHELF_FADE`
+      edges, so the build reads above the bed all the way into its hit;
+    * **prominent original sound** (mix mode) — a −4 dB shelf over each
+      measured window (:data:`_DUCK_OTON_DB`).
+
+    Ambience and whoosh cues never duck — they sit level with the bed.
+    Windows are clamped into ``[0, duration]``, sorted, and returned as
+    LINEAR floor gains (``10^(dB/20)``); overlapping windows simply
+    multiply in the chain (documented composition — an impact riding a
+    riser's shelf dips −10 dB for its beat, which is the intent). Empty
+    result = the untouched old chains, byte-identical.
+    """
+    windows: list[tuple[float, float, float, float]] = []
+    duration = max(0.0, duration)
+    for cue in cues:
+        if not getattr(cue, "file", ""):
+            continue
+        kind = getattr(cue, "kind", "")
+        length = max(0.0, float(getattr(cue, "duration", 0.0) or 0.0))
+        if kind in ("impact", "sub-drop"):
+            depth, fade = _DUCK_ACCENT_DB, _DUCK_FADE
+            length = min(length, _DUCK_ACCENT_MAX_S) if length > 0 else _DUCK_ACCENT_MAX_S
+        elif kind == "riser":
+            depth, fade = _DUCK_RISER_DB, _DUCK_SHELF_FADE
+        else:
+            continue  # ambience/whoosh: level with the bed
+        lo = max(0.0, float(cue.time))
+        hi = min(duration, float(cue.time) + length)
+        if hi - lo > _MIN_GAP:
+            windows.append((lo, hi, 10 ** (depth / 20.0), fade))
+    for lo, hi in prominent or []:
+        lo = max(0.0, float(lo))
+        hi = min(duration, float(hi))
+        if hi - lo > _MIN_GAP:
+            windows.append((lo, hi, 10 ** (_DUCK_OTON_DB / 20.0), _DUCK_SHELF_FADE))
+    windows.sort(key=lambda w: (w[0], w[1]))
+    return windows
+
+
+def _duck_filters(windows: list[tuple[float, float, float, float]]) -> list[str]:
+    """One ``volume`` envelope per ducking window (blueprint 1.4).
+
+    The same trapezoid the gap gates use, with a FLOOR instead of a full
+    mute: gain ``1 - (1 - floor) * ramp`` — 1 outside the window,
+    ``floor`` inside, the ramp easing over ``fade`` seconds just outside
+    each edge. Chained volume envelopes multiply, so ducks compose with
+    each other and with the gap gates in one linear chain.
+    """
+    filters: list[str] = []
+    for lo, hi, floor, fade in windows:
+        ramp = (
+            f"min(1,max(0,min((t-{lo - fade:.3f})/{fade:.3f},"
+            f"({hi + fade:.3f}-t)/{fade:.3f})))"
+        )
+        expr = f"1-{1.0 - floor:.6f}*{ramp}"
+        filters.append(f"volume=volume={_fq(expr)}:eval=frame")
+    return filters
+
+
+def _bed_envelope_filters(
+    gaps: list[tuple[float, float]],
+    ducks: list[tuple[float, float, float, float]],
+) -> list[str]:
+    """Gap gates + ducking envelopes as ONE linear chain (blueprint 1.4).
+
+    The music-gap trapezoids and the ducking envelopes are the same
+    mechanism at different depths; chained ``volume`` filters multiply
+    per sample, so they compose in any combination — a duck inside a gap
+    multiplies into the mute (still 0). ``asetnsamples`` is emitted once
+    for the whole chain. No gaps and no ducks = the empty list, so
+    untouched plans keep their exact old commands.
+    """
+    gates = _gap_gate_filters(gaps)
+    duck = _duck_filters(ducks)
+    if not duck:
+        return gates
+    if not gates:
+        return [f"asetnsamples=n={_GAP_GATE_SAMPLES}"] + duck
+    return gates + duck
+
+
 def render_preview(
     plan: MontagePlan,
     out_path: str,
@@ -354,6 +520,9 @@ def render_preview(
         font = _find_font()
     if not font:
         titles = {}
+    # Title fade, beat-quantized against the plan's own pulse (1.7) —
+    # the same shared helper the planner's dips/dissolves run through.
+    title_fade = quantize_finish(_TITLE_FADE, plan_pulse(plan), max_s=_TITLE_FADE_MAX)
     # Uniform video for every segment: same size, sample-aspect, and rate,
     # so the concat demuxer joins them without a hiccup.
     video_filter = (
@@ -412,7 +581,10 @@ def render_preview(
                     # the same drawtext the export uses, preview quality.
                     text_file = str(Path(tmpdir) / f"title_{i:04d}.txt")
                     Path(text_file).write_text(titles[i], encoding="utf-8")
-                    video_args = ["-vf", _title_filter(text_file, font, h, length)]
+                    video_args = [
+                        "-vf",
+                        _title_filter(text_file, font, h, length, title_fade),
+                    ]
                 _run_ffmpeg(
                     [
                         *args, "-map", "0:v:0", *video_args,
@@ -560,17 +732,26 @@ def _fq(value: str) -> str:
     return "'" + str(value).replace("\\", "/").replace("'", r"'\''") + "'"
 
 
-def _title_filter(text_file: str, font: str, height: int, dip_len: float) -> str:
+def _title_filter(
+    text_file: str,
+    font: str,
+    height: int,
+    dip_len: float,
+    fade_s: float = _TITLE_FADE,
+) -> str:
     """The drawtext filter for one act title over a black dip segment.
 
     Plain white, centered, font size proportional to the canvas height.
     A dip long enough to afford it fades the text in and out over
-    :data:`_TITLE_FADE` seconds INSIDE the dip; a short dip shows the
-    text for the dip's full length. The alpha expression always cuts to
-    0 after ``dip_len`` — a segment extended for a following dissolve
+    ``fade_s`` seconds INSIDE the dip (the :data:`_TITLE_FADE` target,
+    beat-quantized by the renderers through the shared
+    :func:`monteur.montage.quantize_finish` helper — blueprint 1.7; a
+    beatless plan passes 0.3 s unchanged); a short dip shows the text
+    for the dip's full length. The alpha expression always cuts to 0
+    after ``dip_len`` — a segment extended for a following dissolve
     must not carry the title into the extension.
     """
-    fade = _TITLE_FADE if dip_len >= 2 * _TITLE_FADE + 0.2 else 0.0
+    fade = fade_s if dip_len >= 2 * fade_s + 0.2 else 0.0
     if fade > 0:
         alpha = (
             f"if(lt(t,{fade:.3f}),t/{fade:.3f},"
@@ -650,6 +831,8 @@ def _export_audio_graph(
     music_in: float = 0.0,
     music_len: float = 0.0,
     music_gaps: list[tuple[float, float]] | None = None,
+    duck_windows: list[tuple[float, float, float, float]] | None = None,
+    loudnorm: str | None = None,
 ) -> str:
     """The filter_complex audio chain, ending in the output label ``[a]``.
 
@@ -667,9 +850,10 @@ def _export_audio_graph(
     offset, clamped by the caller only to the montage end — a hit's ring
     -out is never cut back to the planned cue length.
     The chain finishes with the plan's ``afade``\\ s and — always last —
-    single-pass ``loudnorm`` at YouTube's -14 LUFS / -1 dBTP / LRA 11
-    target, then a resample back to :data:`_AUDIO_RATE` (loudnorm
-    upsamples internally).
+    ``loudnorm`` at YouTube's -14 LUFS / -1 dBTP / LRA 11 target (the
+    single-pass string by default; ``loudnorm=`` injects the two-pass
+    second stage, blueprint 1.4), then a resample back to
+    :data:`_AUDIO_RATE` (loudnorm upsamples internally).
 
     ``music_in`` / ``music_len`` (keyword-only, both 0 by default = the
     old full-length graph, byte-identical) apply the plan's adaptive
@@ -685,9 +869,27 @@ def _export_audio_graph(
     after the adelay so ``t`` is record time). Only the song: placed SFX
     (the braam under the title) and the original-sound bed play through
     the gap — that is what carries it.
+
+    ``duck_windows`` (keyword-only, None/empty = untouched old graph)
+    ducks the SONG under the accents (blueprint 1.4): the
+    :func:`ducking_windows` tuples become multiplying volume envelopes
+    chained right after the gap gates — same trapezoid machinery, a
+    floor instead of a mute, one linear chain (see
+    :func:`_bed_envelope_filters` for the composition rules). Only the
+    song ducks; the SFX/original streams pass untouched. W2 seam
+    (O-Ton pops): lifting a marked original moment ABOVE the bed is the
+    same envelope on the original chain with a gain above 1 — the
+    machinery is here, wave 2 adds the window source.
+
+    ``loudnorm`` (keyword-only) overrides the loudness tail: None keeps
+    the classic single-pass :data:`_EXPORT_LOUDNORM` string
+    (byte-identical), :func:`render_export` passes the measured
+    second-pass ``linear=true`` string (blueprint 1.4).
     """
     parts: list[str] = []
-    gates = _gap_gate_filters(list(music_gaps or []))
+    gates = _bed_envelope_filters(
+        list(music_gaps or []), list(duck_windows or [])
+    )
     if music_label is not None and (music_in > 0 or music_len > 0 or gates):
         filters: list[str] = []
         if music_len > 0:
@@ -741,10 +943,61 @@ def _export_audio_graph(
     if fade_out > 0:
         st = max(0.0, duration - fade_out)
         tail.append(f"afade=t=out:st={st:.3f}:d={fade_out:.3f}")
-    tail.append(_EXPORT_LOUDNORM)
+    tail.append(loudnorm if loudnorm else _EXPORT_LOUDNORM)
     tail.append(f"aresample={_AUDIO_RATE}")
     parts.append(f"{base}{','.join(tail)}[a]")
     return ";".join(parts)
+
+
+_MEAN_VOLUME_RE = re.compile(r"mean_volume:\s*(-?[\d.]+)\s*dB")
+
+
+def _parse_mean_volume(stderr: str) -> float | None:
+    """volumedetect's ``mean_volume`` (dB) from captured stderr, or None."""
+    match = _MEAN_VOLUME_RE.search(stderr)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _parse_loudnorm_stats(stderr: str) -> dict | None:
+    """loudnorm's ``print_format=json`` block as floats, or None.
+
+    The two-pass first pass (blueprint 1.4): the last ``{...}`` block on
+    stderr carries ``input_i`` / ``input_tp`` / ``input_lra`` /
+    ``input_thresh`` / ``target_offset``. Values are validated into
+    loudnorm's own accepted ranges — anything non-finite or out of range
+    (digital silence measures ``-inf``) returns None and the caller
+    degrades to single-pass, honestly noted.
+    """
+    start = stderr.rfind("{")
+    end = stderr.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        data = json.loads(stderr[start : end + 1])
+    except ValueError:
+        return None
+    ranges = {
+        "input_i": (-99.0, 0.0),
+        "input_tp": (-99.0, 99.0),
+        "input_lra": (0.0, 99.0),
+        "input_thresh": (-99.0, 0.0),
+        "target_offset": (-99.0, 99.0),
+    }
+    out: dict[str, float] = {}
+    for key, (lo, hi) in ranges.items():
+        try:
+            value = float(data[key])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not math.isfinite(value) or not (lo <= value <= hi):
+            return None
+        out[key] = value
+    return out
 
 
 def _export_transitions(
@@ -864,8 +1117,29 @@ def render_export(
       clicks, re-entry exactly at the gap end; see
       :func:`_gap_gate_filters`). Only the song: placed SFX and the
       original-sound bed play through — they carry the silence.
-    * **Loudness** — the audio chain finishes with single-pass
-      ``loudnorm`` at YouTube's target (-14 LUFS, -1 dBTP, LRA 11).
+    * **Bed ducking** (blueprint 1.4) — the MUSIC bed ducks under every
+      placed SFX accent: −6 dB under an impact/braam window, a gentler
+      −4 dB shelf under a riser (it must read above the bed into its
+      hit), and in ``"mix"`` mode −4 dB under prominent original-sound
+      moments (parts whose measured mean level stands
+      :data:`_DUCK_OTON_STANDOUT_DB` above the median — measured via
+      ``volumedetect`` during the bed extraction, deterministic for the
+      same inputs). Implemented as multiplying volume envelopes chained
+      onto the same linear gate architecture as the music gaps
+      (:func:`_bed_envelope_filters`); the preview skips ducking along
+      with the SFX it deliberately does not mix. W2's O-Ton pops will
+      ride this exact machinery (a lift window on the original chain).
+    * **Loudness** (blueprint 1.4) — TRUE two-pass ``loudnorm`` at
+      YouTube's target (-14 LUFS, -1 dBTP, LRA 11): a first audio-only
+      pass renders the finished chain into a null muxer and measures it
+      (``print_format=json``), the final pass applies the measured
+      values with ``linear=true`` — one clean gain, no compressor
+      pumping. The measurement lives only inside this one call; an
+      unusable measurement degrades to the single-pass filter with a
+      note, and material whose true peaks leave no headroom for the
+      linear gain (extreme crest factors) is normalized dynamically by
+      loudnorm's own documented fallback — noted, landing under target
+      rather than crushing transients.
     * **Fades** — the plan's ``fade_in``/``fade_out``, exactly as in
       the preview.
 
@@ -918,7 +1192,8 @@ def render_export(
     fade_in = max(0.0, plan.fade_in)
     fade_out = max(0.0, plan.fade_out)
     own_audio = audio in ("original", "mix")
-    total = len(segments) + (1 if own_audio else 0) + 1
+    # + the loudness measurement pass (blueprint 1.4) + the final mux.
+    total = len(segments) + (1 if own_audio else 0) + 2
     done = 0
 
     def tick(label: str) -> None:
@@ -947,6 +1222,9 @@ def render_export(
                     "titles were skipped (the dips stay plain black)"
                 )
                 titles = {}
+    # Title fade, beat-quantized against the plan's own pulse (1.7) —
+    # the same shared helper the planner's dips/dissolves run through.
+    title_fade = quantize_finish(_TITLE_FADE, plan_pulse(plan), max_s=_TITLE_FADE_MAX)
 
     cover = (
         f"scale={w}:{h}:force_original_aspect_ratio=increase,"
@@ -987,7 +1265,10 @@ def render_export(
                 if i in titles:
                     text_file = str(Path(tmpdir) / f"title_{i:04d}.txt")
                     Path(text_file).write_text(titles[i], encoding="utf-8")
-                    args += ["-vf", _title_filter(text_file, font, h, length)]
+                    args += [
+                        "-vf",
+                        _title_filter(text_file, font, h, length, title_fade),
+                    ]
                 args += [*seg_encode, "-an", seg]
                 _run_ffmpeg(
                     args,
@@ -1000,6 +1281,12 @@ def render_export(
 
         # -- the original-sound bed (nominal lengths — extensions are video-only)
         bed_path: str | None = None
+        # Mix mode measures each sounding part's mean level on the way
+        # (volumedetect before the pad): the parts whose level stands out
+        # are the "prominent original-sound moments" the music bed ducks
+        # under (blueprint 1.4) — measured, not guessed, deterministic
+        # for the same inputs.
+        part_levels: list[tuple[int, float]] = []  # (segment index, mean dB)
         if own_audio:
             bed_parts: list[str] = []
             for i, (kind, length, entry) in enumerate(segments):
@@ -1009,15 +1296,21 @@ def render_export(
                     "-ar", str(_AUDIO_RATE), "-ac", str(_AUDIO_CHANNELS),
                 ]
                 if kind == "clip" and _has_audio(entry.clip_path):
-                    _run_ffmpeg(
-                        [
-                            "-ss", f"{max(0.0, entry.source_start):.3f}",
-                            "-t", f"{length:.3f}", "-i", str(entry.clip_path),
-                            "-map", "0:a:0", "-af", "apad",
-                            "-t", f"{length:.3f}", *pcm, part,
-                        ],
-                        f"extracting sound for segment {i + 1}/{len(segments)}",
-                    )
+                    extract = [
+                        "-ss", f"{max(0.0, entry.source_start):.3f}",
+                        "-t", f"{length:.3f}", "-i", str(entry.clip_path),
+                        "-map", "0:a:0",
+                        "-af", "volumedetect,apad" if audio == "mix" else "apad",
+                        "-t", f"{length:.3f}", *pcm, part,
+                    ]
+                    label = f"extracting sound for segment {i + 1}/{len(segments)}"
+                    if audio == "mix":
+                        stderr = _run_ffmpeg_capture(extract, label)
+                        level = _parse_mean_volume(stderr)
+                        if level is not None:
+                            part_levels.append((i, level))
+                    else:
+                        _run_ffmpeg(extract, label)
                 else:
                     _run_ffmpeg(
                         [
@@ -1046,29 +1339,26 @@ def render_export(
             tick("audio bed")
 
         # -- final pass: one graph for transitions, titles' bed, sfx, loudness
-        final: list[str] = []
-        for seg in paths:
-            final += ["-i", seg]
-        idx = len(paths)
-        music_label: str | None = None
-        bed_label: str | None = None
         # Adaptive music window: read the song from music_start + music_in
         # (the record<->song mapping is unchanged); the audio graph trims,
         # delays and fades the bed into its record window.
         m_in, m_end = music_window_bounds(plan)
         windowed = m_in > _MIN_GAP or m_end < plan.duration - _MIN_GAP
+        music_args: list[str] | None = None
         if audio in ("music", "mix"):
-            final += [
+            # The input-side -t bounds the decoded song to the montage:
+            # without it the loudness measurement (and the mix bed) would
+            # include the song's tail past the montage end — the trimmed
+            # output would then be normalized against audio nobody hears
+            # (blueprint 1.4: measure what ships, nothing else).
+            music_args = [
                 "-ss", f"{max(0.0, plan.music_start + m_in):.3f}",
+                "-t", f"{max(0.0, plan.duration - m_in):.3f}",
                 "-i", str(plan.music_path),
             ]
-            music_label = f"{idx}:a"
-            idx += 1
-        if bed_path is not None:
-            final += ["-i", bed_path]
-            bed_label = f"{idx}:a"
-            idx += 1
-        sfx_specs: list[tuple[str, float, float]] = []
+        sfx_files: list[str] = []
+        sfx_data: list[tuple[float, float, float]] = []
+        placed_cues: list = []
         for cue in plan.sfx:
             if not cue.file:
                 continue  # a search-query marker, not a placed element
@@ -1098,19 +1388,120 @@ def render_export(
             trim = min(trim, max(0.0, plan.duration - cue.time))
             if trim < 1e-3:
                 continue
-            final += ["-i", str(cue_file)]
-            sfx_specs.append((f"{idx}:a", max(0.0, cue.time), trim, offset))
-            idx += 1
-        graph = (
-            _export_video_graph(lengths, trans, fade_in, fade_out, plan.duration)
-            + ";"
-            + _export_audio_graph(
-                audio, music_label, bed_label, sfx_specs,
+            sfx_files.append(str(cue_file))
+            sfx_data.append((max(0.0, cue.time), trim, offset))
+            placed_cues.append(cue)
+
+        # Bed ducking (blueprint 1.4): the song ducks under the accents
+        # that actually SOUND (the placed cues above) and, in mix mode,
+        # under the measured prominent original-sound parts.
+        prominent: list[tuple[float, float]] = []
+        if audio == "mix" and len(part_levels) >= 2:
+            vals = sorted(level for _i, level in part_levels)
+            mid = len(vals) // 2
+            median = (
+                vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2.0
+            )
+            for i, level in part_levels:
+                if level >= median + _DUCK_OTON_STANDOUT_DB - 1e-9:
+                    _kind, _length, entry = segments[i]
+                    prominent.append((entry.record_start, entry.record_end))
+        ducks = (
+            ducking_windows(placed_cues, plan.duration, prominent=prominent)
+            if audio in ("music", "mix")
+            else []
+        )
+
+        audio_inputs = list(music_args or [])
+        if bed_path is not None:
+            audio_inputs += ["-i", bed_path]
+
+        def _audio_graph(base_idx: int, loudnorm_arg: str | None) -> str:
+            """The audio chain with input labels starting at ``base_idx``
+            — built twice: labels 0.. for the measurement pass, labels
+            after the video segments for the final mux (same chain,
+            byte-for-byte apart from the labels and the loudnorm tail)."""
+            i2 = base_idx
+            m_label = b_label = None
+            if music_args is not None:
+                m_label = f"{i2}:a"
+                i2 += 1
+            if bed_path is not None:
+                b_label = f"{i2}:a"
+                i2 += 1
+            specs = []
+            for start, trim, offset in sfx_data:
+                specs.append((f"{i2}:a", start, trim, offset))
+                i2 += 1
+            return _export_audio_graph(
+                audio, m_label, b_label, specs,
                 fade_in, fade_out, plan.duration,
                 music_in=m_in if windowed else 0.0,
                 music_len=(m_end - m_in) if windowed else 0.0,
                 music_gaps=music_bed_gaps(plan),
+                duck_windows=ducks,
+                loudnorm=loudnorm_arg,
             )
+
+        for f in sfx_files:
+            audio_inputs += ["-i", f]
+
+        # -- loudness pass 1 (blueprint 1.4): render the finished audio
+        # chain into a null muxer, measure it. The values live only
+        # inside this one call; failure degrades to single-pass.
+        measured = None
+        try:
+            stderr = _run_ffmpeg_capture(
+                [
+                    *audio_inputs,
+                    "-filter_complex",
+                    _audio_graph(0, _EXPORT_LOUDNORM + ":print_format=json"),
+                    "-map", "[a]", "-f", "null", "-",
+                ],
+                "measuring the export loudness",
+            )
+            measured = _parse_loudnorm_stats(stderr)
+        except MonteurMediaError:
+            measured = None
+        if measured is None:
+            loudnorm_final: str | None = None  # single-pass fallback
+            notes.append(
+                "loudness: the measurement pass failed — single-pass "
+                "loudnorm applied instead of the two-pass linear finish"
+            )
+        else:
+            loudnorm_final = (
+                f"loudnorm=I={_LOUDNORM_I:g}:TP={_LOUDNORM_TP:g}"
+                f":LRA={_LOUDNORM_LRA:g}"
+                f":measured_I={measured['input_i']:.2f}"
+                f":measured_TP={measured['input_tp']:.2f}"
+                f":measured_LRA={measured['input_lra']:.2f}"
+                f":measured_thresh={measured['input_thresh']:.2f}"
+                f":offset={measured['target_offset']:.2f}:linear=true"
+            )
+            gain = _LOUDNORM_I - measured["input_i"]
+            if measured["input_tp"] + gain > _LOUDNORM_TP + 1e-9:
+                # Honest, predictable degradation: when the needed gain
+                # would break the -1 dBTP ceiling (extreme crest factor),
+                # loudnorm's linear mode reverts to dynamic normalization
+                # by its own documented rule — the export still ships,
+                # slightly under target rather than clipped. Say so.
+                notes.append(
+                    "loudness: the mix's true peaks leave no headroom for "
+                    f"the {gain:+.1f} dB linear gain — loudnorm normalized "
+                    "dynamically and the export sits below the -14 LUFS "
+                    "target rather than crushing the transients"
+                )
+        tick("loudness")
+
+        final: list[str] = []
+        for seg in paths:
+            final += ["-i", seg]
+        final += audio_inputs
+        graph = (
+            _export_video_graph(lengths, trans, fade_in, fade_out, plan.duration)
+            + ";"
+            + _audio_graph(len(paths), loudnorm_final)
         )
         final += [
             "-filter_complex", graph, "-map", "[v]", "-map", "[a]",
