@@ -33,6 +33,10 @@ API (all JSON):
   "canvas"?, "audio"?, "format"?}                               -> {"job": id}
 * ``POST /api/create/export`` {"plan_json", "fps"?, "audio"?,
   "canvas"?, "format"?}                                         -> build-result shape
+* ``GET  /api/clipinfo?clip=&folder=&t0=&t1=``                   -> probe facts + vision
+* ``POST /api/alternatives`` {"plan_json", "folder", "slot"}    -> {"slot", "alternatives"}
+* ``POST /api/plan/adjust`` {"plan_json", "slot", "transition",
+  "fps"?, "audio"?, "canvas"?, "format"?}                       -> build-result shape
 * ``GET  /api/thumb?clip=&t=&w=``                                -> JPEG bytes
 * ``POST /api/create/preview`` {"plan_json", "audio"?,
   "width"?}                                                     -> {"job": id}
@@ -196,6 +200,31 @@ WITHOUT re-planning the cut. The response is the standard build-result
 shape (``filename``/``content``/``plan``/``plan_json``; ``tempo`` is 0 —
 the music is not re-analyzed). A bad or empty plan is a 400 with the
 loader's message.
+
+The inspector endpoints serve the Studio's shot inspector — all three are
+instant (no jobs) and none of them ever sifts: they answer from the scan
+cache a build/scan already filled, so a folder without a FRESH cache is a
+404 with a "scan first" message, never a surprise multi-minute sift.
+``GET /api/clipinfo?clip=&folder=&t0=&t1=`` returns one clip's probe facts
+(width/height/fps/has_audio via :func:`monteur.media.probe`, cached by
+path+mtime; probe failures degrade to zeros — facts are an upgrade, not a
+gate) plus the sifted report's duration/usable_ratio and the vision fields
+of the moment overlapping the optional ``t0``–``t1`` source window most
+(``"moment"``: label/tags/role/hero/group/start/end/score, or null).
+``POST /api/alternatives`` {"plan_json", "folder", "slot"} lists up to
+:data:`_ALTERNATIVES_LIMIT` swap candidates for one slot, REUSING the
+director's bench (:func:`monteur.director.review_context` — the strongest
+moments no entry uses, same scoring, no duplicate logic) reordered so
+same-clip / same-scene-group moments come first; each item carries the
+clip's full path so the browser can thumb it. ``POST /api/plan/adjust``
+{"plan_json", "slot", "transition"} is the inspector's boundary control:
+:func:`monteur.montage.adjust_entry_boundary` tweaks ONE boundary
+(cut/dissolve/smash — dissolve seconds by the planner's own 0.5 s rule, a
+smash carves the planner's usual black dip, a cut removes one) and the
+result renders through the same pure plan -> file path as /api/create/
+export, so the response is the standard build-result shape and nothing is
+ever re-planned. Engine ValueErrors (unknown transition, bad slot, a too-
+short outgoing shot) surface as 400s with the engine's own message.
 
 ``/api/thumb`` and the ``/api/create/preview`` + ``/api/preview/<token>.mp4``
 pair are the "Sehen ohne Resolve" surface on top of :mod:`monteur.preview`.
@@ -864,6 +893,120 @@ def _cached_reports(folder: str):
     except OSError:
         return None
     return cache["reports"]
+
+
+# --- the shot inspector's instant endpoints ------------------------------
+#
+# clipinfo/alternatives answer from the scan cache only (never a sift — the
+# inspector must stay instant), so both 404 with a "scan first" message when
+# the cache is stale or for another folder. Probe facts are cached by
+# (absolute path, mtime_ns): the same key discipline as the thumbnail cache,
+# so replacing a clip naturally refreshes its facts.
+
+#: How many swap candidates POST /api/alternatives returns at most.
+_ALTERNATIVES_LIMIT = 6
+
+_CLIPINFO_CACHE: dict[tuple[str, int], dict] = {}
+_CLIPINFO_LOCK = threading.Lock()
+
+
+def _probe_facts(path: str) -> dict:
+    """width/height/fps/has_audio for one clip — cached, soft-failing.
+
+    A clip that cannot be probed (ffmpeg missing, file unreadable) yields
+    zeros/False instead of an error: the inspector's facts are an upgrade,
+    not a gate, exactly like vision on a scan.
+    """
+    try:
+        key = (os.path.abspath(path), os.stat(path).st_mtime_ns)
+    except OSError:
+        return {"width": 0, "height": 0, "fps": 0.0, "has_audio": False}
+    with _CLIPINFO_LOCK:
+        cached = _CLIPINFO_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
+    facts = {"width": 0, "height": 0, "fps": 0.0, "has_audio": False}
+    try:
+        from monteur.media import MonteurMediaError, probe
+
+        info = probe(path)
+        facts = {
+            "width": int(info.width),
+            "height": int(info.height),
+            "fps": float(info.fps),
+            "has_audio": bool(info.has_audio),
+        }
+    except Exception:  # noqa: BLE001 — probe failure must stay a soft zero
+        pass
+    with _CLIPINFO_LOCK:
+        _CLIPINFO_CACHE[key] = dict(facts)
+    return facts
+
+
+def _fresh_reports_or_404(folder: str) -> list:
+    """The scan cache's reports for ``folder`` — or ApiError(404).
+
+    The inspector endpoints never sift: without a fresh cache the honest
+    answer is "scan first", instantly, not a surprise background sift.
+    """
+    if not folder:
+        raise ApiError(400, "missing 'folder' (path to your footage)")
+    reports = _cached_reports(folder)
+    if reports is None:
+        raise ApiError(
+            404,
+            "no fresh scan for this folder — build or scan first, then "
+            "open the inspector again",
+        )
+    return reports
+
+
+def _report_for_clip(reports: list, clip: str):
+    """Match a clip path against the reports by absolute path or basename."""
+    clip_abs = os.path.abspath(clip)
+    name = Path(clip).name
+    for report in reports:
+        if os.path.abspath(report.path) == clip_abs:
+            return report
+    for report in reports:
+        if Path(report.path).name == name:
+            return report
+    return None
+
+
+def _plan_export_result(plan, payload: dict) -> dict:
+    """Render an in-memory plan through the export path — the one shared
+    plan -> build-result-shape serializer (used by /api/create/export and
+    /api/plan/adjust). ``tempo`` is honestly 0: nothing re-listens here."""
+    from monteur.io import write_edl, write_fcpxml
+    from monteur.montage import montage_to_timeline, plan_to_dict
+
+    audio = payload.get("audio") or ("music" if plan.music_path else "original")
+    if not plan.music_path and audio != "original":
+        raise ApiError(
+            400, f"the plan has no music; audio mode {audio!r} needs a song"
+        )
+    fps = float(payload.get("fps") or 25)
+    timeline_kwargs: dict = {"audio": audio}
+    if payload.get("canvas"):
+        timeline_kwargs["canvas"] = payload["canvas"]
+    timeline = montage_to_timeline(plan, fps=fps, **timeline_kwargs)
+    fmt = (payload.get("format") or "fcpxml").lower()
+    if fmt == "edl":
+        content, filename = write_edl(timeline), "monteur_montage.edl"
+    else:
+        content, filename = write_fcpxml(timeline), "monteur_montage.fcpxml"
+    return {
+        "filename": filename,
+        "content": content,
+        "plan": {
+            "duration": plan.duration,
+            "cuts": len(plan.entries),
+            "tempo": 0,  # the music is not re-analyzed here
+            "notes": plan.notes,
+        },
+        "plan_json": plan_to_dict(plan),
+    }
 
 
 def _apply_vision(job: dict, reports: list) -> tuple[list, str]:
@@ -2547,6 +2690,9 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/create/direct/apply"): self._create_direct_apply,
             ("POST", "/api/create/distill"): self._create_distill,
             ("POST", "/api/create/export"): self._create_export,
+            ("GET", "/api/clipinfo"): self._clipinfo,
+            ("POST", "/api/alternatives"): self._alternatives,
+            ("POST", "/api/plan/adjust"): self._plan_adjust,
             ("POST", "/api/create/preview"): self._create_preview,
             ("POST", "/api/create/export-video"): self._create_export_video,
             ("GET", "/api/thumb"): self._thumb,
@@ -2964,8 +3110,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
         the song. A ValueError from the plan loader or renderer surfaces
         as a 400 via the dispatcher.
         """
-        from monteur.io import write_edl, write_fcpxml
-        from monteur.montage import montage_to_timeline, plan_from_dict, plan_to_dict
+        from monteur.montage import plan_from_dict
 
         payload = self._read_json()
         if not isinstance(payload.get("plan_json"), dict):
@@ -2975,34 +3120,167 @@ class MonteurHandler(BaseHTTPRequestHandler):
         plan = plan_from_dict(payload["plan_json"])  # bad -> ValueError -> 400
         if not plan.entries:
             raise ApiError(400, "the plan has no entries — nothing to export")
-        audio = payload.get("audio") or ("music" if plan.music_path else "original")
-        if not plan.music_path and audio != "original":
-            raise ApiError(
-                400, f"the plan has no music; audio mode {audio!r} needs a song"
-            )
-        fps = float(payload.get("fps") or 25)
-        timeline_kwargs: dict = {"audio": audio}
-        if payload.get("canvas"):
-            timeline_kwargs["canvas"] = payload["canvas"]
-        timeline = montage_to_timeline(plan, fps=fps, **timeline_kwargs)
-        fmt = (payload.get("format") or "fcpxml").lower()
-        if fmt == "edl":
-            content, filename = write_edl(timeline), "monteur_montage.edl"
-        else:
-            content, filename = write_fcpxml(timeline), "monteur_montage.fcpxml"
+        self._send_json(_plan_export_result(plan, payload))
+
+    # -- the shot inspector (clip facts, swap bench, boundary control) ------
+
+    def _clipinfo(self) -> None:
+        """GET /api/clipinfo?clip=&folder=&t0=&t1= — one clip's facts, instant.
+
+        Probe facts (cached by path+mtime; zeros when unprobeable) plus the
+        sifted report's duration/usable_ratio and the vision fields of the
+        moment overlapping the optional t0–t1 source window most. Answers
+        from the scan cache only — no cache is a 404 saying "scan first".
+        """
+        from urllib.parse import parse_qs, urlsplit
+
+        query = parse_qs(urlsplit(self.path).query)
+
+        def param(name: str) -> str:
+            return (query.get(name) or [""])[0]
+
+        clip = param("clip").strip()
+        if not clip:
+            raise ApiError(400, "missing 'clip' (the clip's path)")
+        reports = _fresh_reports_or_404(param("folder").strip())
+        report = _report_for_clip(reports, clip)
+        if report is None:
+            raise ApiError(404, f"no clip named {Path(clip).name!r} in the scan")
+        try:
+            t0 = float(param("t0") or 0.0)
+            t1 = float(param("t1") or 0.0)
+        except (TypeError, ValueError):
+            raise ApiError(400, "'t0'/'t1' must be numbers (seconds)")
+
+        # The moment the source window overlaps most (fallback: none).
+        best, best_ov = None, 0.0
+        if t1 > t0:
+            for moment in report.moments:
+                ov = min(moment.end, t1) - max(moment.start, t0)
+                if ov > best_ov + 1e-6:
+                    best, best_ov = moment, ov
+        moment_view = None
+        if best is not None:
+            moment_view = {
+                "start": best.start,
+                "end": best.end,
+                "score": best.score,
+                "label": best.label,
+                "tags": list(best.tags),
+                "role": best.role,
+                "hero": best.hero,
+                "group": best.group,
+            }
+        facts = _probe_facts(report.path)
         self._send_json(
             {
-                "filename": filename,
-                "content": content,
-                "plan": {
-                    "duration": plan.duration,
-                    "cuts": len(plan.entries),
-                    "tempo": 0,  # the music is not re-analyzed here
-                    "notes": plan.notes,
-                },
-                "plan_json": plan_to_dict(plan),
+                "clip": report.path,
+                "name": Path(report.path).name,
+                "duration": report.duration,
+                "media_start": report.media_start,
+                "usable_ratio": report.usable_ratio,
+                "moment": moment_view,
+                **facts,
             }
         )
+
+    def _alternatives(self) -> None:
+        """POST /api/alternatives {"plan_json","folder","slot"} — swap bench.
+
+        Reuses the director's bench (monteur.director.review_context): the
+        strongest moments NO entry uses, same scoring — reordered so
+        moments from the slot's own clip or scene group come first, capped
+        at _ALTERNATIVES_LIMIT. Instant: scan cache only, no sift, no AI.
+        """
+        from monteur.director import review_context
+        from monteur.montage import plan_from_dict
+
+        payload = self._read_json()
+        if not isinstance(payload.get("plan_json"), dict):
+            raise ApiError(
+                400, "missing 'plan_json' (the plan a build result carries)"
+            )
+        plan = plan_from_dict(payload["plan_json"])  # bad -> ValueError -> 400
+        try:
+            slot = int(payload.get("slot"))
+        except (TypeError, ValueError):
+            raise ApiError(400, "'slot' must be an entry index (0-based)")
+        if slot < 0 or slot >= len(plan.entries):
+            raise ApiError(
+                400,
+                f"slot {slot + 1} is not in this plan "
+                f"(it has {len(plan.entries)} entries)",
+            )
+        reports = _fresh_reports_or_404(str(payload.get("folder") or ""))
+
+        # The director's dossier: its bench IS the swap material (strongest
+        # unused moments; review_context owns the scoring and the cap).
+        context = review_context(plan, reports)
+        slot_info = context["slots"][slot]
+        slot_clip = str(slot_info.get("clip") or "")
+        slot_group = str(slot_info.get("group") or "")
+
+        def kin(item: dict) -> int:
+            if item.get("clip") == slot_clip:
+                return 0
+            if slot_group and item.get("group") == slot_group:
+                return 0
+            return 1
+
+        bench = sorted(context["bench"], key=kin)  # stable: keeps bench order
+        by_name = {Path(r.path).name: r.path for r in reports}
+        alternatives = [
+            {
+                "clip": by_name.get(str(item.get("clip") or ""), item.get("clip")),
+                "name": str(item.get("clip") or ""),
+                "start": item.get("start", 0.0),
+                "end": item.get("end", 0.0),
+                "score": item.get("score", 0.0),
+                "label": str(item.get("label") or ""),
+                "role": str(item.get("role") or ""),
+                "hero": float(item.get("hero") or 0.0),
+                "group": str(item.get("group") or ""),
+                "same_scene": kin(item) == 0,
+            }
+            for item in bench[:_ALTERNATIVES_LIMIT]
+        ]
+        self._send_json({"slot": slot, "alternatives": alternatives})
+
+    def _plan_adjust(self) -> None:
+        """POST /api/plan/adjust — one boundary tweak, rendered like export.
+
+        monteur.montage.adjust_entry_boundary does the surgery (transition
+        set/cleared by the planner's own 0.5 s rule, black dip carved or
+        removed); the result renders through the same pure plan -> file
+        path as /api/create/export — the standard build-result shape, no
+        re-plan, no sift. Engine ValueErrors surface as 400s.
+        """
+        from monteur.montage import (
+            ARRANGEMENT_TRANSITIONS,
+            adjust_entry_boundary,
+            plan_from_dict,
+        )
+
+        payload = self._read_json()
+        if not isinstance(payload.get("plan_json"), dict):
+            raise ApiError(
+                400, "missing 'plan_json' (the plan a build result carries)"
+            )
+        transition = str(payload.get("transition") or "")
+        if transition not in ARRANGEMENT_TRANSITIONS:
+            valid = ", ".join(ARRANGEMENT_TRANSITIONS)
+            raise ApiError(400, f"'transition' must be one of: {valid}")
+        try:
+            slot = int(payload.get("slot"))
+        except (TypeError, ValueError):
+            raise ApiError(400, "'slot' must be an entry index (0-based)")
+        plan = plan_from_dict(payload["plan_json"])  # bad -> ValueError -> 400
+        if not plan.entries:
+            raise ApiError(400, "the plan has no entries — nothing to adjust")
+        # The engine's own validation (bad slot, slot 0, too-short smash,
+        # unremovable dip) raises ValueError -> the dispatcher's 400.
+        adjusted = adjust_entry_boundary(plan, slot, transition)
+        self._send_json(_plan_export_result(adjusted, payload))
 
     # -- "Sehen ohne Resolve": thumbnails + preview player -------------------
 

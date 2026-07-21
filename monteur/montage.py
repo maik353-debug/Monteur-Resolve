@@ -390,6 +390,12 @@ _AUTO_FADE_OUT = 1.0
 # length the shortened outgoing clip must keep.
 _DIP_SECONDS = 0.4
 _DIP_MIN_REMAINDER = 0.25
+# Samples per second in MontagePlan.music_energy (the timeline strip's
+# energy lane): sample i covers record time i / MUSIC_ENERGY_RATE.
+MUSIC_ENERGY_RATE = 2.0
+# A dip "sits on" an entry boundary when start+length lands within this
+# many seconds of the entry's record_start (tolerates the cut-lead shift).
+_BOUNDARY_EPS = 0.05
 
 # Arrangement (the editor's own scene order; see the module docstring).
 # Valid "after" boundary requests and "sfx" boundary cues per item.
@@ -554,6 +560,26 @@ class MontagePlan:
     # the cut; :func:`monteur.resolve.titles_from_plan` prefers these over
     # its derived texts. Empty list (the default) = no override anywhere.
     title_texts: list[str] = field(default_factory=list)
+    # --- timeline-strip metadata (all additive; empty = not available) -----
+    # The story-arc phase spans in RECORD time: (start, end, label) with
+    # label one of "opening"/"build"/"climax"/"outro". Filled by
+    # plan_montage for arc styles (and no-music pseudo grids); the arc-less
+    # "auto" style has no phases and leaves this empty. Serialized only
+    # when set, so old plans (and auto plans) round-trip byte-identically.
+    phases: list[tuple[float, float, str]] = field(default_factory=list)
+    # The song's smoothed section energy under the montage window, sampled
+    # at a fixed :data:`MUSIC_ENERGY_RATE` (2 samples/second): sample ``i``
+    # is the 0..1 energy at record time ``i / MUSIC_ENERGY_RATE``, rounded
+    # to 3 decimals — ~2 floats per montage second, small by construction.
+    # Written only when the plan was built against analyzed music.
+    music_energy: list[float] = field(default_factory=list)
+    # Compact beat marks in RECORD time: DOWNBEATS only (bar starts, "the
+    # one"), not every beat — a 3-minute song carries ~90 downbeats vs
+    # ~360 beats. Rounded to 2 decimals. Written only when music exists.
+    beat_marks: list[float] = field(default_factory=list)
+    # Drop/chorus impact times in RECORD time (usually 0-3 values) — the
+    # strip's accent markers. Written only when music exists and in range.
+    drop_marks: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -671,6 +697,25 @@ def _energy_at(sections: list[MusicSection], t: float) -> float:
     if sections and t >= sections[-1].end - _EPS:
         return sections[-1].energy
     return 0.5
+
+
+def _sample_energy(sections: list[MusicSection], length: float) -> list[float]:
+    """The strip's energy lane: section energy at MUSIC_ENERGY_RATE, smoothed.
+
+    Sample ``i`` is the energy at record time ``i / MUSIC_ENERGY_RATE``,
+    lightly smoothed with a 3-tap moving average so the lane renders as a
+    curve instead of section steps, rounded to 3 decimals. Empty when the
+    song has no sections or the montage has no length.
+    """
+    if not sections or length <= _EPS:
+        return []
+    n = int(math.floor(length * MUSIC_ENERGY_RATE)) + 1
+    raw = [_energy_at(sections, i / MUSIC_ENERGY_RATE) for i in range(n)]
+    smoothed: list[float] = []
+    for i in range(n):
+        lo, hi = max(0, i - 1), min(n, i + 2)
+        smoothed.append(round(sum(raw[lo:hi]) / (hi - lo), 3))
+    return smoothed
 
 
 def _nth_beat_after(beats: list[float], t: float, n: int) -> float | None:
@@ -2263,6 +2308,19 @@ def plan_montage(
                 or not any(d + _EPS < c < d + hold - _EPS for d in drop_starts)
             ]
     plan.notes.extend(grid_notes)
+    # Timeline-strip metadata (additive; see the field docs on MontagePlan):
+    # the arc phases in record time plus a compact picture of the music —
+    # smoothed section energy at MUSIC_ENERGY_RATE, downbeats and drops.
+    # grid_music is already windowed onto [0, length] (record time).
+    plan.phases = [(float(s), float(e), str(lab)) for s, e, lab in phases]
+    if music is not None:
+        plan.music_energy = _sample_energy(grid_music.sections, length)
+        plan.beat_marks = [
+            round(t, 2) for t in grid_music.downbeats if -_EPS <= t <= length + _EPS
+        ]
+        plan.drop_marks = [
+            round(t, 2) for t in grid_music.drops if -_EPS <= t <= length + _EPS
+        ]
     # Cut-ahead lead: interior cuts move slightly BEFORE their beat so the
     # incoming shot is on screen when the beat lands. Drop-slot matching
     # below tolerates the shift (slots start cut_lead before their drop).
@@ -2945,6 +3003,18 @@ def plan_to_dict(plan: MontagePlan) -> dict:
     }
     if plan.title_texts:
         data["title_texts"] = [str(text) for text in plan.title_texts]
+    # Timeline-strip metadata (phases / music_energy / beat_marks /
+    # drop_marks) is written only when set — exactly like title_texts, so
+    # plans saved before the strip existed (and plans without music or
+    # phases) stay byte-identical.
+    if plan.phases:
+        data["phases"] = [[start, end, label] for start, end, label in plan.phases]
+    if plan.music_energy:
+        data["music_energy"] = [float(v) for v in plan.music_energy]
+    if plan.beat_marks:
+        data["beat_marks"] = [float(t) for t in plan.beat_marks]
+    if plan.drop_marks:
+        data["drop_marks"] = [float(t) for t in plan.drop_marks]
     return data
 
 
@@ -2981,9 +3051,164 @@ def plan_from_dict(data: dict) -> MontagePlan:
             # Version-tolerant: plans saved before the composer existed (and
             # plans without composed titles) simply have no such key.
             title_texts=[str(text) for text in data.get("title_texts", [])],
+            # Same tolerance for the timeline-strip metadata: plans saved
+            # before the strip existed simply have none of these keys.
+            phases=[
+                (float(start), float(end), str(label))
+                for start, end, label in data.get("phases", [])
+            ],
+            music_energy=[float(v) for v in data.get("music_energy", [])],
+            beat_marks=[float(t) for t in data.get("beat_marks", [])],
+            drop_marks=[float(t) for t in data.get("drop_marks", [])],
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"malformed plan JSON: {exc}") from exc
+
+
+def adjust_entry_boundary(
+    plan: MontagePlan, slot: int, transition: str
+) -> MontagePlan:
+    """Change ONE boundary of the cut — pure plan surgery, no re-plan.
+
+    ``slot`` is the 0-based index into ``plan.entries`` (record order) and
+    ``transition`` says how the cut INTO that entry should read — one of
+    :data:`ARRANGEMENT_TRANSITIONS`:
+
+    * ``"cut"`` — hard cut: the entry's dissolve is cleared, and a black
+      dip sitting on the boundary is removed (the outgoing shot gets its
+      carved-off tail back — the exact reverse of the smash below).
+    * ``"dissolve"`` — the entry dissolves in with the planner's own rule:
+      ``min(_MAX_DISSOLVE, half the slot length)`` (the 0.5 s rule from
+      :func:`_plan_finishing`). A dip on the boundary is removed first — a
+      shot cannot both smash out of black and dissolve.
+    * ``"smash"`` — the classic trailer breath: the OUTGOING entry gives
+      up its last :data:`_DIP_SECONDS` to a black gap (a title slot) and
+      the entry hits out of black; its dissolve is cleared. Already
+      smashed boundaries are left alone (noted, not an error).
+
+    Everything else — the record grid, every other entry, the SFX cues —
+    stays bit-identical; ``title_texts`` stays aligned with ``dips`` (an
+    inserted dip gets "" when titles exist, a removed dip drops its
+    title). The original plan object is never modified; the returned plan
+    carries a ``boundary:`` note saying what changed.
+
+    Raises ValueError for an unknown transition, a slot outside the plan,
+    slot 0 (the first shot's boundary is the montage fade-in, not a cut),
+    a smash whose outgoing slot is too short (the same
+    :data:`_DIP_MIN_REMAINDER` rule the planner uses), and a dip removal
+    whose outgoing clip has no source material left to grow back into.
+    """
+    if transition not in ARRANGEMENT_TRANSITIONS:
+        valid = ", ".join(ARRANGEMENT_TRANSITIONS)
+        raise ValueError(
+            f"unknown transition {transition!r}; valid transitions: {valid}"
+        )
+    try:
+        slot = int(slot)
+    except (TypeError, ValueError):
+        raise ValueError("slot must be an entry index (0-based)")
+    if slot < 0 or slot >= len(plan.entries):
+        raise ValueError(
+            f"slot {slot + 1} is not in this plan (it has {len(plan.entries)} entries)"
+        )
+    if slot == 0:
+        raise ValueError(
+            "the first shot has no incoming cut — its boundary is the "
+            "montage fade-in"
+        )
+
+    entries = [replace(e) for e in plan.entries]
+    dips = list(plan.dips)
+    titles = list(plan.title_texts)
+    entry = entries[slot]
+    prev = entries[slot - 1]
+    bound = entry.record_start
+    added: list[str] = []
+
+    # A black dip already sitting on this boundary (its END = the entry's
+    # record_start, within the cut-lead tolerance)?
+    dip_at = next(
+        (
+            k
+            for k, (d_start, d_len) in enumerate(dips)
+            if abs(d_start + d_len - bound) <= _BOUNDARY_EPS + _EPS
+        ),
+        None,
+    )
+
+    if transition == "smash":
+        if dip_at is not None:
+            added.append(
+                f"boundary: slot {slot + 1} already smashes in from black — kept"
+            )
+        else:
+            length = prev.record_end - prev.record_start
+            if length - _DIP_SECONDS < _DIP_MIN_REMAINDER:
+                raise ValueError(
+                    f"slot {slot} is too short ({length:.2f}s) to give up "
+                    f"{_DIP_SECONDS:g}s for a smash to black"
+                )
+            prev.record_end -= _DIP_SECONDS
+            prev.source_end -= _DIP_SECONDS
+            insert_at = bisect.bisect_left(
+                [d_start for d_start, _ in dips], prev.record_end
+            )
+            dips.insert(insert_at, (prev.record_end, _DIP_SECONDS))
+            if titles:
+                titles.insert(insert_at, "")
+            added.append(
+                f"boundary: smash to black into slot {slot + 1} "
+                f"({_DIP_SECONDS:g}s title gap)"
+            )
+        entry.transition = 0.0
+    else:  # "cut" / "dissolve"
+        if dip_at is not None:
+            d_start, d_len = dips[dip_at]
+            if abs(prev.record_end - d_start) > _BOUNDARY_EPS + _EPS:
+                raise ValueError(
+                    f"the black dip before slot {slot + 1} does not sit on the "
+                    "previous shot's cut — it cannot be removed here"
+                )
+            room = (
+                prev.clip_duration - prev.source_end
+                if prev.clip_duration > _EPS
+                else d_len  # unknown clip length: trust the carve-off's origin
+            )
+            if room + _EPS < d_len:
+                raise ValueError(
+                    f"cannot remove the black dip before slot {slot + 1}: "
+                    f"{PurePath(prev.clip_path).name} has only {max(room, 0.0):.2f}s "
+                    f"of source left after its cut"
+                )
+            prev.record_end += d_len
+            prev.source_end += d_len
+            del dips[dip_at]
+            if dip_at < len(titles):
+                del titles[dip_at]
+            added.append(f"boundary: removed the black dip before slot {slot + 1}")
+        if transition == "dissolve":
+            entry.transition = min(
+                _MAX_DISSOLVE, (entry.record_end - entry.record_start) / 2.0
+            )
+            added.append(
+                f"boundary: dissolve into slot {slot + 1} ({entry.transition:g}s)"
+            )
+        else:
+            entry.transition = 0.0
+            added.append(f"boundary: hard cut into slot {slot + 1}")
+
+    return replace(
+        plan,
+        entries=entries,
+        dips=dips,
+        title_texts=titles,
+        notes=list(plan.notes) + added,
+        sfx=list(plan.sfx),
+        phases=list(plan.phases),
+        music_energy=list(plan.music_energy),
+        beat_marks=list(plan.beat_marks),
+        drop_marks=list(plan.drop_marks),
+    )
 
 
 def pin_entry(plan: MontagePlan, entry: MontageEntry) -> None:

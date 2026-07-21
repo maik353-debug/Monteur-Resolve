@@ -4511,3 +4511,342 @@ class TestMovieResultParityApi:
         card = source.index('id="mov-asm-result"')
         download = source.index('id="mov-asm-download"')
         assert card < download
+
+
+# --- the shot inspector's endpoints (clipinfo / alternatives / plan-adjust) ----
+
+
+def _inspector_reports():
+    """Fake sifted reports with vision fields — no media files needed."""
+    from monteur.sift import ClipReport, Moment
+
+    def clip(name, group=""):
+        return ClipReport(
+            path=f"/footage/{name}",
+            duration=30.0,
+            moments=[
+                Moment(2.0, 5.0, 0.9, label=f"{name} opener", role="opener",
+                       hero=0.7, group=group),
+                Moment(10.0, 13.0, 0.6, label=f"{name} middle", group=group),
+                Moment(20.0, 24.0, 0.8, label=f"{name} closer", role="closer"),
+            ],
+            usable_ratio=0.75,
+        )
+
+    return [clip("a.mp4", group="ridge"), clip("b.mp4", group="ridge"),
+            clip("c.mp4")]
+
+
+def _inspector_plan_dict(reports):
+    from monteur.montage import plan_montage, plan_to_dict
+    from monteur.music import MusicAnalysis, MusicSection
+
+    music = MusicAnalysis(
+        path="/music/song.wav", duration=12.0, tempo=120.0,
+        beats=[i * 0.5 for i in range(24)],
+        downbeats=[i * 2.0 for i in range(6)],
+        sections=[MusicSection(0.0, 12.0, 0.6, "mid")],
+    )
+    # a short cut on purpose: most moments stay UNUSED, so the bench
+    # (the alternatives material) is never empty in these tests
+    return plan_to_dict(
+        plan_montage(reports, music, cut_lead=0.0, max_duration=4.0)
+    )
+
+
+class TestInspectorApi:
+    """clipinfo / alternatives / plan-adjust: instant, cache-only, no sift."""
+
+    FOLDER = "/footage"
+
+    @pytest.fixture()
+    def cached(self, monkeypatch):
+        reports = _inspector_reports()
+
+        def fake_cached(folder):
+            return reports if folder == self.FOLDER else None
+
+        monkeypatch.setattr("monteur.web.server._cached_reports", fake_cached)
+        return reports
+
+    # -- clipinfo --------------------------------------------------------
+
+    def test_clipinfo_missing_clip_is_400(self, server, cached):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _get(f"{server}/api/clipinfo?folder={self.FOLDER}")
+        assert exc_info.value.code == 400
+        assert "clip" in json.loads(exc_info.value.read())["error"]
+
+    def test_clipinfo_missing_folder_is_400(self, server, cached):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _get(f"{server}/api/clipinfo?clip=a.mp4")
+        assert exc_info.value.code == 400
+        assert "folder" in json.loads(exc_info.value.read())["error"]
+
+    def test_clipinfo_without_scan_cache_is_404(self, server, cached):
+        query = urllib.parse.urlencode({"clip": "a.mp4", "folder": "/elsewhere"})
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _get(f"{server}/api/clipinfo?{query}")
+        assert exc_info.value.code == 404
+        assert "scan" in json.loads(exc_info.value.read())["error"]
+
+    def test_clipinfo_unknown_clip_is_404(self, server, cached):
+        query = urllib.parse.urlencode(
+            {"clip": "nope.mp4", "folder": self.FOLDER}
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _get(f"{server}/api/clipinfo?{query}")
+        assert exc_info.value.code == 404
+
+    def test_clipinfo_facts_and_overlapping_moment(self, server, cached, monkeypatch):
+        monkeypatch.setattr(
+            "monteur.web.server._probe_facts",
+            lambda path: {"width": 3840, "height": 2160, "fps": 25.0,
+                          "has_audio": True},
+        )
+        query = urllib.parse.urlencode(
+            {"clip": "a.mp4", "folder": self.FOLDER, "t0": 2.5, "t1": 4.5}
+        )
+        data = _get(f"{server}/api/clipinfo?{query}")
+        assert data["name"] == "a.mp4"
+        assert data["clip"] == "/footage/a.mp4"  # matched by basename
+        assert data["duration"] == 30.0
+        assert data["usable_ratio"] == 0.75
+        assert (data["width"], data["height"], data["fps"]) == (3840, 2160, 25.0)
+        # the 2.5-4.5 window overlaps the opener moment most
+        assert data["moment"]["label"] == "a.mp4 opener"
+        assert data["moment"]["role"] == "opener"
+        assert data["moment"]["hero"] == 0.7
+        assert data["moment"]["group"] == "ridge"
+
+    def test_clipinfo_probe_failure_degrades_to_zeros(self, server, cached):
+        # /footage/a.mp4 does not exist — probe facts soften to zeros
+        query = urllib.parse.urlencode({"clip": "a.mp4", "folder": self.FOLDER})
+        data = _get(f"{server}/api/clipinfo?{query}")
+        assert (data["width"], data["height"], data["fps"]) == (0, 0, 0.0)
+        assert data["moment"] is None  # no window sent -> no moment guess
+
+    # -- alternatives ----------------------------------------------------
+
+    def _plan(self, cached):
+        return _inspector_plan_dict(cached)
+
+    def test_alternatives_missing_plan_is_400(self, server, cached):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/alternatives",
+                  {"folder": self.FOLDER, "slot": 0})
+        assert exc_info.value.code == 400
+
+    def test_alternatives_bad_slot_is_400(self, server, cached):
+        plan = self._plan(cached)
+        for slot in ("x", None, 99, -1):
+            with pytest.raises(urllib.error.HTTPError) as exc_info:
+                _post(f"{server}/api/alternatives",
+                      {"plan_json": plan, "folder": self.FOLDER, "slot": slot})
+            assert exc_info.value.code == 400
+
+    def test_alternatives_without_scan_cache_is_404(self, server, cached):
+        plan = self._plan(cached)
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/alternatives",
+                  {"plan_json": plan, "folder": "/elsewhere", "slot": 0})
+        assert exc_info.value.code == 404
+
+    def test_alternatives_reuse_the_directors_bench(self, server, cached):
+        from monteur.director import review_context
+        from monteur.montage import plan_from_dict
+
+        plan = self._plan(cached)
+        data = _post(f"{server}/api/alternatives",
+                     {"plan_json": plan, "folder": self.FOLDER, "slot": 0})
+        assert data["slot"] == 0
+        alternatives = data["alternatives"]
+        assert 1 <= len(alternatives) <= 6
+        # every candidate comes from the director's bench (no new scoring)
+        bench = review_context(plan_from_dict(plan), cached)["bench"]
+        bench_keys = {(b["clip"], b["start"], b["end"]) for b in bench}
+        for alt in alternatives:
+            assert (alt["name"], alt["start"], alt["end"]) in bench_keys
+            assert alt["clip"].startswith("/footage/")  # full path for thumbs
+        # same-clip / same-scene-group candidates lead the list
+        kinship = [alt["same_scene"] for alt in alternatives]
+        assert kinship == sorted(kinship, reverse=True)
+
+    # -- plan/adjust -----------------------------------------------------
+
+    def test_adjust_returns_the_export_shape(self, server, cached):
+        plan = self._plan(cached)
+        data = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": plan, "slot": 1, "transition": "dissolve",
+             "format": "edl", "audio": "original"},
+        )
+        assert data["filename"] == "monteur_montage.edl"
+        assert data["content"].startswith("TITLE:")
+        assert data["plan"]["tempo"] == 0  # nothing re-listened
+        adjusted = data["plan_json"]["entries"]
+        assert adjusted[1]["transition"] == pytest.approx(
+            min(0.5, (adjusted[1]["record_end"] - adjusted[1]["record_start"]) / 2)
+        )
+        assert any("boundary: dissolve into slot 2" in n
+                   for n in data["plan"]["notes"])
+        # the request's own plan_json is not mutated server-side
+        assert plan["entries"][1]["transition"] == 0.0
+
+    def test_adjust_smash_then_cut_round_trips(self, server, cached):
+        plan = self._plan(cached)
+        smashed = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": plan, "slot": 2, "transition": "smash",
+             "audio": "original"},
+        )["plan_json"]
+        assert len(smashed["dips"]) == len(plan["dips"]) + 1
+        restored = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": smashed, "slot": 2, "transition": "cut",
+             "audio": "original"},
+        )["plan_json"]
+        assert restored["dips"] == plan["dips"]
+        assert restored["entries"] == plan["entries"]
+
+    def test_adjust_validation_400s(self, server, cached):
+        plan = self._plan(cached)
+        cases = [
+            ({"slot": 1, "transition": "wipe"}, "transition"),
+            ({"slot": "x", "transition": "cut"}, "slot"),
+            ({"slot": 0, "transition": "dissolve"}, "fade-in"),
+            ({"slot": 99, "transition": "cut"}, "not in this plan"),
+        ]
+        for extra, needle in cases:
+            with pytest.raises(urllib.error.HTTPError) as exc_info:
+                _post(f"{server}/api/plan/adjust",
+                      {"plan_json": plan, **extra})
+            assert exc_info.value.code == 400
+            assert needle in json.loads(exc_info.value.read())["error"]
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/plan/adjust",
+                  {"slot": 1, "transition": "cut"})
+        assert exc_info.value.code == 400
+
+
+class TestPlanAdjustOnDemo:
+    """Behavioral: a real build's plan takes a dissolve and gives it back."""
+
+    DEMO = str(_DEMO_FOOTAGE)
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+
+    def test_adjust_round_trip_on_built_plan(self, server):
+        build = _post(
+            f"{server}/api/create/build",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+             "style": "travel", "format": "edl"},
+        )
+        job = _wait_for_job(server, build["job"], timeout=300.0)
+        assert job["state"] == "done", job["message"]
+        plan = job["result"]["plan_json"]
+        # the built plan already carries the strip metadata
+        assert plan.get("phases")
+        assert plan.get("music_energy")
+        slot = 1
+        before = plan["entries"][slot]["transition"]
+        target = "cut" if before > 0 else "dissolve"
+        adjusted = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": plan, "slot": slot, "transition": target},
+        )
+        entry = adjusted["plan_json"]["entries"][slot]
+        if target == "dissolve":
+            assert entry["transition"] > 0
+        else:
+            assert entry["transition"] == 0
+        # give the boundary back — the grid is bit-identical again
+        reverse = "dissolve" if target == "cut" else "cut"
+        restored = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": adjusted["plan_json"], "slot": slot,
+             "transition": reverse},
+        )
+        expected = plan["entries"]
+        if before == 0 and reverse == "dissolve":
+            expected = adjusted["plan_json"]["entries"]
+        got = restored["plan_json"]["entries"]
+        untouched = [e for i, e in enumerate(got) if i != slot]
+        assert untouched == [e for i, e in enumerate(plan["entries"]) if i != slot]
+
+
+class TestProUiStatic:
+    """Static asserts on app.html: the strip, the inspector and the badges."""
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_timeline_strip_markup_and_wiring(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            # strip markup above the storyboard
+            'id="cre-strip"',
+            'id="cre-strip-blocks"',
+            'id="cre-strip-lane"',
+            'id="cre-strip-legend"',
+            # proportional blocks, phase colors, dips, drop + downbeats
+            "function renderTimelineStrip",
+            "function drawStripLane",
+            "--phase-opening",
+            "--phase-climax",
+            "plan.music_energy",
+            "beat_marks",
+            "drop_marks",
+            "tl-dip",
+            # theme-aware redraw: CSS variables + data-theme observer
+            "function cssVar",
+            'attributeFilter: ["data-theme"]',
+        ):
+            assert needle in source, needle
+        # phase colors exist in BOTH themes
+        assert source.count("--phase-climax:") == 2
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_inspector_markup_and_wiring(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            'id="cre-inspector"',
+            'id="cre-insp-title"',
+            'id="cre-insp-facts"',
+            'id="cre-insp-pin"',
+            'id="cre-insp-trans"',
+            'data-trans="cut"',
+            'data-trans="dissolve"',
+            'data-trans="smash"',
+            'id="cre-insp-alts-btn"',
+            'id="cre-insp-alts"',
+            # the endpoints the inspector rides on
+            "/api/clipinfo",
+            "/api/alternatives",
+            "/api/plan/adjust",
+            # the swap goes through the EXISTING apply machinery
+            "startDirectApply(body, function () { selectSlot(i); });",
+            # shared selection + keyboard
+            "function selectSlot",
+            '"ArrowRight"',
+            '"Escape"',
+            "revPinStamp",
+        ):
+            assert needle in source, needle
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_finding_badges_hooks(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            "function findingsBySlot",
+            "function applyFindingBadges",
+            "sb-flag",
+            "tl-flag",
+            # issues[].slots from the review, plus parseable engine notes
+            "(issue.slots || []).forEach",
+            "arrangement: scenes (",
+            # badges refresh when the review changes — in both directions
+            "applyFindingBadges(); // a cleared review takes its warning dots with it",
+        ):
+            assert needle in source, needle

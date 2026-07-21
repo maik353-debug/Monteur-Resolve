@@ -1861,3 +1861,247 @@ def test_rhythm_holds_capped_in_absolute_seconds():
     assert gaps[0] < 10.0  # nothing balloons toward the old 16s hold
     assert max(gaps) <= opening_base_s + 4 * beat + 1e-6  # downbeat slack
     assert len(cuts) >= 8  # a 36s trailer is not 5 shots
+
+
+# --- timeline-strip metadata (phases / music_energy / beat_marks / drop_marks) --
+
+
+def make_marked_music() -> MusicAnalysis:
+    """make_music() plus downbeats, phrases and one drop — strip material."""
+    music = make_music()
+    music.downbeats = [i * 2.0 for i in range(6)]
+    music.phrases = [0.0, 8.0]
+    music.drops = [8.0]
+    return music
+
+
+class TestStripMetadata:
+    def test_arc_style_records_phases_and_music_marks(self):
+        from monteur.montage import MUSIC_ENERGY_RATE
+
+        plan = plan_montage(
+            make_reports(), make_marked_music(), style="travel", cut_lead=0.0
+        )
+        assert plan.phases, "an arc style must record its phase spans"
+        labels = {label for _, _, label in plan.phases}
+        assert labels <= {"opening", "build", "climax", "outro"}
+        # phases tile the montage in record time
+        assert plan.phases[0][0] == pytest.approx(0.0)
+        assert plan.phases[-1][1] == pytest.approx(plan.duration)
+        # energy: one sample per 1/MUSIC_ENERGY_RATE seconds, all in 0..1
+        expected = int(plan.duration * MUSIC_ENERGY_RATE) + 1
+        assert len(plan.music_energy) == expected
+        assert all(0.0 <= v <= 1.0 for v in plan.music_energy)
+        # compact marks: downbeats only (not the 24 beats), plus the drop
+        assert plan.beat_marks == [i * 2.0 for i in range(6)]
+        assert plan.drop_marks == [8.0]
+
+    def test_auto_style_has_energy_but_no_phases(self):
+        plan = plan_montage(make_reports(), make_marked_music(), cut_lead=0.0)
+        assert plan.phases == []  # "auto" cuts on sections, not an arc
+        assert plan.music_energy  # the lane still renders
+        assert plan.beat_marks
+
+    def test_no_music_plan_carries_phases_only(self):
+        plan = plan_montage(
+            make_reports(), None, max_duration=10.0, style="travel"
+        )
+        assert plan.phases  # the pseudo grid still walks the arc
+        assert plan.music_energy == []
+        assert plan.beat_marks == []
+        assert plan.drop_marks == []
+
+    def test_round_trip(self):
+        from monteur.montage import plan_from_dict, plan_to_dict
+
+        plan = plan_montage(make_reports(), make_marked_music(), style="travel")
+        loaded = plan_from_dict(plan_to_dict(plan))
+        assert loaded.phases == plan.phases
+        assert loaded.music_energy == plan.music_energy
+        assert loaded.beat_marks == plan.beat_marks
+        assert loaded.drop_marks == plan.drop_marks
+
+    def test_old_plan_dict_without_strip_keys_loads(self):
+        from monteur.montage import plan_from_dict, plan_to_dict
+
+        data = plan_to_dict(plan_montage(make_reports(), make_marked_music()))
+        for key in ("phases", "music_energy", "beat_marks", "drop_marks"):
+            data.pop(key, None)
+        loaded = plan_from_dict(data)
+        assert loaded.phases == []
+        assert loaded.music_energy == []
+        assert loaded.beat_marks == []
+        assert loaded.drop_marks == []
+
+    def test_unset_fields_serialize_byte_identical(self):
+        import json
+
+        from monteur.montage import MontagePlan, plan_to_dict
+
+        plan = MontagePlan(music_path="", duration=4.0)
+        data = plan_to_dict(plan)
+        for key in ("phases", "music_energy", "beat_marks", "drop_marks"):
+            assert key not in data
+        # a plan without strip metadata writes the exact pre-strip payload
+        stripped = MontagePlan(music_path="", duration=4.0)
+        assert json.dumps(plan_to_dict(stripped), sort_keys=True) == json.dumps(
+            data, sort_keys=True
+        )
+
+
+# --- adjust_entry_boundary (the inspector's boundary control) -------------------
+
+
+def make_boundary_plan():
+    """Three contiguous 2s slots from one long clip; slot 1 dissolves in."""
+    from monteur.montage import MontageEntry, MontagePlan
+
+    entries = [
+        MontageEntry("/footage/a.mp4", 10.0, 12.0, 0.0, 2.0, 0.9,
+                     clip_duration=30.0),
+        MontageEntry("/footage/b.mp4", 5.0, 7.0, 2.0, 4.0, 0.8,
+                     transition=0.5, clip_duration=25.0),
+        MontageEntry("/footage/a.mp4", 20.0, 22.0, 4.0, 6.0, 0.7,
+                     clip_duration=30.0),
+    ]
+    return MontagePlan(
+        music_path="/music/song.wav", duration=6.0, entries=entries,
+        notes=["style \"travel\": Travel film"],
+    )
+
+
+class TestAdjustEntryBoundary:
+    def test_set_dissolve_uses_the_half_slot_rule(self):
+        from monteur.montage import adjust_entry_boundary
+
+        plan = make_boundary_plan()
+        adjusted = adjust_entry_boundary(plan, 2, "dissolve")
+        assert adjusted.entries[2].transition == pytest.approx(0.5)
+        assert plan.entries[2].transition == 0.0  # the original is untouched
+        assert any("dissolve into slot 3" in n for n in adjusted.notes)
+
+    def test_short_slot_dissolve_is_half_the_slot(self):
+        from dataclasses import replace
+
+        from monteur.montage import adjust_entry_boundary
+
+        plan = make_boundary_plan()
+        plan.entries[2] = replace(
+            plan.entries[2], record_start=5.4, record_end=6.0, source_end=20.6
+        )
+        plan.entries[1] = replace(plan.entries[1], record_end=5.4, source_end=8.4)
+        adjusted = adjust_entry_boundary(plan, 2, "dissolve")
+        assert adjusted.entries[2].transition == pytest.approx(0.3)
+
+    def test_clear_to_cut(self):
+        from monteur.montage import adjust_entry_boundary
+
+        plan = make_boundary_plan()
+        adjusted = adjust_entry_boundary(plan, 1, "cut")
+        assert adjusted.entries[1].transition == 0.0
+        assert plan.entries[1].transition == pytest.approx(0.5)
+        assert any("hard cut into slot 2" in n for n in adjusted.notes)
+
+    def test_smash_carves_the_planners_dip(self):
+        from monteur.montage import _DIP_SECONDS, adjust_entry_boundary
+
+        plan = make_boundary_plan()
+        adjusted = adjust_entry_boundary(plan, 2, "smash")
+        prev = adjusted.entries[1]
+        assert prev.record_end == pytest.approx(4.0 - _DIP_SECONDS)
+        assert prev.source_end == pytest.approx(7.0 - _DIP_SECONDS)
+        assert adjusted.dips == [(pytest.approx(4.0 - _DIP_SECONDS), _DIP_SECONDS)]
+        assert adjusted.entries[2].transition == 0.0
+        assert plan.dips == []  # the original is untouched
+
+    def test_smash_then_cut_restores_the_grid(self):
+        from dataclasses import asdict
+
+        from monteur.montage import adjust_entry_boundary
+
+        plan = make_boundary_plan()
+        smashed = adjust_entry_boundary(plan, 2, "smash")
+        restored = adjust_entry_boundary(smashed, 2, "cut")
+        assert restored.dips == []
+        assert [asdict(e) for e in restored.entries] == [
+            asdict(e) for e in plan.entries
+        ]
+
+    def test_smash_on_a_smashed_boundary_is_a_note_not_a_change(self):
+        from monteur.montage import adjust_entry_boundary
+
+        plan = make_boundary_plan()
+        smashed = adjust_entry_boundary(plan, 2, "smash")
+        again = adjust_entry_boundary(smashed, 2, "smash")
+        assert again.dips == smashed.dips
+        assert again.entries[1].record_end == smashed.entries[1].record_end
+        assert any("already smashes" in n for n in again.notes)
+
+    def test_smash_too_short_outgoing_slot_raises(self):
+        from dataclasses import replace
+
+        from monteur.montage import adjust_entry_boundary
+
+        plan = make_boundary_plan()
+        plan.entries[1] = replace(
+            plan.entries[1], record_start=3.5, source_start=6.5
+        )
+        with pytest.raises(ValueError, match="too short"):
+            adjust_entry_boundary(plan, 2, "smash")
+
+    def test_dip_removal_without_source_room_raises(self):
+        from dataclasses import replace
+
+        from monteur.montage import adjust_entry_boundary
+
+        plan = make_boundary_plan()
+        smashed = adjust_entry_boundary(plan, 2, "smash")
+        # the outgoing clip ends exactly at its cut: no material to grow back
+        smashed.entries[1] = replace(smashed.entries[1], clip_duration=6.6)
+        with pytest.raises(ValueError, match="source left"):
+            adjust_entry_boundary(smashed, 2, "cut")
+
+    def test_title_texts_stay_aligned_with_dips(self):
+        from monteur.montage import _DIP_SECONDS, adjust_entry_boundary
+
+        plan = make_boundary_plan()
+        plan.dips = [(1.6, 0.4)]
+        plan.title_texts = ["ACT ONE"]
+        plan.entries[0].record_end = 1.6
+        plan.entries[0].source_end = 11.6
+        smashed = adjust_entry_boundary(plan, 2, "smash")
+        assert smashed.dips == [(1.6, 0.4), (pytest.approx(4.0 - _DIP_SECONDS), _DIP_SECONDS)]
+        assert smashed.title_texts == ["ACT ONE", ""]
+        # removing the FIRST dip drops its title, the later one keeps its slot
+        opened = adjust_entry_boundary(smashed, 1, "cut")
+        assert opened.dips == smashed.dips[1:]
+        assert opened.title_texts == [""]
+
+    def test_everything_else_stays_bit_identical(self):
+        from dataclasses import asdict
+
+        from monteur.montage import adjust_entry_boundary
+
+        plan = make_boundary_plan()
+        plan.sfx = []
+        adjusted = adjust_entry_boundary(plan, 1, "cut")
+        assert asdict(adjusted.entries[0]) == asdict(plan.entries[0])
+        assert asdict(adjusted.entries[2]) == asdict(plan.entries[2])
+        assert adjusted.duration == plan.duration
+        assert adjusted.music_start == plan.music_start
+        assert adjusted.notes[: len(plan.notes)] == plan.notes
+
+    def test_validation_errors(self):
+        from monteur.montage import adjust_entry_boundary
+
+        plan = make_boundary_plan()
+        with pytest.raises(ValueError, match="valid transitions"):
+            adjust_entry_boundary(plan, 1, "wipe")
+        with pytest.raises(ValueError, match="not in this plan"):
+            adjust_entry_boundary(plan, 3, "cut")
+        with pytest.raises(ValueError, match="not in this plan"):
+            adjust_entry_boundary(plan, -1, "cut")
+        with pytest.raises(ValueError, match="entry index"):
+            adjust_entry_boundary(plan, "x", "cut")
+        with pytest.raises(ValueError, match="fade-in"):
+            adjust_entry_boundary(plan, 0, "dissolve")

@@ -38,6 +38,11 @@
   --seg-dark: #4a4b55;
   --seg-blurry: #9a8a4a;
   --seg-shaky: #b0574d;
+  --phase-none: #33343c;
+  --phase-opening: #2e4c42;
+  --phase-build: #3b4a66;
+  --phase-climax: #6d4526;
+  --phase-outro: #4c3c58;
   --btn-bg: var(--accent);
   --btn-ink: #201408;
   --veil: rgba(18, 18, 22, 0.85);
@@ -73,6 +78,11 @@
   --seg-dark: #6a6b74;
   --seg-blurry: #8f7f2e;
   --seg-shaky: #ad4a3e;
+  --phase-none: #dcdde3;
+  --phase-opening: #c6ded2;
+  --phase-build: #c9d7ee;
+  --phase-climax: #eed7ba;
+  --phase-outro: #dbcfe8;
   --btn-bg: var(--accent);
   --btn-ink: #ffffff;
   --veil: rgba(233, 233, 236, 0.85);
@@ -803,6 +813,113 @@ svg text.axis {
   border-right: 2px solid var(--accent); color: var(--ink-2);
   font-size: 9.5px; font-weight: 700; letter-spacing: 0.08em;
   text-transform: uppercase; max-height: 116px; overflow: hidden;
+}
+
+/* timeline strip: proportional clip blocks over a beat/energy lane.
+   Block WIDTH = duration share, background = story-arc phase; black
+   notches are the smash-to-black dips; the canvas lane underneath draws
+   the song's energy, downbeat ticks, cut hairlines and the drop marker. */
+.tl-strip { margin: 10px 0 4px; }
+.tl-blocks {
+  display: flex; align-items: stretch; height: 34px;
+  border: 1px solid var(--border); border-radius: 3px 3px 0 0;
+  overflow: hidden; background: var(--input-bg);
+}
+.tl-block {
+  position: relative; flex: 0 0 auto; min-width: 3px;
+  border: 0; border-left: 1px solid var(--page); padding: 0; margin: 0;
+  cursor: pointer; background: var(--phase-none); border-radius: 0;
+}
+.tl-block:first-child { border-left: 0; }
+.tl-block:hover, .tl-block:focus-visible { filter: brightness(1.22); }
+.tl-block.sel { box-shadow: inset 0 0 0 2px var(--accent); filter: none; }
+.tl-block.ph-opening, .tl-legend i.ph-opening { background: var(--phase-opening); }
+.tl-block.ph-build, .tl-legend i.ph-build { background: var(--phase-build); }
+.tl-block.ph-climax, .tl-legend i.ph-climax { background: var(--phase-climax); }
+.tl-block.ph-outro, .tl-legend i.ph-outro { background: var(--phase-outro); }
+.tl-dip { flex: 0 0 auto; min-width: 3px; background: #000; border-left: 1px solid var(--page); }
+.tl-flag {
+  position: absolute; top: 3px; right: 3px; width: 7px; height: 7px;
+  border-radius: 50%; background: var(--warning);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45); pointer-events: none;
+}
+.tl-lane {
+  display: block; width: 100%; height: 30px;
+  border: 1px solid var(--border); border-top: 0; border-radius: 0 0 3px 3px;
+  background: var(--input-bg);
+}
+.tl-legend {
+  display: flex; flex-wrap: wrap; gap: 12px; margin: 5px 0 0;
+  font-size: 10px; font-weight: 650; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--ink-muted);
+}
+.tl-legend i {
+  display: inline-block; width: 8px; height: 8px; border-radius: 2px;
+  margin-right: 4px; font-style: normal; background: var(--phase-none);
+}
+
+/* storyboard extras: click-to-inspect selection + inline finding badges */
+#cre-sb-board .sb-card[data-slot] { cursor: pointer; }
+.sb-card.sel { outline: 2px solid var(--accent); outline-offset: -1px; }
+.sb-flag {
+  position: absolute; top: 3px; right: 3px; width: 9px; height: 9px;
+  border-radius: 50%; background: var(--warning);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5); pointer-events: none;
+}
+
+/* shot inspector: a fixed right drawer in the Resolve idiom (not a modal) */
+.inspector {
+  position: fixed; top: 42px; right: 0; bottom: 0; width: 320px; z-index: 60;
+  display: flex; flex-direction: column;
+  background: var(--surface); border-left: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+.insp-head {
+  flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.insp-title { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 650; }
+.insp-keys { font-size: 9.5px; color: var(--ink-muted); font-family: var(--mono); white-space: nowrap; }
+.insp-close { padding: 0 8px; font-size: 14px; line-height: 1.6; }
+.insp-body { flex: 1; overflow-y: auto; padding: 12px 12px 16px; }
+.insp-thumb {
+  display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover;
+  background: #000; border: 1px solid var(--border); border-radius: 3px;
+}
+.insp-facts { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 10px 0 0; font-size: 11.5px; }
+.insp-facts dt {
+  color: var(--ink-muted); font-size: 9.5px; font-weight: 650;
+  letter-spacing: 0.06em; text-transform: uppercase; line-height: 2;
+}
+.insp-facts dd { margin: 0; color: var(--ink-2); overflow-wrap: anywhere; align-self: center; }
+.insp-issue {
+  border-left: 2px solid var(--warning); background: var(--warn-wash);
+  border-radius: 3px; padding: 6px 9px; margin-top: 8px;
+  font-size: 11.5px; color: var(--ink-2); overflow-wrap: anywhere;
+}
+.insp-block { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); }
+.insp-block .seg-toggle { margin-top: 6px; }
+.insp-actions { display: flex; gap: 8px; margin-top: 10px; }
+.insp-alts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+button.insp-alt {
+  display: flex; flex-direction: column; padding: 0; overflow: hidden;
+  text-align: left; font: inherit; color: inherit; cursor: pointer;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 3px;
+}
+button.insp-alt:hover, button.insp-alt:focus-visible { border-color: var(--accent); }
+.insp-alt img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: #000; }
+.insp-alt-meta { padding: 4px 6px 5px; display: flex; flex-direction: column; gap: 1px; }
+.insp-alt-name {
+  font-family: var(--mono); font-size: 9.5px; color: var(--ink-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.insp-alt-line { font-size: 10px; color: var(--ink-muted); font-family: var(--mono); }
+.insp-alt-line .insp-same { color: var(--accent); font-family: inherit; }
+.insp-alt-label {
+  font-size: 10px; line-height: 1.35; color: var(--ink-muted);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 /* arrange step (2b): palette + sequence lane reuse the storyboard cards */
@@ -1627,9 +1744,14 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           </ol>
           <div class="kit-block" id="cre-storyboard" hidden>
             <p class="seg-heading">Storyboard</p>
+            <div class="tl-strip" id="cre-strip" hidden>
+              <div class="tl-blocks" id="cre-strip-blocks"></div>
+              <canvas class="tl-lane" id="cre-strip-lane" height="30" aria-hidden="true"></canvas>
+              <p class="tl-legend" id="cre-strip-legend" hidden></p>
+            </div>
             <p class="sb-story" id="cre-sb-story" hidden></p>
             <div class="sb-board" id="cre-sb-board"></div>
-            <p class="help-small">One card per shot in record order; black cards mark where the cut dips to black for a title. Pin the shots you love — pinned shots survive every revision exactly where they are.</p>
+            <p class="help-small">One card per shot in record order; black cards mark where the cut dips to black for a title. Click a shot — in the strip above or on its card — to open the inspector; pin the shots you love — pinned shots survive every revision exactly where they are.</p>
           </div>
           <div class="kit-block" id="cre-revise" hidden>
             <p class="seg-heading">Revise this cut</p>
@@ -1685,6 +1807,38 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           </div>
         </div>
       </section>
+
+      <aside class="inspector" id="cre-inspector" hidden aria-label="Shot inspector">
+        <div class="insp-head">
+          <span class="insp-title" id="cre-insp-title">Shot</span>
+          <span class="insp-keys" title="Keyboard: ← → switch shots · P pins · Esc closes">←→ · P · Esc</span>
+          <button class="btn ghost small insp-close" id="cre-insp-close" type="button" aria-label="Close the inspector (Esc)" title="Close (Esc)">×</button>
+        </div>
+        <div class="insp-body">
+          <img class="insp-thumb" id="cre-insp-thumb" alt="">
+          <dl class="insp-facts" id="cre-insp-facts"></dl>
+          <div id="cre-insp-issues"></div>
+          <div class="insp-actions">
+            <button class="pin-btn" id="cre-insp-pin" type="button" aria-pressed="false">Pin</button>
+          </div>
+          <div class="insp-block">
+            <p class="seg-heading">Transition into this shot</p>
+            <div class="seg-toggle" role="group" id="cre-insp-trans" aria-label="Transition into this shot">
+              <button type="button" data-trans="cut" aria-pressed="false">Cut</button>
+              <button type="button" data-trans="dissolve" aria-pressed="false">Dissolve</button>
+              <button type="button" data-trans="smash" aria-pressed="false">Smash</button>
+            </div>
+            <p class="help-small" id="cre-insp-trans-hint"></p>
+          </div>
+          <div class="insp-block">
+            <p class="seg-heading">Swap source</p>
+            <p class="help-small">The strongest unused moments — same clip or scene first. A swap changes only this shot&rsquo;s source; the grid stays.</p>
+            <button class="btn small" id="cre-insp-alts-btn" type="button">Show alternatives<span class="spin" aria-hidden="true"></span></button>
+            <div class="insp-alts" id="cre-insp-alts"></div>
+          </div>
+          <p class="scan-note" id="cre-insp-msg" role="status" hidden></p>
+        </div>
+      </aside>
 
       <details class="fine-tune" id="cre-distill" style="margin-top: 22px;">
         <summary>Distill a trailer from a finished cut</summary>
@@ -5438,6 +5592,9 @@ function creResetRevise() {
   rev.planJson = null;
   rev.pins = [];
   rev.lastBody = null;
+  closeInspector();
+  clear($("cre-strip-blocks"));
+  $("cre-strip").hidden = true;
   clear($("cre-sb-board"));
   $("cre-storyboard").hidden = true;
   $("cre-sb-story").hidden = true;
@@ -5540,6 +5697,15 @@ function sbEntryCard(entry, i, noPin) {
     card.appendChild(meta);
     return card;
   }
+  // the Create board's cards are the inspector's click targets too
+  card.dataset.slot = String(i);
+  card.classList.toggle("sel", insp.slot === i);
+  card.setAttribute("role", "button");
+  card.tabIndex = 0;
+  card.addEventListener("click", function () { selectSlot(i); });
+  card.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectSlot(i); }
+  });
   var stamp = revPinStamp(entry);
   var pinned = rev.pins.indexOf(stamp) !== -1;
   card.classList.toggle("pinned", pinned);
@@ -5547,13 +5713,15 @@ function sbEntryCard(entry, i, noPin) {
   pin.type = "button";
   pin.setAttribute("aria-pressed", String(pinned));
   pin.setAttribute("aria-label", "Pin shot " + (i + 1) + " — keep it exactly where it is");
-  pin.addEventListener("click", function () {
+  pin.addEventListener("click", function (e) {
+    e.stopPropagation(); // pinning must not open/move the inspector
     var at = rev.pins.indexOf(stamp);
     var on = at === -1;
     if (on) rev.pins.push(stamp); else rev.pins.splice(at, 1);
     pin.setAttribute("aria-pressed", String(on));
     pin.textContent = on ? "Pinned" : "Pin";
     card.classList.toggle("pinned", on);
+    if (insp.slot === i) syncInspPin();
   });
   meta.appendChild(pin);
   card.appendChild(meta);
@@ -5595,6 +5763,10 @@ function renderStoryboard() {
   $("cre-storyboard").hidden = entries.length === 0;
   $("cre-revise").hidden = entries.length === 0;
   $("cre-direct").hidden = entries.length === 0;
+  // the proportional strip mirrors the board (shared selection + badges)
+  if (insp.slot !== null && insp.slot >= entries.length) closeInspector();
+  renderTimelineStrip();
+  if (insp.slot !== null) renderInspector();
 }
 
 /* ---- step 3: preview player (monteur.preview — Sehen ohne Resolve) ----
@@ -5752,6 +5924,7 @@ function resetDirectorNotes() {
   dnotes.lastApplyBody = null;
   $("cre-dir-result").hidden = true;
   $("cre-dir-msg").hidden = true;
+  applyFindingBadges(); // a cleared review takes its warning dots with it
 }
 
 /* renders a director's review into a "<prefix>-*" block. The default is the
@@ -5799,6 +5972,11 @@ function renderDirectorReview(review, prefix) {
   var applyBtn = $(prefix + "-apply"); // the Movie block reviews only — no apply
   if (applyBtn) applyBtn.hidden = replacements === 0;
   $(prefix + "-result").hidden = false;
+  // the review's issues annotate the storyboard cards + strip blocks
+  if (prefix === "cre-dir") {
+    applyFindingBadges();
+    if (insp.slot !== null) renderInspector();
+  }
 }
 
 $("cre-dir-btn").addEventListener("click", function () {
@@ -5864,6 +6042,7 @@ function startDirectApply(body, andThen) {
         // the review was applied; the improved plan deserves a fresh one
         dnotes.review = null;
         $("cre-dir-result").hidden = true;
+        applyFindingBadges(); // the applied review's badges leave with it
         $("cre-result-title").focus();
         toast("Suggestions applied — the result replaced the previous one.", "success");
         if (andThen) andThen(result);
@@ -5896,6 +6075,572 @@ $("cre-dir-apply").addEventListener("click", function () {
   if (built.audio) body.audio = built.audio;
   if (built.canvas) body.canvas = built.canvas;
   startDirectApply(body, null);
+});
+
+/* ---- step 3: timeline strip + shot inspector (the pro surface) --------
+   The strip is a proportional miniature of the cut: block width = duration
+   share, background = story-arc phase (plan.phases), black notches = the
+   smash-to-black dips, and the canvas lane underneath draws the song's
+   stored energy curve (plan.music_energy, 2 samples/s), downbeat ticks
+   (plan.beat_marks), cut hairlines and the drop marker (plan.drop_marks).
+   Clicking a block or a storyboard card selects the same slot (one shared
+   selection) and opens the inspector — a fixed right drawer with the
+   slot's facts (probe facts + vision via GET /api/clipinfo), the pin
+   toggle (the same rev.pins state), the boundary control (POST
+   /api/plan/adjust — pure plan surgery, rendered like an export) and the
+   swap bench (POST /api/alternatives -> a synthetic one-issue review
+   through the EXISTING /api/create/direct/apply machinery, so the record
+   grid never moves). Keyboard: Esc closes, ← → move, P pins. */
+
+var insp = {
+  slot: null,     // selected slot index (record order), null = closed
+  infoCache: {}   // clipinfo responses keyed by clip|t0|t1
+};
+
+function planSortedEntries() {
+  var plan = rev.planJson || {};
+  return ((plan.entries || []).slice()).sort(function (a, b) {
+    return (a.record_start || 0) - (b.record_start || 0);
+  });
+}
+
+/* the story-arc phase label under record time t ("" without phases) */
+function phaseLabelAt(phases, t) {
+  for (var i = 0; i < phases.length; i++) {
+    var p = phases[i];
+    if ((p[0] || 0) <= t + 0.001 && t < (p[1] || 0) - 0.001) return String(p[2] || "");
+  }
+  if (phases.length && t >= (phases[phases.length - 1][1] || 0) - 0.001) {
+    return String(phases[phases.length - 1][2] || "");
+  }
+  return "";
+}
+
+/* every quality finding per slot: the director's issues (dnotes.review)
+   plus the engine's parseable "arrangement: scene N ..." warnings */
+function findingsBySlot() {
+  var map = {};
+  function add(slot, text) {
+    if (!(slot >= 0)) return;
+    (map[slot] = map[slot] || []).push(text);
+  }
+  (((dnotes.review || {}).issues) || []).forEach(function (issue) {
+    var text = String(issue.kind || "").replace(/_/g, " ");
+    if (issue.problem) text += (text ? ": " : "") + String(issue.problem);
+    (issue.slots || []).forEach(function (s) {
+      add(s, text || "flagged in the director's notes");
+    });
+  });
+  (((rev.planJson || {}).notes) || []).forEach(function (raw) {
+    var note = String(raw);
+    var m = /^arrangement: scenes (\d+) and (\d+) are takes of the same scene/.exec(note);
+    if (m) {
+      add(parseInt(m[1], 10) - 1, note);
+      add(parseInt(m[2], 10) - 1, note);
+      return;
+    }
+    m = /^arrangement: scene (\d+) is a calm moment on the drop/.exec(note);
+    if (m) add(parseInt(m[1], 10) - 1, note);
+  });
+  return map;
+}
+
+/* (re)decorate storyboard cards + strip blocks with amber finding dots */
+function applyFindingBadges() {
+  Array.prototype.forEach.call(
+    document.querySelectorAll("#cre-sb-board .sb-flag, #cre-strip-blocks .tl-flag"),
+    function (node) { node.remove(); }
+  );
+  var map = findingsBySlot();
+  Object.keys(map).forEach(function (key) {
+    var texts = map[key].join("\n");
+    var card = document.querySelector('#cre-sb-board .sb-card[data-slot="' + key + '"] .sb-thumb-wrap');
+    if (card) {
+      var dot = el("span", "sb-badge sb-flag");
+      dot.title = texts;
+      card.appendChild(dot);
+    }
+    var block = document.querySelector('#cre-strip-blocks .tl-block[data-slot="' + key + '"]');
+    if (block) {
+      block.appendChild(el("span", "tl-flag"));
+      block.title = (block.dataset.basetitle || "") + "\n⚠ " + texts;
+    }
+  });
+}
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function renderTimelineStrip() {
+  var host = $("cre-strip");
+  var blocks = $("cre-strip-blocks");
+  clear(blocks);
+  var plan = rev.planJson || {};
+  var entries = planSortedEntries();
+  var duration = plan.duration ||
+    (entries.length ? entries[entries.length - 1].record_end || 0 : 0);
+  if (!entries.length || !duration) { host.hidden = true; return; }
+  host.hidden = false;
+  var dips = ((plan.dips || []).slice()).sort(function (a, b) {
+    return (a[0] || 0) - (b[0] || 0);
+  });
+  var phases = plan.phases || [];
+  var dipIndex = 0;
+  function addDip(dip) {
+    var notch = el("div", "tl-dip");
+    notch.style.width = (100 * (dip[1] || 0) / duration) + "%";
+    notch.title = "Dip to black — " + fmt1(dip[1] || 0) + "s";
+    blocks.appendChild(notch);
+  }
+  entries.forEach(function (entry, i) {
+    while (dipIndex < dips.length && (dips[dipIndex][0] || 0) <= (entry.record_start || 0) + 0.001) {
+      addDip(dips[dipIndex]);
+      dipIndex += 1;
+    }
+    var length = (entry.record_end || 0) - (entry.record_start || 0);
+    var block = el("button", "tl-block");
+    block.type = "button";
+    block.style.width = (100 * length / duration) + "%";
+    block.dataset.slot = String(i);
+    var phase = phaseLabelAt(phases, entry.record_start || 0);
+    if (phase) block.classList.add("ph-" + phase);
+    var title = "Shot " + (i + 1) + " · " + baseName(entry.clip_path) +
+      " · " + fmt1(length) + "s" + (phase ? " · " + phase : "");
+    block.title = title;
+    block.dataset.basetitle = title;
+    block.setAttribute("aria-label", title);
+    block.classList.toggle("sel", insp.slot === i);
+    block.addEventListener("click", function () { selectSlot(i); });
+    blocks.appendChild(block);
+  });
+  for (; dipIndex < dips.length; dipIndex++) addDip(dips[dipIndex]);
+  // phase legend (only the phases this cut actually has)
+  var legend = $("cre-strip-legend");
+  clear(legend);
+  var seen = [];
+  ["opening", "build", "climax", "outro"].forEach(function (label) {
+    if (phases.some(function (p) { return String(p[2] || "") === label; })) seen.push(label);
+  });
+  seen.forEach(function (label) {
+    var chip = el("span", null);
+    chip.appendChild(el("i", "ph-" + label));
+    chip.appendChild(document.createTextNode(label));
+    legend.appendChild(chip);
+  });
+  legend.hidden = seen.length === 0;
+  drawStripLane();
+  applyFindingBadges();
+}
+
+/* the beat/energy lane: canvas, redrawn on resize and theme switch */
+function drawStripLane() {
+  var canvas = $("cre-strip-lane");
+  var plan = rev.planJson || {};
+  var entries = planSortedEntries();
+  var duration = plan.duration ||
+    (entries.length ? entries[entries.length - 1].record_end || 0 : 0);
+  var cssWidth = canvas.clientWidth;
+  if (!cssWidth || !duration) return; // hidden or empty — nothing to draw
+  var laneHeight = 30;
+  var dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.round(cssWidth * dpr));
+  canvas.height = Math.round(laneHeight * dpr);
+  var ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, cssWidth, laneHeight);
+  function x(t) { return t / duration * cssWidth; }
+  var accent = cssVar("--accent");
+  // energy area fill (plan.music_energy: 2 samples per second)
+  var energy = plan.music_energy || [];
+  if (energy.length > 1) {
+    var rate = 2;
+    ctx.globalAlpha = 0.2;
+    ctx.fillStyle = accent;
+    ctx.beginPath();
+    ctx.moveTo(0, laneHeight);
+    energy.forEach(function (v, i) {
+      ctx.lineTo(x(i / rate), laneHeight - 2 - v * (laneHeight - 7));
+    });
+    ctx.lineTo(x((energy.length - 1) / rate), laneHeight);
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = 0.7;
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    energy.forEach(function (v, i) {
+      var px = x(i / rate);
+      var py = laneHeight - 2 - v * (laneHeight - 7);
+      if (i) ctx.lineTo(px, py); else ctx.moveTo(px, py);
+    });
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  // cut positions as hairlines
+  ctx.strokeStyle = cssVar("--axis");
+  ctx.lineWidth = 1;
+  entries.forEach(function (entry, i) {
+    if (!i) return;
+    var px = Math.round(x(entry.record_start || 0)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, laneHeight); ctx.stroke();
+  });
+  // downbeat ticks along the bottom
+  ctx.strokeStyle = cssVar("--ink-muted");
+  (plan.beat_marks || []).forEach(function (t) {
+    var px = Math.round(x(t)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(px, laneHeight - 5); ctx.lineTo(px, laneHeight); ctx.stroke();
+  });
+  // the drop: a full-height accent marker with a top flag
+  ctx.strokeStyle = accent;
+  ctx.fillStyle = accent;
+  ctx.lineWidth = 2;
+  (plan.drop_marks || []).forEach(function (t) {
+    var px = Math.round(x(t));
+    ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, laneHeight); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(px - 4, 0); ctx.lineTo(px + 4, 0); ctx.lineTo(px, 6);
+    ctx.closePath(); ctx.fill();
+  });
+}
+window.addEventListener("resize", drawStripLane);
+if (window.ResizeObserver) {
+  // the strip renders before the result card unhides (clientWidth 0) —
+  // the observer paints the lane the moment it actually gets laid out
+  new ResizeObserver(drawStripLane).observe($("cre-strip-lane"));
+}
+if (window.MutationObserver) {
+  // the theme toggle stamps data-theme on <html>; the lane re-reads its CSS colors
+  new MutationObserver(drawStripLane).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme"]
+  });
+}
+
+/* ---- the shared selection (strip blocks + storyboard cards) ---- */
+
+function selectSlot(i) {
+  var entries = planSortedEntries();
+  if (!entries.length) return;
+  i = Math.max(0, Math.min(entries.length - 1, i));
+  insp.slot = i;
+  Array.prototype.forEach.call(
+    document.querySelectorAll("#cre-sb-board .sb-card[data-slot], #cre-strip-blocks .tl-block"),
+    function (node) { node.classList.toggle("sel", node.dataset.slot === String(i)); }
+  );
+  var card = document.querySelector('#cre-sb-board .sb-card[data-slot="' + i + '"]');
+  if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest", inline: "nearest" });
+  renderInspector();
+  $("cre-inspector").hidden = false;
+}
+
+function closeInspector() {
+  insp.slot = null;
+  $("cre-inspector").hidden = true;
+  Array.prototype.forEach.call(
+    document.querySelectorAll("#cre-sb-board .sb-card.sel, #cre-strip-blocks .tl-block.sel"),
+    function (node) { node.classList.remove("sel"); }
+  );
+}
+$("cre-insp-close").addEventListener("click", closeInspector);
+
+/* how the cut INTO slot i currently reads: dissolve / smash / cut */
+function boundaryState(i) {
+  var entries = planSortedEntries();
+  var entry = entries[i];
+  if (!entry) return "cut";
+  if ((entry.transition || 0) > 0.001) return "dissolve";
+  var dips = ((rev.planJson || {}).dips) || [];
+  for (var k = 0; k < dips.length; k++) {
+    if (Math.abs((dips[k][0] || 0) + (dips[k][1] || 0) - (entry.record_start || 0)) <= 0.05) {
+      return "smash";
+    }
+  }
+  return "cut";
+}
+
+function inspFact(dl, term, value) {
+  if (!value) return;
+  dl.appendChild(el("dt", null, term));
+  dl.appendChild(el("dd", null, value));
+}
+
+function energyWord(v) { return v < 0.35 ? "low" : v < 0.7 ? "mid" : "high"; }
+
+/* the act this slot sits in (acts = 1 + dips passed before its start) */
+function actNumberAt(entry) {
+  var dips = ((rev.planJson || {}).dips) || [];
+  var act = 1;
+  dips.forEach(function (dip) {
+    if ((dip[0] || 0) <= (entry.record_start || 0) + 0.001) act += 1;
+  });
+  return act;
+}
+
+function fetchClipInfo(entry) {
+  var built = (cre.result && cre.result.body) || {};
+  var folder = built.folder || $("cre-folder").value.trim();
+  var key = String(entry.clip_path) + "|" + entry.source_start + "|" + entry.source_end;
+  if (insp.infoCache[key]) return Promise.resolve(insp.infoCache[key]);
+  var url = "/api/clipinfo?clip=" + encodeURIComponent(String(entry.clip_path || "")) +
+    "&folder=" + encodeURIComponent(folder) +
+    "&t0=" + (entry.source_start || 0).toFixed(3) +
+    "&t1=" + (entry.source_end || 0).toFixed(3);
+  return api(url).then(function (info) {
+    insp.infoCache[key] = info || {};
+    return insp.infoCache[key];
+  });
+}
+
+function syncInspPin() {
+  if (insp.slot === null) return;
+  var entries = planSortedEntries();
+  var entry = entries[insp.slot];
+  if (!entry) return;
+  var pinned = rev.pins.indexOf(revPinStamp(entry)) !== -1;
+  var btn = $("cre-insp-pin");
+  btn.setAttribute("aria-pressed", String(pinned));
+  btn.textContent = pinned ? "Pinned — survives revisions" : "Pin this shot";
+}
+
+$("cre-insp-pin").addEventListener("click", function () {
+  if (insp.slot === null) return;
+  var card = document.querySelector('#cre-sb-board .sb-card[data-slot="' + insp.slot + '"]');
+  var pin = card && card.querySelector(".sb-pin");
+  if (pin) { pin.click(); return; } // one pin state, one toggle path
+  var entries = planSortedEntries();
+  var entry = entries[insp.slot];
+  if (!entry) return;
+  var stamp = revPinStamp(entry);
+  var at = rev.pins.indexOf(stamp);
+  if (at === -1) rev.pins.push(stamp); else rev.pins.splice(at, 1);
+  syncInspPin();
+});
+
+function renderInspTransitions(i) {
+  var current = boundaryState(i);
+  var entries = planSortedEntries();
+  var entry = entries[i] || {};
+  Array.prototype.forEach.call($("cre-insp-trans").querySelectorAll("button"), function (btn) {
+    btn.setAttribute("aria-pressed", String(btn.dataset.trans === current));
+    btn.disabled = i === 0;
+  });
+  $("cre-insp-trans-hint").textContent =
+    i === 0 ? "The first shot fades in from black — there is no incoming cut to change." :
+    current === "smash" ? "This shot hits out of a black title gap." :
+    current === "dissolve" ? "A " + fmt1(entry.transition || 0) + "s dissolve eases into this shot." :
+    "A hard cut lands this shot on the beat.";
+}
+
+function applyTransition(trans) {
+  if (insp.slot === null || !rev.planJson) return;
+  if (buildPanel.running() || revisePanel.running() || directPanel.running()) return;
+  var i = insp.slot;
+  if (i === 0 || boundaryState(i) === trans) return;
+  var built = (cre.result && cre.result.body) || {};
+  var body = {
+    plan_json: rev.planJson, slot: i, transition: trans,
+    fps: built.fps || fpsFrom($("cre-fps")), format: cre.format
+  };
+  if (built.audio) body.audio = built.audio;
+  if (built.canvas) body.canvas = built.canvas;
+  $("cre-insp-msg").hidden = true;
+  var buttons = $("cre-insp-trans").querySelectorAll("button");
+  Array.prototype.forEach.call(buttons, function (btn) { btn.disabled = true; });
+  api("/api/plan/adjust", { method: "POST", body: body }).then(function (result) {
+    // adjust never re-listens to the song (tempo 0) — keep showing the
+    // tempo the build knew, exactly like a resumed draft does
+    var prevTempo = (cre.result && cre.result.data && cre.result.data.plan &&
+      cre.result.data.plan.tempo) || 0;
+    if (prevTempo && result.plan && !result.plan.tempo) result.plan.tempo = prevTempo;
+    // the adjusted plan replaces the current one, exactly like an export:
+    // a later format switch re-exports THIS plan, never re-plans
+    rev.planJson = (result && result.plan_json) || rev.planJson;
+    var exportBody = { plan_json: rev.planJson, fps: body.fps, format: body.format };
+    if (body.audio) exportBody.audio = body.audio;
+    if (body.canvas) exportBody.canvas = body.canvas;
+    cre.result = {
+      data: result, format: body.format,
+      body: (cre.result && cre.result.body) || null,
+      kind: "export", exportBody: exportBody
+    };
+    $("cre-resolve-msg").hidden = true;
+    $("cre-resolve-result").hidden = true;
+    renderCreResult(result);
+    renderStoryboard(); // re-renders the strip + keeps the selection
+    resetPreview();     // the previewed plan is gone — boundaries moved
+    selectSlot(i);
+    toast("Boundary updated — " + trans + " into shot " + (i + 1) + ".", "success");
+  }).catch(function (err) {
+    creNote("cre-insp-msg", err && err.message ? err.message : String(err), true);
+    renderInspTransitions(i);
+  });
+}
+Array.prototype.forEach.call($("cre-insp-trans").querySelectorAll("button"), function (btn) {
+  btn.addEventListener("click", function () { applyTransition(String(btn.dataset.trans)); });
+});
+
+function renderAlternatives(alternatives) {
+  var host = $("cre-insp-alts");
+  clear(host);
+  if (!alternatives.length) {
+    creNote("cre-insp-msg", "No unused moments left on the bench — everything strong is already in the cut.");
+    return;
+  }
+  var slot = insp.slot;
+  alternatives.forEach(function (alt) {
+    var btn = el("button", "insp-alt");
+    btn.type = "button";
+    var mid = ((alt.start || 0) + (alt.end || 0)) / 2;
+    var img = document.createElement("img");
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.alt = String(alt.name || "");
+    img.src = "/api/thumb?clip=" + encodeURIComponent(String(alt.clip || "")) +
+      "&t=" + mid.toFixed(3) + "&w=320";
+    btn.appendChild(img);
+    var meta = el("div", "insp-alt-meta");
+    meta.appendChild(el("span", "insp-alt-name", String(alt.name || "")));
+    var line = el("span", "insp-alt-line",
+      fmtClock(alt.start || 0) + "–" + fmtClock(alt.end || 0) +
+      " · " + (typeof alt.score === "number" ? alt.score.toFixed(2) : ""));
+    if (alt.same_scene) {
+      line.appendChild(document.createTextNode(" · "));
+      line.appendChild(el("span", "insp-same", "same scene"));
+    }
+    meta.appendChild(line);
+    if (alt.label) meta.appendChild(el("span", "insp-alt-label", String(alt.label)));
+    btn.appendChild(meta);
+    btn.title = "Swap shot " + (slot + 1) + " to this moment";
+    btn.addEventListener("click", function () { swapTo(alt); });
+    host.appendChild(btn);
+  });
+}
+
+function loadAlternatives() {
+  if (insp.slot === null || !rev.planJson) return;
+  var i = insp.slot;
+  var built = (cre.result && cre.result.body) || {};
+  var folder = built.folder || $("cre-folder").value.trim();
+  $("cre-insp-msg").hidden = true;
+  busy($("cre-insp-alts-btn"), function () {
+    return api("/api/alternatives", {
+      method: "POST",
+      body: { plan_json: rev.planJson, folder: folder, slot: i }
+    }).then(function (data) {
+      if (insp.slot !== i) return; // the selection moved while we fetched
+      renderAlternatives((data && data.alternatives) || []);
+    });
+  });
+}
+$("cre-insp-alts-btn").addEventListener("click", loadAlternatives);
+
+/* a swap is a director-style replacement applied MECHANICALLY through the
+   existing /api/create/direct/apply machinery: a synthetic one-issue
+   review — the record grid stays untouched, the card refreshes in place */
+function swapTo(alt) {
+  if (insp.slot === null || !rev.planJson) return;
+  var i = insp.slot;
+  var built = (cre.result && cre.result.body) || {};
+  var review = {
+    verdict: "", score: 0, praise: [], summary: "",
+    issues: [{
+      slots: [i], kind: "swap",
+      problem: "", suggestion: "swap requested in the inspector",
+      replacement: { clip: String(alt.name || alt.clip || ""), start: alt.start || 0, end: alt.end || 0 }
+    }]
+  };
+  var body = {
+    plan_json: rev.planJson,
+    folder: built.folder || $("cre-folder").value.trim(),
+    review: review,
+    fps: built.fps || fpsFrom($("cre-fps")),
+    format: cre.format
+  };
+  if (built.audio) body.audio = built.audio;
+  if (built.canvas) body.canvas = built.canvas;
+  startDirectApply(body, function () { selectSlot(i); });
+}
+
+function renderInspector() {
+  var entries = planSortedEntries();
+  var i = insp.slot;
+  if (i === null || !entries[i]) { closeInspector(); return; }
+  var entry = entries[i];
+  var plan = rev.planJson || {};
+  $("cre-insp-title").textContent = "Shot " + (i + 1) + " of " + entries.length;
+  var thumb = $("cre-insp-thumb");
+  thumb.src = sbThumbUrl(entry);
+  thumb.alt = "Shot " + (i + 1) + " — " + baseName(entry.clip_path);
+  var dl = $("cre-insp-facts");
+  clear(dl);
+  var length = (entry.record_end || 0) - (entry.record_start || 0);
+  inspFact(dl, "Record", fmtClock(entry.record_start || 0) + "–" + fmtClock(entry.record_end || 0));
+  var tempo = (cre.result && cre.result.data && cre.result.data.plan && cre.result.data.plan.tempo) || 0;
+  inspFact(dl, "Duration", fmt1(length) + "s" +
+    (tempo ? " · " + (length * tempo / 60).toFixed(1) + " beats" : ""));
+  var phase = phaseLabelAt(plan.phases || [], entry.record_start || 0);
+  var music = "";
+  var energy = plan.music_energy || [];
+  if (energy.length) {
+    var lo = Math.max(0, Math.floor((entry.record_start || 0) * 2));
+    var hi = Math.min(energy.length, Math.ceil((entry.record_end || 0) * 2) + 1);
+    var slice = energy.slice(lo, hi);
+    if (slice.length) {
+      var avg = slice.reduce(function (a, b) { return a + b; }, 0) / slice.length;
+      music = energyWord(avg) + " energy (" + avg.toFixed(2) + ")";
+    }
+  }
+  if (phase || music) {
+    inspFact(dl, "Phase", (phase || "—") + (music ? " · " + music : ""));
+  }
+  inspFact(dl, "Clip", baseName(entry.clip_path));
+  inspFact(dl, "Source", fmtClock(entry.source_start || 0) + "–" + fmtClock(entry.source_end || 0) + " in the clip");
+  if (typeof entry.score === "number" && entry.score) {
+    inspFact(dl, "Score", entry.score.toFixed(2));
+  }
+  if (entry.label) inspFact(dl, "Sees", String(entry.label));
+  var acts = sbActTitles(plan.notes || []);
+  var act = actNumberAt(entry);
+  if (acts[act]) inspFact(dl, "Act " + act, String(acts[act]));
+  // probe facts + the overlapping moment's vision fields, async + cached
+  fetchClipInfo(entry).then(function (info) {
+    if (insp.slot !== i) return; // the selection moved meanwhile
+    if (info.width && info.height) {
+      inspFact(dl, "Format", info.width + "×" + info.height +
+        (info.fps ? " · " + fmt1(info.fps) + " fps" : ""));
+    }
+    var moment = info.moment;
+    if (moment) {
+      if (moment.label && !entry.label) inspFact(dl, "Sees", String(moment.label));
+      var bits = [];
+      if (moment.role) bits.push(String(moment.role));
+      if (moment.hero >= 0.5) bits.push("hero " + Number(moment.hero).toFixed(1));
+      if (moment.group) bits.push("scene " + String(moment.group));
+      if (bits.length) inspFact(dl, "Casting", bits.join(" · "));
+    }
+  }).catch(function () { /* facts are an upgrade — a miss stays silent */ });
+  // the findings that cite this slot
+  var issues = $("cre-insp-issues");
+  clear(issues);
+  (findingsBySlot()[i] || []).forEach(function (text) {
+    issues.appendChild(el("p", "insp-issue", text));
+  });
+  syncInspPin();
+  renderInspTransitions(i);
+  clear($("cre-insp-alts"));
+  $("cre-insp-msg").hidden = true;
+}
+
+/* keyboard: Esc closes, ← → move the selection, P pins (see the drawer
+   header's tooltip) — never while typing in a field */
+document.addEventListener("keydown", function (e) {
+  if (insp.slot === null || $("cre-inspector").hidden) return;
+  var tag = (e.target && e.target.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select" || (e.target && e.target.isContentEditable)) return;
+  if (e.key === "Escape") { e.preventDefault(); closeInspector(); }
+  else if (e.key === "ArrowRight") { e.preventDefault(); selectSlot(insp.slot + 1); }
+  else if (e.key === "ArrowLeft") { e.preventDefault(); selectSlot(insp.slot - 1); }
+  else if (e.key === "p" || e.key === "P") { e.preventDefault(); $("cre-insp-pin").click(); }
 });
 
 /* ---- step 3: build the cut directly in DaVinci Resolve ----------------
