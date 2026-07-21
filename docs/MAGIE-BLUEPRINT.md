@@ -79,7 +79,7 @@ Sync-Assertion über vier Quellen (Bild-Peak, SFX-Peak, O-Ton, Titel);
 Integrated Loudness −14 LUFS ±1 LU im Export; Flinch-Test PLUS Mute-Test
 (trägt der Schnitt ohne Ton?).
 
-## Wellen 2–4 (Kurzfassung; Detail-Synthese folgt nach Welle 1)
+## Wellen 2–4 (Kurzfassung)
 - W2: Sekundär-Drop-Zwangs-Cuts (mit Phasen-Hold-Clearing), O-Ton-Pops (markante
   Originalton-Momente punktuell über das Bed heben — Ducking-Maschinerie aus 1.4),
   J-/L-Cuts im Export (Ton führt/zieht nach).
@@ -87,3 +87,73 @@ Integrated Loudness −14 LUFS ±1 LU im Export; Flinch-Test PLUS Mute-Test
   Grammatik (weit→mittel→nah-Wechselregeln), visuelle Reime/Callbacks.
 - W4: Render→Watch→Refine-Selbstschleife (das System schaut sein eigenes Preview und
   iteriert bis zur Abnahme-Metrik), lernende Präferenzen aus Nutzer-Korrekturen.
+
+## Welle 2 — Detail-Spezifikation (verbindlich; verankert im Post-Welle-1-Code)
+
+### 2.1 Sekundär-Drop-Zwangs-Cuts (Arc-Styles) mit Phasen-Hold-Clearing
+Anker: montage.py Zeile ~124–133 (Doc), Drop-Pin ~1813–1826, `_drop_hold` (1458).
+Heute forcieren nur "auto"/"short" auf JEDEM in-range Drop einen Cut mit Hold und
+räumen Grid-Cuts ~2 Beats danach frei. In Arc-Styles (trailer/paced/wedding/…)
+pinnt nur der Klimax auf den BESTEN Drop; die Sekundär-Drops bleiben ungenutzt.
+- Sekundär-Drops (alle in-range Drops außer dem Klimax-Pin) nach `drop_weight`
+  sortieren; die stärksten K forcieren einen Cut EXAKT auf dem Drop — aber nur wenn
+  sie musikalisch tragen (Mindest-`drop_weight`-Schwelle, dokumentiert) und weit
+  genug vom Klimax und voneinander entfernt sind (Mindestabstand in Beats).
+- Phasen-Hold-Clearing: Ein Sekundär-Drop, der in einen laufenden Phasen-Hold
+  (Opening-Hold, langer Klimax-Hold) fällt, darf den Hold nicht zerschneiden ohne
+  ihn zu RÄUMEN — d. h. den Hold bis zum Drop laufen lassen, am Drop hart schneiden,
+  danach das Phasen-Muster sauber neu aufsetzen (kein Sliver, kein halber Hold).
+  Der Klimax-Pin und seine Arc-Squeeze-Floors (1.5) bleiben unangetastet.
+- Der Sekundär-Drop-Slot ist ebenfalls ein HOLD (2-Beat-Minimum wie der Klimax),
+  bekommt einen Impact-Cue (wie "auto": Impact auf jedem drop-forced Cut, montage.py
+  482), und der stärkste ungenutzte Moment wird darauf gecastet.
+- Bewusste Default-Änderung → test_social.py-Fixtures für die betroffenen Arc-Styles
+  neu, feld-diff-dokumentiert. "auto"/"short" bleiben byte-identisch (haben's schon).
+  Byte-Parität schützt Fallbacks, nicht die sanktionierten Arc-Defaults.
+
+### 2.2 O-Ton-Pops (Originalton punktuell über das Bed heben)
+Anker: preview.py Zeile 165–166 & 879–880 (benannte W2-Naht), `ducking_windows`/
+`_duck_filters`/`_bed_envelope_filters`, `_DUCK_OTON_DB`, die bestehende Prominenz-
+Messung (Teile ≥ `_DUCK_OTON_STANDOUT_DB` über dem Median via volumedetect).
+- Spiegle die Ducking-Maschinerie als LIFT: eine Volume-Envelope mit Floor > 1
+  (Boost, z. B. +3…+4 dB, dokumentiert) auf der ORIGINALTON-Kette über jedem
+  markanten O-Ton-Fenster — dieselbe Trapez-Mechanik, dieselbe Linear-Chain-
+  Komposition. Der Pop ist die andere Seite der Medaille zum Musik-Ducking:
+  unter dem O-Ton-Fenster duckt die Musik (schon da), im selben Fenster hebt der
+  O-Ton (neu). Nur im Mix-Modus.
+- Deterministisch, gemessen (nicht geraten): dasselbe volumedetect-Fenster wie 1.4.
+  Ein Pop braucht Kopf­raum — nach dem Lift darf der O-Ton −1 dBTP nicht reißen
+  (clampen, ehrliche Note wenn geclamped). Export UND Preview? Preview mischt keinen
+  O-Ton-Pop wenn es auch SFX nicht mischt — konsistent mit 1.4 (Pops = Deliverable,
+  gehören in render_export; Preview bleibt schlank). Naht im Docstring benennen.
+- Leere Fenster ⇒ byte-identische alte Graphen.
+
+### 2.3 J-/L-Cuts im Export (Ton führt / zieht nach)
+Anker: io/fcpxml.py (verbundene Audio-Clips, Offset = Schnittpunkt, Zeile ~49;
+`_audio_lane`/`_lane_track`), preview.py render_export Originalton-Bett (~1282+).
+- An ausgewählten Szenen-Übergängen den Originalton-Schnittpunkt frame-genau vom
+  BILD-Schnitt entkoppeln: J-Cut (Ton des NÄCHSTEN Shots setzt vor dem Bildschnitt
+  ein — Antizipation) bzw. L-Cut (Ton des VORIGEN Shots klingt über den Bildschnitt
+  nach — Kontinuität). Kleiner, typisierter Lead/Lag (z. B. 3–8 Frames, fps-bewusst
+  via cut_lead_for-Denkart), deterministisch.
+- NUR wo es dient: nicht am Peak-on-Beat-Cut (Sync ist heilig), nicht über
+  music_gaps/Stille-Kanten, nicht über einen drop-forced Cut, nicht wenn ein
+  platzierter SFX/Impact am Schnitt sitzt. Bevorzugt an ruhigen Continuity-Merges
+  und Hot→Cool-Phrasenwechseln.
+- fcpxml: der Originalton-Connected-Clip bekommt In/Out + Offset so, dass er den
+  Bildschnitt um Lead/Lag überlappt (Resolve-Roundtrip trägt das nativ). Export
+  (ffmpeg): das Originalton-Segment entsprechend früher/später einblenden mit
+  Mikro-Crossfade an der Naht. Musik-Bett und Grid unberührt.
+- Plan-Format-Toleranz: J/L-Metadaten nur-wenn-gesetzt serialisieren; hand-gebaute
+  Pläne ohne J/L bleiben byte-identisch.
+
+## Abnahme (Welle 2)
+Sekundär-Drops: jeder geforcte Sekundär-Cut liegt exakt (±1 Frame) auf seinem Drop,
+kein Sliver, Klimax-Pin/Arc-Floors unverändert. O-Ton-Pop: gemessener Boost am
+markanten Moment, O-Ton-Peak liest über dem Bett (RMS-Assertion im Fenster),
+−1 dBTP gehalten. J/L: Ton-Kante messbar vom Bild-Schnitt versetzt, Peak-on-Beat-
+und Drop-Cuts nachweislich UNVERSETZT. Haus-Garantien: Zero-Repeat, bit-identische
+Pins/Arrangements, "auto"/"short" byte-identisch, Fallback-Byte-Parität.
+
+## Wellen 3–4 — Detail-Synthese folgt vor ihrer Umsetzung
+(grounded im dann-aktuellen Code, analog zur W2-Synthese oben).
