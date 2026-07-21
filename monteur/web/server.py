@@ -970,6 +970,64 @@ def _sift_or_cached(job: dict, folder: str) -> tuple[list, bool]:
     return reports, False
 
 
+def _validate_arrangement(payload: dict) -> None:
+    """400 (ApiError) on a structurally malformed 'arrangement' payload.
+
+    Called by the build/kit handlers at REQUEST time, so a broken client
+    payload never becomes a half-started job. Each scene must fit the
+    engine format ({"clip", "start", optional "after"/"sfx"}; extra
+    display keys like "end"/"label" ride along untouched). Unknown clip
+    PATHS are a job-time error (the engine names them) because the
+    footage is only known after the sift. A missing/empty arrangement is
+    fine — the key is simply removed.
+    """
+    if "arrangement" not in payload:
+        return
+    from monteur.montage import ARRANGEMENT_SFX_KINDS, ARRANGEMENT_TRANSITIONS
+
+    raw = payload.get("arrangement")
+    if not raw:
+        payload.pop("arrangement", None)
+        return
+    if not isinstance(raw, list):
+        raise ApiError(400, "'arrangement' must be a list of scenes")
+    for n, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            raise ApiError(400, f"arrangement scene {n}: must be an object")
+        clip = item.get("clip")
+        if not isinstance(clip, str) or not clip.strip():
+            raise ApiError(
+                400, f"arrangement scene {n}: missing 'clip' (the clip path)"
+            )
+        try:
+            start = float(item.get("start"))
+        except (TypeError, ValueError):
+            raise ApiError(
+                400, f"arrangement scene {n}: 'start' must be a number (seconds)"
+            )
+        if start < 0:
+            raise ApiError(
+                400, f"arrangement scene {n}: 'start' must not be negative"
+            )
+        after = item.get("after")
+        if after is not None:
+            transition = after.get("transition") if isinstance(after, dict) else after
+            if transition not in ARRANGEMENT_TRANSITIONS:
+                valid = ", ".join(ARRANGEMENT_TRANSITIONS)
+                raise ApiError(
+                    400,
+                    f"arrangement scene {n}: 'after' transition must be one "
+                    f"of {valid}",
+                )
+        sfx_kind = item.get("sfx")
+        if sfx_kind is not None and sfx_kind != "":
+            if sfx_kind not in ARRANGEMENT_SFX_KINDS:
+                valid = ", ".join(ARRANGEMENT_SFX_KINDS)
+                raise ApiError(
+                    400, f"arrangement scene {n}: 'sfx' must be one of {valid}"
+                )
+
+
 def _plan_from_payload(job: dict, payload: dict):
     """Shared plan construction for build and kit jobs.
 
@@ -1036,6 +1094,11 @@ def _plan_from_payload(job: dict, payload: dict):
         plan_kwargs["pace"] = float(payload["pace"])
     if payload.get("transitions"):
         plan_kwargs["transitions"] = payload["transitions"]
+    if payload.get("arrangement"):
+        # The editor's own scene order (the Arrange step). The handler
+        # already 400-ed malformed payloads; unknown clip paths surface
+        # here as the engine's own ValueError -> a clear job error.
+        plan_kwargs["arrangement"] = payload["arrangement"]
     if payload.get("ai_cut"):
         # Claude composes the cut (monteur.compose): the engine still builds
         # the exact grid plan_montage would, then ONE Claude completion casts
@@ -1089,7 +1152,7 @@ def _apply_elements(job: dict, plan, music, elements_dir: str) -> None:
 _DRAFT_SETTING_KEYS = (
     "audio", "order", "style", "canvas", "transitions", "fps", "format",
     "max_duration", "pace", "allow_repeats", "sfx", "cut_lead", "see",
-    "ai_cut", "brief", "elements",
+    "ai_cut", "brief", "elements", "arrangement",
 )
 
 
@@ -2732,6 +2795,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
         payload = self._read_json()
         if not payload.get("folder"):
             raise ApiError(400, "missing 'folder' (path to your footage)")
+        _validate_arrangement(payload)
         job = _new_job("build")
         threading.Thread(
             target=_run_build_job,
@@ -2762,6 +2826,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             raise ApiError(400, "missing 'folder' (path to your footage)")
         if not payload.get("kit_dir"):
             raise ApiError(400, "missing 'kit_dir' (folder to write the publish kit into)")
+        _validate_arrangement(payload)
         job = _new_job("kit")
         threading.Thread(
             target=_run_kit_job,

@@ -369,6 +369,182 @@ class TestCreateApi:
         assert full["plan_json"] == revise_job["result"]["plan_json"]
 
 
+class TestArrangeApi:
+    """The Arrange step's server side: payload validation, forwarding to
+    plan_montage, and drafts persistence of the arrangement."""
+
+    DEMO = str(_DEMO_FOOTAGE)
+
+    def _payload(self, **extra):
+        return {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav",
+                "format": "edl", **extra}
+
+    # -- request-time validation (no footage needed: 400 before any job) --
+
+    def test_arrangement_must_be_a_list(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/build",
+                  {"folder": "/x", "arrangement": {"clip": "a.mp4"}})
+        assert exc_info.value.code == 400
+        assert "must be a list" in exc_info.value.read().decode()
+
+    def test_arrangement_scene_needs_clip_and_numeric_start(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/build",
+                  {"folder": "/x", "arrangement": [{"start": 1.0}]})
+        assert exc_info.value.code == 400
+        assert "missing 'clip'" in exc_info.value.read().decode()
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/build",
+                  {"folder": "/x",
+                   "arrangement": [{"clip": "a.mp4", "start": "soon"}]})
+        assert exc_info.value.code == 400
+        assert "'start' must be a number" in exc_info.value.read().decode()
+
+    def test_arrangement_rejects_unknown_transition_and_sfx(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/build",
+                  {"folder": "/x",
+                   "arrangement": [
+                       {"clip": "a.mp4", "start": 0,
+                        "after": {"transition": "wipe"}}]})
+        assert exc_info.value.code == 400
+        assert "cut, dissolve, smash" in exc_info.value.read().decode()
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/build",
+                  {"folder": "/x",
+                   "arrangement": [{"clip": "a.mp4", "start": 0, "sfx": "boom"}]})
+        assert exc_info.value.code == 400
+        assert "impact, whoosh, riser" in exc_info.value.read().decode()
+
+    def test_kit_validates_the_arrangement_too(self, server, tmp_path):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/kit",
+                  {"folder": "/x", "kit_dir": str(tmp_path),
+                   "arrangement": "not-a-list"})
+        assert exc_info.value.code == 400
+
+    def test_empty_arrangement_is_simply_dropped(self, server):
+        # [] / null means "not arranged" — the build must not 400 on it
+        # (it fails later on the bogus folder, as any build would).
+        data = _post(f"{server}/api/create/build",
+                     {"folder": "/nonexistent-folder", "arrangement": []})
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "arrangement" not in job["message"]
+
+    # -- forwarding into the engine (needs the demo footage) --
+
+    @pytest.fixture()
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+
+    def test_build_forwards_arrangement_and_reports_it(self, server, _needs_demo_media):
+        data = _post(
+            f"{server}/api/create/build",
+            self._payload(
+                max_duration=20,
+                arrangement=[
+                    {"clip": "clip_C.mp4", "start": 0.0,
+                     "after": {"transition": "smash"}, "end": 4.0,
+                     "label": "display extras ride along"},
+                    {"clip": "clip_A.mp4", "start": 0.0,
+                     "after": {"transition": "dissolve"}},
+                    {"clip": "clip_D.mp4", "start": 0.0},
+                ],
+            ),
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        plan_json = job["result"]["plan_json"]
+        entries = sorted(plan_json["entries"], key=lambda e: e["record_start"])
+        assert Path(entries[0]["clip_path"]).name == "clip_C.mp4"
+        assert Path(entries[1]["clip_path"]).name == "clip_A.mp4"
+        assert Path(entries[2]["clip_path"]).name == "clip_D.mp4"
+        notes = "\n".join(job["result"]["plan"]["notes"])
+        assert "arrangement:" in notes
+        assert "follow your order" in notes
+        assert plan_json["dips"], "the smash boundary must dip to black"
+
+    def test_unknown_arranged_clip_is_a_job_error_naming_it(self, server, _needs_demo_media):
+        data = _post(
+            f"{server}/api/create/build",
+            self._payload(arrangement=[{"clip": "ghost.mp4", "start": 0.0}]),
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "ghost.mp4" in job["message"]
+
+    def test_build_autosave_remembers_the_arrangement(self, server, _needs_demo_media):
+        arrangement = [{"clip": "clip_A.mp4", "start": 0.0,
+                        "after": {"transition": "cut"}}]
+        data = _post(
+            f"{server}/api/create/build",
+            self._payload(arrangement=arrangement),
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        full = _get(f"{server}/api/drafts/autosave")
+        assert full["settings"]["arrangement"] == arrangement
+
+    def test_drafts_round_trip_the_arrangement(self, server):
+        arrangement = [
+            {"clip": "/footage/a.mp4", "start": 2.0, "end": 5.0,
+             "label": "the opener", "after": {"transition": "smash"},
+             "sfx": "impact"},
+        ]
+        stored = _post(
+            f"{server}/api/drafts",
+            {"name": "arranged cut", "folder": "/footage",
+             "settings": {"style": "auto", "arrangement": arrangement},
+             "plan_json": {"monteur_plan": 1, "music_path": "", "duration": 1.0,
+                           "entries": [], "notes": [], "dips": [], "sfx": []}},
+        )
+        full = _get(f"{server}/api/drafts/{stored['id']}")
+        assert full["settings"]["arrangement"] == arrangement
+
+
+class TestArrangeUi:
+    """Static asserts on app.html: the Arrange step's markup and wiring."""
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_step_strip_has_the_conditional_arrange_step(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        # the opt-in checkbox in step 2 and the conditional wbar chip
+        assert 'id="cre-arrange"' in html
+        assert "Arrange the story myself" in html
+        assert '<span id="wbar-2b" hidden>' in html
+        # the step section itself, between steps 2 and 3
+        assert 'id="cre-step-2b"' in html
+        assert html.index('id="cre-step-2"') < html.index('id="cre-step-2b"') \
+            < html.index('id="cre-step-3"')
+        # the wizard walks 1 -> 2 -> 2b -> 3 only when opted in
+        assert 'creShowStep(cre.arrange.on ? "2b" : 3, true)' in html
+        assert "setArrangeOn" in html
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_palette_sequence_and_boundary_markup(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert 'id="cre-arr-palette"' in html
+        assert 'id="cre-arr-seq"' in html
+        assert 'id="cre-arr-filter"' in html   # find-search as the palette filter
+        assert 'id="cre-arr-count"' in html    # the live counter
+        assert "arr-bound" in html             # boundary control between cards
+        assert 'ARR_TRANSITIONS = ["cut", "dissolve", "smash"]' in html
+        assert '["", "impact", "whoosh", "riser"]' in html
+        assert 'id="cre-arr-sfx-hint"' in html  # hidden-with-hint without elements
+        assert "/api/thumb?clip=" in html
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_build_payload_and_drafts_carry_the_arrangement(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert "body.arrangement = cre.arrange.seq.map" in html
+        # drafts: saved with the settings, restored on resume
+        assert '"arrangement"].forEach' in html
+        assert "Array.isArray(s.arrangement)" in html
+
+
 class TestJobsApi:
     def test_unknown_job_is_404(self, server):
         with pytest.raises(urllib.error.HTTPError) as exc_info:

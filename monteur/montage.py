@@ -242,6 +242,30 @@ audio clips on a dedicated SFX track ("A2" music/original, "A3" mix)
 while keeping the marker. ``plan_to_dict`` writes ``file`` only when
 set, so plans without placed elements serialize exactly as before.
 
+Arrangement (the editor's own scene order)
+------------------------------------------
+``plan_montage(..., arrangement=[...])`` lets the editor dictate the
+CASTING ORDER while the engine keeps the craft: the grid (style, rhythm
+canon, phases, drop logic) builds exactly as without an arrangement, and
+the arranged scenes then claim the slots in the user's order from slot 0
+upward. Each item is a dict ``{"clip": path, "start": seconds}`` plus an
+optional ``"after"`` (``{"transition": "cut"|"dissolve"|"smash"}`` — or
+the bare string) for the boundary INTO the next slot and an optional
+``"sfx"`` (``"impact"|"whoosh"|"riser"``) cue at that boundary. The item
+is matched to a sifted moment by clip + start overlap (the director's
+matcher), snapped/trimmed to the slot's duration with the fill's own
+rules, and marked consumed so the auto-fill of any REMAINING slots never
+replays it first. More scenes than slots keeps the user's order and
+drops the excess from the end, honestly noted. After building, a
+deterministic consistency report lands in the notes under an
+``arrangement:`` prefix — how many slots follow the order, trims onto
+the beat grid, pacing flags (a calm scene on the drop; two takes of the
+same scene back to back), the unplaced excess. ``arrangement=None``
+(the default) is byte-identical to before — the arrangement is an
+INPUT, not plan state, so :func:`plan_to_dict` is untouched. The
+composer (:mod:`monteur.compose`) treats arranged slots as LOCKED: they
+are flagged in the dossier and any cast for them is ignored.
+
 Plan persistence & revision
 ---------------------------
 :func:`plan_to_dict` / :func:`plan_from_dict` round-trip a full plan
@@ -366,6 +390,27 @@ _AUTO_FADE_OUT = 1.0
 # length the shortened outgoing clip must keep.
 _DIP_SECONDS = 0.4
 _DIP_MIN_REMAINDER = 0.25
+
+# Arrangement (the editor's own scene order; see the module docstring).
+# Valid "after" boundary requests and "sfx" boundary cues per item.
+ARRANGEMENT_TRANSITIONS = ("cut", "dissolve", "smash")
+ARRANGEMENT_SFX_KINDS = ("impact", "whoosh", "riser")
+# A moment trimmed by less than this (seconds) is not worth a trim note.
+_ARR_TRIM_NOTE_MIN = 0.05
+# An arranged boundary cue is skipped when a same-kind cue already sits
+# within this many seconds (don't double an impact the SFX layer planned).
+_ARR_CUE_CLEARANCE = 0.5
+# Calm-on-the-drop flag: an arranged moment counts as calm when its mean
+# motion magnitude is at/below _MOTION_MIN_MAGNITUDE and its highlight is
+# below this — flagged only when the pool holds a livelier alternative.
+_ARR_CALM_HIGHLIGHT = 0.3
+# Ready-to-paste library queries for arranged boundary cues (the same
+# wording _plan_sfx uses, so assign_elements files them identically).
+_ARR_SFX_QUERIES = {
+    "impact": "cinematic impact hit",
+    "whoosh": "whoosh transition fast",
+    "riser": "riser build up",
+}
 
 # SFX layer (plan_montage(..., sfx=True)) — see the module docstring.
 # Density cap: at most ~one cue per this many seconds of cut, so the plan
@@ -1466,6 +1511,8 @@ def _fill(
     drop_slots: set[int] | frozenset[int] = frozenset(),
     semantic: bool = False,
     slot_energies: list[float] | None = None,
+    pre_used: set[int] | frozenset[int] = frozenset(),
+    preset: dict[int, "_PoolItem"] | None = None,
 ) -> tuple[list[MontageEntry], list[str]]:
     """Assign pool moments to slots.
 
@@ -1496,6 +1543,14 @@ def _fill(
     Reuse (pool exhausted) is unchanged — cyclic scan for unconsumed tails,
     then rewind — except a drop slot still grabs the best remaining material.
 
+    ``pre_used`` (pool indices an arrangement already placed) keeps those
+    moments out of the first pass — their unconsumed TAILS stay available
+    to the reuse scan, exactly like any other consumed moment. ``preset``
+    (slot index -> the pool item an arrangement put there) seeds the
+    neighbour bookkeeping, so motion continuity and the same-scene
+    penalty see the arranged slots. Both default to empty, which is
+    byte-identical to the behavior before they existed.
+
     ``semantic=True`` (any pool moment carries vision annotations) layers
     the semantic-casting bonuses onto the candidate blend: a fitting role
     adds ``_ROLE_WEIGHT``, climax-phase candidates add ``_HERO_WEIGHT`` x
@@ -1520,7 +1575,9 @@ def _fill(
         if peak > _EPS:
             motion_norm = [m / peak for m in mags]
     rewound = False
-    unused = list(range(n))  # pool indices not yet placed, in pool order
+    # Pool indices not yet placed, in pool order (an arrangement's picks
+    # are already placed and start consumed).
+    unused = [i for i in range(n) if i not in pre_used]
     reserved: dict[int, int] = {}  # slot index -> pool index held for a drop
     for drop_slot in sorted(drop_slots):
         if not unused:
@@ -1538,7 +1595,7 @@ def _fill(
         reserved[drop_slot] = unused.pop(pos)
     held = set(reserved.values())  # kept out of reuse until their drop is served
 
-    by_slot: dict[int, _PoolItem] = {}
+    by_slot: dict[int, _PoolItem] = dict(preset or {})
     same_scene_avoided = 0
     for visit, slot_idx in enumerate(slot_order):
         rec_start, rec_end = slots[slot_idx]
@@ -1693,6 +1750,309 @@ def _fill(
     return entries, notes
 
 
+# --- arrangement (the editor's own scene order) --------------------------------
+
+
+def _resolve_arrangement(
+    arrangement: list, pool: list[_PoolItem]
+) -> list[dict]:
+    """Validate raw arrangement items against the pool — the engine's gate.
+
+    Returns one dict per item: ``indices`` (the pool indices of that clip's
+    moments), ``want`` (requested source start), ``after`` ("" or a
+    :data:`ARRANGEMENT_TRANSITIONS` value) and ``sfx`` ("" or an
+    :data:`ARRANGEMENT_SFX_KINDS` value). Raises ValueError with a clear,
+    complete message on structural problems or unknown clips (ALL unknown
+    names are listed, not just the first).
+    """
+    by_clip: dict[str, list[int]] = {}
+    for idx, item in enumerate(pool):
+        by_clip.setdefault(item.clip_path, []).append(idx)
+        by_clip.setdefault(PurePath(item.clip_path).name, []).append(idx)
+
+    items: list[dict] = []
+    unknown: list[str] = []
+    for n, raw in enumerate(arrangement, start=1):
+        if not isinstance(raw, dict):
+            raise ValueError(f"arrangement: scene {n} must be an object")
+        clip = str(raw.get("clip") or "").strip()
+        if not clip:
+            raise ValueError(f"arrangement: scene {n} is missing 'clip'")
+        try:
+            want = float(raw.get("start", 0.0))
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"arrangement: scene {n} needs a numeric 'start' (seconds)"
+            )
+        after_raw = raw.get("after")
+        if isinstance(after_raw, dict):
+            after = str(after_raw.get("transition") or "")
+        else:
+            after = str(after_raw or "")
+        if after and after not in ARRANGEMENT_TRANSITIONS:
+            valid = ", ".join(ARRANGEMENT_TRANSITIONS)
+            raise ValueError(
+                f"arrangement: scene {n} has unknown transition {after!r}; "
+                f"valid: {valid}"
+            )
+        sfx_kind = str(raw.get("sfx") or "")
+        if sfx_kind and sfx_kind not in ARRANGEMENT_SFX_KINDS:
+            valid = ", ".join(ARRANGEMENT_SFX_KINDS)
+            raise ValueError(
+                f"arrangement: scene {n} has unknown sfx {sfx_kind!r}; "
+                f"valid: {valid}"
+            )
+        indices = by_clip.get(clip) or by_clip.get(PurePath(clip).name)
+        if not indices:
+            unknown.append(clip)
+            indices = []
+        items.append(
+            {"clip": clip, "want": want, "after": after, "sfx": sfx_kind,
+             "indices": indices}
+        )
+    if unknown:
+        names = ", ".join(repr(PurePath(c).name) for c in dict.fromkeys(unknown))
+        raise ValueError(f"arrangement: no clip named {names} in the footage")
+    return items
+
+
+def _cast_arrangement(
+    items: list[dict],
+    pool: list[_PoolItem],
+    slots: list[tuple[float, float]],
+    drop_slots: set[int] | frozenset[int],
+    duration: float,
+) -> tuple[list[MontageEntry], dict[int, _PoolItem], list[str]]:
+    """Place the arranged scenes onto slots 0..k-1 (the user's order).
+
+    ``k = min(len(items), len(slots))``. Each item is matched to the
+    best-overlapping moment of its clip (the director's matcher: largest
+    overlap with ``[start, start + slot]``, then nearest centre, then
+    higher score), snapped into the moment and trimmed/padded to the
+    slot's exact duration with the fill's own rules. Consumption is
+    recorded on the pool item so the auto-fill never replays the placed
+    piece first. Returns the entries, the slot -> pool-item map (the
+    fill's ``preset``) and the consistency notes: trims onto the grid,
+    a calm scene on the drop, same-scene adjacency, unplaced excess.
+    """
+    k = min(len(items), len(slots))
+    entries: list[MontageEntry] = []
+    preset: dict[int, _PoolItem] = {}
+    notes: list[str] = []
+    # Is there any lively material at all? Only then is "calm on the
+    # drop" a real flag rather than a statement about the whole pool.
+    lively_exists = any(
+        (math.hypot(*it.moment.entry_motion) + math.hypot(*it.moment.exit_motion)) / 2.0
+        > _MOTION_MIN_MAGNITUDE
+        or it.moment.highlight >= _ARR_CALM_HIGHLIGHT
+        for it in pool
+    )
+    for i in range(k):
+        item = items[i]
+        rec_start, rec_end = slots[i]
+        slot_len = rec_end - rec_start
+        want = item["want"]
+        centre = want + slot_len / 2.0
+        best = min(
+            item["indices"],
+            key=lambda idx: (
+                -max(
+                    0.0,
+                    min(pool[idx].moment.end, want + slot_len)
+                    - max(pool[idx].moment.start, want),
+                ),
+                abs((pool[idx].moment.start + pool[idx].moment.end) / 2.0 - centre),
+                -pool[idx].moment.score,
+                idx,
+            ),
+        )
+        pick = pool[best]
+        moment = pick.moment
+        # Snap into the moment, duration-preserving; pad toward the clip's
+        # end when the moment tail is short — the fill's own rules.
+        src_start = min(max(want, moment.start), max(moment.start, moment.end - slot_len))
+        src_start = max(0.0, src_start)
+        src_end = min(src_start + slot_len, moment.end)
+        if src_end - src_start < slot_len - _EPS:
+            src_end = max(src_end, min(src_start + slot_len, pick.clip_duration))
+        if src_end - src_start < slot_len - _EPS:
+            notes.append(
+                f"gap at {rec_start:.2f}s: only {src_end - src_start:.2f}s of "
+                f"source for a {slot_len:.2f}s slot"
+            )
+        pick.consumed = max(pick.consumed, src_end - moment.start)
+        pick.uses += 1
+        preset[i] = pick
+        entries.append(
+            MontageEntry(
+                clip_path=pick.clip_path,
+                source_start=src_start,
+                source_end=src_end,
+                record_start=rec_start,
+                record_end=rec_end,
+                score=moment.score,
+                media_start=pick.media_start,
+                clip_duration=pick.clip_duration,
+                label=pick.label,
+            )
+        )
+        moment_len = moment.end - moment.start
+        placed = src_end - src_start
+        if moment_len > placed + _ARR_TRIM_NOTE_MIN:
+            notes.append(
+                f"arrangement: scene {i + 1} trimmed {moment_len:.1f}s -> "
+                f"{placed:.1f}s to sit on the beat grid"
+            )
+        if i in drop_slots and lively_exists:
+            motion = (
+                math.hypot(*moment.entry_motion) + math.hypot(*moment.exit_motion)
+            ) / 2.0
+            if (
+                motion <= _MOTION_MIN_MAGNITUDE
+                and moment.highlight < _ARR_CALM_HIGHLIGHT
+            ):
+                notes.append(
+                    f"arrangement: scene {i + 1} is a calm moment on the drop "
+                    "— a high-energy scene would hit harder"
+                )
+    for i in range(k - 1):
+        a, b = preset[i], preset[i + 1]
+        if a.group and a.group == b.group:
+            notes.append(
+                f"arrangement: scenes {i + 1} and {i + 2} are takes of the "
+                "same scene back to back"
+            )
+    order_note = f"arrangement: {k} of {len(slots)} slots follow your order"
+    if k < len(slots):
+        order_note += f"; the remaining {len(slots) - k} filled automatically"
+    notes.insert(0, order_note)
+    if len(items) > len(slots):
+        excess = len(items) - len(slots)
+        notes.append(
+            f"arrangement: {excess} scene{'s' if excess != 1 else ''} did not "
+            f"fit the {duration:.0f}s target — raise the length or drop scenes"
+        )
+    return entries, preset, notes
+
+
+def _arrangement_boundaries(
+    plan: MontagePlan,
+    entries: list[MontageEntry],
+    items: list[dict],
+    k: int,
+) -> None:
+    """Apply the arranged "after" requests to the finished plan (in place).
+
+    Runs AFTER :func:`_plan_finishing`, so the requests override the
+    style's own habits at exactly the user's boundaries: ``"cut"`` forces
+    a hard cut even in a dissolve-happy phase, ``"dissolve"`` dissolves
+    into the next slot (the existing length rule: min 0.5 s, half the
+    slot), ``"smash"`` dips to black exactly like a style's act change
+    (skipped without a note only when the slot is too short to give up
+    the dip, or a dip already sits on that boundary). One summary note
+    counts what was applied.
+    """
+    cuts = dissolves = smashes = 0
+    for i in range(min(k, len(entries) - 1)):
+        after = items[i]["after"]
+        if not after:
+            continue
+        incoming = entries[i + 1]
+        if after == "cut":
+            incoming.transition = 0.0
+            cuts += 1
+        elif after == "dissolve":
+            incoming.transition = min(
+                _MAX_DISSOLVE, (incoming.record_end - incoming.record_start) / 2.0
+            )
+            dissolves += 1
+        elif after == "smash":
+            outgoing = entries[i]
+            if any(abs(ds - outgoing.record_end) <= 0.25 + _EPS for ds, _ in plan.dips):
+                continue  # the style already dipped this boundary
+            slot = outgoing.record_end - outgoing.record_start
+            if slot - _DIP_SECONDS < _DIP_MIN_REMAINDER:
+                plan.notes.append(
+                    f"arrangement: scene {i + 1} is too short for a smash to "
+                    "black — kept the straight cut"
+                )
+                continue
+            outgoing.record_end -= _DIP_SECONDS
+            outgoing.source_end -= _DIP_SECONDS
+            plan.dips.append((outgoing.record_end, _DIP_SECONDS))
+            smashes += 1
+    if plan.dips:
+        plan.dips.sort(key=lambda d: d[0])
+    pieces = [
+        f"{count} {word}"
+        for count, word in (
+            (cuts, "forced cuts" if cuts != 1 else "forced cut"),
+            (dissolves, "dissolves" if dissolves != 1 else "dissolve"),
+            (smashes, "smashes to black" if smashes != 1 else "smash to black"),
+        )
+        if count
+    ]
+    if pieces:
+        plan.notes.append("arrangement: boundaries — " + ", ".join(pieces))
+
+
+def _arrangement_cues(
+    plan: MontagePlan,
+    slots: list[tuple[float, float]],
+    items: list[dict],
+    k: int,
+) -> None:
+    """Add the arranged "sfx" boundary cues to the plan (in place).
+
+    Runs AFTER :func:`_plan_sfx`, so a cue the SFX layer already planned
+    at that boundary (same kind within ``_ARR_CUE_CLEARANCE``) is never
+    doubled. An impact hits ON the boundary, a whoosh centers on it, a
+    riser ENDS exactly on it — the same shapes the SFX layer plans. Cues
+    are marker/file cues like any other (:mod:`monteur.elements` files
+    them when a sound library is given); the note counts what was added.
+    """
+    added = 0
+    for i in range(k):
+        kind = items[i]["sfx"]
+        if not kind:
+            continue
+        boundary = slots[i][1]
+        if boundary >= plan.duration - _EPS:
+            continue  # the montage's end is no boundary to accent
+        if kind == "impact":
+            time = boundary
+            length = min(_SFX_IMPACT_LENGTH, plan.duration - boundary)
+        elif kind == "whoosh":
+            time = max(0.0, boundary - _SFX_WHOOSH_LENGTH / 2.0)
+            length = _SFX_WHOOSH_LENGTH
+        else:  # riser: build out of the arranged slot, ending on the boundary
+            length = min(_SFX_RISER_MAX, slots[i][1] - slots[i][0])
+            time = max(0.0, boundary - length)
+        if length <= _EPS:
+            continue
+        if any(
+            cue.kind == kind and abs(cue.time - time) < _ARR_CUE_CLEARANCE - _EPS
+            for cue in plan.sfx
+        ):
+            continue  # the SFX layer already covers this boundary
+        plan.sfx.append(
+            SfxCue(
+                time=time,
+                duration=length,
+                kind=kind,
+                query=_ARR_SFX_QUERIES[kind],
+                note=f"your arrangement — after scene {i + 1}",
+            )
+        )
+        added += 1
+    if added:
+        plan.sfx.sort(key=lambda c: c.time)
+        plan.notes.append(
+            f"arrangement: {added} sound cue{'s' if added != 1 else ''} at "
+            "your boundaries"
+        )
+
+
 # --- public API ---------------------------------------------------------------
 
 
@@ -1709,6 +2069,7 @@ def plan_montage(
     transitions: str = "auto",
     *,
     sfx: bool = False,
+    arrangement: list[dict] | None = None,
 ) -> MontagePlan:
     """Distribute the best moments across the song, in a cutting style.
 
@@ -1764,6 +2125,16 @@ def plan_montage(
     dissolves for gentle phases (see the module docstring's Finishing
     section).
 
+    ``arrangement`` (keyword-only, default None) hands the CASTING ORDER
+    to the editor: an ordered list of ``{"clip", "start"}`` dicts (plus
+    optional ``"after"`` transitions and ``"sfx"`` boundary cues) claims
+    the slots from 0 upward in exactly that order while the grid, rhythm
+    and finishing stay the engine's — see the module docstring's
+    Arrangement section for matching, trimming, excess handling and the
+    ``arrangement:`` consistency notes. Malformed items and unknown clips
+    raise ValueError naming the problem. ``None`` is byte-identical to
+    before.
+
     ``sfx`` (keyword-only, default False) additionally plans a sound-design
     layer: ``plan.sfx`` is filled with :class:`SfxCue` entries — ambience
     under the opening, risers into act changes, impacts on the climax/drop
@@ -1785,6 +2156,8 @@ def plan_montage(
         raise ValueError(
             f"unknown transitions {transitions!r}; valid modes: {valid}"
         )
+    if arrangement is not None and not isinstance(arrangement, list):
+        raise ValueError("arrangement must be a list of scene objects")
 
     if music is None:
         requested = max_duration
@@ -1921,6 +2294,26 @@ def plan_montage(
     else:
         raise ValueError(f"unknown order: {order!r}")
 
+    # Arrangement: the editor's scenes claim slots 0..k-1 in the given
+    # order; the auto-fill below only serves what remains. Placed moments
+    # start consumed, so their material is never replayed first.
+    arr_items: list[dict] = []
+    arr_entries: list[MontageEntry] = []
+    arr_preset: dict[int, _PoolItem] = {}
+    arr_pre_used: frozenset[int] = frozenset()
+    if arrangement:
+        arr_items = _resolve_arrangement(arrangement, pool)
+        arr_entries, arr_preset, arr_notes = _cast_arrangement(
+            arr_items, pool, slots, drop_slots, plan.duration
+        )
+        arr_k = len(arr_entries)
+        placed = list(arr_preset.values())
+        arr_pre_used = frozenset(
+            i for i, it in enumerate(pool) if any(it is p for p in placed)
+        )
+        slot_order = [s for s in slot_order if s >= arr_k]
+        drop_slots = {d for d in drop_slots if d >= arr_k}
+
     # Semantic casting kicks in only when the vision pass annotated at least
     # one pool moment (labels alone still ride along, but change nothing).
     semantic = any(it.role or it.hero > _EPS or it.group for it in pool)
@@ -1937,15 +2330,23 @@ def plan_montage(
     entries, fill_notes = _fill(
         slots, slot_order, pool, phases, highlight_phase, drop_slots,
         semantic=semantic, slot_energies=slot_energies,
+        pre_used=arr_pre_used, preset=arr_preset or None,
     )
+    entries = arr_entries + entries
     entries.sort(key=lambda e: e.record_start)
     plan.entries = entries
     plan.notes.extend(fill_notes)
+    if arrangement:
+        plan.notes.extend(arr_notes)
     used = sum(1 for it in pool if it.uses)
     plan.notes.append(f"{len(slots)} slots filled, {used} of {len(pool)} moments used")
     _plan_finishing(plan, entries, grid_music, chosen, phases, transitions)
+    if arr_entries:
+        _arrangement_boundaries(plan, entries, arr_items, len(arr_entries))
     if sfx:
         _plan_sfx(plan, phases, drop_starts)
+    if arr_entries:
+        _arrangement_cues(plan, slots, arr_items, len(arr_entries))
     return plan
 
 

@@ -778,6 +778,24 @@ def cmd_create(args: argparse.Namespace) -> None:
         # Vision pass: annotate the moments (labels, roles, hero shots,
         # scene groups); plan_montage picks the annotations up by itself.
         _run_vision(reports, max_moments=args.max_moments)
+    arrangement = None
+    if args.arrangement:
+        # The editor's own scene order (see --arrangement's help for the
+        # format). Structure and clip names are validated by plan_montage
+        # itself — here only the file and JSON shape are checked.
+        try:
+            arrangement = json.loads(
+                Path(args.arrangement).read_text(encoding="utf-8")
+            )
+        except OSError as exc:
+            _fail(f"could not read --arrangement {args.arrangement}: {exc}")
+        except ValueError as exc:
+            _fail(f"--arrangement {args.arrangement} is not valid JSON: {exc}")
+        if not isinstance(arrangement, list) or not arrangement:
+            _fail(
+                "--arrangement JSON must be a non-empty list of scenes, "
+                'e.g. [{"clip": "b.mp4", "start": 12.0}]'
+            )
     try:
         if args.ai_cut:
             # Claude composes the cut (monteur.compose): the engine still
@@ -792,6 +810,7 @@ def cmd_create(args: argparse.Namespace) -> None:
                 order=args.order, max_duration=args.max_duration,
                 allow_repeats=args.allow_repeats, cut_lead=args.cut_lead,
                 pace=args.pace, transitions=args.transitions, sfx=args.sfx,
+                arrangement=arrangement,
             )
         else:
             plan = plan_montage(
@@ -799,6 +818,7 @@ def cmd_create(args: argparse.Namespace) -> None:
                 style=args.style, allow_repeats=args.allow_repeats,
                 cut_lead=args.cut_lead, pace=args.pace,
                 transitions=args.transitions, sfx=args.sfx,
+                arrangement=arrangement,
             )
     except ValueError as exc:
         _fail(str(exc))
@@ -1550,6 +1570,17 @@ def build_parser() -> argparse.ArgumentParser:
              "Claude Code costs nothing extra; falls back to the heuristic "
              "cut with a note when Claude is unreachable; sharpest with "
              "--see)",
+    )
+    p.add_argument(
+        "--arrangement", default="", metavar="FILE.json",
+        help="arrange the story yourself: a JSON list of scenes in YOUR "
+             'order, e.g. [{"clip": "b.mp4", "start": 12.0, "after": '
+             '{"transition": "smash"}, "sfx": "impact"}, ...] — each scene '
+             "claims the next slot on the beat grid; \"after\" (cut/"
+             "dissolve/smash) sets the boundary into the next scene, "
+             '"sfx" (impact/whoosh/riser) drops a cue there; remaining '
+             "slots fill automatically and the notes carry a consistency "
+             "report",
     )
     p.add_argument(
         "--save-plan", default="", metavar="PATH.json",

@@ -805,6 +805,24 @@ svg text.axis {
   text-transform: uppercase; max-height: 116px; overflow: hidden;
 }
 
+/* arrange step (2b): palette + sequence lane reuse the storyboard cards */
+.arr-palette { max-height: 420px; overflow-y: auto; }
+button.sb-card {
+  padding: 0; text-align: left; font: inherit; color: inherit; cursor: pointer;
+}
+button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent); }
+.sb-badge.sb-hero { top: 3px; right: 3px; background: var(--accent); color: #fff; }
+.arr-seq { align-items: center; }
+.arr-bound {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 0 1px;
+}
+.arr-bound .btn { padding: 1px 7px; font-size: 10px; font-family: var(--mono); }
+.arr-bound .btn b { font-weight: 400; margin-right: 4px; }
+.arr-bound .arr-sfx-btn.on { border-color: var(--accent); color: var(--accent); }
+.arr-tools { display: flex; gap: 3px; margin-top: auto; }
+.arr-tools .btn { padding: 1px 7px; font-size: 10.5px; line-height: 1.5; }
+
 /* job progress panel */
 .job-panel {
   border: 1px solid var(--border); border-radius: 3px; background: var(--input-bg);
@@ -1180,7 +1198,7 @@ svg text.axis {
     <section id="create" hidden>
       <p class="eyebrow">Create a first cut</p>
       <p class="wiz-progress" id="wiz-progress">Step 1 of 3 — Your footage</p>
-      <div class="wiz-bar" aria-hidden="true"><span id="wbar-1" class="on"><b>1</b>Footage</span><span id="wbar-2"><b>2</b>Music &amp; options</span><span id="wbar-3"><b>3</b>Your cut</span></div>
+      <div class="wiz-bar" aria-hidden="true"><span id="wbar-1" class="on"><b>1</b>Footage</span><span id="wbar-2"><b>2</b>Music &amp; options</span><span id="wbar-2b" hidden><b>2b</b>Arrange</span><span id="wbar-3"><b>3</b>Your cut</span></div>
 
       <section class="wiz-step" id="cre-step-1" aria-labelledby="cre-h1">
         <div class="step-head">
@@ -1367,6 +1385,11 @@ svg text.axis {
           <span>Claude composes the cut</span>
         </label>
         <p class="help-small" style="max-width: 620px; margin-bottom: 14px;">Claude reads the vision labels and your description, writes a story arc, casts every slot and titles the act breaks &mdash; the engine keeps every cut locked on the music. Runs over your Claude connection (with Claude Code: no extra cost). Sharpest when &ldquo;Let Claude watch your clips&rdquo; ran in step 1 &mdash; Monteur suggests it automatically after a labeled scan.</p>
+        <label class="see-check">
+          <input type="checkbox" id="cre-arrange">
+          <span>Arrange the story myself (optional)</span>
+        </label>
+        <p class="help-small" style="max-width: 620px; margin-bottom: 14px;">Adds one step where you put your scenes in YOUR order and pick the transition at every boundary &mdash; the cut engine then snaps everything to the beat, fills the rest and checks pacing and consistency. Scenes you arrange stay exactly where you put them, even when Claude composes the rest.</p>
         <details class="fine-tune" id="cre-finetune">
           <summary>Fine-tune — clip order, cut timing, repeats</summary>
           <div class="ft-body">
@@ -1404,6 +1427,32 @@ svg text.axis {
         <div class="wiz-nav">
           <button class="btn ghost" id="cre-back-2" type="button">← Back</button>
           <button class="btn primary" id="cre-next-2" type="button">Continue to your cut →</button>
+        </div>
+      </section>
+
+      <section class="wiz-step" id="cre-step-2b" hidden aria-labelledby="cre-h2b">
+        <div class="step-head">
+          <span class="step-chip" aria-hidden="true">2b</span>
+          <div>
+            <h1 id="cre-h2b" tabindex="-1">Arrange your story</h1>
+            <p class="wiz-lead">Put your scenes in the order YOU want &mdash; Monteur keeps that order and still makes it beautiful: every cut lands on the beat, transitions and pacing get checked, and any remaining time fills automatically.</p>
+          </div>
+        </div>
+        <h3 class="fgroup-title">Your scenes</h3>
+        <label class="sr-only" for="cre-arr-filter">Filter scenes</label>
+        <div class="path-row">
+          <input type="text" id="cre-arr-filter" placeholder="Filter scenes &mdash; e.g. kurve, sunset, hero&hellip;" spellcheck="false" autocomplete="off">
+        </div>
+        <p class="help-small">Click a scene to add it to your sequence below. The filter searches the labels Claude wrote &mdash; sharpest after a &ldquo;Let Claude watch your clips&rdquo; scan in step 1.</p>
+        <div class="sb-board arr-palette" id="cre-arr-palette"></div>
+        <p class="scan-note" id="cre-arr-palette-msg" role="status" hidden></p>
+        <h3 class="fgroup-title">Your sequence</h3>
+        <p class="help-small" id="cre-arr-count" role="status" aria-live="polite">No scenes yet &mdash; click a scene above to start your story.</p>
+        <div class="sb-board arr-seq" id="cre-arr-seq"></div>
+        <p class="help-small" id="cre-arr-sfx-hint" hidden>Want a sound accent (impact, whoosh, riser) on a boundary? Set a sound-elements folder in step 2&rsquo;s fine-tune first &mdash; then every boundary offers one.</p>
+        <div class="wiz-nav">
+          <button class="btn ghost" id="cre-arr-back" type="button">&larr; Back</button>
+          <button class="btn primary" id="cre-arr-next" type="button">Build my cut &rarr;</button>
         </div>
       </section>
 
@@ -3532,7 +3581,11 @@ var cre = {
   order: "chronological", // "chronological" | "best_first"
   format: "fcpxml",       // download format
   draftId: null,          // the saved draft this cut updates on re-save (null = new)
-  aiCutTouched: false     // has the user decided about "Claude composes the cut"?
+  aiCutTouched: false,    // has the user decided about "Claude composes the cut"?
+  arrange: {              // the optional Arrange step (2b)
+    on: false,            // "Arrange the story myself" opted in?
+    seq: []               // ordered scenes: {clip, start, end, label, after, sfx}
+  }
 };
 
 var SEG_COLORS = { usable: "var(--series-1)", dark: "var(--seg-dark)", blurry: "var(--seg-blurry)", shaky: "var(--seg-shaky)" };
@@ -3883,12 +3936,19 @@ function creShowStep(n, focusHeading) {
   if (n !== 3 && previewPanel.running()) { previewPanel.stop(); setPreviewBusy(false); }
   if (n !== 3 && exportPanel.running()) { exportPanel.stop(); setExportBusy(false); }
   cre.step = n;
-  var names = { 1: "Your footage", 2: "Music & options", 3: "Your cut" };
-  $("wiz-progress").textContent = "Step " + n + " of 3 — " + names[n];
-  [1, 2, 3].forEach(function (i) {
+  var names = { 1: "Your footage", 2: "Music & options", "2b": "Arrange your story", 3: "Your cut" };
+  $("wiz-progress").textContent = n === "2b"
+    ? "Step 2b — Arrange your story"
+    : "Step " + n + " of 3 — " + names[n];
+  // "2b" is the optional Arrange step between 2 and 3 (its wbar chip is
+  // only visible while the opt-in checkbox is on; see setArrangeOn).
+  var steps = [1, 2, "2b", 3];
+  var rank = steps.indexOf(n);
+  steps.forEach(function (i, at) {
     $("cre-step-" + i).hidden = i !== n;
-    $("wbar-" + i).className = i <= n ? "on" : "";
+    $("wbar-" + i).className = at <= rank ? "on" : "";
   });
+  if (n === "2b") arrRender();
   if (focusHeading) $("cre-h" + n).focus();
 }
 
@@ -3984,6 +4044,7 @@ function scanFolder() {
   cre.clips = null;
   cre.result = null; // footage changed — any previous build is stale
   cre.draftId = null; // ...a re-save after this is a NEW draft, not an update
+  cre.arrange.seq = []; // ...and an arranged sequence points at old scenes
   creResetRevise(); // ...and so is any plan the revision loop still holds
   $("cre-result").hidden = true;
   $("cre-find-msg").hidden = true;
@@ -4430,9 +4491,234 @@ $("cre-next-1").addEventListener("click", function () { creShowStep(2, true); })
 $("cre-back-2").addEventListener("click", function () { creShowStep(1, true); });
 $("cre-next-2").addEventListener("click", function () {
   if (!creValidateStep2()) return;
-  creShowStep(3, true);
+  creShowStep(cre.arrange.on ? "2b" : 3, true);
 });
-$("cre-back-3").addEventListener("click", function () { creShowStep(2, true); });
+$("cre-back-3").addEventListener("click", function () {
+  creShowStep(cre.arrange.on ? "2b" : 2, true);
+});
+
+/* ---- step 2b: arrange the story yourself (optional) --------------------
+   Opt-in via the step-2 checkbox. TOP: a palette of every scanned moment
+   as a storyboard card (thumb via /api/thumb, duration, label, hero badge)
+   with a label filter; click a card to APPEND it to the sequence. BOTTOM:
+   the ordered sequence with ↑/↓/remove per scene and, between consecutive
+   scenes, a boundary control cycling cut → dissolve → smash plus an
+   optional sfx cue (only when a sound-elements folder is set). The
+   sequence goes into the build payload as `arrangement` (creBuildBody)
+   and into drafts via the settings — the engine keeps the order and
+   reports consistency under "arrangement:" notes. */
+
+function setArrangeOn(on) {
+  cre.arrange.on = on;
+  $("cre-arrange").checked = on;
+  $("wbar-2b").hidden = !on;
+  $("cre-next-2").innerHTML = on ? "Continue to arrange →" : "Continue to your cut →";
+}
+$("cre-arrange").addEventListener("change", function () { setArrangeOn(this.checked); });
+
+/* every scanned moment, flattened for the palette */
+function arrMoments() {
+  var out = [];
+  (cre.clips || []).forEach(function (clip) {
+    (clip.moments || []).forEach(function (m) {
+      if (!m) return;
+      out.push({
+        clip: String(clip.path || ""),
+        start: m.start || 0,
+        end: m.end || 0,
+        label: String(m.label || ""),
+        role: String(m.role || ""),
+        tags: Array.isArray(m.tags) ? m.tags.map(String) : [],
+        hero: typeof m.hero === "number" ? m.hero : 0
+      });
+    });
+  });
+  return out;
+}
+
+function arrMatches(moment, query) {
+  if (!query) return true;
+  var hay = (baseName(moment.clip) + " " + moment.label + " " + moment.role + " " +
+    moment.tags.join(" ")).toLowerCase();
+  return query.toLowerCase().split(/\s+/).every(function (word) {
+    if (!word) return true;
+    if (word === "hero" && moment.hero >= 0.7) return true; // the money shots
+    return hay.indexOf(word) !== -1;
+  });
+}
+
+function arrThumb(clip, start, end, alt) {
+  var img = document.createElement("img");
+  img.className = "sb-thumb";
+  img.alt = alt;
+  img.loading = "lazy";
+  img.decoding = "async";
+  img.src = "/api/thumb?clip=" + encodeURIComponent(clip) +
+    "&t=" + (((start || 0) + (end || 0)) / 2).toFixed(3) + "&w=320";
+  return img;
+}
+
+/* one palette card; click = append the scene to the sequence */
+function arrPaletteCard(moment) {
+  var card = document.createElement("button");
+  card.type = "button";
+  card.className = "sb-card arr-pick";
+  card.setAttribute("aria-label", "Add scene: " + baseName(moment.clip) +
+    (moment.label ? " — " + moment.label : ""));
+  var wrap = el("div", "sb-thumb-wrap");
+  wrap.appendChild(arrThumb(moment.clip, moment.start, moment.end,
+    "Scene from " + baseName(moment.clip)));
+  wrap.appendChild(el("span", "sb-badge sb-dur", fmt1(moment.end - moment.start) + "s"));
+  if (moment.hero >= 0.7) wrap.appendChild(el("span", "sb-badge sb-hero", "hero"));
+  card.appendChild(wrap);
+  var meta = el("div", "sb-meta");
+  meta.appendChild(el("span", "sb-name", baseName(moment.clip)));
+  if (moment.label) meta.appendChild(el("span", "sb-label", moment.label));
+  card.appendChild(meta);
+  card.addEventListener("click", function () {
+    cre.arrange.seq.push({
+      clip: moment.clip, start: moment.start, end: moment.end,
+      label: moment.label, after: "cut", sfx: ""
+    });
+    arrRender();
+  });
+  return card;
+}
+
+var ARR_TRANSITIONS = ["cut", "dissolve", "smash"];
+var ARR_TRANS_GLYPHS = { cut: "│", dissolve: "◩", smash: "■" };
+var ARR_SFX_KINDS = ["", "impact", "whoosh", "riser"];
+
+/* the boundary control between sequence scenes i and i+1 */
+function arrBoundary(item, index) {
+  var bound = el("div", "arr-bound");
+  var trans = el("button", "btn ghost small");
+  trans.type = "button";
+  function paintTrans() {
+    clear(trans);
+    trans.appendChild(el("b", null, ARR_TRANS_GLYPHS[item.after] || "│"));
+    trans.appendChild(document.createTextNode(item.after));
+    trans.setAttribute("aria-label", "Transition after scene " + (index + 1) +
+      ": " + item.after + " — click to change");
+    trans.title = "Transition into the next scene — cut → dissolve → smash to black";
+  }
+  paintTrans();
+  trans.addEventListener("click", function () {
+    item.after = ARR_TRANSITIONS[(ARR_TRANSITIONS.indexOf(item.after) + 1) % ARR_TRANSITIONS.length];
+    paintTrans();
+  });
+  bound.appendChild(trans);
+  if ($("cre-elements").value.trim()) {
+    var sfx = el("button", "btn ghost small arr-sfx-btn");
+    sfx.type = "button";
+    function paintSfx() {
+      sfx.textContent = item.sfx ? "♪ " + item.sfx : "♪ none";
+      sfx.classList.toggle("on", !!item.sfx);
+      sfx.setAttribute("aria-label", "Sound accent after scene " + (index + 1) +
+        ": " + (item.sfx || "none") + " — click to change");
+      sfx.title = "Sound accent on this boundary — impact, whoosh or riser from your elements folder";
+    }
+    paintSfx();
+    sfx.addEventListener("click", function () {
+      item.sfx = ARR_SFX_KINDS[(ARR_SFX_KINDS.indexOf(item.sfx) + 1) % ARR_SFX_KINDS.length];
+      paintSfx();
+    });
+    bound.appendChild(sfx);
+  }
+  return bound;
+}
+
+/* one sequence card with ↑ / ↓ / remove controls */
+function arrSeqCard(item, index, total) {
+  var card = el("div", "sb-card");
+  var wrap = el("div", "sb-thumb-wrap");
+  wrap.appendChild(arrThumb(item.clip, item.start, item.end,
+    "Scene " + (index + 1) + " — " + baseName(item.clip)));
+  wrap.appendChild(el("span", "sb-badge sb-slot", String(index + 1)));
+  wrap.appendChild(el("span", "sb-badge sb-dur", fmt1((item.end || 0) - (item.start || 0)) + "s"));
+  card.appendChild(wrap);
+  var meta = el("div", "sb-meta");
+  meta.appendChild(el("span", "sb-name", baseName(item.clip)));
+  if (item.label) meta.appendChild(el("span", "sb-label", item.label));
+  var tools = el("div", "arr-tools");
+  function tool(text, label, disabled, act) {
+    var btn = el("button", "btn ghost small", text);
+    btn.type = "button";
+    btn.setAttribute("aria-label", label + " — scene " + (index + 1));
+    btn.disabled = !!disabled;
+    btn.addEventListener("click", act);
+    tools.appendChild(btn);
+  }
+  tool("↑", "Move earlier", index === 0, function () {
+    var seq = cre.arrange.seq;
+    seq.splice(index - 1, 0, seq.splice(index, 1)[0]);
+    arrRender();
+  });
+  tool("↓", "Move later", index === total - 1, function () {
+    var seq = cre.arrange.seq;
+    seq.splice(index + 1, 0, seq.splice(index, 1)[0]);
+    arrRender();
+  });
+  tool("×", "Remove", false, function () {
+    cre.arrange.seq.splice(index, 1);
+    arrRender();
+  });
+  meta.appendChild(tools);
+  card.appendChild(meta);
+  return card;
+}
+
+/* the live counter under "Your sequence" */
+function arrCounterText() {
+  var n = cre.arrange.seq.length;
+  if (!n) return "No scenes yet — click a scene above to start your story.";
+  // honest estimate: the pace (or a per-style guess) per scene, rounded
+  var base = cre.pace || ({ auto: 2, travel: 2, wedding: 3, music_video: 1.5, trailer: 2 })[cre.style] || 2;
+  var lo = Math.max(1, Math.round(n * base * 0.8));
+  var hi = Math.max(lo + 1, Math.round(n * base * 1.6));
+  var text = n + (n === 1 ? " scene" : " scenes") + " ≈ " + lo + "–" + hi + "s at your pace";
+  var target = cre.lenMode === "target" ? targetLen() : 0;
+  if (target) text += " — target " + target + "s: the rest fills automatically.";
+  else text += " — the whole song: the rest fills automatically.";
+  return text;
+}
+
+function arrRender() {
+  var palette = $("cre-arr-palette");
+  clear(palette);
+  var moments = arrMoments();
+  var query = $("cre-arr-filter").value.trim();
+  var shown = 0;
+  moments.forEach(function (moment) {
+    if (!arrMatches(moment, query)) return;
+    palette.appendChild(arrPaletteCard(moment));
+    shown += 1;
+  });
+  var msg = $("cre-arr-palette-msg");
+  if (!moments.length) {
+    creNote("cre-arr-palette-msg", "No scanned scenes yet — scan your footage in step 1 first.");
+  } else if (!shown) {
+    creNote("cre-arr-palette-msg", "No scene matches “" + query + "” — clear the filter to see all " + moments.length + ".");
+  } else {
+    msg.hidden = true;
+  }
+  var lane = $("cre-arr-seq");
+  clear(lane);
+  var seq = cre.arrange.seq;
+  seq.forEach(function (item, index) {
+    lane.appendChild(arrSeqCard(item, index, seq.length));
+    if (index < seq.length - 1) lane.appendChild(arrBoundary(item, index));
+  });
+  $("cre-arr-count").textContent = arrCounterText();
+  $("cre-arr-sfx-hint").hidden = !seq.length || !!$("cre-elements").value.trim();
+}
+$("cre-arr-filter").addEventListener("input", function () { arrRender(); });
+$("cre-arr-back").addEventListener("click", function () { creShowStep(2, true); });
+$("cre-arr-next").addEventListener("click", function () {
+  if (!creValidateStep2()) return;
+  creShowStep(3, true);
+  startBuild(null);
+});
 
 /* ---- step 3: build & download ---- */
 
@@ -4463,6 +4749,21 @@ function creBuildBody() {
     // real sound files ride on the SFX cue layer, so the folder implies it
     body.elements = elements;
     body.sfx = true;
+  }
+  if (cre.arrange.on && cre.arrange.seq.length) {
+    // the Arrange step's sequence — end/label are display extras the
+    // server tolerates (they let a resumed draft redraw the lane). The
+    // LAST scene sends no "after": its boundary control is never shown,
+    // so the style keeps its own habits toward the auto-filled rest.
+    var last = cre.arrange.seq.length - 1;
+    body.arrangement = cre.arrange.seq.map(function (item, index) {
+      var scene = {
+        clip: item.clip, start: item.start, end: item.end, label: item.label
+      };
+      if (index < last) scene.after = { transition: item.after || "cut" };
+      if (index < last && item.sfx) scene.sfx = item.sfx;
+      return scene;
+    });
   }
   return body;
 }
@@ -4697,7 +4998,7 @@ function draftSettingsFromState() {
   var settings = {};
   ["audio", "order", "style", "canvas", "transitions", "fps", "format",
    "max_duration", "pace", "allow_repeats", "sfx", "cut_lead", "see",
-   "ai_cut", "brief", "elements"].forEach(function (key) {
+   "ai_cut", "brief", "elements", "arrangement"].forEach(function (key) {
     if (body[key] !== undefined) settings[key] = body[key];
   });
   return settings;
@@ -4767,6 +5068,23 @@ function restoreWizardFromDraft(draft) {
   if (typeof s.ai_cut === "boolean") {
     $("cre-ai-cut").checked = s.ai_cut;
     cre.aiCutTouched = true; // a restored decision beats the scan suggestion
+  }
+  // the Arrange step's sequence survives the reload with the draft
+  if (Array.isArray(s.arrangement) && s.arrangement.length) {
+    setArrangeOn(true);
+    cre.arrange.seq = s.arrangement.map(function (item) {
+      return {
+        clip: String(item.clip || ""),
+        start: +item.start || 0,
+        end: +item.end || (+item.start || 0),
+        label: String(item.label || ""),
+        after: String((item.after && item.after.transition) || item.after || "cut"),
+        sfx: String(item.sfx || "")
+      };
+    });
+  } else {
+    setArrangeOn(false);
+    cre.arrange.seq = [];
   }
   var lead = parseFloat(s.cut_lead);
   if (isFinite(lead) && lead >= 0) $("cre-cutlead").value = String(lead);

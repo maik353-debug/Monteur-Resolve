@@ -242,6 +242,7 @@ def compose_context(
     reports: list[ClipReport],
     music: MusicAnalysis | None = None,
     style: str = "auto",
+    locked: set[int] | frozenset[int] = frozenset(),
 ) -> dict:
     """The JSON-ready dossier the composer prompt carries.
 
@@ -256,6 +257,11 @@ def compose_context(
     and the vision fields (label/tags/role/hero/group) when present —
     empty fields are omitted so an unseen inventory stays small and
     honest. ``vision`` says whether any annotations exist at all.
+
+    ``locked`` (slot indices an arrangement already cast) marks those
+    slots ``"locked": true`` in the dossier — the prompt tells Claude to
+    compose around them, and :func:`_apply_cast` ignores any cast for
+    them regardless. Empty (the default) leaves the dossier unchanged.
     """
     chosen = _montage.STYLES.get(style, _montage.STYLES["auto"])
     phases = _phases_for(plan, music, chosen)
@@ -284,6 +290,8 @@ def compose_context(
             for dip_start, dip_len in plan.dips
         ):
             slot["after_dip"] = True
+        if i in locked:
+            slot["locked"] = True
         slots.append(slot)
 
     dips = [
@@ -347,6 +355,13 @@ def _build_prompt(context: dict, style: str, brief: str) -> str:
             "score, motion and shot order; do not invent content. (A 'Let "
             "Claude watch your clips' scan would make this far sharper.)"
         )
+    if any(slot.get("locked") for slot in context.get("slots") or []):
+        parts.append(
+            "Slots marked `locked` are already cast by the editor's own "
+            "arrangement — their material and order are FINAL. Do not "
+            "recast them; compose the remaining slots, the titles and the "
+            "story around them."
+        )
     parts.append(
         "DOSSIER (slots in record order; dips are black title slots; the "
         "inventory is every usable moment):\n"
@@ -394,7 +409,12 @@ def _overlapping_moment(
     return best
 
 
-def _apply_cast(plan: MontagePlan, data: dict, reports: list[ClipReport]) -> None:
+def _apply_cast(
+    plan: MontagePlan,
+    data: dict,
+    reports: list[ClipReport],
+    locked: set[int] | frozenset[int] = frozenset(),
+) -> None:
     """Apply a parsed composer reply to the plan, in place.
 
     Every valid pick swaps ONLY the slot's source-describing fields
@@ -403,6 +423,11 @@ def _apply_cast(plan: MontagePlan, data: dict, reports: list[ClipReport]) -> Non
     Invalid picks (unknown slot/clip, window outside every moment, not
     enough material) keep the heuristic entry with a per-slot note.
     Claude's titles land in ``plan.title_texts``; story/why in the notes.
+
+    ``locked`` slots (an editor's arrangement cast them) are never
+    touched: any cast Claude sends for them is dropped silently — one
+    summary note says how many slots the arrangement holds — and a
+    missing cast for them is NOT a fallback.
     """
     by_name: dict[str, ClipReport] = {}
     for report in reports:
@@ -426,6 +451,8 @@ def _apply_cast(plan: MontagePlan, data: dict, reports: list[ClipReport]) -> Non
     cast_slots: set[int] = set()
     fallbacks: list[tuple[int, str]] = []
     for i, entry in enumerate(entries):
+        if i in locked:
+            continue  # the arrangement cast this slot — Claude cannot recast it
         pick = picks.get(i)
         if pick is None:
             fallbacks.append((i, "no cast for this slot"))
@@ -507,8 +534,15 @@ def _apply_cast(plan: MontagePlan, data: dict, reports: list[ClipReport]) -> Non
         if line:
             plan.notes.append(f"act {idx + 1}: {line}")
     plan.notes.append(
-        f"composed by Claude: {len(cast_slots)} of {len(entries)} slots cast"
+        f"composed by Claude: {len(cast_slots)} of "
+        f"{len(entries) - len(locked)} slots cast"
     )
+    if locked:
+        plan.notes.append(
+            f"composer: {len(locked)} slot"
+            + ("s" if len(locked) != 1 else "")
+            + " locked by your arrangement"
+        )
     if reused:
         plan.notes.append(
             f"composer: reused material in {reused} slot"
@@ -570,6 +604,12 @@ def compose_montage(
     cast per slot and swaps only the sources; invalid picks keep the
     heuristic entry with a note.
 
+    An ``arrangement`` in ``plan_kwargs`` (the editor's own scene order,
+    see :func:`monteur.montage.plan_montage`) is forwarded verbatim; the
+    slots it claims are LOCKED for the composer — flagged in the dossier
+    and immune to recasting — so Claude composes the remaining slots,
+    titles and story around the editor's order.
+
     ``strict=False`` (default): an unreachable backend or unparseable
     reply returns the heuristic plan with a ``"composer unavailable"``
     note — never raises. ``strict=True``: those failures raise
@@ -580,7 +620,13 @@ def compose_montage(
     if not plan.entries:
         return plan
 
-    context = compose_context(plan, reports, music, style=style)
+    # An arrangement (forwarded verbatim to plan_montage above) claims the
+    # slots 0..k-1 — deterministically, so the SAME k is recomputed here and
+    # those slots are locked: flagged in the dossier, immune in _apply_cast.
+    arrangement = plan_kwargs.get("arrangement") or []
+    locked = frozenset(range(min(len(arrangement), len(plan.entries))))
+
+    context = compose_context(plan, reports, music, style=style, locked=locked)
     prompt = _build_prompt(context, style, brief)
     try:
         raw = ai.complete(prompt, system=_SYSTEM, json_schema=COMPOSE_SCHEMA)
@@ -601,7 +647,7 @@ def compose_montage(
         plan.notes.append(f"composer unavailable: {exc}; heuristic cut")
         return plan
 
-    _apply_cast(plan, data, reports)
+    _apply_cast(plan, data, reports, locked=locked)
     if not context.get("vision"):
         plan.notes.append(
             'no vision labels — run "Let Claude watch your clips" '
