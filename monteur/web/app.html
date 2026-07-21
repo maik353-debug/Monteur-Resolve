@@ -245,6 +245,8 @@ h1, h2, h3, p { margin: 0; }
 }
 .btn.busy .spin { display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* the quiet "this click will rebuild" note inside step 2's continue button */
+.btn .rebuild-hint { opacity: 0.7; font-weight: 400; font-size: 0.86em; margin-left: 4px; }
 
 /* ---------- main / welcome -------------------------------------------- */
 .main { flex: 1; overflow-y: auto; min-width: 0; position: relative; }
@@ -1643,7 +1645,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         </details>
         <div class="wiz-nav">
           <button class="btn ghost" id="cre-back-2" type="button">← Back</button>
-          <button class="btn primary" id="cre-next-2" type="button">Continue to storyboard →</button>
+          <button class="btn primary" id="cre-next-2" type="button">Continue to storyboard →<span class="rebuild-hint" id="cre-next-2-hint" hidden>(rebuild needed)</span></button>
         </div>
       </section>
 
@@ -3885,6 +3887,8 @@ var cre = {
   order: "chronological", // "chronological" | "best_first"
   format: "fcpxml",       // download format
   draftId: null,          // the saved draft this cut updates on re-save (null = new)
+  buildFp: null,          // fingerprint of the options the working draft was BUILT with
+                          // (set on build success / draft resume; null = no clean draft)
   aiCutTouched: false,    // has the user decided about "Claude composes the cut"?
   arrange: {              // step 3's "Add / reorder scenes" section
     seq: [],              // ordered scenes: {clip, start, end, label, after, sfx}
@@ -4264,6 +4268,7 @@ function creShowStep(n, focusHeading) {
     closeMiniPlayer();
   }
   if (n === 3 && $("cre-arrange-tools").open) arrRender();
+  if (n === 2) syncContinueHint(); // fresh look at "would this click rebuild?"
   if (focusHeading) $("cre-h" + n).focus();
 }
 
@@ -4359,6 +4364,7 @@ function scanFolder() {
   startProxyWatch(null); // a fresh scan restarts the proxy status line
   cre.clips = null;
   cre.result = null; // footage changed — any previous build is stale
+  cre.buildFp = null; // ...so the next storyboard visit builds fresh
   cre.draftId = null; // ...a re-save after this is a NEW draft, not an update
   cre.arrange.seq = []; // ...and an arranged sequence points at old scenes
   cre.arrange.dirty = false;
@@ -4860,10 +4866,22 @@ function creValidateStep2() {
 }
 
 $("cre-next-1").addEventListener("click", function () { creShowStep(2, true); });
+// any option edit in step 2 may flip the continue button's rebuild hint —
+// chips bubble "click", text fields "input", selects/checkboxes "change"
+["click", "input", "change"].forEach(function (kind) {
+  $("cre-step-2").addEventListener(kind, function () { syncContinueHint(); });
+});
 $("cre-back-2").addEventListener("click", function () { creShowStep(1, true); });
 $("cre-next-2").addEventListener("click", function () {
   if (!creValidateStep2()) return;
-  // entering the storyboard runs the build — the result IS the working draft
+  // the FIRST visit builds — the result IS the working draft. After that,
+  // returning with unchanged options is pure navigation: the draft (with
+  // every revise/apply/adjust since the build) is simply shown again.
+  // Only a changed option — or step 3's "Rebuild draft" — builds anew.
+  if (cre.result && rev.planJson && !buildIsDirty()) {
+    creShowStep(3, true);
+    return;
+  }
   creShowStep(3, true);
   startBuild(null);
 });
@@ -5139,6 +5157,45 @@ function creBuildBody() {
   return body;
 }
 
+/* ---- build fingerprint: step 2 -> 3 must not rebuild for nothing ------
+   The stable JSON of the build payload minus its one volatile key:
+   "format" is download-only (the Download button re-runs a format switch
+   itself, it never changes the cut). cre.buildFp stores the fingerprint
+   of the last successful BUILD (or, on draft resume, of the restored
+   controls). Revise, director apply, inspector adjust/swap and dip titles
+   change the PLAN, not these options, so they leave the fingerprint
+   alone: with a clean fingerprint "Continue to storyboard" is pure
+   navigation and can never silently rebuild those edits away. Step 3's
+   "Rebuild draft" stays the manual override and always builds. */
+function stableJson(value) {
+  if (Array.isArray(value)) {
+    return "[" + value.map(stableJson).join(",") + "]";
+  }
+  if (value && typeof value === "object") {
+    return "{" + Object.keys(value).sort().map(function (key) {
+      return JSON.stringify(key) + ":" + stableJson(value[key]);
+    }).join(",") + "}";
+  }
+  return JSON.stringify(value === undefined ? null : value);
+}
+function buildFingerprintOf(body) {
+  var copy = {};
+  Object.keys(body).forEach(function (key) {
+    if (key !== "format") copy[key] = body[key];
+  });
+  return stableJson(copy);
+}
+function buildFingerprint() { return buildFingerprintOf(creBuildBody()); }
+/* dirty = no built draft yet, or an option changed since the last build */
+function buildIsDirty() {
+  return !cre.buildFp || buildFingerprint() !== cre.buildFp;
+}
+/* step 2's continue button whispers when the click will rebuild a draft */
+function syncContinueHint() {
+  var hasDraft = !!(cre.result && rev && rev.planJson);
+  $("cre-next-2-hint").hidden = !(hasDraft && buildIsDirty());
+}
+
 function renderCreResult(data) {
   var plan = data.plan || {};
   // step 4's summary tiles — cuts / length / tempo, plus the story line
@@ -5199,12 +5256,18 @@ function startBuild(andThen) {
   if (resolveBuildPanel.running()) { resolveBuildPanel.stop(); setResolveBuildBusy(false); }
   $("cre-resolve-msg").hidden = true;
   $("cre-resolve-result").hidden = true;
+  // mid-build there is no clean draft — a cancelled or failed build must
+  // never read as "nothing to rebuild" on the next step 2 -> 3 hop
+  cre.buildFp = null;
   setBuildBusy(true);
   api("/api/create/build", { method: "POST", body: body }).then(function (data) {
     buildPanel.start(data.job, {
       onDone: function (result) {
         setBuildBusy(false);
         cre.result = { data: result, format: body.format, body: body, kind: "build" };
+        // the options this draft was built with — until one changes, going
+        // options -> storyboard just navigates instead of rebuilding
+        cre.buildFp = buildFingerprintOf(body);
         cre.draftId = null; // a fresh build is a new cut — re-save makes a new draft
         refreshDrafts(); // the server just autosaved this build
         // a fresh build seeds the revision loop with its full plan
@@ -5530,6 +5593,9 @@ function resumeDraft(draftId, btn) {
           kind: "export", exportBody: exportBody
         };
         cre.draftId = draft.autosave ? null : (draft.id || null);
+        // the restored controls ARE the settings this draft was built with:
+        // resume -> options -> storyboard must not rebuild either
+        cre.buildFp = buildFingerprint();
         $("cre-rev-rationale").hidden = true;
         $("cre-rev-msg").hidden = true;
         $("cre-build-msg").hidden = true;

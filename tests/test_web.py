@@ -5672,3 +5672,200 @@ class TestPlayoutAcceptance:
             page.screenshot(path=str(shots / "playout-dip-title.png"))
 
             browser.close()
+
+class TestNoRebuildOnCleanReturn:
+    """Storyboard -> options -> storyboard with UNCHANGED options must not
+    rebuild. The build runs once on the first visit; afterwards only a
+    changed build option (or step 3's manual "Rebuild draft") builds anew.
+    The gate is a fingerprint of the build payload (everything except the
+    download-only "format" key) stored on build success and on draft
+    resume — plan mutations (revise/apply/adjust) deliberately leave it
+    alone, so clean navigation can never rebuild those edits away."""
+
+    DEMO = str(_DEMO_FOOTAGE)
+
+    # ---- static wiring ---------------------------------------------------
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_fingerprint_helpers_exist(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            "function stableJson",
+            "function buildFingerprintOf",
+            "function buildFingerprint()",
+            "function buildIsDirty",
+            "function syncContinueHint",
+            # the download format never dirties the draft
+            'if (key !== "format") copy[key] = body[key];',
+        ):
+            assert needle in html, needle
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_continue_handler_skips_a_clean_rebuild(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        # clean draft -> pure navigation, no job
+        assert "if (cre.result && rev.planJson && !buildIsDirty())" in html
+        # ...and the dirty/no-draft path still builds exactly as before
+        assert "creShowStep(3, true);\n  startBuild(null);" in html
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_fingerprint_is_stored_on_build_success_and_resume(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert "cre.buildFp = buildFingerprintOf(body);" in html  # build done
+        assert "cre.buildFp = buildFingerprint();" in html        # draft resume
+        # exactly four assignments: build start (null), build success,
+        # resume, and the footage-changed reset — revise/apply/adjust/swap
+        # never touch it, so a revision can't be rebuilt away by navigation
+        assert html.count("cre.buildFp =") == 4
+        assert html.count("cre.buildFp = null") == 2
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_rebuild_button_is_still_the_manual_override(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert (
+            'id="cre-build-btn" type="button">Rebuild draft'
+            '<span class="spin" aria-hidden="true"></span></button>' in html
+        )
+        assert (
+            '$("cre-build-btn").addEventListener("click", '
+            "function () { startBuild(null); });" in html
+        )
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_step2_continue_carries_the_quiet_hint(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert 'id="cre-next-2-hint"' in html
+        assert "(rebuild needed)" in html
+        # the hint lives INSIDE the continue button and starts hidden
+        button = html.split('id="cre-next-2"', 1)[1].split("</button>", 1)[0]
+        assert 'id="cre-next-2-hint" hidden' in button
+        # ...and is refreshed on step entry and on step-2 edits
+        assert "if (n === 2) syncContinueHint();" in html
+        assert '$("cre-step-2").addEventListener(kind' in html
+
+    # ---- the bug's exact reproduction, in a real browser -------------------
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+
+    def test_clean_return_never_rebuilds(self, server, tmp_path):
+        playwright_api = pytest.importorskip(
+            "playwright.sync_api", reason="playwright is not installed"
+        )
+        shots = Path(
+            os.environ.get("MONTEUR_PLAYWRIGHT_SHOTS") or str(tmp_path / "shots")
+        )
+        shots.mkdir(parents=True, exist_ok=True)
+        build_posts = []  # every POST /api/create/build the page ever fires
+
+        with playwright_api.sync_playwright() as playwright:
+            browser = _launch_chromium(playwright)
+            if browser is None:
+                pytest.skip("no Chromium browser available for Playwright")
+            page = browser.new_page(viewport={"width": 1440, "height": 960})
+            page.on(
+                "request",
+                lambda request: build_posts.append(request.url)
+                if request.method == "POST" and "/api/create/build" in request.url
+                else None,
+            )
+            plan_js = "JSON.stringify(window.monteurPlayout.plan())"
+            board_js = "JSON.stringify(window.monteurPlayout.entries())"
+
+            # ---- step 1: scan ------------------------------------------------
+            page.goto(server)
+            page.click("#tab-create")
+            page.fill("#cre-folder", self.DEMO)
+            page.click("#cre-scan-btn")
+            page.wait_for_selector("#cre-next-1", state="visible", timeout=120_000)
+
+            # ---- step 2 -> 3: the ONE initial build --------------------------
+            # WITH music: the revise autosave keeps the music path, so the
+            # reload+resume leg below restores a resumable, valid wizard
+            page.click("#cre-next-1")
+            page.fill("#cre-music", f"{self.DEMO}/song.wav")
+            page.fill("#cre-maxlen", "12")
+            page.click("#cre-next-2")
+            page.wait_for_selector(
+                "#cre-sb-board .sb-card", state="visible", timeout=180_000
+            )
+            assert len(build_posts) == 1
+            board_1 = page.evaluate(board_js)
+            page.screenshot(path=str(shots / "norebuild-01-first-build.png"))
+
+            # ---- back to options, change NOTHING, continue: NO build job ----
+            page.click("#cre-back-3")
+            page.wait_for_selector("#cre-step-2", state="visible")
+            assert page.is_hidden("#cre-next-2-hint")  # clean: no rebuild note
+            page.locator("#cre-next-2").scroll_into_view_if_needed()
+            page.screenshot(path=str(shots / "norebuild-02-options-clean.png"))
+            page.click("#cre-next-2")
+            page.wait_for_selector("#cre-sb-board .sb-card", state="visible")
+            page.wait_for_timeout(800)  # a rebuild would POST immediately
+            assert len(build_posts) == 1, "clean navigation must never rebuild"
+            assert page.evaluate(board_js) == board_1  # the board is identical
+            page.screenshot(path=str(shots / "norebuild-03-clean-return.png"))
+
+            # ---- change pace: the hint appears, continue rebuilds ------------
+            page.click("#cre-back-3")
+            page.click("#pace-2")
+            page.wait_for_selector("#cre-next-2-hint", state="visible")
+            page.locator("#cre-next-2").scroll_into_view_if_needed()
+            page.screenshot(path=str(shots / "norebuild-04-dirty-hint.png"))
+            with page.expect_request(
+                lambda r: r.method == "POST" and "/api/create/build" in r.url,
+                timeout=10_000,
+            ):
+                page.click("#cre-next-2")
+            page.wait_for_selector(
+                "#cre-sb-board .sb-card", state="visible", timeout=180_000
+            )
+            assert len(build_posts) == 2
+
+            # ---- revise in step 3, then options -> storyboard: the REVISED
+            # plan survives the round trip, still without a build job ----------
+            plan_before_revise = page.evaluate(plan_js)
+            page.fill("#cre-rev-brief", "ruhiger")
+            page.click("#cre-rev-btn")
+            page.wait_for_function(  # the field clears only on revise success
+                "document.getElementById('cre-rev-brief').value === ''",
+                timeout=180_000,
+            )
+            revised = page.evaluate(plan_js)
+            assert revised != plan_before_revise
+            assert "revision:" in revised  # the engine marks revised plans
+            page.click("#cre-back-3")
+            page.wait_for_selector("#cre-step-2", state="visible")
+            assert page.is_hidden("#cre-next-2-hint")  # a revise is NOT dirty
+            page.click("#cre-next-2")
+            page.wait_for_selector("#cre-sb-board .sb-card", state="visible")
+            page.wait_for_timeout(800)
+            assert len(build_posts) == 2, "a revise must not re-arm the build"
+            assert page.evaluate(plan_js) == revised  # the revision is intact
+            page.screenshot(path=str(shots / "norebuild-05-revise-kept.png"))
+
+            # ---- reload + resume: forward/back still never rebuilds ----------
+            page.reload()
+            page.click("#tab-create")
+            page.wait_for_selector("#cre-drafts", state="visible", timeout=30_000)
+            page.click("#cre-drafts-list button[aria-label^='Resume draft']")
+            page.wait_for_selector(
+                "#cre-sb-board .sb-card", state="visible", timeout=120_000
+            )
+            resumed = page.evaluate(plan_js)
+            assert "revision:" in resumed  # the autosave carried the revised cut
+            page.click("#cre-back-3")
+            page.wait_for_selector("#cre-step-2", state="visible")
+            assert page.is_hidden("#cre-next-2-hint")  # resume seeds a clean fp
+            page.click("#cre-next-2")
+            page.wait_for_selector("#cre-sb-board .sb-card", state="visible")
+            page.wait_for_timeout(800)
+            assert len(build_posts) == 2, (
+                "resume -> options -> storyboard must not rebuild"
+            )
+            assert page.evaluate(plan_js) == resumed
+            page.screenshot(path=str(shots / "norebuild-06-resumed.png"))
+
+            browser.close()
