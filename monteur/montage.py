@@ -165,6 +165,51 @@ exists. Labels ride along: ``MontageEntry.label`` feeds the video clip's
 <label>"), and a plan note reports what the casting actually did (e.g.
 "semantic casting: 9 of 14 slots matched to roles, hero shot on the drop").
 
+Time-of-day coherence
+---------------------
+:mod:`monteur.daylight` classifies each moment's time of day offline
+("day" / "golden" / "night" on ``Moment.daylight``). The casting reads it
+as two SOFT terms on the candidate blend — coherence is the law,
+direction is direction:
+
+* **Coherence (the law).** A candidate whose class differs from the
+  previous cast slot's loses :data:`_DAYLIGHT_SWITCH_PENALTY` (0.15):
+  footage sits in time-of-day blocks with rare, deliberate switches.
+  Zero when either side is unknown, so unclassified material behaves
+  exactly as before.
+* **Direction (a decision).** The deterministic default block ORDER is
+  the material's natural arc — day -> golden -> night filtered to the
+  classes that exist, mapped over the montage proportionally to each
+  class's material share (:func:`_daylight_targets`, only when >= 2
+  classes exist). A candidate matching its slot's target class gains
+  :data:`_DAYLIGHT_BLOCK_WEIGHT` (0.1). The composer
+  (:mod:`monteur.compose`) may direct another order deliberately (a
+  night teaser cold open) and explains it; an arrangement and pins win
+  outright — arranged slots are never scored or flagged.
+
+Never a hard sort: both terms are tie-breakers below one order step.
+The notes carry the arc ("story: daylight arc day -> golden -> night
+(soft)") and honest per-slot warnings when a cast slot sits against the
+flow ("slot 14: night shot inside the day block").
+
+Content-adaptive pacing
+-----------------------
+After casting, a slot-merge pass (:func:`_merge_calm_slots`) lets slow
+content breathe: when two-plus ADJACENT slots on calm music (slot energy
+<= :data:`_MERGE_MAX_SLOT_ENERGY`) are cast with calm material (motion
+<= :data:`_MERGE_CALM_MOTION` of the pool's fastest and highlight <=
+:data:`_MERGE_CALM_HIGHLIGHT`), the later entries are dropped and the
+first one's record and source windows extend over them — but only when
+its sifted moment really has the material and no other entry plays those
+frames (the zero-repeat promise survives). Cuts stay on the grid: a
+merge simply ends on a LATER existing cut time. The climax phase never
+merges, a merge never crosses an act/section change (so it can never
+swallow a smash-to-black dip), arranged and drop slots and the final
+shot are immune, and the merged shot respects :data:`_MAX_CUT_SECONDS`.
+With no motion data in the pool calmness is unknowable and the pass
+changes nothing. A note reports the result ("pacing: 6 calm slots merged
+into 3 longer shots ...").
+
 Finishing
 ---------
 A montage shorter than the song ends on a musical boundary:
@@ -452,6 +497,44 @@ _HERO_WEIGHT = 0.5
 _GROUP_PENALTY = 0.25
 # A drop-slot moment at/above this hero level is called out in the notes.
 _HERO_NOTE_LEVEL = 0.5
+# Time-of-day coherence (Moment.daylight, filled offline by
+# monteur.daylight). COHERENCE IS THE LAW: footage wants to sit in
+# time-of-day BLOCKS with rare, deliberate switches. A candidate whose
+# daylight class differs from the PREVIOUS cast slot's pays this penalty —
+# sized like _ROLE_WEIGHT relatives: below one order step (0.175), so it
+# breaks near-ties instead of overruling the pool order. Zero when either
+# side is unknown; pins and arranged slots are never scored, so explicit
+# choices always win.
+_DAYLIGHT_SWITCH_PENALTY = 0.15
+# DIRECTION IS DIRECTION: the block ORDER is a story decision. The
+# deterministic default is the material's natural arc — day -> golden ->
+# night, filtered to the classes that actually exist — mapped over the
+# montage proportionally to each class's share of pool material (see
+# _daylight_targets). A candidate matching its slot's target class gains
+# this small bonus; the composer (monteur.compose) may choose another
+# block order deliberately, and an arrangement always wins outright.
+_DAYLIGHT_BLOCK_WEIGHT = 0.1
+# The natural arc order the deterministic default follows.
+_DAYLIGHT_ARC = ("day", "golden", "night")
+# Against-the-flow warnings: at most this many per-slot notes before the
+# remainder is summarized in one line.
+_DAYLIGHT_NOTE_LIMIT = 3
+# Content-adaptive pacing (the slot-merge pass; see the module docstring's
+# Content-adaptive pacing section). Adjacent slots on calm music that are
+# cast with calm material merge into one longer shot, so the cut count
+# drops exactly where the content is slow.
+# A slot merges only when its music energy (song section or nominal phase
+# energy — the same numbers energy matching uses) is at/below this:
+# "low"/"mid" sections and the gentle opening/outro phases qualify, the
+# build/climax/hook/punch never do.
+_MERGE_MAX_SLOT_ENERGY = 0.5
+# A cast moment is "calm" when its motion (mean entry/exit magnitude
+# normalised to the pool's fastest moment — the exact value energy
+# matching scores with) is at/below this...
+_MERGE_CALM_MOTION = 0.35
+# ...and its audio highlight is at/below this (matches the arrangement's
+# calm-on-the-drop threshold).
+_MERGE_CALM_HIGHLIGHT = 0.3
 # Which vision role each arc phase asks for.
 _ROLE_FOR_PHASE = {
     "opening": "opener",
@@ -1680,6 +1763,10 @@ class _PoolItem:
     def label(self) -> str:
         return getattr(self.moment, "label", "")
 
+    @property
+    def daylight(self) -> str:
+        return getattr(self.moment, "daylight", "")
+
 
 def _pick_reuse(
     pool: list[_PoolItem], start: int, held: set[int] | frozenset[int] = frozenset()
@@ -1790,6 +1877,50 @@ def _wanted_roles(
     return wanted
 
 
+def _daylight_targets(
+    slots: list[tuple[float, float]], pool: list[_PoolItem]
+) -> list[str]:
+    """Per-slot target daylight class for the deterministic story arc.
+
+    The default block ORDER is the material's natural arc — day -> golden
+    -> night (:data:`_DAYLIGHT_ARC`) filtered to the classes that actually
+    exist in the pool. Each present class gets a contiguous block of
+    record time proportional to its share of the pool's classified
+    material; a slot's target is the class whose block contains the
+    slot's midpoint. Returns ``[]`` (no targeting) when fewer than two
+    classes exist — a one-class shoot has no arc to tell.
+    """
+    share: dict[str, float] = {}
+    for item in pool:
+        if item.daylight:
+            share[item.daylight] = share.get(item.daylight, 0.0) + max(
+                0.0, item.moment.end - item.moment.start
+            )
+    order = [c for c in _DAYLIGHT_ARC if share.get(c, 0.0) > _EPS]
+    if len(order) < 2 or not slots:
+        return []
+    total = sum(share[c] for c in order)
+    origin = slots[0][0]
+    length = slots[-1][1] - origin
+    if total <= _EPS or length <= _EPS:
+        return []
+    bounds: list[tuple[float, str]] = []
+    acc = 0.0
+    for c in order:
+        acc += share[c] / total * length
+        bounds.append((acc, c))
+    targets: list[str] = []
+    for start, end in slots:
+        mid = (start + end) / 2.0 - origin
+        for bound, c in bounds:
+            if mid <= bound + _EPS:
+                targets.append(c)
+                break
+        else:
+            targets.append(order[-1])
+    return targets
+
+
 def _fill(
     slots: list[tuple[float, float]],
     slot_order: list[int],
@@ -1894,6 +2025,12 @@ def _fill(
         peak = max(mags, default=0.0)
         if peak > _EPS:
             motion_norm = [m / peak for m in mags]
+    # Time-of-day coherence (see the module docstring): active as soon as
+    # any pool moment carries a daylight class. day_targets is the
+    # deterministic block arc ([] when fewer than two classes exist —
+    # the switch penalty still applies, there is just no arc to follow).
+    daylight_active = any(it.daylight for it in pool)
+    day_targets: list[str] = _daylight_targets(slots, pool) if daylight_active else []
     rewound = False
     short_at: float | None = None  # record start of the first unservable slot
     # Pool indices not yet placed, in pool order (an arrangement's picks
@@ -1988,6 +2125,7 @@ def _fill(
                 )
             prev = by_slot.get(slot_idx - 1)
             prev_exit = prev.moment.exit_motion if prev is not None else None
+            prev_daylight = prev.daylight if prev is not None else ""
             # Semantic casting: mild per-candidate adjustments (see the
             # module docstring). Bonuses (role fit, climax hero) and the
             # scene-variety penalty are kept apart so we can honestly note
@@ -2023,6 +2161,15 @@ def _fill(
                     score += _ENERGY_MATCH_WEIGHT * (
                         1.0 - abs(slot_energies[slot_idx] - motion_norm[idx])
                     )
+                # Time-of-day coherence: a switch away from the previous
+                # slot's class costs a little (zero when either side is
+                # unknown), and matching the arc's target class for this
+                # slot earns a little — both soft, both tie-breakers.
+                if daylight_active and pool[idx].daylight:
+                    if prev_daylight and pool[idx].daylight != prev_daylight:
+                        score -= _DAYLIGHT_SWITCH_PENALTY
+                    if day_targets and pool[idx].daylight == day_targets[slot_idx]:
+                        score += _DAYLIGHT_BLOCK_WEIGHT
                 return score
 
             best = max(
@@ -2137,7 +2284,192 @@ def _fill(
             )
         if pieces:
             notes.append("semantic casting: " + ", ".join(pieces))
+    if day_targets:
+        arc = " -> ".join(dict.fromkeys(day_targets))
+        notes.append(f"story: daylight arc {arc} (soft)")
+        # Honest warnings: cast slots sitting against the flow. Arranged
+        # slots (preset) are the editor's own order and are never flagged.
+        preset_slots = set(preset or {})
+        against = [
+            (idx, by_slot[idx].daylight, day_targets[idx])
+            for idx in sorted(by_slot)
+            if idx not in preset_slots
+            and (short_at is None or slots[idx][0] < short_at - _EPS)
+            and by_slot[idx].daylight
+            and by_slot[idx].daylight != day_targets[idx]
+        ]
+        for idx, got, want in against[:_DAYLIGHT_NOTE_LIMIT]:
+            notes.append(f"slot {idx + 1}: {got} shot inside the {want} block")
+        if len(against) > _DAYLIGHT_NOTE_LIMIT:
+            notes.append(
+                f"daylight: {len(against) - _DAYLIGHT_NOTE_LIMIT} more "
+                "slots sit against the arc"
+            )
     return entries, notes, short_at
+
+
+# --- content-adaptive pacing (the slot-merge pass) ------------------------------
+
+
+def _merge_calm_slots(
+    entries: list[MontageEntry],
+    pool: list[_PoolItem],
+    slot_energies: list[float],
+    phases: list[tuple[float, float, str]],
+    sections: list[MusicSection],
+    drop_slots: set[int] | frozenset[int],
+    protected: int,
+) -> tuple[list[MontageEntry], str | None]:
+    """Merge adjacent calm-on-calm slots into longer shots (deterministic).
+
+    The grid cuts phases/sections at a musical density, but a slow scene
+    (getting ready, a quiet landscape) must not be chopped at the same
+    rate as a fast one — content decides, not the metronome alone. When
+    two or more ADJACENT slots on calm music (slot energy at/below
+    :data:`_MERGE_MAX_SLOT_ENERGY`) are cast with calm material (motion
+    at/below :data:`_MERGE_CALM_MOTION` of the pool's fastest, highlight
+    at/below :data:`_MERGE_CALM_HIGHLIGHT`), the later entries are
+    dropped and the first one's record AND source windows extend over
+    them — the remaining cut still lands exactly on a later grid cut, so
+    every boundary stays musical.
+
+    Hard rules, in the order they gate a merge:
+
+    * no motion signal anywhere in the pool = calmness unknowable = no
+      merges (plans from motionless reports stay byte-identical);
+    * ``entries[0..protected-1]`` (the editor's arrangement) and drop
+      slots never take part — explicit choices and the drop hit stay;
+    * the climax phase never merges (belt and braces on top of its 1.0
+      energy), and a merge never crosses a phase or section-label change
+      — so it can never swallow an act boundary or a smash-to-black dip;
+    * the LAST entry is never absorbed (it is the cast closer/loop shot);
+    * the merged shot stays at/below :data:`_MAX_CUT_SECONDS`;
+    * the absorber's own sifted moment must really HAVE the extra
+      material (the source never extends past ``moment.end``), and the
+      extension must not overlap material any other entry plays — the
+      zero-repeat promise survives; otherwise the split is kept.
+
+    Returns ``(entries, note)`` — the note ("pacing: N calm slots merged
+    into M longer shots ...") is None when nothing merged.
+    """
+    n = len(entries)
+    if n < 2:
+        return entries, None
+    mags = [
+        (math.hypot(*it.moment.entry_motion) + math.hypot(*it.moment.exit_motion)) / 2.0
+        for it in pool
+    ]
+    peak = max(mags, default=0.0)
+    if peak <= _EPS:
+        return entries, None  # no motion data anywhere: calmness unknowable
+
+    # Back-match each entry to the pool moment it was cast from (largest
+    # source overlap in the same clip) — the calm signals live there.
+    infos: list[tuple[Moment, bool] | None] = []
+    for entry in entries:
+        best: int | None = None
+        best_ov = 0.0
+        for i, item in enumerate(pool):
+            if item.clip_path != entry.clip_path:
+                continue
+            ov = min(item.moment.end, entry.source_end) - max(
+                item.moment.start, entry.source_start
+            )
+            if ov > best_ov + _EPS:
+                best, best_ov = i, ov
+        if best is None:
+            infos.append(None)
+        else:
+            calm = (
+                mags[best] / peak <= _MERGE_CALM_MOTION + _EPS
+                and pool[best].moment.highlight <= _MERGE_CALM_HIGHLIGHT + _EPS
+            )
+            infos.append((pool[best].moment, calm))
+
+    def context(i: int) -> str:
+        """The act/section an entry sits in — merges never cross these."""
+        if phases:
+            return _phase_label_at(phases, entries[i].record_start) or ""
+        if sections:
+            return _label_at(sections, entries[i].record_start)
+        return ""
+
+    def blocked(i: int) -> bool:
+        return (
+            i < protected
+            or i in drop_slots
+            or (phases and _phase_label_at(phases, entries[i].record_start) == "climax")
+        )
+
+    def calm(i: int) -> bool:
+        return (
+            infos[i] is not None
+            and infos[i][1]
+            and slot_energies[i] <= _MERGE_MAX_SLOT_ENERGY + _EPS
+        )
+
+    def extension_overlaps(clip: str, lo: float, hi: float, absorbed: set[int]) -> bool:
+        """True when (lo, hi) of ``clip`` is on screen in another entry."""
+        for k, other in enumerate(entries):
+            if k in absorbed or other.clip_path != clip:
+                continue
+            if min(other.source_end, hi) - max(other.source_start, lo) > _EPS:
+                return True
+        return False
+
+    result: list[MontageEntry] = []
+    merged_slots = 0
+    merged_groups = 0
+    i = 0
+    while i < n:
+        entry = entries[i]
+        if blocked(i) or not calm(i):
+            result.append(entry)
+            i += 1
+            continue
+        moment = infos[i][0]  # type: ignore[index] — calm(i) guarantees infos[i]
+        ctx = context(i)
+        absorbed: set[int] = {i}
+        new_record_end = entry.record_end
+        new_source_end = entry.source_end
+        j = i + 1
+        while (
+            j < n - 1  # the last entry is never absorbed (the cast closer)
+            and not blocked(j)
+            and calm(j)
+            and context(j) == ctx
+            and abs(entries[j].record_start - new_record_end) <= _EPS
+            and entries[j].record_end - entry.record_start <= _MAX_CUT_SECONDS + _EPS
+        ):
+            want_end = entry.source_start + (entries[j].record_end - entry.record_start)
+            if want_end > moment.end + _EPS:
+                break  # the moment does not have the material: keep the split
+            if extension_overlaps(
+                entry.clip_path, new_source_end, want_end, absorbed | {j}
+            ):
+                break  # extending would repeat material another slot plays
+            absorbed.add(j)
+            new_record_end = entries[j].record_end
+            new_source_end = want_end
+            j += 1
+        if len(absorbed) > 1:
+            result.append(
+                replace(entry, record_end=new_record_end, source_end=new_source_end)
+            )
+            merged_slots += len(absorbed)
+            merged_groups += 1
+        else:
+            result.append(entry)
+        i = j if len(absorbed) > 1 else i + 1
+
+    if not merged_groups:
+        return entries, None
+    note = (
+        f"pacing: {merged_slots} calm slots merged into {merged_groups} "
+        f"longer shot{'s' if merged_groups != 1 else ''} "
+        "(calm scenes get room to breathe)"
+    )
+    return result, note
 
 
 # --- arrangement (the editor's own scene order) --------------------------------
@@ -3054,8 +3386,21 @@ def plan_montage(
         # No-repeats truncation: the fill ran out of fresh material — cut
         # the plan at the last fillable slot instead of recycling footage.
         entries = _shorten_no_repeats(plan, entries, grid_music, short_at, len(pool))
+    # Content-adaptive pacing: adjacent calm slots on calm music merge into
+    # longer shots (never in the climax, never across act/section changes,
+    # never an arranged or drop slot; see _merge_calm_slots). Entries tile
+    # the slots 1:1 at this point, so entry index == slot index.
+    merge_note: str | None = None
+    if slot_energies is not None:
+        entries, merge_note = _merge_calm_slots(
+            entries, pool, slot_energies, phases,
+            grid_music.sections if music is not None else [],
+            drop_slots, len(arr_entries),
+        )
     plan.entries = entries
     plan.notes.extend(fill_notes)
+    if merge_note:
+        plan.notes.append(merge_note)
     if arrangement:
         plan.notes.extend(arr_notes)
     used = sum(1 for it in pool if it.uses)

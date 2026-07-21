@@ -381,6 +381,42 @@ def frame_metrics(
     return _full_decode_metrics(path, samples_per_second, size, runner)
 
 
+def extract_rgb_frame(
+    path: str | Path,
+    time_s: float,
+    size: tuple[int, int] = (64, 36),
+    runner=None,
+):
+    """One downscaled RGB frame at ``time_s`` as a numpy uint8 array (H, W, 3).
+
+    The COLOR sibling of the grayscale metric decode above — used by
+    :mod:`monteur.daylight` to judge time of day (warmth needs the R-B
+    balance, which grayscale cannot carry). ``-ss`` before ``-i`` seeks on
+    keyframes (fast; frame-exactness does not matter for a representative
+    sample) and the raw rgb24 frame is read straight from the pipe — no
+    temp files. Raises :class:`MonteurMediaError` when ffmpeg is missing
+    or the frame cannot be decoded.
+    """
+    np = _numpy()
+    width, height = size
+    result = _run(
+        [
+            find_ffmpeg(), "-hide_banner",
+            "-ss", f"{max(0.0, float(time_s)):.3f}", "-i", str(path),
+            "-frames:v", "1", "-vf", f"scale={width}:{height}",
+            "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+        ],
+        runner,
+    )
+    frame_bytes = width * height * 3
+    if result.returncode != 0 or len(result.stdout) < frame_bytes:
+        stderr = result.stderr.decode("utf-8", "replace")[-300:]
+        raise MonteurMediaError(f"could not extract a frame from {path}: {stderr}")
+    return np.frombuffer(result.stdout[:frame_bytes], dtype=np.uint8).reshape(
+        height, width, 3
+    )
+
+
 # Audio-metric tuning (approximate; see AudioMetric).
 _CLIP_LEVEL = 0.985  # |sample| at/above this counts as (near-)digital clipping
 _LOW_BAND_HZ = 150.0  # ceiling of the "low" band; wind/handling rumble lives below

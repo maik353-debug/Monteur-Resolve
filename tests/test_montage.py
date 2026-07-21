@@ -2236,3 +2236,368 @@ class TestAdjustEntryBoundary:
             adjust_entry_boundary(plan, "x", "cut")
         with pytest.raises(ValueError, match="fade-in"):
             adjust_entry_boundary(plan, 0, "dissolve")
+
+
+# --- time-of-day coherence (Moment.daylight) -----------------------------------
+
+
+def _flat_music(duration: float = 12.0, energy: float = 0.5, drops=None) -> MusicAnalysis:
+    """One flat section so the grid stays simple and slot energy constant."""
+    return MusicAnalysis(
+        path="/music/song.wav",
+        duration=duration,
+        tempo=120.0,
+        beats=[i * 0.5 for i in range(int(duration * 2))],
+        sections=[MusicSection(0.0, duration, energy, "mid")],
+        drops=list(drops or []),
+    )
+
+
+def _alternating_daylight_report(with_daylight: bool = True) -> ClipReport:
+    """Six 2s moments whose daylight alternates day/night in file order."""
+    moments = []
+    for i in range(6):
+        m = Moment(i * 4.0, i * 4.0 + 2.0, 0.8)
+        if with_daylight:
+            m.daylight = "day" if i % 2 == 0 else "night"
+        moments.append(m)
+    return ClipReport(path="/footage/mixed.mp4", duration=30.0, moments=moments)
+
+
+def _entry_daylight(entry, reports) -> str:
+    """The daylight class of the moment an entry was cast from."""
+    best, best_ov = "", 0.0
+    for report in reports:
+        if report.path != entry.clip_path:
+            continue
+        for m in report.moments:
+            ov = min(m.end, entry.source_end) - max(m.start, entry.source_start)
+            if ov > best_ov:
+                best, best_ov = m.daylight, ov
+    return best
+
+
+def _daylight_switches(plan, reports) -> int:
+    classes = [
+        _entry_daylight(e, reports)
+        for e in sorted(plan.entries, key=lambda e: e.record_start)
+    ]
+    classes = [c for c in classes if c]
+    return sum(1 for a, b in zip(classes, classes[1:]) if a != b)
+
+
+def test_daylight_coherence_reduces_switches_on_shuffled_material():
+    shuffled = [_alternating_daylight_report(with_daylight=True)]
+    blank = [_alternating_daylight_report(with_daylight=False)]
+    plan_coherent = plan_montage(shuffled, _flat_music(), cut_lead=0.0)
+    plan_blank = plan_montage(blank, _flat_music(), cut_lead=0.0)
+    # The blank plan fills in pool order (alternating day/night); the
+    # coherence penalty + block bonus regroup the material into blocks.
+    before = _daylight_switches(plan_blank, shuffled)  # same windows, read classes
+    after = _daylight_switches(plan_coherent, shuffled)
+    assert before >= 3  # the shuffled baseline really does thrash
+    assert after < before
+    assert any("story: daylight arc day -> night (soft)" in n for n in plan_coherent.notes)
+
+
+def test_daylight_blank_is_neutral_and_unnoted():
+    plan = plan_montage(
+        [_alternating_daylight_report(with_daylight=False)], _flat_music(), cut_lead=0.0
+    )
+    assert not any("daylight" in n for n in plan.notes)
+    assert not any(n.startswith("story:") for n in plan.notes)
+    # Pool order preserved exactly (first pass walks the moments in order).
+    starts = [e.source_start for e in plan.entries[:6]]
+    assert starts == sorted(starts)
+
+
+def test_daylight_single_class_has_no_arc():
+    report = _alternating_daylight_report(with_daylight=False)
+    for m in report.moments:
+        m.daylight = "day"  # one class only: nothing to order
+    plan = plan_montage([report], _flat_music(), cut_lead=0.0)
+    assert not any(n.startswith("story: daylight") for n in plan.notes)
+    starts = [e.source_start for e in plan.entries[:6]]
+    assert starts == sorted(starts)  # switch penalty never fires: no reorder
+
+
+def test_daylight_arc_follows_available_classes():
+    report = _alternating_daylight_report(with_daylight=False)
+    for i, m in enumerate(report.moments):
+        m.daylight = "golden" if i % 2 == 0 else "night"  # no day at all
+    plan = plan_montage([report], _flat_music(), cut_lead=0.0)
+    assert any(
+        "story: daylight arc golden -> night (soft)" in n for n in plan.notes
+    )
+
+
+def test_daylight_against_flow_slot_is_flagged():
+    # Plenty of day material plus ONE night moment carrying the audio
+    # highlight: the drop reservation puts it early, inside the day block.
+    day = ClipReport(
+        path="/footage/day.mp4",
+        duration=40.0,
+        moments=[Moment(i * 5.0, i * 5.0 + 3.0, 0.8) for i in range(6)],
+    )
+    for m in day.moments:
+        m.daylight = "day"
+    night = ClipReport(
+        path="/footage/night.mp4",
+        duration=10.0,
+        moments=[Moment(0.0, 2.0, 0.5, highlight=0.95)],
+    )
+    night.moments[0].daylight = "night"
+    plan = plan_montage([day, night], _flat_music(drops=[2.0]), cut_lead=0.0)
+    drop_entry = next(e for e in plan.entries if abs(e.record_start - 2.0) < 1e-6)
+    assert drop_entry.clip_path == "/footage/night.mp4"
+    assert any("night shot inside the day block" in n for n in plan.notes)
+
+
+def test_daylight_arranged_slots_win_and_are_not_flagged():
+    report = _alternating_daylight_report(with_daylight=True)
+    # The editor demands night first — the arrangement wins outright.
+    arrangement = [
+        {"clip": "mixed.mp4", "start": 4.0},   # a night moment
+        {"clip": "mixed.mp4", "start": 0.0},   # then a day moment
+    ]
+    plan = plan_montage(
+        [report], _flat_music(), cut_lead=0.0, arrangement=arrangement
+    )
+    entries = sorted(plan.entries, key=lambda e: e.record_start)
+    assert entries[0].source_start == pytest.approx(4.0, abs=0.3)
+    assert entries[1].source_start == pytest.approx(0.0, abs=0.3)
+    # Arranged slots are never flagged against the arc.
+    assert not any(
+        n.startswith(("slot 1:", "slot 2:")) and "block" in n for n in plan.notes
+    )
+
+
+# --- content-adaptive pacing (the slot-merge pass) ------------------------------
+
+
+def _pacing_music() -> MusicAnalysis:
+    """12s: a calm low half and a loud high half, beats every 0.5s."""
+    return MusicAnalysis(
+        path="/music/song.wav",
+        duration=12.0,
+        tempo=120.0,
+        beats=[i * 0.5 for i in range(24)],
+        sections=[
+            MusicSection(0.0, 6.0, 0.2, "low"),
+            MusicSection(6.0, 12.0, 0.9, "high"),
+        ],
+    )
+
+
+def _pacing_reports(calm_motion=(0.2, 0.0)) -> list[ClipReport]:
+    """A calm clip with long moments + a fast clip (sets the motion peak)."""
+    calm = ClipReport(
+        path="/f/calm.mp4",
+        duration=20.0,
+        moments=[
+            Moment(0.0, 8.0, 0.9, entry_motion=calm_motion, exit_motion=calm_motion),
+            Moment(8.0, 16.0, 0.8, entry_motion=calm_motion, exit_motion=calm_motion),
+        ],
+    )
+    # Plenty of fast moments so the fill never re-slices the calm clip's
+    # tail into a later slot (which would rightly block a merge — the
+    # extension would repeat material another slot plays).
+    fast = ClipReport(
+        path="/f/fast.mp4",
+        duration=40.0,
+        moments=[
+            Moment(i * 3.0, i * 3.0 + 2.0, 0.7,
+                   entry_motion=(10.0, 0.0), exit_motion=(10.0, 0.0))
+            for i in range(12)
+        ],
+    )
+    return [calm, fast]
+
+
+def test_calm_adjacent_slots_merge_in_the_quiet_section():
+    merged = plan_montage(_pacing_reports(), _pacing_music(), cut_lead=0.0)
+    allfast = plan_montage(
+        _pacing_reports(calm_motion=(10.0, 0.0)), _pacing_music(), cut_lead=0.0
+    )
+    # Fewer cuts exactly where the content is slow.
+    assert len(merged.entries) < len(allfast.entries)
+    assert any(n.startswith("pacing:") and "merged" in n for n in merged.notes)
+    assert not any(n.startswith("pacing:") for n in allfast.notes)
+    # The merged shot: longer record, source extended 1:1, capped at 8s.
+    longest = max(merged.entries, key=lambda e: e.record_end - e.record_start)
+    length = longest.record_end - longest.record_start
+    assert length > 2.0 + 1e-6
+    assert length <= 8.0 + 1e-6
+    assert longest.source_end - longest.source_start == pytest.approx(length)
+    # Cuts stay on the grid: every merged boundary is one of the unmerged
+    # plan's boundaries (a merge only REMOVES cuts, never moves one).
+    unmerged_bounds = {round(e.record_start, 4) for e in allfast.entries} | {
+        round(e.record_end, 4) for e in allfast.entries
+    }
+    for entry in merged.entries:
+        assert round(entry.record_start, 4) in unmerged_bounds
+        assert round(entry.record_end, 4) in unmerged_bounds
+    # The loud half keeps its fast cuts (energy gate).
+    for entry in merged.entries:
+        if entry.record_start >= 6.0 - 1e-6:
+            assert entry.record_end - entry.record_start <= 2.0 + 1e-6
+    # The montage still tiles contiguously to the full length.
+    ordered = sorted(merged.entries, key=lambda e: e.record_start)
+    assert ordered[0].record_start == pytest.approx(0.0)
+    for a, b in zip(ordered, ordered[1:]):
+        assert a.record_end == pytest.approx(b.record_start)
+    assert ordered[-1].record_end == pytest.approx(merged.duration)
+
+
+def test_merge_keeps_split_when_the_moment_lacks_material():
+    # Calm 2s moments: extending past moment.end is impossible, the split
+    # is kept and no pacing note appears.
+    calm = ClipReport(
+        path="/f/calm.mp4",
+        duration=30.0,
+        moments=[
+            Moment(i * 2.0, i * 2.0 + 2.0, 0.9,
+                   entry_motion=(0.2, 0.0), exit_motion=(0.2, 0.0))
+            for i in range(6)
+        ],
+    )
+    fast = ClipReport(
+        path="/f/fast.mp4",
+        duration=30.0,
+        moments=[
+            Moment(i * 3.0, i * 3.0 + 2.0, 0.7,
+                   entry_motion=(10.0, 0.0), exit_motion=(10.0, 0.0))
+            for i in range(4)
+        ],
+    )
+    plan = plan_montage([calm, fast], _pacing_music(), cut_lead=0.0)
+    assert not any(n.startswith("pacing:") for n in plan.notes)
+
+
+def test_merge_parity_when_all_moments_are_high_motion():
+    reports = _pacing_reports(calm_motion=(10.0, 0.0))
+    plan_a = plan_montage(reports, _pacing_music(), cut_lead=0.0)
+    plan_b = plan_montage(
+        _pacing_reports(calm_motion=(10.0, 0.0)), _pacing_music(), cut_lead=0.0
+    )
+    from monteur.montage import plan_to_dict as _ptd
+
+    assert _ptd(plan_a) == _ptd(plan_b)  # deterministic, byte-identical
+    assert not any(n.startswith("pacing:") for n in plan_a.notes)
+
+
+def test_merge_never_absorbs_the_drop_slot():
+    music = _pacing_music()
+    music.drops = [2.0]
+    plan = plan_montage(_pacing_reports(), music, cut_lead=0.0)
+    # The drop-forced cut at 2.0 survives every merge.
+    assert any(abs(e.record_start - 2.0) < 1e-6 for e in plan.entries)
+
+
+def test_merge_spares_arranged_slots():
+    plain = plan_montage(_pacing_reports(), _pacing_music(), cut_lead=0.0)
+    assert any(n.startswith("pacing:") for n in plain.notes)
+    first_len_plain = min(
+        plain.entries, key=lambda e: e.record_start
+    )
+    arrangement = [
+        {"clip": "calm.mp4", "start": 0.0},
+        {"clip": "calm.mp4", "start": 8.0},
+    ]
+    arranged = plan_montage(
+        _pacing_reports(), _pacing_music(), cut_lead=0.0, arrangement=arrangement
+    )
+    entries = sorted(arranged.entries, key=lambda e: e.record_start)
+    # The two arranged slots keep their own cut between them (no merge),
+    # so the first entry is strictly shorter than the plain plan's merged
+    # opening shot.
+    assert entries[0].record_end == pytest.approx(entries[1].record_start)
+    assert (
+        entries[0].record_end - entries[0].record_start
+        < first_len_plain.record_end - first_len_plain.record_start - 1e-6
+    )
+
+
+def test_merge_stays_out_of_the_climax_and_inside_phases():
+    """A styled cut merges only in gentle phases and never across bounds."""
+    music = MusicAnalysis(
+        path="/music/track.wav",
+        duration=40.0,
+        tempo=120.0,
+        beats=[i * 0.5 for i in range(80)],
+        sections=[MusicSection(0.0, 40.0, 0.5, "mid")],
+        downbeats=[i * 2.0 for i in range(20)],
+        phrases=[i * 8.0 for i in range(5)],
+    )
+    calm = ClipReport(
+        path="/f/calm.mp4",
+        duration=90.0,
+        moments=[
+            Moment(i * 12.0, i * 12.0 + 10.0, 0.9,
+                   entry_motion=(0.2, 0.0), exit_motion=(0.2, 0.0))
+            for i in range(7)
+        ],
+    )
+    # A surplus of fast moments: with more moments than slots no calm
+    # tail is ever re-sliced, so the merge pass has room to act.
+    fast = ClipReport(
+        path="/f/fast.mp4",
+        duration=90.0,
+        moments=[
+            Moment(i * 2.0, i * 2.0 + 1.5, 0.7,
+                   entry_motion=(10.0, 0.0), exit_motion=(10.0, 0.0))
+            for i in range(40)
+        ],
+    )
+    plan = plan_montage([calm, fast], music, style="travel", cut_lead=0.0)
+    assert any(n.startswith("pacing:") for n in plan.notes)  # merges DID happen
+    assert plan.phases
+    climax = next((s, e) for s, e, lab in plan.phases if lab == "climax")
+    for entry in plan.entries:
+        # No entry ever crosses a phase boundary (merges stay inside acts).
+        spans = [
+            (s, e) for s, e, _lab in plan.phases
+            if entry.record_start >= s - 1e-6 and entry.record_start < e - 1e-6
+        ]
+        assert spans and entry.record_end <= spans[0][1] + 1e-6
+        # Climax slots never merge: cuts there stay at/below 2 beats + the
+        # style's 2-beat rhythm slam (1s each at 120 bpm).
+        if climax[0] - 1e-6 <= entry.record_start < climax[1] - 1e-6:
+            assert entry.record_end - entry.record_start <= 2.0 + 1e-6
+
+
+def test_merge_never_swallows_a_smash_dip():
+    calm = ClipReport(
+        path="/f/calm.mp4",
+        duration=90.0,
+        moments=[
+            Moment(i * 12.0, i * 12.0 + 10.0, 0.9,
+                   entry_motion=(0.2, 0.0), exit_motion=(0.2, 0.0))
+            for i in range(7)
+        ],
+    )
+    fast = ClipReport(
+        path="/f/fast.mp4",
+        duration=90.0,
+        moments=[
+            Moment(i * 2.0, i * 2.0 + 1.5, 0.7,
+                   entry_motion=(10.0, 0.0), exit_motion=(10.0, 0.0))
+            for i in range(40)
+        ],
+    )
+    music = MusicAnalysis(
+        path="/music/track.wav",
+        duration=40.0,
+        tempo=120.0,
+        beats=[i * 0.5 for i in range(80)],
+        sections=[MusicSection(0.0, 40.0, 0.5, "mid")],
+        downbeats=[i * 2.0 for i in range(20)],
+        phrases=[i * 8.0 for i in range(5)],
+    )
+    plan = plan_montage([calm, fast], music, style="trailer", cut_lead=0.0)
+    assert any(n.startswith("pacing:") for n in plan.notes)  # merges DID happen
+    assert plan.dips  # the trailer still smashes to black
+    for dip_start, _length in plan.dips:
+        assert any(
+            abs(e.record_end - dip_start) < 1e-3 for e in plan.entries
+        )  # every dip still sits on a real entry boundary

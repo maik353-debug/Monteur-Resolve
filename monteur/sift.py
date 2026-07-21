@@ -140,6 +140,13 @@ class Moment:
     which shows each moment's keyframe to Claude — so the montage planner can
     cast shots by meaning (hero shots on the drop, establishing shots in the
     opening) instead of by technical score alone.
+
+    ``daylight`` is the moment's time-of-day class ("day" | "golden" |
+    "night", "" = not classified), filled IN PLACE by
+    :func:`monteur.daylight.annotate_reports` — offline pixel statistics,
+    no API. The montage planner reads it as a SOFT time-coherence signal
+    (footage wants to sit in time-of-day blocks); a moment without the
+    field behaves exactly as before.
     """
 
     start: float
@@ -153,6 +160,7 @@ class Moment:
     role: str = ""         # "opener" | "build" | "climax" | "closer" | "" = unknown/not analyzed
     hero: float = 0.0      # 0..1 hero-shot strength (0 = ordinary or not analyzed)
     group: str = ""        # short scene-similarity key; same group = visually the same scene
+    daylight: str = ""     # "day" | "golden" | "night" | "" = not classified (monteur.daylight)
 
 
 @dataclass
@@ -606,6 +614,24 @@ def _call_progress(progress, index, total, name, stage, report):
         pass
 
 
+def _annotate_daylight(reports: list[ClipReport]) -> None:
+    """Best-effort time-of-day pass over freshly sifted reports (in place).
+
+    Offline and cached (``.monteur-daylight.json`` next to the footage —
+    see :mod:`monteur.daylight`), so it belongs to the scan itself: every
+    surface that sifts (CLI, web, MCP) gets ``Moment.daylight`` filled
+    without extra wiring. Failures of ANY kind (missing numpy/ffmpeg,
+    unreadable clips, read-only folders) are swallowed — daylight is an
+    upgrade, not a gate, and a scan must never fail because of it.
+    """
+    try:
+        from monteur import daylight
+
+        daylight.annotate_reports(reports)
+    except Exception:  # noqa: BLE001 — daylight must never fail a scan
+        pass
+
+
 def sift_directory(
     directory: str, progress=None, cancel: threading.Event | None = None
 ) -> list[ClipReport]:
@@ -619,6 +645,12 @@ def sift_directory(
     Individual clip failures become a note in that clip's report without
     cancelling the others; only a missing ffmpeg (which dooms every clip)
     aborts the run.
+
+    After the clips are analysed, a best-effort time-of-day pass
+    (:mod:`monteur.daylight`) fills each moment's ``daylight`` class from
+    one small frame per moment — offline, cached next to the footage, and
+    silent (it does not touch the progress callback below); any failure
+    leaves the fields empty without affecting the scan.
 
     ``progress`` is an optional callback invoked around each clip so callers
     (e.g. the CLI) can show per-clip feedback while the slow frame/audio
@@ -685,6 +717,7 @@ def sift_directory(
             if _cancelled():
                 raise SiftCancelled("sift cancelled")
             results.append(_analyze_one(i, p))
+        _annotate_daylight(results)
         return results
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = []
@@ -698,4 +731,5 @@ def sift_directory(
         results = [f.result() for f in futures]
     if _cancelled():
         raise SiftCancelled("sift cancelled")
+    _annotate_daylight(results)
     return results

@@ -529,3 +529,43 @@ def test_cmd_create_routes_through_compose(tmp_path, monkeypatch, capsys):
     printed = capsys.readouterr().out
     assert "story: ein Sommer in drei Akten" in printed
     assert "act 1: still beginnen" in printed
+
+
+# --- time-of-day (daylight) in the dossier and the prompt --------------------------
+
+
+def test_dossier_carries_daylight_and_prompt_states_the_law(monkeypatch):
+    calls: list[dict] = []
+    monkeypatch.setattr(ai, "complete", fake_complete(empty_reply(), calls))
+    reports = make_reports()
+    reports[0].moments[0].daylight = "day"
+    reports[1].moments[0].daylight = "night"
+    compose_montage(reports, make_music(), cut_lead=0.0)
+    prompt = calls[0]["prompt"]
+    assert '"daylight": "day"' in prompt
+    assert '"daylight": "night"' in prompt
+    # The coherence law + the block order as the composer's decision.
+    assert "COHERENCE IS THE LAW" in prompt
+    assert "day -> golden -> night" in prompt
+    assert "say why in `why`" in prompt
+
+
+def test_prompt_has_no_daylight_lines_without_classes(monkeypatch):
+    calls: list[dict] = []
+    monkeypatch.setattr(ai, "complete", fake_complete(empty_reply(), calls))
+    compose_montage(make_reports(), make_music(), cut_lead=0.0)
+    prompt = calls[0]["prompt"]
+    assert "COHERENCE IS THE LAW" not in prompt
+    assert '"daylight"' not in prompt
+
+
+def test_compose_context_omits_empty_daylight():
+    from monteur.compose import compose_context
+
+    reports = make_reports()
+    reports[0].moments[0].daylight = "golden"
+    plan = plan_montage(reports, make_music(), cut_lead=0.0)
+    context = compose_context(plan, reports, make_music())
+    flagged = [i for i in context["inventory"] if "daylight" in i]
+    assert len(flagged) == 1
+    assert flagged[0]["daylight"] == "golden"

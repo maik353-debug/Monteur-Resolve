@@ -367,7 +367,10 @@ def test_calm_scene_on_the_drop_is_flagged():
             for i in range(6)
         ],
     )
-    plan_plain = plan_montage([calm, lively], make_music(drops=[6.0]), cut_lead=0.0)
+    # Probe the raw slot grid with lively-only material: the grid depends
+    # only on the music, and all-lively material never triggers the
+    # content-adaptive slot-merge pass, so entry index == slot index here.
+    plan_plain = plan_montage([lively], make_music(drops=[6.0]), cut_lead=0.0)
     entries = sorted(plan_plain.entries, key=lambda e: e.record_start)
     drop_idx = next(
         i for i, e in enumerate(entries) if abs(e.record_start - 6.0) < 1e-6

@@ -105,6 +105,10 @@ _SYSTEM = (
     "- never two shots of the same scene group back to back;\n"
     "- image energy should track music energy — calm sections carry calmer "
     "imagery, loud sections carry the motion;\n"
+    "- time of day must stay coherent: day, golden-hour and night shots "
+    "belong in blocks with rare, deliberate switches — a lone night shot "
+    "inside a day block is a flag unless it is clearly a chosen story "
+    "beat (a teaser, a flash-forward);\n"
     "- vary the motifs: one location or subject must not dominate;\n"
     "- the outro should decay, not spike;\n"
     "- repetition is acceptable only when it is rhythmically intentional.\n"
@@ -174,8 +178,9 @@ def review_context(
     duration, tempo, section list, drop times, smash-to-black dips, entry
     count). ``slots`` has one lean dict per entry: 0-based ``slot`` index,
     record/source windows, clip BASENAME, score, the vision annotations
-    (label from the entry itself; role/hero/group enriched by matching the
-    entry's clip + source overlap against the reports' moments), the music
+    (label from the entry itself; role/hero/group — plus the offline
+    ``daylight`` class — enriched by matching the entry's clip + source
+    overlap against the reports' moments), the music
     section under the slot and the dissolve length when there is one.
     ``bench`` lists up to :data:`BENCH_LIMIT` of the strongest moments NO
     entry uses — the only material a review may propose as replacements.
@@ -234,6 +239,8 @@ def review_context(
                 slot["hero"] = _r(moment.hero)
             if moment.group:
                 slot["group"] = moment.group
+            if getattr(moment, "daylight", ""):
+                slot["daylight"] = moment.daylight
             if report is not None:
                 used.append((report, moment))
         section = _section_label(music, plan, entry.record_start)
@@ -277,6 +284,8 @@ def review_context(
             item["hero"] = _r(moment.hero)
         if moment.group:
             item["group"] = moment.group
+        if getattr(moment, "daylight", ""):
+            item["daylight"] = moment.daylight
         bench.append(item)
 
     return {"overview": overview, "slots": slots, "bench": bench}

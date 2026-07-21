@@ -240,6 +240,8 @@ def _inventory(reports: list[ClipReport]) -> list[dict]:
                 item["hero"] = _r(m.hero)
             if m.group:
                 item["group"] = m.group
+            if getattr(m, "daylight", ""):
+                item["daylight"] = m.daylight
             items.append(item)
     return items
 

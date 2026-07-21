@@ -284,9 +284,13 @@ def compose_context(
     true`` when it hits out of a black dip. ``dips`` lists the title
     slots (0-based ``dip`` index + start time). ``inventory`` lists every
     usable moment: clip basename, window, score, mean motion magnitude,
-    and the vision fields (label/tags/role/hero/group) when present —
-    empty fields are omitted so an unseen inventory stays small and
-    honest. ``vision`` says whether any annotations exist at all.
+    the vision fields (label/tags/role/hero/group) and the offline
+    ``daylight`` class (day/golden/night, :mod:`monteur.daylight`) when
+    present — empty fields are omitted so an unseen inventory stays small
+    and honest. ``vision`` says whether any annotations exist at all.
+    When daylight classes exist the prompt states the time-coherence law
+    (blocks with rare switches) and hands the block ORDER to the composer
+    as a story decision to be explained in ``why``.
 
     ``locked`` (slot indices an arrangement already cast) marks those
     slots ``"locked": true`` in the dossier — the prompt tells Claude to
@@ -365,6 +369,8 @@ def compose_context(
                 item["hero"] = _r(m.hero)
             if getattr(m, "group", ""):
                 item["group"] = m.group
+            if getattr(m, "daylight", ""):
+                item["daylight"] = m.daylight
             inventory.append(item)
 
     context = {
@@ -414,6 +420,18 @@ def _build_prompt(context: dict, style: str, brief: str) -> str:
             "No vision labels are available for this footage — cast by "
             "score, motion and shot order; do not invent content. (A 'Let "
             "Claude watch your clips' scan would make this far sharper.)"
+        )
+    if any(item.get("daylight") for item in context.get("inventory") or []):
+        parts.append(
+            "TIME OF DAY: inventory moments carry a `daylight` class (day / "
+            "golden / night), measured from the footage. COHERENCE IS THE "
+            "LAW: keep the cut in time-of-day blocks — switch classes "
+            "rarely and only on purpose; a lone night shot between two day "
+            "shots reads like a mistake. The block ORDER is yours to "
+            "direct: the natural arc is day -> golden -> night, but the "
+            "brief may justify another order (a night teaser as a cold "
+            "open is a legitimate choice). If you depart from the natural "
+            "arc, say why in `why`."
         )
     if any(slot.get("locked") for slot in context.get("slots") or []):
         parts.append(

@@ -361,3 +361,19 @@ class TestMissingCli:
         monkeypatch.setattr("monteur.sift.list_media", lambda folder: [])
         with pytest.raises(SystemExit):
             main(["missing", "clips"])
+
+
+# --- time-of-day (daylight) in the inventory ---------------------------------------
+
+
+def test_inventory_carries_daylight_when_classified():
+    from monteur.coverage import _inventory
+
+    reports = make_unlabeled_reports()
+    reports[0].moments[0].daylight = "day"
+    items = _inventory(reports)
+    flagged = [i for i in items if "daylight" in i]
+    assert len(flagged) == 1
+    assert flagged[0]["daylight"] == "day"
+    # Unclassified moments omit the key entirely (lean and honest).
+    assert all("daylight" not in i for i in items[1:])

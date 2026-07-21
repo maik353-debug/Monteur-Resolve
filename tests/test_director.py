@@ -510,3 +510,24 @@ class TestDirectCli:
         with pytest.raises(SystemExit):
             args.func(args)
         assert "no way to reach Claude" in capsys.readouterr().err
+
+
+# --- time-of-day (daylight) in the dossier and the craft rules ---------------------
+
+
+class TestDaylight:
+    def test_slot_and_bench_carry_daylight(self):
+        reports = make_reports()
+        reports[0].moments[0].daylight = "golden"   # used by slot 0
+        reports[1].moments[1].daylight = "night"    # b.mp4 8-10: unused -> bench
+        context = review_context(make_plan(), reports, make_music())
+        assert context["slots"][0]["daylight"] == "golden"
+        assert "daylight" not in context["slots"][1]  # unclassified: omitted
+        bench_night = [b for b in context["bench"] if b.get("daylight")]
+        assert any(b["daylight"] == "night" for b in bench_night)
+
+    def test_craft_rules_include_time_of_day_coherence(self):
+        from monteur.director import _SYSTEM
+
+        assert "time of day must stay coherent" in _SYSTEM
+        assert "blocks" in _SYSTEM
