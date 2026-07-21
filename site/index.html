@@ -1,0 +1,713 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monteur — Der Schnitt, der den Beat trifft</title>
+<meta name="description" content="Monteur ist KI-Schnitt für DaVinci Resolve: Footage rein, Richtung vorgeben, iterieren, fertiges Video raus. Der Bild-Höhepunkt landet auf dem Beat.">
+<style>
+/* ————————————————————————————————————————————————
+   Monteur — cinematic dark marketing draft
+   Single visual world (a grading suite is dark by nature —
+   a deliberate commitment, not a missing light theme).
+   ———————————————————————————————————————————————— */
+:root{
+  --ink:#0A0B10;        /* blue-black ground */
+  --ink-2:#0D0F15;
+  --panel:#14161F;      /* raised surface */
+  --panel-2:#191C27;
+  --line:#262A38;       /* hairline */
+  --line-2:#333849;
+  --ember:#FF9A3C;      /* the beat hit · the peak · the playhead */
+  --ember-deep:#F0791E;
+  --pulse:#54D2C8;      /* the music waveform (cool, used sparingly) */
+  --chalk:#F3EFE6;      /* warm off-white — headings */
+  --haze:#9AA1B6;       /* cool grey — body */
+  --haze-dim:#6B7185;   /* muted labels */
+  --max:1120px;
+  --sans:"Helvetica Neue",Helvetica,Arial,system-ui,sans-serif;
+  --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;
+  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,"Roboto Mono",monospace;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--ink);color:var(--haze);
+  font-family:var(--sans);font-size:17px;line-height:1.65;
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+  overflow-x:hidden;
+}
+::selection{background:rgba(255,154,60,.28);color:var(--chalk)}
+a{color:inherit;text-decoration:none}
+canvas{display:block}
+h1,h2,h3{color:var(--chalk);margin:0;text-wrap:balance;letter-spacing:-.02em;font-weight:800}
+p{margin:0}
+
+/* layout helpers */
+.wrap{max-width:var(--max);margin:0 auto;padding:0 28px}
+.eyebrow{
+  font-family:var(--mono);font-size:12px;letter-spacing:.32em;text-transform:uppercase;
+  color:var(--ember);font-weight:500;
+}
+.lead{font-size:19px;line-height:1.7;color:var(--haze);max-width:60ch}
+.serif{font-family:var(--serif)}
+
+/* ————— top bar ————— */
+.top{
+  position:fixed;top:0;left:0;right:0;z-index:50;
+  display:flex;align-items:center;justify-content:space-between;
+  padding:16px 28px;
+  background:linear-gradient(180deg,rgba(10,11,16,.92),rgba(10,11,16,0));
+  backdrop-filter:blur(6px);
+}
+.brand{display:flex;align-items:center;gap:11px;color:var(--chalk);font-weight:800;letter-spacing:-.01em;font-size:18px}
+.brand .glyph{width:22px;height:22px;flex:0 0 auto}
+.top nav{display:flex;gap:26px;align-items:center}
+.top nav a{font-size:14px;color:var(--haze);transition:color .2s}
+.top nav a:hover{color:var(--chalk)}
+.top .pill{
+  font-size:14px;font-weight:600;color:var(--ink);background:var(--ember);
+  padding:9px 16px;border-radius:999px;transition:transform .15s,box-shadow .2s;
+  box-shadow:0 6px 22px -8px rgba(255,154,60,.7);
+}
+.top .pill:hover{transform:translateY(-1px);box-shadow:0 10px 28px -8px rgba(255,154,60,.85);color:var(--ink)}
+@media(max-width:720px){.top nav .lnk{display:none}}
+
+/* ————— hero ————— */
+.hero{position:relative;padding:150px 0 90px;overflow:hidden}
+.hero::before{ /* ambient grade glow */
+  content:"";position:absolute;inset:-20% -10% auto -10%;height:80%;
+  background:radial-gradient(60% 70% at 72% 30%,rgba(255,154,60,.16),transparent 60%),
+             radial-gradient(50% 60% at 12% 12%,rgba(84,210,200,.10),transparent 65%);
+  filter:blur(4px);pointer-events:none;
+}
+.hero .wrap{position:relative}
+.hero h1{
+  font-size:clamp(40px,7.4vw,86px);line-height:.98;margin:22px 0 0;
+  letter-spacing:-.035em;
+}
+.hero h1 .em{color:var(--ember)}
+.hero .sub{margin-top:26px;font-size:clamp(17px,2.2vw,21px);line-height:1.6;max-width:36ch;color:var(--haze)}
+.cta-row{display:flex;gap:14px;flex-wrap:wrap;margin-top:34px}
+.btn{
+  display:inline-flex;align-items:center;gap:9px;font-weight:700;font-size:16px;
+  padding:14px 24px;border-radius:12px;transition:transform .15s,background .2s,border-color .2s;
+}
+.btn-primary{background:var(--ember);color:var(--ink);box-shadow:0 14px 40px -14px rgba(255,154,60,.75)}
+.btn-primary:hover{transform:translateY(-2px)}
+.btn-ghost{border:1px solid var(--line-2);color:var(--chalk)}
+.btn-ghost:hover{border-color:var(--ember);transform:translateY(-2px)}
+
+/* the live coincidence stage */
+.stage{
+  margin-top:56px;border:1px solid var(--line);border-radius:18px;
+  background:linear-gradient(180deg,var(--panel),var(--ink-2));
+  box-shadow:0 40px 90px -50px rgba(0,0,0,.9),inset 0 1px 0 rgba(255,255,255,.03);
+  overflow:hidden;
+}
+.stage-head{
+  display:flex;align-items:center;justify-content:space-between;gap:16px;
+  padding:14px 20px;border-bottom:1px solid var(--line);
+  font-family:var(--mono);font-size:12px;color:var(--haze-dim);letter-spacing:.06em;
+}
+.stage-head .dots{display:flex;gap:7px}
+.stage-head .dots i{width:11px;height:11px;border-radius:50%;background:var(--line-2);display:block}
+.stage-head .tc{color:var(--pulse)}
+#coincidence{width:100%;height:300px;display:block}
+.stage-cap{
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:16px 20px;border-top:1px solid var(--line);
+  font-family:var(--mono);font-size:13px;color:var(--haze-dim);
+}
+.stage-cap .hit{color:var(--ember);font-weight:600}
+.stage-cap .grow{flex:1}
+@media(max-width:560px){#coincidence{height:230px}}
+
+/* section frame */
+.section{padding:96px 0;position:relative}
+.section h2{font-size:clamp(28px,4.6vw,46px);line-height:1.04;letter-spacing:-.03em}
+.section .kick{margin-bottom:16px}
+
+/* thin timeline divider */
+.ribbon{height:2px;background:
+  repeating-linear-gradient(90deg,var(--line) 0 1px,transparent 1px 34px);
+  position:relative;opacity:.9}
+.ribbon::after{content:"";position:absolute;left:0;top:-2px;width:56px;height:6px;border-radius:3px;
+  background:linear-gradient(90deg,var(--ember),transparent);opacity:.8}
+
+/* formula band */
+.formula{background:var(--ink-2);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.formula .wrap{padding:78px 28px;text-align:center}
+.formula .expr{
+  font-size:clamp(26px,5vw,52px);font-weight:800;color:var(--chalk);letter-spacing:-.03em;
+  display:flex;gap:.5ch;justify-content:center;flex-wrap:wrap;line-height:1.1;
+}
+.formula .expr b{color:var(--ember);font-weight:800}
+.formula .expr .x{color:var(--haze-dim);font-weight:400}
+.formula p{margin:22px auto 0;max-width:52ch;color:var(--haze)}
+
+/* moments (the magic) */
+.moments{display:flex;flex-direction:column;gap:0}
+.moment{
+  display:grid;grid-template-columns:1fr 1fr;gap:48px;align-items:center;
+  padding:56px 0;border-top:1px solid var(--line);
+}
+.moment:first-child{border-top:0}
+.moment .idx{font-family:var(--mono);font-size:13px;color:var(--ember);letter-spacing:.14em}
+.moment h3{font-size:clamp(24px,3.4vw,34px);line-height:1.06;margin:14px 0 14px;letter-spacing:-.025em}
+.moment p{color:var(--haze);max-width:44ch}
+.moment .stat{margin-top:18px;font-family:var(--mono);font-size:13px;color:var(--haze-dim)}
+.moment .stat b{color:var(--pulse);font-weight:600}
+.viz{
+  border:1px solid var(--line);border-radius:14px;background:var(--panel);
+  height:210px;overflow:hidden;position:relative;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.03);
+}
+.viz canvas{width:100%;height:100%}
+.moment:nth-child(even) .txt{order:2}
+.moment:nth-child(even) .viz{order:1}
+@media(max-width:760px){
+  .moment{grid-template-columns:1fr;gap:26px;padding:44px 0}
+  .moment:nth-child(even) .txt{order:1}
+  .moment:nth-child(even) .viz{order:2}
+}
+
+/* workflow pipeline */
+.flow{display:grid;grid-template-columns:repeat(4,1fr);gap:20px;margin-top:44px}
+.step{
+  position:relative;padding:26px 22px;border:1px solid var(--line);border-radius:14px;
+  background:linear-gradient(180deg,var(--panel),var(--ink-2));
+}
+.step .n{
+  font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--ember);
+  width:30px;height:30px;border-radius:8px;display:grid;place-items:center;font-weight:700;
+}
+.step h3{font-size:19px;margin:16px 0 8px}
+.step p{font-size:15px;color:var(--haze);line-height:1.55}
+.step::after{ /* connector */
+  content:"";position:absolute;right:-13px;top:41px;width:14px;height:2px;background:var(--line-2);z-index:2;
+}
+.step:last-child::after{display:none}
+@media(max-width:860px){
+  .flow{grid-template-columns:1fr 1fr}
+  .step:nth-child(2)::after{display:none}
+}
+@media(max-width:480px){.flow{grid-template-columns:1fr}.step::after{display:none}}
+
+/* principles */
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);
+  border:1px solid var(--line);border-radius:16px;overflow:hidden;margin-top:44px}
+.cell{background:var(--ink-2);padding:30px 26px}
+.cell .mk{width:26px;height:26px;color:var(--ember);margin-bottom:16px}
+.cell h3{font-size:18px;margin-bottom:9px}
+.cell p{font-size:15px;color:var(--haze);line-height:1.55}
+@media(max-width:760px){.grid3{grid-template-columns:1fr}}
+
+/* spec readout */
+.specs{background:var(--ink-2);border-top:1px solid var(--line)}
+.specs .wrap{padding:80px 28px}
+.readout{
+  border:1px solid var(--line);border-radius:14px;overflow:hidden;margin-top:34px;
+  font-family:var(--mono);
+}
+.readout .row{
+  display:flex;justify-content:space-between;gap:20px;align-items:baseline;
+  padding:17px 24px;border-top:1px solid var(--line);font-size:14px;
+}
+.readout .row:first-child{border-top:0}
+.readout .k{color:var(--haze-dim);letter-spacing:.04em}
+.readout .v{color:var(--chalk);font-weight:600;text-align:right}
+.readout .v em{color:var(--pulse);font-style:normal}
+
+/* final cta */
+.finale{padding:110px 0;text-align:center;position:relative;overflow:hidden}
+.finale::before{content:"";position:absolute;inset:auto -20% -40% -20%;height:70%;
+  background:radial-gradient(50% 100% at 50% 100%,rgba(255,154,60,.18),transparent 70%);pointer-events:none}
+.finale .wrap{position:relative}
+.finale h2{font-size:clamp(30px,5.4vw,56px);line-height:1.02}
+.finale p{margin:20px auto 0;max-width:46ch;color:var(--haze);font-size:18px}
+.finale .cta-row{justify-content:center}
+
+/* footer */
+footer{border-top:1px solid var(--line);padding:40px 0;color:var(--haze-dim);font-size:14px}
+footer .wrap{display:flex;justify-content:space-between;align-items:center;gap:20px;flex-wrap:wrap}
+footer .brand{font-size:16px}
+footer .mono{font-family:var(--mono);font-size:12px;letter-spacing:.04em}
+
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <a class="brand" href="#top">
+    <svg class="glyph" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="1.5" y="7" width="21" height="10" rx="2" stroke="#54D2C8" stroke-width="1.5"/>
+      <line x1="8" y1="4" x2="8" y2="20" stroke="#FF9A3C" stroke-width="2.2"/>
+      <circle cx="8" cy="12" r="2.6" fill="#FF9A3C"/>
+    </svg>
+    Monteur
+  </a>
+  <nav>
+    <a class="lnk" href="#magie">Die Magie</a>
+    <a class="lnk" href="#ablauf">Ablauf</a>
+    <a class="lnk" href="#specs">Technik</a>
+    <a class="pill" href="#start">Monteur öffnen</a>
+  </nav>
+</header>
+
+<main id="top">
+
+  <!-- ————— HERO ————— -->
+  <section class="hero">
+    <div class="wrap">
+      <span class="eyebrow">KI-Schnitt für DaVinci Resolve</span>
+      <h1>Footage rein.<br><span class="em">Fertiges Video</span> raus.</h1>
+      <p class="sub">Monteur schneidet dein Material zur Musik — der Bild-Höhepunkt landet auf dem Beat, die Stille sitzt mit Absicht, der Mix trifft −14&nbsp;LUFS. Du gibst die Richtung vor. Resolve öffnest du nur, wenn du willst.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="#start">Monteur öffnen →</a>
+        <a class="btn btn-ghost" href="#magie">Wie es funktioniert</a>
+      </div>
+
+      <div class="stage" aria-label="Der Bild-Höhepunkt schnappt auf den Beat">
+        <div class="stage-head">
+          <span class="dots"><i></i><i></i><i></i></span>
+          <span>KOINZIDENZ · LIVE</span>
+          <span class="tc" id="tc">00:00:04:12</span>
+        </div>
+        <canvas id="coincidence" width="1040" height="300"></canvas>
+        <div class="stage-cap">
+          <span class="hit">■ Bild-Peak</span>
+          <span style="color:var(--pulse)">▲ Beat</span>
+          <span class="grow"></span>
+          <span>Treffer in ±0.25&nbsp;s — der Schnitt fühlt sich getroffen an, nicht zufällig.</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ————— FORMULA ————— -->
+  <section class="formula" id="magie">
+    <div class="wrap">
+      <span class="eyebrow">Die Formel hinter dem Gefühl</span>
+      <div class="expr" style="margin-top:20px">
+        WOW <span class="x">=</span> <b>Koinzidenz</b> <span class="x">×</span> <b>Kontrast</b> <span class="x">×</span> <b>Absicht</b>
+      </div>
+      <p>Beat-genaues Timing allein ist nur die halbe Miete. Monteur macht daraus <em>Treffer</em> — Bild-Höhepunkte auf dem Schlag, warme und kühle Momente im Wechsel, und jede Stille als bewusst gesetzte Umkehr. Deterministisch, lokal, wiederholbar.</p>
+    </div>
+  </section>
+
+  <!-- ————— MOMENTS ————— -->
+  <section class="section">
+    <div class="wrap">
+      <span class="eyebrow kick">Welle 1 · Was den Schnitt zaubert</span>
+      <div class="moments">
+
+        <article class="moment">
+          <div class="txt">
+            <div class="idx">01 · KOINZIDENZ</div>
+            <h3>Der Höhepunkt trifft den Schlag.</h3>
+            <p>Der stärkste Bild-Moment — Sprung, Blick, Bewegung — wird auf den Beat gelegt, nicht in seine Nähe. Der Cut-Lead ist frame-genau, die Wirkung landet im Bauch.</p>
+            <div class="stat">Peak-Koinzidenz auf Demo-Material <b>33 % → 93 %</b></div>
+          </div>
+          <div class="viz"><canvas data-viz="peak"></canvas></div>
+        </article>
+
+        <article class="moment">
+          <div class="txt">
+            <div class="idx">02 · ABSICHT</div>
+            <h3>Der Atem vor dem Drop.</h3>
+            <p>Bewusste Stille bricht die Musik dort, wo es etwas bedeutet — unter Titeln, vor dem Einschlag. Immer mit Träger (O-Ton, SFX), nie versehentlich leer. Über alle Render-Wege identisch.</p>
+            <div class="stat">Stille-Ehrlichkeit <b>0 % → 100 %</b></div>
+          </div>
+          <div class="viz"><canvas data-viz="silence"></canvas></div>
+        </article>
+
+        <article class="moment">
+          <div class="txt">
+            <div class="idx">03 · KONTRAST</div>
+            <h3>Nicht der erste Drop. Der stärkste.</h3>
+            <p>Monteur bewertet jeden Drop nach musikalischem Gewicht — Sprunghöhe der Hüllkurve, Energie der Folgesektion — und pinnt den Klimax auf den, der wirklich trägt.</p>
+            <div class="stat">Klimax auf <b>den stärksten von N</b> Drops</div>
+          </div>
+          <div class="viz"><canvas data-viz="drop"></canvas></div>
+        </article>
+
+        <article class="moment">
+          <div class="txt">
+            <div class="idx">04 · ABSICHT</div>
+            <h3>Shorts, die zurück in den Hook fallen.</h3>
+            <p>Das Song-Fenster endet auf einer Phrasengrenze, die musikalisch zum Anfang zurückführt — und der letzte Shot gibt seine Bewegung an den Hook weiter. Der Loop hat keine hörbare Naht.</p>
+            <div class="stat">Fenster-Ende auf Phrasengrenze · <b>Motion-Handback</b></div>
+          </div>
+          <div class="viz"><canvas data-viz="loop"></canvas></div>
+        </article>
+
+        <article class="moment">
+          <div class="txt">
+            <div class="idx">05 · KONTRAST</div>
+            <h3>Der Mix, der sitzt.</h3>
+            <p>Das Musik-Bett duckt unter jedem Akzent — −6&nbsp;dB unter Impacts, ein sanftes Shelf unter Risern, damit sie in ihren Hit lesen. Der Export läuft durch echtes Two-Pass-Loudnorm.</p>
+            <div class="stat">Integrated Loudness <b>−14 LUFS ±1 LU</b></div>
+          </div>
+          <div class="viz"><canvas data-viz="mix"></canvas></div>
+        </article>
+
+        <article class="moment">
+          <div class="txt">
+            <div class="idx">06 · HANDWERK</div>
+            <h3>Kein Zappeln. Blenden auf dem Grid.</h3>
+            <p>Kein erzeugter Slot unter 0.3&nbsp;s — Sliver werden in ihre Nachbarn absorbiert. Dissolves sitzen exakt auf dem Beat-Raster, Cut-Leads sind fps-bewusst. Der Schnitt trägt auch stummgeschaltet.</p>
+            <div class="stat">Mute-Test bestanden · <b>Frame-Hygiene</b></div>
+          </div>
+          <div class="viz"><canvas data-viz="hygiene"></canvas></div>
+        </article>
+
+      </div>
+    </div>
+  </section>
+
+  <div class="ribbon"></div>
+
+  <!-- ————— WORKFLOW ————— -->
+  <section class="section" id="ablauf">
+    <div class="wrap">
+      <span class="eyebrow kick">Von der SD-Karte zum Post</span>
+      <h2>Vier Schritte. Kein Timeline-Kampf.</h2>
+      <div class="flow">
+        <div class="step"><div class="n">1</div><h3>Footage rein</h3><p>Ordner wählen. Monteur sichtet jeden Clip, findet die Momente und sortiert nach Tageslicht — Tag, Golden Hour, Nacht.</p></div>
+        <div class="step"><div class="n">2</div><h3>Richtung vorgeben</h3><p>Stil, Länge, Plattform. Ein Satz Director's Notes genügt — die Regie im Hintergrund denkt mit, statt jeden Clip einzeln abzuhaken.</p></div>
+        <div class="step"><div class="n">3</div><h3>Iterieren</h3><p>Preview ansehen, im Storyboard tauschen, Grenzen ziehen, neu casten. Sofort sehen, was sich ändert — ohne Re-Render von Hand.</p></div>
+        <div class="step"><div class="n">4</div><h3>Fertig raus</h3><p>Exportieren oder direkt zu YouTube. Willst du feinschleifen, gibt Monteur eine echte Resolve-Timeline aus — mit Titeln, Sound-Lanes und Stille.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ————— PRINCIPLES ————— -->
+  <section class="section">
+    <div class="wrap">
+      <span class="eyebrow kick">Warum Monteur anders ist</span>
+      <h2>Deine Ästhetik. Deine Maschine.</h2>
+      <div class="grid3">
+        <div class="cell">
+          <svg class="mk" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="4" stroke="currentColor" stroke-width="1.6"/><path d="M8 12l3 3 5-6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <h3>Lokal & deterministisch</h3>
+          <p>Gleicher Input, gleicher Schnitt — jedes Mal. Dein Material bleibt auf deiner Maschine, kein Upload in irgendeine Cloud.</p>
+        </div>
+        <div class="cell">
+          <svg class="mk" viewBox="0 0 24 24" fill="none"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6.3 6.3l2.8 2.8M14.9 14.9l2.8 2.8M17.7 6.3l-2.8 2.8M9.1 14.9l-2.8 2.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="12" cy="12" r="2.6" stroke="currentColor" stroke-width="1.6"/></svg>
+          <h3>Claude als Co-Regie</h3>
+          <p>Eine große KI wählt Reihenfolge, Rhythmus und Richtung — nicht ein starres Regelwerk. Filmtheorie, in den Schnitt gegossen.</p>
+        </div>
+        <div class="cell">
+          <svg class="mk" viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="13" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M8 21h8M12 17v4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <h3>Du siehst nie eine Zeile Code</h3>
+          <p>Alles läuft in der App — sichten, schneiden, iterieren, exportieren. Die Kommandozeile bleibt unter der Haube, wo sie hingehört.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ————— SPECS ————— -->
+  <section class="specs" id="specs">
+    <div class="wrap">
+      <span class="eyebrow">Das Kleingedruckte, im Klartext</span>
+      <h2 style="margin-top:14px">Technik</h2>
+      <div class="readout">
+        <div class="row"><span class="k">Peak-Koinzidenz</span><span class="v">±0.25&nbsp;s <em>zum Cut-Lead</em></span></div>
+        <div class="row"><span class="k">Export-Loudness</span><span class="v">−14 LUFS ±1 LU · <em>−1 dBTP</em></span></div>
+        <div class="row"><span class="k">Wiederholungen</span><span class="v">Zero-Repeat <em>garantiert</em></span></div>
+        <div class="row"><span class="k">Verarbeitung</span><span class="v">deterministisch & <em>offline</em></span></div>
+        <div class="row"><span class="k">Formate</span><span class="v">9:16 · 1:1 · 16:9</span></div>
+        <div class="row"><span class="k">Resolve-Brücke</span><span class="v">DaVinci Resolve Studio <em>21+</em></span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ————— FINALE ————— -->
+  <section class="finale" id="start">
+    <div class="wrap">
+      <span class="eyebrow">Bereit zum Schneiden</span>
+      <h2 style="margin-top:16px">Der nächste Post schneidet<br>sich fast von selbst.</h2>
+      <p>Footage rein, Richtung vorgeben, iterieren — und ein Cut kommt raus, der sich wie Magie anfühlt.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="#top">Monteur öffnen →</a>
+        <a class="btn btn-ghost" href="#magie">Noch mal die Magie</a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span class="brand">
+      <svg class="glyph" viewBox="0 0 24 24" fill="none" aria-hidden="true" style="width:18px;height:18px">
+        <rect x="1.5" y="7" width="21" height="10" rx="2" stroke="#54D2C8" stroke-width="1.5"/>
+        <line x1="8" y1="4" x2="8" y2="20" stroke="#FF9A3C" stroke-width="2.2"/>
+        <circle cx="8" cy="12" r="2.6" fill="#FF9A3C"/>
+      </svg>
+      Monteur
+    </span>
+    <span>Der Schnitt, der den Beat trifft.</span>
+    <span class="mono">ENTWURF · 2026</span>
+  </div>
+</footer>
+
+<script>
+(function(){
+  "use strict";
+  var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ————— HERO: the coincidence stage ————— */
+  var c = document.getElementById("coincidence");
+  if(c){
+    var ctx = c.getContext("2d");
+    var W, H, dpr;
+    function size(){
+      dpr = Math.min(window.devicePixelRatio||1, 2);
+      W = c.clientWidth; H = c.clientHeight;
+      c.width = W*dpr; c.height = H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0);
+    }
+    size(); window.addEventListener("resize", size);
+
+    var EMBER="#FF9A3C", PULSE="#54D2C8";
+    var beats = 8;               // beats across the stage
+    var t = 0;                   // animation clock
+    var snapEvery = 2.6;         // seconds per snap cycle
+    var tcEl = document.getElementById("tc");
+
+    function beatX(i){ var pad=64; return pad + (W-2*pad)*(i/(beats-1)); }
+
+    function draw(){
+      ctx.clearRect(0,0,W,H);
+      var midY = H*0.60;
+
+      // faint beat grid
+      for(var i=0;i<beats;i++){
+        var x=beatX(i);
+        ctx.strokeStyle="rgba(38,42,56,.9)";
+        ctx.lineWidth=1;
+        ctx.beginPath();ctx.moveTo(x,24);ctx.lineTo(x,H-40);ctx.stroke();
+        // beat tick marker (cool)
+        ctx.fillStyle="rgba(84,210,200,.55)";
+        ctx.beginPath();
+        ctx.moveTo(x,H-34);ctx.lineTo(x-5,H-24);ctx.lineTo(x+5,H-24);ctx.closePath();ctx.fill();
+      }
+
+      // music waveform (cool, subtle) along the baseline
+      ctx.strokeStyle="rgba(84,210,200,.42)";
+      ctx.lineWidth=2;ctx.beginPath();
+      for(var px=40;px<=W-40;px+=4){
+        var ph=(px/W)*Math.PI*10 + t*1.4;
+        var amp=10+7*Math.sin(px/60);
+        var y=H-58 + Math.sin(ph)*amp*0.5;
+        if(px===40)ctx.moveTo(px,y);else ctx.lineTo(px,y);
+      }
+      ctx.stroke();
+
+      // the picture-peak envelope — a rising curve that crests at "peakX"
+      // peakX drifts, then SNAPS to the nearest beat each cycle.
+      var cyc = (t % snapEvery)/snapEvery;               // 0..1
+      var targetBeat = Math.floor(t/snapEvery) % (beats-1);
+      var fromX, toX = beatX(targetBeat+ (targetBeat%2? 0:1) < beats ? Math.min(targetBeat+2,beats-1) : targetBeat);
+      // choose a stable target beat (interior beats read best)
+      var tb = 2 + (Math.floor(t/snapEvery) % (beats-4));
+      toX = beatX(tb);
+      var driftX = toX + (1-easeOut(Math.min(cyc/0.55,1))) * ((tb%2?1:-1) * 120);
+      var peakX = cyc<0.55 ? driftX : toX;
+      var snapped = cyc>=0.52 && cyc<0.72;
+
+      // envelope glow under the peak
+      var grad = ctx.createRadialGradient(peakX,midY-70,4,peakX,midY-70,120);
+      grad.addColorStop(0,"rgba(255,154,60,"+(snapped?0.5:0.22)+")");
+      grad.addColorStop(1,"rgba(255,154,60,0)");
+      ctx.fillStyle=grad;ctx.fillRect(peakX-120,midY-190,240,240);
+
+      // envelope curve (image intensity)
+      ctx.strokeStyle=EMBER;ctx.lineWidth=2.5;
+      ctx.beginPath();
+      var startX=48, endX=W-48;
+      for(var xx=startX;xx<=endX;xx+=3){
+        var d=(xx-peakX)/78;
+        var env=Math.exp(-d*d);           // gaussian peak
+        var y=midY - env*(120) - 6;
+        if(xx===startX)ctx.moveTo(xx,y);else ctx.lineTo(xx,y);
+      }
+      ctx.stroke();
+
+      // the peak marker (square) sitting on top of the crest
+      var crestY=midY-120-6;
+      // vertical connector when snapped
+      if(cyc>=0.52){
+        ctx.strokeStyle="rgba(255,154,60,"+(snapped?0.9:0.4)+")";
+        ctx.setLineDash([4,5]);ctx.lineWidth=1.5;
+        ctx.beginPath();ctx.moveTo(peakX,crestY);ctx.lineTo(peakX,H-24);ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      // flash ring on the beat at snap
+      if(snapped){
+        var fr=(cyc-0.52)/0.20;
+        ctx.strokeStyle="rgba(255,154,60,"+(1-fr)+")";
+        ctx.lineWidth=2;
+        ctx.beginPath();ctx.arc(peakX,H-24,6+fr*22,0,Math.PI*2);ctx.stroke();
+      }
+      // marker square
+      ctx.fillStyle=EMBER;
+      ctx.save();ctx.translate(peakX,crestY);ctx.rotate(Math.PI/4);
+      var s=snapped?9:7;ctx.fillRect(-s/2,-s/2,s,s);ctx.restore();
+
+      // timecode readout
+      if(tcEl){
+        var frames=Math.floor((t*24)%24);
+        var secs=Math.floor(t)%60;
+        var mins=Math.floor(t/60)%60;
+        tcEl.textContent="00:"+pad2(mins)+":"+pad2(secs)+":"+pad2(frames);
+      }
+    }
+    function pad2(n){return (n<10?"0":"")+n;}
+    function easeOut(x){return 1-Math.pow(1-x,3);}
+
+    if(reduced){ t=2*snapEvery+snapEvery*0.6; draw(); }
+    else{
+      var last=null;
+      requestAnimationFrame(function loop(ts){
+        if(last==null)last=ts;
+        t += (ts-last)/1000; last=ts;
+        draw();
+        requestAnimationFrame(loop);
+      });
+    }
+  }
+
+  /* ————— MOMENT micro-visuals ————— */
+  var vizCanvases = document.querySelectorAll("[data-viz]");
+  var running = [];
+  vizCanvases.forEach(function(cv){
+    var g = cv.getContext("2d");
+    function fit(){
+      var d=Math.min(window.devicePixelRatio||1,2);
+      var w=cv.clientWidth||cv.parentNode.clientWidth, h=cv.clientHeight||210;
+      cv.width=w*d; cv.height=h*d; g.setTransform(d,0,0,d,0,0);
+      cv._w=w; cv._h=h;
+    }
+    fit();
+    running.push({cv:cv,g:g,fit:fit,kind:cv.getAttribute("data-viz")});
+  });
+  window.addEventListener("resize",function(){running.forEach(function(r){r.fit();});});
+
+  var EMBER="#FF9A3C", PULSE="#54D2C8", GRID="rgba(38,42,56,.9)", DIM="rgba(107,113,133,.6)";
+
+  function renderViz(r,t){
+    var g=r.g,w=r.cv._w,h=r.cv._h;g.clearRect(0,0,w,h);
+    var k=r.kind, midY=h*0.5;
+    if(k==="peak"){
+      // beat ticks + a peak square snapping onto center beat
+      for(var i=0;i<6;i++){var x=30+i*((w-60)/5);g.strokeStyle=GRID;g.beginPath();g.moveTo(x,20);g.lineTo(x,h-20);g.stroke();
+        g.fillStyle="rgba(84,210,200,.5)";g.beginPath();g.moveTo(x,h-18);g.lineTo(x-4,h-10);g.lineTo(x+4,h-10);g.closePath();g.fill();}
+      var cx=30+2*((w-60)/5)+((w-60)/5)*(0.5+0.5*Math.sin(t*1.3));
+      var target=30+3*((w-60)/5);
+      var lock=(Math.sin(t*1.3)>0.85);
+      var px=lock?target:cx;
+      g.strokeStyle=EMBER;g.lineWidth=2;g.beginPath();
+      for(var xx=20;xx<w-20;xx+=3){var d=(xx-px)/40;var e=Math.exp(-d*d);g.lineTo(xx,midY-e*46);}g.stroke();
+      g.fillStyle=EMBER;g.save();g.translate(px,midY-46);g.rotate(Math.PI/4);g.fillRect(-5,-5,10,10);g.restore();
+    }else if(k==="silence"){
+      // waveform with a muted gap band
+      var gapS=w*0.42, gapE=w*0.60;
+      g.fillStyle="rgba(255,154,60,.08)";g.fillRect(gapS,16,gapE-gapS,h-32);
+      g.strokeStyle="rgba(255,154,60,.35)";g.setLineDash([3,4]);
+      g.beginPath();g.moveTo(gapS,16);g.lineTo(gapS,h-16);g.moveTo(gapE,16);g.lineTo(gapE,h-16);g.stroke();g.setLineDash([]);
+      g.strokeStyle=PULSE;g.lineWidth=2;
+      for(var b=0;b<2;b++){g.globalAlpha=b?0.35:1;g.beginPath();
+        for(var x=18;x<w-18;x+=3){
+          var inGap=x>gapS&&x<gapE;
+          var amp=inGap?1.5:(14+10*Math.sin(x/13+t*2));
+          var y=midY+Math.sin(x/7+t*3+b)*amp*(inGap?0.2:0.5);
+          if(x===18)g.moveTo(x,y);else g.lineTo(x,y);
+        }g.stroke();}
+      g.globalAlpha=1;
+      g.fillStyle="rgba(107,113,133,.85)";g.font="11px ui-monospace,monospace";
+      g.fillText("STILLE",gapS+6,h-24);
+    }else if(k==="drop"){
+      // several drop bars, strongest highlighted
+      var heights=[.35,.55,.42,.9,.5,.62], n=heights.length, bw=(w-60)/n;
+      var strongest=3, pulse=0.5+0.5*Math.sin(t*3);
+      for(var i2=0;i2<n;i2++){
+        var bx=30+i2*bw+bw*0.2, bh=(h-50)*heights[i2];
+        var on=i2===strongest;
+        g.fillStyle=on?EMBER:"rgba(84,210,200,.30)";
+        if(on)g.globalAlpha=0.6+0.4*pulse;
+        g.fillRect(bx,h-24-bh,bw*0.6,bh);g.globalAlpha=1;
+      }
+      g.fillStyle=EMBER;g.font="11px ui-monospace,monospace";
+      g.fillText("★ stärkster Drop",30,20);
+    }else if(k==="loop"){
+      // a track that wraps: arrow from end back to start
+      g.strokeStyle=GRID;g.lineWidth=2;g.beginPath();g.moveTo(24,midY);g.lineTo(w-24,midY);g.stroke();
+      g.fillStyle=PULSE;g.beginPath();g.arc(24,midY,4,0,7);g.fill();
+      var hp=24+(w-48)*((t*0.25)%1);
+      g.fillStyle=EMBER;g.save();g.translate(hp,midY);g.rotate(Math.PI/4);g.fillRect(-4,-4,8,8);g.restore();
+      // wrap arc
+      g.strokeStyle="rgba(255,154,60,.6)";g.lineWidth=2;g.beginPath();
+      g.moveTo(w-24,midY);g.bezierCurveTo(w-24,midY+46,24,midY+46,24,midY);g.stroke();
+      g.fillStyle="rgba(255,154,60,.6)";g.beginPath();g.moveTo(24,midY);g.lineTo(30,midY+7);g.lineTo(18,midY+7);g.closePath();g.fill();
+      g.fillStyle="rgba(107,113,133,.85)";g.font="11px ui-monospace,monospace";g.fillText("Loop-Naht",w/2-28,midY+40);
+    }else if(k==="mix"){
+      // a bed line that ducks under an accent spike
+      g.strokeStyle="rgba(84,210,200,.5)";g.lineWidth=2;g.beginPath();
+      var accentX=w*0.5, duck;
+      for(var x2=20;x2<w-20;x2+=3){
+        var dd=(x2-accentX)/60; duck=1-0.55*Math.exp(-dd*dd);
+        var y=midY+30 - 18*duck;
+        if(x2===20)g.moveTo(x2,y);else g.lineTo(x2,y);
+      }g.stroke();
+      // accent spike (ember)
+      var sp=0.6+0.4*Math.abs(Math.sin(t*2));
+      g.strokeStyle=EMBER;g.lineWidth=2.5;g.beginPath();
+      g.moveTo(accentX,midY+12);g.lineTo(accentX,midY+12-40*sp);g.stroke();
+      g.fillStyle=EMBER;g.beginPath();g.arc(accentX,midY+12-40*sp,4,0,7);g.fill();
+      g.fillStyle="rgba(107,113,133,.85)";g.font="11px ui-monospace,monospace";
+      g.fillText("−14 LUFS",20,20);g.fillText("Bett duckt −6 dB",accentX-40,h-14);
+    }else if(k==="hygiene"){
+      // clean even clip blocks vs one removed sliver
+      var xs=18, gap=6, blocks=[46,60,52,70,40], y0=midY-16;
+      for(var i3=0;i3<blocks.length;i3++){
+        g.fillStyle="rgba(84,210,200,.28)";g.fillRect(xs,y0,blocks[i3],32);
+        g.strokeStyle="rgba(84,210,200,.5)";g.strokeRect(xs+.5,y0+.5,blocks[i3],32);
+        xs+=blocks[i3]+gap;
+        if(xs>w-40)break;
+      }
+      // a ghost sliver being absorbed (fades)
+      var f=Math.abs(Math.sin(t*1.6));
+      g.globalAlpha=f*0.7;g.fillStyle=EMBER;g.fillRect(w*0.5,y0,3,32);g.globalAlpha=1;
+      g.strokeStyle="rgba(255,154,60,.5)";g.setLineDash([3,3]);g.beginPath();
+      g.moveTo(w*0.5+2,y0+16);g.lineTo(w*0.5+22,y0+16);g.stroke();g.setLineDash([]);
+      g.fillStyle="rgba(255,154,60,.7)";g.font="11px ui-monospace,monospace";g.fillText("Sliver → absorbiert",w*0.5-14,y0-8);
+    }
+  }
+
+  if(reduced){
+    running.forEach(function(r){renderViz(r,1.2);});
+  }else{
+    var start=null;
+    requestAnimationFrame(function loop(ts){
+      if(start==null)start=ts; var t=(ts-start)/1000;
+      running.forEach(function(r){renderViz(r,t);});
+      requestAnimationFrame(loop);
+    });
+  }
+
+  /* smooth scroll for in-page links */
+  document.querySelectorAll('a[href^="#"]').forEach(function(a){
+    a.addEventListener("click",function(e){
+      var id=a.getAttribute("href");if(id.length<2)return;
+      var el=document.querySelector(id);if(!el)return;
+      e.preventDefault();el.scrollIntoView({behavior:reduced?"auto":"smooth",block:"start"});
+    });
+  });
+})();
+</script>
+
+</body>
+</html>
