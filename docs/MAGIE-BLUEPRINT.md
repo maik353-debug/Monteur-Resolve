@@ -155,5 +155,52 @@ markanten Moment, O-Ton-Peak liest über dem Bett (RMS-Assertion im Fenster),
 und Drop-Cuts nachweislich UNVERSETZT. Haus-Garantien: Zero-Repeat, bit-identische
 Pins/Arrangements, "auto"/"short" byte-identisch, Fallback-Byte-Parität.
 
-## Wellen 3–4 — Detail-Synthese folgt vor ihrer Umsetzung
-(grounded im dann-aktuellen Code, analog zur W2-Synthese oben).
+## Welle 3 — Detail-Spezifikation (filmtheoretisch verbindlich; Code-Anker vor Umsetzung verifizieren)
+
+Grundthese W3: Bis hier trifft der Schnitt den TON. Welle 3 macht das BILD kohärent —
+Walter Murchs „Rule of Six" (Emotion > Story > Rhythmus > Eye-Trace > 2D-Ebene >
+3D-Kontinuität) sagt: die untersten Ränge dürfen für die oberen geopfert werden,
+aber wo Emotion/Story/Rhythmus schon sitzen (Welle 1+2), heben Eye-Trace und
+Bildgrammatik das Ergebnis von „richtig getimt" auf „müheloses Sehen".
+
+### 3.1 Eye-Trace-Kontinuität (Blickführung über Schnitte; Murchs Regel 4)
+- Pro Clip die Position des Aufmerksamkeitspunkts schätzen (Bewegungsschwerpunkt /
+  Salienz aus den schon extrahierten Frame-Metriken — kein neues ML, deterministisch
+  und offline; nutze die vorhandenen 64×36-RGB/Metrik-Frames wie daylight.py).
+- Beim Casting/Ordering zweier benachbarter Slots einen sanften Bonus, wenn der
+  Aufmerksamkeitspunkt des ausgehenden Frames nahe dem des eingehenden liegt
+  (Blick springt nicht quer über die Leinwand) — bzw. bewusster, dosierter
+  Kontrast an gewollten Akzenten. Als Scoring-Term im bestehenden Cast/Merge-Pfad,
+  NICHT als harte Regel (Rang 4 weicht Rang 1–3: Peak-on-Beat, Drop, Rhythmus
+  gewinnen immer).
+- Am Peak-on-Beat-/Drop-Cut NIE die Sync opfern — Eye-Trace ist nur Tie-Breaker.
+
+### 3.2 Shot-Size-Grammatik (weit → mittel → nah)
+- Shot-Size pro Clip klassifizieren (Näherung aus Motiv-/Salienz-Größe im Frame:
+  wide/medium/close), offline, deterministisch, only-when-set serialisiert.
+- Grammatik-Bonus beim Ordering: Etablieren (weit) → Entwickeln (mittel) →
+  Zahlen (nah); zwei gleich große Shots hintereinander werden mild bestraft
+  (Ausnahme: bewusste Intensivierung close→close am Klimax). Beim Motorrad:
+  Totale der Straße → Fahrer/Maschine mittel → Detail (Gasgriff, Tacho, Blick).
+- Fügt sich in Hot/Cool-Phrasengruppen (1.6) und die Daylight-Kohärenz ein —
+  Bildgröße ist eine WEITERE Kontrast-Achse, kollidiert nicht mit den bestehenden.
+
+### 3.3 Visuelle Reime / Callbacks
+- Paare visuell verwandter Shots erkennen (ähnliche Komposition/Bewegung/Farbe
+  über die vorhandenen Metriken) und, wo Rhythmus es zulässt, als Reim setzen:
+  ein Motiv am Anfang, sein Echo am Ende (rahmt das Video), oder ein Match-Cut
+  an einer Phrasengrenze. Sparsam und bewusst — ein Reim, der wirkt, nicht zehn,
+  die zur Masche werden. Respektiert Zero-Repeat (ein Reim ist Ähnlichkeit, NICHT
+  derselbe Moment doppelt).
+
+### Abnahme (Welle 3)
+Eye-Trace: messbar geringere durchschnittliche Blickpunkt-Distanz über Schnitte
+ggü. Baseline, OHNE dass ein Peak/Drop-Cut sich verschiebt. Shot-Grammatik:
+messbar weniger gleichgroße Nachbar-Paare, Etablier-Shot vorn. Reime: erkannt und
+gesetzt, Zero-Repeat unverletzt. Haus-Garantien wie immer; Bild-Scoring als
+Tie-Breaker, nie über Sync/Drop/Rhythmus.
+
+## Welle 4 — Detail-Synthese folgt vor ihrer Umsetzung
+Render→Watch→Refine-Selbstschleife (das System misst sein eigenes Preview gegen die
+Abnahme-Metriken der Wellen 1–3 und iteriert, bis sie erfüllt sind) + lernende
+Präferenzen aus Nutzer-Korrekturen. Grounded im Post-W3-Code vor Umsetzung.
