@@ -815,6 +815,40 @@ svg text.axis {
   text-transform: uppercase; max-height: 116px; overflow: hidden;
 }
 
+/* step 3 (Storyboard): act section headers group the board's cards */
+.sb-act-head {
+  flex-basis: 100%; display: flex; align-items: baseline; gap: 10px;
+  margin: 6px 0 0; padding: 2px 0 3px; border-bottom: 1px solid var(--grid);
+  color: var(--accent); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;
+}
+.sb-act-head .act-intent {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  color: var(--ink-2); font-size: 11.5px; font-weight: 500;
+  letter-spacing: 0; text-transform: none;
+}
+
+/* the music-entry note under the story line */
+.sb-music {
+  border-left: 2px solid var(--series-2); background: var(--good-wash);
+  border-radius: 3px; padding: 7px 11px; margin: 8px 0 2px; font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* editable dip titles (the black title cards) */
+button.sb-dip-title {
+  background: none; border: 0; padding: 0; margin: 0; cursor: text;
+  color: inherit; font: inherit; text-align: center; max-width: 100%;
+}
+button.sb-dip-title:hover, button.sb-dip-title:focus-visible {
+  color: var(--accent-soft);
+}
+input.sb-dip-input {
+  width: 100%; padding: 1px 2px; border: 1px solid var(--axis);
+  border-radius: 2px; background: #131316; color: #e8e9ee;
+  font-size: 9.5px; line-height: 1.3; text-align: center;
+}
+
 /* timeline strip: proportional clip blocks over a beat/energy lane.
    Block WIDTH = duration share, background = story-arc phase; black
    notches are the smash-to-black dips; the canvas lane underneath draws
@@ -922,7 +956,7 @@ button.insp-alt:hover, button.insp-alt:focus-visible { border-color: var(--accen
   overflow: hidden;
 }
 
-/* arrange step (2b): palette + sequence lane reuse the storyboard cards */
+/* "Add / reorder scenes" (step 3): palette + order lane reuse the storyboard cards */
 .arr-palette { max-height: 420px; overflow-y: auto; }
 button.sb-card {
   padding: 0; text-align: left; font: inherit; color: inherit; cursor: pointer;
@@ -930,13 +964,6 @@ button.sb-card {
 button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent); }
 .sb-badge.sb-hero { top: 3px; right: 3px; background: var(--accent); color: #fff; }
 .arr-seq { align-items: center; }
-.arr-bound {
-  display: flex; flex-direction: column; align-items: center; gap: 4px;
-  padding: 0 1px;
-}
-.arr-bound .btn { padding: 1px 7px; font-size: 10px; font-family: var(--mono); }
-.arr-bound .btn b { font-weight: 400; margin-right: 4px; }
-.arr-bound .arr-sfx-btn.on { border-color: var(--accent); color: var(--accent); }
 .arr-tools { display: flex; gap: 3px; margin-top: auto; }
 .arr-tools .btn { padding: 1px 7px; font-size: 10.5px; line-height: 1.5; }
 
@@ -1314,8 +1341,8 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
 
     <section id="create" hidden>
       <p class="eyebrow">Create a first cut</p>
-      <p class="wiz-progress" id="wiz-progress">Step 1 of 3 — Your footage</p>
-      <div class="wiz-bar" aria-hidden="true"><span id="wbar-1" class="on"><b>1</b>Footage</span><span id="wbar-2"><b>2</b>Music &amp; options</span><span id="wbar-2b" hidden><b>2b</b>Arrange</span><span id="wbar-3"><b>3</b>Your cut</span></div>
+      <p class="wiz-progress" id="wiz-progress">Step 1 of 4 — Your footage</p>
+      <div class="wiz-bar" aria-hidden="true"><span id="wbar-1" class="on"><b>1</b>Footage</span><span id="wbar-2"><b>2</b>Options</span><span id="wbar-3"><b>3</b>Storyboard</span><span id="wbar-4"><b>4</b>Your cut</span></div>
 
       <section class="wiz-step" id="cre-step-1" aria-labelledby="cre-h1">
         <div class="step-head">
@@ -1382,7 +1409,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           </div>
         </details>
         <div class="wiz-nav">
-          <button class="btn primary" id="cre-next-1" type="button" hidden>Continue to music →</button>
+          <button class="btn primary" id="cre-next-1" type="button" hidden>Continue to options →</button>
         </div>
       </section>
 
@@ -1511,11 +1538,6 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           <span>Claude composes the cut</span>
         </label>
         <p class="help-small" style="max-width: 620px; margin-bottom: 14px;">Claude reads the vision labels and your description, writes a story arc, casts every slot and titles the act breaks &mdash; the engine keeps every cut locked on the music. Runs over your Claude connection (with Claude Code: no extra cost). Sharpest when &ldquo;Let Claude watch your clips&rdquo; ran in step 1 &mdash; Monteur suggests it automatically after a labeled scan.</p>
-        <label class="see-check">
-          <input type="checkbox" id="cre-arrange">
-          <span>Arrange the story myself (optional)</span>
-        </label>
-        <p class="help-small" style="max-width: 620px; margin-bottom: 14px;">Adds one step where you put your scenes in YOUR order and pick the transition at every boundary &mdash; the cut engine then snaps everything to the beat, fills the rest and checks pacing and consistency. Scenes you arrange stay exactly where you put them, even when Claude composes the rest.</p>
         <details class="fine-tune" id="cre-finetune">
           <summary>Fine-tune — clip order, cut timing, repeats</summary>
           <div class="ft-body">
@@ -1552,33 +1574,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         </details>
         <div class="wiz-nav">
           <button class="btn ghost" id="cre-back-2" type="button">← Back</button>
-          <button class="btn primary" id="cre-next-2" type="button">Continue to your cut →</button>
-        </div>
-      </section>
-
-      <section class="wiz-step" id="cre-step-2b" hidden aria-labelledby="cre-h2b">
-        <div class="step-head">
-          <span class="step-chip" aria-hidden="true">2b</span>
-          <div>
-            <h1 id="cre-h2b" tabindex="-1">Arrange your story</h1>
-            <p class="wiz-lead">Put your scenes in the order YOU want &mdash; Monteur keeps that order and still makes it beautiful: every cut lands on the beat, transitions and pacing get checked, and any remaining time fills automatically.</p>
-          </div>
-        </div>
-        <h3 class="fgroup-title">Your scenes</h3>
-        <label class="sr-only" for="cre-arr-filter">Filter scenes</label>
-        <div class="path-row">
-          <input type="text" id="cre-arr-filter" placeholder="Filter scenes &mdash; e.g. kurve, sunset, hero&hellip;" spellcheck="false" autocomplete="off">
-        </div>
-        <p class="help-small">Click a scene to add it to your sequence below. The filter searches the labels Claude wrote &mdash; sharpest after a &ldquo;Let Claude watch your clips&rdquo; scan in step 1.</p>
-        <div class="sb-board arr-palette" id="cre-arr-palette"></div>
-        <p class="scan-note" id="cre-arr-palette-msg" role="status" hidden></p>
-        <h3 class="fgroup-title">Your sequence</h3>
-        <p class="help-small" id="cre-arr-count" role="status" aria-live="polite">No scenes yet &mdash; click a scene above to start your story.</p>
-        <div class="sb-board arr-seq" id="cre-arr-seq"></div>
-        <p class="help-small" id="cre-arr-sfx-hint" hidden>Want a sound accent (impact, whoosh, riser) on a boundary? Set a sound-elements folder in step 2&rsquo;s fine-tune first &mdash; then every boundary offers one.</p>
-        <div class="wiz-nav">
-          <button class="btn ghost" id="cre-arr-back" type="button">&larr; Back</button>
-          <button class="btn primary" id="cre-arr-next" type="button">Build my cut &rarr;</button>
+          <button class="btn primary" id="cre-next-2" type="button">Continue to storyboard →</button>
         </div>
       </section>
 
@@ -1586,21 +1582,28 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         <div class="step-head">
           <span class="step-chip" aria-hidden="true">3</span>
           <div>
-            <h1 id="cre-h3" tabindex="-1">Your cut</h1>
-            <p class="wiz-lead">Monteur lines your best moments up with the beat and writes a small timeline file you can open in DaVinci Resolve.</p>
+            <h1 id="cre-h3" tabindex="-1">Storyboard</h1>
+            <p class="wiz-lead">Your working draft: the story Claude found, the matching clips, the timeline. Reorder, swap, retitle and revise here &mdash; every cut stays on the beat. When it feels right, continue to Your cut.</p>
           </div>
         </div>
         <div class="wiz-nav">
           <button class="btn ghost" id="cre-back-3" type="button">← Back</button>
-          <button class="btn primary" id="cre-build-btn" type="button">Build my cut<span class="spin" aria-hidden="true"></span></button>
+          <button class="btn" id="cre-build-btn" type="button">Rebuild draft<span class="spin" aria-hidden="true"></span></button>
+          <button class="btn primary" id="cre-next-3" type="button" disabled>Continue to your cut →</button>
         </div>
         <div id="cre-build-panel"></div>
         <p class="scan-note" id="cre-build-msg" role="status" hidden></p>
-        <div class="card" id="cre-result" hidden>
-          <h2 id="cre-result-title" tabindex="-1">Your cut is ready</h2>
+        <div id="cre-result" hidden>
+          <h2 class="seg-heading" id="cre-result-title" tabindex="-1" style="margin-top: 14px;">Your working draft</h2>
           <p class="rev-rationale" id="cre-rev-rationale" role="status" hidden></p>
-          <div class="result-stats" id="cre-summary"></div>
-          <ul class="plan-notes" id="cre-notes"></ul>
+          <p class="sb-story" id="cre-sb-story" hidden></p>
+          <p class="sb-music" id="cre-sb-music" hidden></p>
+          <details class="fine-tune" id="cre-notes-block" style="margin: 10px 0 12px;" hidden>
+            <summary id="cre-notes-summary">Engine notes</summary>
+            <div class="rank-body">
+              <ul class="plan-notes" id="cre-notes" style="margin-top: 0;"></ul>
+            </div>
+          </details>
           <div class="preview-block" id="cre-preview">
             <div class="preview-row">
               <button class="btn" id="cre-preview-btn" type="button">Preview this cut<span class="spin" aria-hidden="true"></span></button>
@@ -1610,7 +1613,91 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             <p class="scan-note" id="cre-preview-msg" role="status" hidden></p>
             <video class="preview-player" id="cre-preview-video" controls preload="metadata" hidden></video>
           </div>
-          <div class="resolve-send">
+          <div class="kit-block" id="cre-storyboard" hidden>
+            <p class="seg-heading">Timeline &amp; storyboard</p>
+            <div class="tl-strip" id="cre-strip" hidden>
+              <div class="tl-blocks" id="cre-strip-blocks"></div>
+              <canvas class="tl-lane" id="cre-strip-lane" height="30" aria-hidden="true"></canvas>
+              <p class="tl-legend" id="cre-strip-legend" hidden></p>
+            </div>
+            <div class="sb-board" id="cre-sb-board"></div>
+            <p class="help-small">One card per shot in record order, grouped by act; the black cards are dips to black &mdash; click their text to edit the title. Click a shot &mdash; in the strip above or on its card &mdash; to open the inspector: swap its source, change its boundary, pin it. Pinned shots survive every revision exactly where they are.</p>
+          </div>
+          <details class="fine-tune" id="cre-arrange-tools" style="margin-top: 14px;">
+            <summary>Add / reorder scenes</summary>
+            <div class="rank-body">
+              <p class="help-small">The lane below IS your board order. Move scenes with &uarr; &darr;, remove them with &times;, or click a scanned scene in the palette to add it at the end &mdash; then rebuild: the engine keeps YOUR order, snaps every cut back on the beat and fills the rest.</p>
+              <h3 class="fgroup-title">Your order</h3>
+              <p class="help-small" id="cre-arr-count" role="status" aria-live="polite"></p>
+              <div class="sb-board arr-seq" id="cre-arr-seq"></div>
+              <div class="path-row" style="margin-top: 10px;">
+                <button class="btn primary" id="cre-arr-apply" type="button" disabled>Rebuild with this order<span class="spin" aria-hidden="true"></span></button>
+              </div>
+              <h3 class="fgroup-title">Add a scene</h3>
+              <label class="sr-only" for="cre-arr-filter">Filter scenes</label>
+              <div class="path-row">
+                <input type="text" id="cre-arr-filter" placeholder="Filter scenes &mdash; e.g. kurve, sunset, hero&hellip;" spellcheck="false" autocomplete="off">
+              </div>
+              <p class="help-small">The palette shows every good moment from your scan; click one to append it to your order. The filter searches the labels Claude wrote &mdash; sharpest after a &ldquo;Let Claude watch your clips&rdquo; scan in step 1.</p>
+              <div class="sb-board arr-palette" id="cre-arr-palette"></div>
+              <p class="scan-note" id="cre-arr-palette-msg" role="status" hidden></p>
+            </div>
+          </details>
+          <details class="fine-tune" id="cre-missing" style="margin-top: 14px;">
+            <summary id="cre-missing-summary">What&rsquo;s still missing</summary>
+            <div class="rank-body" id="cre-missing-body"></div>
+          </details>
+          <div class="kit-block" id="cre-revise" hidden>
+            <p class="seg-heading">Revise this cut</p>
+            <p class="help-small">Watch the draft, then say what bothers you in one sentence — German or English. Pin the shots you love in the storyboard above first: they stay exactly where they are.</p>
+            <label class="sr-only" for="cre-rev-brief">Revision instruction</label>
+            <div class="path-row" style="margin-top: 10px;">
+              <input type="text" id="cre-rev-brief" placeholder="zweite Hälfte ruhiger" spellcheck="false" autocomplete="off">
+              <button class="btn" id="cre-rev-btn" type="button">Revise<span class="spin" aria-hidden="true"></span></button>
+            </div>
+            <p class="help-small">Monteur reads regions (&ldquo;zweite Hälfte&rdquo;, &ldquo;ab 1:30&rdquo;), pace (&ldquo;ruhiger&rdquo;, &ldquo;schneller&rdquo;), transitions (&ldquo;harte Schnitte&rdquo;, &ldquo;Blenden&rdquo;) and styles — and tells you exactly how it read your sentence. The draft above is replaced by the revised cut.</p>
+            <div id="cre-rev-panel"></div>
+            <p class="scan-note" id="cre-rev-msg" role="status" hidden></p>
+          </div>
+          <div class="kit-block" id="cre-direct" hidden>
+            <p class="seg-heading">Director&rsquo;s notes — Claude reviews this cut</p>
+            <p class="help-small">A second pair of eyes before you render: Claude judges the planned cut like a seasoned editor — does the opening establish, does the strongest shot land on the drop, do same-scene shots collide, does the imagery track the music&rsquo;s energy — and suggests concrete swaps from your unused material. It runs over your Claude connection (with Claude Code there&rsquo;s no extra API cost) and is sharpest when &ldquo;Let Claude watch your clips&rdquo; ran during the scan.</p>
+            <label class="sr-only" for="cre-dir-notes">Context for the review (optional)</label>
+            <div class="path-row">
+              <input type="text" id="cre-dir-notes" placeholder="What the video is for (optional) — e.g. Instagram teaser for our travel blog" spellcheck="false" autocomplete="off">
+              <button class="btn" id="cre-dir-btn" type="button">Get director&rsquo;s notes<span class="spin" aria-hidden="true"></span></button>
+            </div>
+            <div id="cre-dir-panel"></div>
+            <p class="scan-note" id="cre-dir-msg" role="status" hidden></p>
+            <div id="cre-dir-result" hidden>
+              <div class="result-stats dir-score" id="cre-dir-scorebox"></div>
+              <p class="rev-rationale" id="cre-dir-verdict"></p>
+              <ul class="plan-notes" id="cre-dir-praise"></ul>
+              <div id="cre-dir-issues"></div>
+              <p class="help-small" id="cre-dir-summary" style="margin-top: 8px;"></p>
+              <button class="btn primary" id="cre-dir-apply" type="button" hidden style="margin-top: 10px;">Apply suggestions<span class="spin" aria-hidden="true"></span></button>
+            </div>
+          </div>
+          <div class="wiz-nav" style="margin-top: 18px;">
+            <button class="btn primary" id="cre-next-3b" type="button" disabled>Continue to your cut →</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="wiz-step" id="cre-step-4" hidden aria-labelledby="cre-h4">
+        <div class="step-head">
+          <span class="step-chip" aria-hidden="true">4</span>
+          <div>
+            <h1 id="cre-h4" tabindex="-1">Your cut</h1>
+            <p class="wiz-lead">The finished cut, ready to harvest &mdash; build it as a real timeline in DaVinci Resolve, download the file, export the video, publish. Changing the cut itself lives in the storyboard.</p>
+          </div>
+        </div>
+        <div class="wiz-nav">
+          <button class="btn ghost" id="cre-back-4" type="button">← Back to storyboard</button>
+        </div>
+        <section class="tiles" id="cre-final-tiles" aria-label="Cut summary" style="margin: 14px 0 4px;"></section>
+        <p class="sb-story" id="cre-final-story" hidden></p>
+        <div class="resolve-send">
             <button class="btn primary" id="cre-resolve-btn" type="button">Build in DaVinci Resolve<span class="spin" aria-hidden="true"></span></button>
             <p class="help-small">One click, no file: builds this cut as a timeline directly in the Resolve project you have open — cuts at their true positions, act titles as real Text+, black title gaps, canvas and cine crop applied. Dissolves and the black fade-in/out are the one thing Resolve's scripting cannot create: those live in the downloaded file below (import it when you want them), or drag a quick fade in Resolve by hand.</p>
             <div id="cre-resolve-panel"></div>
@@ -1751,48 +1838,6 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             <li>When Resolve asks where the media lives, point it at your footage folder.</li>
             <li>Press play — then fine-tune from there. FCPXML relinks most easily.</li>
           </ol>
-          <div class="kit-block" id="cre-storyboard" hidden>
-            <p class="seg-heading">Storyboard</p>
-            <div class="tl-strip" id="cre-strip" hidden>
-              <div class="tl-blocks" id="cre-strip-blocks"></div>
-              <canvas class="tl-lane" id="cre-strip-lane" height="30" aria-hidden="true"></canvas>
-              <p class="tl-legend" id="cre-strip-legend" hidden></p>
-            </div>
-            <p class="sb-story" id="cre-sb-story" hidden></p>
-            <div class="sb-board" id="cre-sb-board"></div>
-            <p class="help-small">One card per shot in record order; black cards mark where the cut dips to black for a title. Click a shot — in the strip above or on its card — to open the inspector; pin the shots you love — pinned shots survive every revision exactly where they are.</p>
-          </div>
-          <div class="kit-block" id="cre-revise" hidden>
-            <p class="seg-heading">Revise this cut</p>
-            <p class="help-small">Watch the cut, then say what bothers you in one sentence — German or English. Pin the shots you love in the storyboard above first: they stay exactly where they are.</p>
-            <label class="sr-only" for="cre-rev-brief">Revision instruction</label>
-            <div class="path-row" style="margin-top: 10px;">
-              <input type="text" id="cre-rev-brief" placeholder="zweite Hälfte ruhiger" spellcheck="false" autocomplete="off">
-              <button class="btn" id="cre-rev-btn" type="button">Revise<span class="spin" aria-hidden="true"></span></button>
-            </div>
-            <p class="help-small">Monteur reads regions (&ldquo;zweite Hälfte&rdquo;, &ldquo;ab 1:30&rdquo;), pace (&ldquo;ruhiger&rdquo;, &ldquo;schneller&rdquo;), transitions (&ldquo;harte Schnitte&rdquo;, &ldquo;Blenden&rdquo;) and styles — and tells you exactly how it read your sentence. The result below is replaced by the revised cut.</p>
-            <div id="cre-rev-panel"></div>
-            <p class="scan-note" id="cre-rev-msg" role="status" hidden></p>
-          </div>
-          <div class="kit-block" id="cre-direct" hidden>
-            <p class="seg-heading">Director&rsquo;s notes — Claude reviews this cut</p>
-            <p class="help-small">A second pair of eyes before you render: Claude judges the planned cut like a seasoned editor — does the opening establish, does the strongest shot land on the drop, do same-scene shots collide, does the imagery track the music&rsquo;s energy — and suggests concrete swaps from your unused material. It runs over your Claude connection (with Claude Code there&rsquo;s no extra API cost) and is sharpest when &ldquo;Let Claude watch your clips&rdquo; ran during the scan.</p>
-            <label class="sr-only" for="cre-dir-notes">Context for the review (optional)</label>
-            <div class="path-row">
-              <input type="text" id="cre-dir-notes" placeholder="What the video is for (optional) — e.g. Instagram teaser for our travel blog" spellcheck="false" autocomplete="off">
-              <button class="btn" id="cre-dir-btn" type="button">Get director&rsquo;s notes<span class="spin" aria-hidden="true"></span></button>
-            </div>
-            <div id="cre-dir-panel"></div>
-            <p class="scan-note" id="cre-dir-msg" role="status" hidden></p>
-            <div id="cre-dir-result" hidden>
-              <div class="result-stats dir-score" id="cre-dir-scorebox"></div>
-              <p class="rev-rationale" id="cre-dir-verdict"></p>
-              <ul class="plan-notes" id="cre-dir-praise"></ul>
-              <div id="cre-dir-issues"></div>
-              <p class="help-small" id="cre-dir-summary" style="margin-top: 8px;"></p>
-              <button class="btn primary" id="cre-dir-apply" type="button" hidden style="margin-top: 10px;">Apply suggestions<span class="spin" aria-hidden="true"></span></button>
-            </div>
-          </div>
           <div class="kit-block" id="cre-kit">
             <p class="seg-heading">Publish kit — the upload package for this cut</p>
             <p class="help-small">Uploading a video means writing a title, a description, chapters and tags, and hunting for a thumbnail — the kit drafts all of that from the cut above so publishing takes minutes, not an evening. It writes one <code>publish.md</code> with title suggestions and a short description (drafted by Claude when your Anthropic API key is set or Claude Code — the <code>claude</code> command — is installed; otherwise from an honest offline template that says so), YouTube chapter timestamps taken from the cut&rsquo;s own scene changes, a ready-to-paste tag list, and real thumbnail stills of your strongest moments in a <code>thumbs/</code> folder. A planned SFX layer adds its sound-design shopping list with Artlist search links.</p>
@@ -1802,7 +1847,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
               <button class="btn ghost" id="cre-browse-kit" type="button">Browse&hellip;</button>
               <button class="btn" id="cre-kit-btn" type="button">Write publish kit<span class="spin" aria-hidden="true"></span></button>
             </div>
-            <p class="help-small">Where the kit lands: only publish.md and thumbs/ are written into this folder (it&rsquo;s created if needed) — a publish folder next to your footage works well. &ldquo;Write publish kit&rdquo; drafts from the cut exactly as shown above, so revise first, publish after.</p>
+            <p class="help-small">Where the kit lands: only publish.md and thumbs/ are written into this folder (it&rsquo;s created if needed) — a publish folder next to your footage works well. &ldquo;Write publish kit&rdquo; drafts from the cut exactly as it stands, so revise in the storyboard first, publish after.</p>
             <div id="cre-kit-panel"></div>
             <p class="scan-note" id="cre-kit-msg" role="status" hidden></p>
             <div id="cre-kit-result" hidden>
@@ -1814,7 +1859,6 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
               </details>
             </div>
           </div>
-        </div>
       </section>
 
       <aside class="inspector" id="cre-inspector" hidden aria-label="Shot inspector">
@@ -3746,9 +3790,9 @@ var cre = {
   format: "fcpxml",       // download format
   draftId: null,          // the saved draft this cut updates on re-save (null = new)
   aiCutTouched: false,    // has the user decided about "Claude composes the cut"?
-  arrange: {              // the optional Arrange step (2b)
-    on: false,            // "Arrange the story myself" opted in?
-    seq: []               // ordered scenes: {clip, start, end, label, after, sfx}
+  arrange: {              // step 3's "Add / reorder scenes" section
+    seq: [],              // ordered scenes: {clip, start, end, label, after, sfx}
+    dirty: false          // true once the user edited the order (rebuild pending)
   }
 };
 
@@ -3987,6 +4031,11 @@ function setBuildBusy(on) {
   btn.classList.toggle("busy", on);
   btn.disabled = on;
   $("cre-back-3").disabled = on;
+  $("cre-arr-apply").disabled = on || !cre.arrange.dirty;
+  // mid-build the draft is in flux — the harvest step waits for it
+  var gate = on || !rev.planJson;
+  $("cre-next-3").disabled = gate;
+  $("cre-next-3b").disabled = gate;
 }
 function setRankBusy(on) {
   var btn = $("cre-rank-btn");
@@ -4088,31 +4137,31 @@ function creNote(id, message, isError) {
 }
 
 function creShowStep(n, focusHeading) {
+  // each step owns its poll loops — leaving the step stops them
   if (n !== 1 && scanPanel.running()) { scanPanel.stop(); setScanBusy(false); }
   if (n !== 1 && coveragePanel.running()) { coveragePanel.stop(); setCoverageBusy(false); }
   if (n !== 2 && rankPanel.running()) { rankPanel.stop(); setRankBusy(false); }
+  // step 3 (Storyboard) owns the draft loops: build, revise, review, preview
   if (n !== 3 && buildPanel.running()) { buildPanel.stop(); setBuildBusy(false); }
-  if (n !== 3 && kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
   if (n !== 3 && revisePanel.running()) { revisePanel.stop(); setReviseBusy(false); }
   if (n !== 3 && directPanel.running()) { directPanel.stop(); setDirectBusy(false); setDirectApplyBusy(false); }
-  if (n !== 3 && resolveBuildPanel.running()) { resolveBuildPanel.stop(); setResolveBuildBusy(false); }
-  if (n !== 3 && renderPanel.running()) { renderPanel.stop(); setRenderBusy(false); }
   if (n !== 3 && previewPanel.running()) { previewPanel.stop(); setPreviewBusy(false); }
-  if (n !== 3 && exportPanel.running()) { exportPanel.stop(); setExportBusy(false); }
+  // step 4 (Your cut) owns the harvest loops: Resolve, render, export, kit
+  if (n !== 4 && kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
+  if (n !== 4 && resolveBuildPanel.running()) { resolveBuildPanel.stop(); setResolveBuildBusy(false); }
+  if (n !== 4 && renderPanel.running()) { renderPanel.stop(); setRenderBusy(false); }
+  if (n !== 4 && exportPanel.running()) { exportPanel.stop(); setExportBusy(false); }
   cre.step = n;
-  var names = { 1: "Your footage", 2: "Music & options", "2b": "Arrange your story", 3: "Your cut" };
-  $("wiz-progress").textContent = n === "2b"
-    ? "Step 2b — Arrange your story"
-    : "Step " + n + " of 3 — " + names[n];
-  // "2b" is the optional Arrange step between 2 and 3 (its wbar chip is
-  // only visible while the opt-in checkbox is on; see setArrangeOn).
-  var steps = [1, 2, "2b", 3];
+  var names = { 1: "Your footage", 2: "Music & options", 3: "Storyboard", 4: "Your cut" };
+  $("wiz-progress").textContent = "Step " + n + " of 4 — " + names[n];
+  var steps = [1, 2, 3, 4];
   var rank = steps.indexOf(n);
   steps.forEach(function (i, at) {
     $("cre-step-" + i).hidden = i !== n;
     $("wbar-" + i).className = at <= rank ? "on" : "";
   });
-  if (n === "2b") arrRender();
+  if (n !== 3) closeInspector(); // the drawer belongs to the storyboard
+  if (n === 3 && $("cre-arrange-tools").open) arrRender();
   if (focusHeading) $("cre-h" + n).focus();
 }
 
@@ -4209,6 +4258,7 @@ function scanFolder() {
   cre.result = null; // footage changed — any previous build is stale
   cre.draftId = null; // ...a re-save after this is a NEW draft, not an update
   cre.arrange.seq = []; // ...and an arranged sequence points at old scenes
+  cre.arrange.dirty = false;
   creResetRevise(); // ...and so is any plan the revision loop still holds
   $("cre-result").hidden = true;
   $("cre-find-msg").hidden = true;
@@ -4708,30 +4758,61 @@ $("cre-next-1").addEventListener("click", function () { creShowStep(2, true); })
 $("cre-back-2").addEventListener("click", function () { creShowStep(1, true); });
 $("cre-next-2").addEventListener("click", function () {
   if (!creValidateStep2()) return;
-  creShowStep(cre.arrange.on ? "2b" : 3, true);
+  // entering the storyboard runs the build — the result IS the working draft
+  creShowStep(3, true);
+  startBuild(null);
 });
-$("cre-back-3").addEventListener("click", function () {
-  creShowStep(cre.arrange.on ? "2b" : 2, true);
-});
-
-/* ---- step 2b: arrange the story yourself (optional) --------------------
-   Opt-in via the step-2 checkbox. TOP: a palette of every scanned moment
-   as a storyboard card (thumb via /api/thumb, duration, label, hero badge)
-   with a label filter; click a card to APPEND it to the sequence. BOTTOM:
-   the ordered sequence with ↑/↓/remove per scene and, between consecutive
-   scenes, a boundary control cycling cut → dissolve → smash plus an
-   optional sfx cue (only when a sound-elements folder is set). The
-   sequence goes into the build payload as `arrangement` (creBuildBody)
-   and into drafts via the settings — the engine keeps the order and
-   reports consistency under "arrangement:" notes. */
-
-function setArrangeOn(on) {
-  cre.arrange.on = on;
-  $("cre-arrange").checked = on;
-  $("wbar-2b").hidden = !on;
-  $("cre-next-2").innerHTML = on ? "Continue to arrange →" : "Continue to your cut →";
+$("cre-back-3").addEventListener("click", function () { creShowStep(2, true); });
+function creGoHarvest() {
+  if (!cre.result || !rev.planJson) return;
+  creShowStep(4, true);
 }
-$("cre-arrange").addEventListener("change", function () { setArrangeOn(this.checked); });
+$("cre-next-3").addEventListener("click", creGoHarvest);
+$("cre-next-3b").addEventListener("click", creGoHarvest);
+$("cre-back-4").addEventListener("click", function () { creShowStep(3, true); });
+
+/* ---- step 3: "Add / reorder scenes" — the board's order editor ---------
+   The palette + lane from the old Arrange step, re-homed into the
+   storyboard as a collapsible section. The LANE always mirrors the
+   current board order: until the user edits, it shows the plan's entries
+   (derived live); the first edit materializes that order as
+   cre.arrange.seq (dirty). "Rebuild with this order" re-runs the build
+   WITH the arrangement derived from the board — the engine keeps the
+   order, snaps every cut to the beat and fills the rest. Removing a card
+   rebuilds with that moment excluded from the arrangement. The sequence
+   rides in every later rebuild and in drafts (settings.arrangement); the
+   engine reports consistency under "arrangement:" notes. Boundaries are
+   the inspector's job now — the derived scenes carry the board's current
+   transitions so a rebuild keeps them. */
+
+/* the current board order as arrangement scenes ({clip, start, end,
+   label, after}) — the "after" is the transition INTO the next shot */
+function seqFromPlan() {
+  var entries = planSortedEntries();
+  return entries.map(function (entry, i) {
+    return {
+      clip: String(entry.clip_path || ""),
+      start: entry.source_start || 0,
+      end: entry.source_end || 0,
+      label: String(entry.label || ""),
+      after: i + 1 < entries.length ? boundaryState(i + 1) : "cut",
+      sfx: ""
+    };
+  });
+}
+
+function arrLaneItems() {
+  return cre.arrange.dirty ? cre.arrange.seq : seqFromPlan();
+}
+
+/* the first edit turns the derived board order into THE user arrangement */
+function arrEnsureSeq() {
+  if (!cre.arrange.dirty) {
+    cre.arrange.seq = seqFromPlan();
+    cre.arrange.dirty = true;
+  }
+  return cre.arrange.seq;
+}
 
 /* every scanned moment, flattened for the palette */
 function arrMoments() {
@@ -4793,56 +4874,13 @@ function arrPaletteCard(moment) {
   if (moment.label) meta.appendChild(el("span", "sb-label", moment.label));
   card.appendChild(meta);
   card.addEventListener("click", function () {
-    cre.arrange.seq.push({
+    arrEnsureSeq().push({
       clip: moment.clip, start: moment.start, end: moment.end,
       label: moment.label, after: "cut", sfx: ""
     });
     arrRender();
   });
   return card;
-}
-
-var ARR_TRANSITIONS = ["cut", "dissolve", "smash"];
-var ARR_TRANS_GLYPHS = { cut: "│", dissolve: "◩", smash: "■" };
-var ARR_SFX_KINDS = ["", "impact", "whoosh", "riser"];
-
-/* the boundary control between sequence scenes i and i+1 */
-function arrBoundary(item, index) {
-  var bound = el("div", "arr-bound");
-  var trans = el("button", "btn ghost small");
-  trans.type = "button";
-  function paintTrans() {
-    clear(trans);
-    trans.appendChild(el("b", null, ARR_TRANS_GLYPHS[item.after] || "│"));
-    trans.appendChild(document.createTextNode(item.after));
-    trans.setAttribute("aria-label", "Transition after scene " + (index + 1) +
-      ": " + item.after + " — click to change");
-    trans.title = "Transition into the next scene — cut → dissolve → smash to black";
-  }
-  paintTrans();
-  trans.addEventListener("click", function () {
-    item.after = ARR_TRANSITIONS[(ARR_TRANSITIONS.indexOf(item.after) + 1) % ARR_TRANSITIONS.length];
-    paintTrans();
-  });
-  bound.appendChild(trans);
-  if ($("cre-elements").value.trim()) {
-    var sfx = el("button", "btn ghost small arr-sfx-btn");
-    sfx.type = "button";
-    function paintSfx() {
-      sfx.textContent = item.sfx ? "♪ " + item.sfx : "♪ none";
-      sfx.classList.toggle("on", !!item.sfx);
-      sfx.setAttribute("aria-label", "Sound accent after scene " + (index + 1) +
-        ": " + (item.sfx || "none") + " — click to change");
-      sfx.title = "Sound accent on this boundary — impact, whoosh or riser from your elements folder";
-    }
-    paintSfx();
-    sfx.addEventListener("click", function () {
-      item.sfx = ARR_SFX_KINDS[(ARR_SFX_KINDS.indexOf(item.sfx) + 1) % ARR_SFX_KINDS.length];
-      paintSfx();
-    });
-    bound.appendChild(sfx);
-  }
-  return bound;
 }
 
 /* one sequence card with ↑ / ↓ / remove controls */
@@ -4867,17 +4905,17 @@ function arrSeqCard(item, index, total) {
     tools.appendChild(btn);
   }
   tool("↑", "Move earlier", index === 0, function () {
-    var seq = cre.arrange.seq;
+    var seq = arrEnsureSeq();
     seq.splice(index - 1, 0, seq.splice(index, 1)[0]);
     arrRender();
   });
   tool("↓", "Move later", index === total - 1, function () {
-    var seq = cre.arrange.seq;
+    var seq = arrEnsureSeq();
     seq.splice(index + 1, 0, seq.splice(index, 1)[0]);
     arrRender();
   });
   tool("×", "Remove", false, function () {
-    cre.arrange.seq.splice(index, 1);
+    arrEnsureSeq().splice(index, 1);
     arrRender();
   });
   meta.appendChild(tools);
@@ -4885,18 +4923,19 @@ function arrSeqCard(item, index, total) {
   return card;
 }
 
-/* the live counter under "Your sequence" */
-function arrCounterText() {
-  var n = cre.arrange.seq.length;
-  if (!n) return "No scenes yet — click a scene above to start your story.";
-  // honest estimate: the pace (or a per-style guess) per scene, rounded
-  var base = cre.pace || ({ auto: 2, travel: 2, wedding: 3, music_video: 1.5, trailer: 2 })[cre.style] || 2;
-  var lo = Math.max(1, Math.round(n * base * 0.8));
-  var hi = Math.max(lo + 1, Math.round(n * base * 1.6));
-  var text = n + (n === 1 ? " scene" : " scenes") + " ≈ " + lo + "–" + hi + "s at your pace";
-  var target = cre.lenMode === "target" ? targetLen() : 0;
-  if (target) text += " — target " + target + "s: the rest fills automatically.";
-  else text += " — the whole song: the rest fills automatically.";
+/* the live counter over the order lane */
+function arrCounterText(n) {
+  if (!n) {
+    return rev.planJson
+      ? "No scenes in your order — a rebuild plans freely again."
+      : "No draft yet — the board order appears here after the build.";
+  }
+  var text = n + (n === 1 ? " scene" : " scenes");
+  if (cre.arrange.dirty) {
+    text += " — your edited order. Rebuild to apply it; the engine keeps the order and fills the rest.";
+  } else {
+    text += " — the current board order. Move, remove or add scenes to change the story.";
+  }
   return text;
 }
 
@@ -4913,7 +4952,7 @@ function arrRender() {
   });
   var msg = $("cre-arr-palette-msg");
   if (!moments.length) {
-    creNote("cre-arr-palette-msg", "No scanned scenes yet — scan your footage in step 1 first.");
+    creNote("cre-arr-palette-msg", "No scanned scenes in this session — reordering below still works; scan in step 1 to fill the palette.");
   } else if (!shown) {
     creNote("cre-arr-palette-msg", "No scene matches “" + query + "” — clear the filter to see all " + moments.length + ".");
   } else {
@@ -4921,20 +4960,24 @@ function arrRender() {
   }
   var lane = $("cre-arr-seq");
   clear(lane);
-  var seq = cre.arrange.seq;
+  var seq = arrLaneItems();
   seq.forEach(function (item, index) {
     lane.appendChild(arrSeqCard(item, index, seq.length));
-    if (index < seq.length - 1) lane.appendChild(arrBoundary(item, index));
   });
-  $("cre-arr-count").textContent = arrCounterText();
-  $("cre-arr-sfx-hint").hidden = !seq.length || !!$("cre-elements").value.trim();
+  $("cre-arr-count").textContent = arrCounterText(seq.length);
+  $("cre-arr-apply").disabled = !cre.arrange.dirty || buildPanel.running();
 }
 $("cre-arr-filter").addEventListener("input", function () { arrRender(); });
-$("cre-arr-back").addEventListener("click", function () { creShowStep(2, true); });
-$("cre-arr-next").addEventListener("click", function () {
-  if (!creValidateStep2()) return;
-  creShowStep(3, true);
-  startBuild(null);
+$("cre-arrange-tools").addEventListener("toggle", function () {
+  if ($("cre-arrange-tools").open) arrRender();
+});
+$("cre-arr-apply").addEventListener("click", function () {
+  if (!cre.arrange.dirty || buildPanel.running()) return;
+  // rebuild WITH the arrangement derived from the edited board order
+  startBuild(function () {
+    cre.arrange.dirty = false; // the new plan embodies this order now
+    if ($("cre-arrange-tools").open) arrRender();
+  });
 });
 
 /* ---- step 3: build & download ---- */
@@ -4970,11 +5013,11 @@ function creBuildBody() {
     body.elements = elements;
     body.sfx = true;
   }
-  if (cre.arrange.on && cre.arrange.seq.length) {
-    // the Arrange step's sequence — end/label are display extras the
+  if (cre.arrange.seq.length) {
+    // the storyboard's edited order — end/label are display extras the
     // server tolerates (they let a resumed draft redraw the lane). The
-    // LAST scene sends no "after": its boundary control is never shown,
-    // so the style keeps its own habits toward the auto-filled rest.
+    // LAST scene sends no "after": its boundary faces the auto-filled
+    // rest, so the style keeps its own habits there.
     var last = cre.arrange.seq.length - 1;
     body.arrangement = cre.arrange.seq.map(function (item, index) {
       var scene = {
@@ -4989,23 +5032,32 @@ function creBuildBody() {
 }
 
 function renderCreResult(data) {
-  var summary = $("cre-summary");
-  clear(summary);
   var plan = data.plan || {};
+  // step 4's summary tiles — cuts / length / tempo, plus the story line
+  var tiles = $("cre-final-tiles");
+  clear(tiles);
   var stats = [
-    [String(plan.cuts || 0), plan.cuts === 1 ? "cut" : "cuts"],
-    [fmtClock(plan.duration || 0), "long"]
+    ["Cuts", String(plan.cuts || 0)],
+    ["Length", fmtClock(plan.duration || 0)]
   ];
-  if (plan.tempo) stats.push([String(Math.round(plan.tempo)), "BPM tempo"]); // no music → no tempo to show
+  if (plan.tempo) stats.push(["Tempo", Math.round(plan.tempo) + " BPM"]); // no music → no tempo tile
   stats.forEach(function (pair) {
-    var stat = el("div", "result-stat");
-    stat.appendChild(el("div", "rs-num", pair[0]));
-    stat.appendChild(el("div", "rs-label", pair[1]));
-    summary.appendChild(stat);
+    var tile = el("div", "tile");
+    tile.appendChild(el("div", "tile-label", pair[0]));
+    tile.appendChild(el("div", "tile-value", pair[1]));
+    tiles.appendChild(tile);
   });
+  var story = sbStoryLine((plan.notes || []).map(String));
+  $("cre-final-story").textContent = story ? "Story — " + story : "";
+  $("cre-final-story").hidden = !story;
+  // step 3's engine notes, collapsed under the story header
   var notes = $("cre-notes");
   clear(notes);
   (plan.notes || []).forEach(function (note) { notes.appendChild(el("li", null, note)); });
+  var noteCount = (plan.notes || []).length;
+  $("cre-notes-summary").textContent =
+    "Engine notes — " + noteCount + (noteCount === 1 ? " line" : " lines");
+  $("cre-notes-block").hidden = noteCount === 0;
   if (data.vision_error) {
     creNote("cre-build-msg", "Claude couldn't watch the clips: " + String(data.vision_error) + " The cut still built without labels.");
   }
@@ -5017,6 +5069,9 @@ function renderCreResult(data) {
   $("cre-export-result").hidden = true;
   prepareExportRow();
   $("cre-result").hidden = false;
+  // the harvest step (4: Your cut) is reachable once a draft exists
+  $("cre-next-3").disabled = false;
+  $("cre-next-3b").disabled = false;
 }
 
 function startBuild(andThen) {
@@ -5289,9 +5344,9 @@ function restoreWizardFromDraft(draft) {
     $("cre-ai-cut").checked = s.ai_cut;
     cre.aiCutTouched = true; // a restored decision beats the scan suggestion
   }
-  // the Arrange step's sequence survives the reload with the draft
+  // the storyboard's edited order survives the reload with the draft
+  cre.arrange.dirty = false;
   if (Array.isArray(s.arrangement) && s.arrangement.length) {
-    setArrangeOn(true);
     cre.arrange.seq = s.arrangement.map(function (item) {
       return {
         clip: String(item.clip || ""),
@@ -5303,7 +5358,6 @@ function restoreWizardFromDraft(draft) {
       };
     });
   } else {
-    setArrangeOn(false);
     cre.arrange.seq = [];
   }
   var lead = parseFloat(s.cut_lead);
@@ -5543,7 +5597,66 @@ function setBriefText(text) {
 $("cre-brief").addEventListener("input", function () { $("cre-cov-brief").value = this.value; });
 $("cre-cov-brief").addEventListener("input", function () { $("cre-brief").value = this.value; });
 
+/* the last coverage result — step 3's "what's missing" hook re-shows it */
+var covState = { last: null };
+
+/* the missing-shot cards ("Must" first) — shared by the step-1 panel and
+   the step-3 hook */
+function covMissingCards(missing) {
+  var cards = el("div", "cov-cards");
+  missing.filter(function (m) { return m.priority === "must"; })
+    .concat(missing.filter(function (m) { return m.priority !== "must"; }))
+    .forEach(function (m) {
+      var isMust = m.priority === "must";
+      var card = el("div", isMust ? "cov-card must" : "cov-card nice");
+      var top = el("div", null);
+      top.appendChild(el("span", isMust ? "cov-badge must" : "cov-badge nice", isMust ? "Must" : "Nice"));
+      top.appendChild(el("span", "cov-shot", String(m.shot || "")));
+      card.appendChild(top);
+      if (m.why) card.appendChild(el("div", "cov-why", String(m.why)));
+      if (m.tip) card.appendChild(el("div", "cov-tip", "How: " + String(m.tip)));
+      cards.appendChild(card);
+    });
+  return cards;
+}
+
+/* step 3's hook: the coverage result's missing cards, collapsed next to
+   the board — or a calm pointer back to step 1 when none ran yet */
+function renderMissingHook() {
+  var body = $("cre-missing-body");
+  clear(body);
+  var cov = covState.last;
+  if (!cov) {
+    $("cre-missing-summary").textContent = "What’s still missing";
+    var hint = el("p", "help-small");
+    hint.appendChild(document.createTextNode("No shot list yet — run "));
+    var link = el("button", "link-btn", "Check my coverage in step 1");
+    link.type = "button";
+    link.addEventListener("click", function () {
+      creShowStep(1, false);
+      $("cre-coverage").open = true;
+      $("cre-cov-brief").focus();
+    });
+    hint.appendChild(link);
+    hint.appendChild(document.createTextNode(" — Claude lists the shots your footage still needs, before you cut anything."));
+    body.appendChild(hint);
+    return;
+  }
+  var missing = cov.missing || [];
+  $("cre-missing-summary").textContent = missing.length
+    ? "What’s still missing — " + missing.length + (missing.length === 1 ? " shot" : " shots")
+    : "What’s still missing — nothing";
+  if (cov.verdict) body.appendChild(el("p", "help-small", String(cov.verdict)));
+  if (!missing.length) {
+    body.appendChild(el("p", "cov-summary", "Nothing missing — this footage can carry the cut."));
+    return;
+  }
+  body.appendChild(covMissingCards(missing));
+}
+
 function renderCoverage(cov) {
+  covState.last = cov;
+  renderMissingHook(); // keep step 3's hook in sync with the fresh result
   var host = $("cre-cov-results");
   clear(host);
   var basics = cov.basics || {};
@@ -5572,21 +5685,7 @@ function renderCoverage(cov) {
 
   var missing = cov.missing || [];
   if (missing.length) {
-    var cards = el("div", "cov-cards");
-    missing.filter(function (m) { return m.priority === "must"; })
-      .concat(missing.filter(function (m) { return m.priority !== "must"; }))
-      .forEach(function (m) {
-        var isMust = m.priority === "must";
-        var card = el("div", isMust ? "cov-card must" : "cov-card nice");
-        var top = el("div", null);
-        top.appendChild(el("span", isMust ? "cov-badge must" : "cov-badge nice", isMust ? "Must" : "Nice"));
-        top.appendChild(el("span", "cov-shot", String(m.shot || "")));
-        card.appendChild(top);
-        if (m.why) card.appendChild(el("div", "cov-why", String(m.why)));
-        if (m.tip) card.appendChild(el("div", "cov-tip", "How: " + String(m.tip)));
-        cards.appendChild(card);
-      });
-    host.appendChild(cards);
+    host.appendChild(covMissingCards(missing));
   } else {
     host.appendChild(el("p", "cov-summary", "Nothing missing — this footage can carry the cut."));
   }
@@ -5667,7 +5766,14 @@ function creResetRevise() {
   clear($("cre-sb-board"));
   $("cre-storyboard").hidden = true;
   $("cre-sb-story").hidden = true;
+  $("cre-sb-music").hidden = true;
+  $("cre-notes-block").hidden = true;
   $("cre-revise").hidden = true;
+  // no plan — the harvest step has nothing to harvest
+  $("cre-next-3").disabled = true;
+  $("cre-next-3b").disabled = true;
+  clear($("cre-final-tiles"));
+  $("cre-final-story").hidden = true;
   $("cre-rev-rationale").hidden = true;
   $("cre-rev-msg").hidden = true;
   $("cre-resolve-msg").hidden = true;
@@ -5725,19 +5831,109 @@ function sbActTitles(notes) {
   return acts;
 }
 
-function sbActChip(number, text) {
-  var chip = el("div", "sb-act", "Act " + number + (text ? " — " + text : ""));
-  chip.title = "Act " + number + (text ? ": " + text : "");
-  return chip;
+/* the music-entry note ("music enters at 12.0s …" / "music window: …") */
+function sbMusicLine(notes) {
+  for (var i = 0; i < notes.length; i++) {
+    var note = String(notes[i]);
+    if (/music enters|music window/i.test(note)) return note;
+  }
+  return "";
+}
+
+/* an act section header: the board groups its cards under these */
+function sbActHeader(number, text) {
+  var head = el("div", "sb-act-head");
+  head.appendChild(el("span", null, "Act " + number));
+  if (text) head.appendChild(el("span", "act-intent", text));
+  head.title = "Act " + number + (text ? ": " + text : "");
+  return head;
 }
 
 function sbDipCard(dipIndex, dip, titles) {
   var card = el("div", "sb-dip");
   var title = String((titles && titles[dipIndex]) || "").trim();
-  card.appendChild(el("span", "sb-dip-title", title || "to black"));
+  var btn = el("button", "sb-dip-title", title || "to black");
+  btn.type = "button";
+  btn.setAttribute("aria-label", "Edit the title on black dip " + (dipIndex + 1) +
+    (title ? " — currently “" + title + "”" : ""));
+  btn.addEventListener("click", function () {
+    startDipTitleEdit(btn, dipIndex, title);
+  });
+  card.appendChild(btn);
   card.appendChild(el("span", "sb-dip-dur", fmt1(dip[1] || 0) + "s"));
-  card.title = title ? "Title card: “" + title + "”" : "Dip to black";
+  card.title = title
+    ? "Title card: “" + title + "” — click the text to edit it"
+    : "Dip to black — click the text to add a title";
   return card;
+}
+
+/* ---- step 3: dip titles are editable text (pure plan surgery) ----------
+   Clicking a dip card's text swaps it for a tiny input; Enter/blur sends
+   {plan_json, dip, title} to POST /api/plan/adjust — the boundary
+   control's endpoint grew a title mode: title_texts surgery only, no
+   re-plan, rendered like an export so the plan replaces in place. */
+
+function startDipTitleEdit(btn, dipIndex, current) {
+  if (buildPanel.running() || revisePanel.running() || directPanel.running()) return;
+  var input = document.createElement("input");
+  input.type = "text";
+  input.className = "sb-dip-input";
+  input.value = current;
+  input.maxLength = 80;
+  input.setAttribute("aria-label", "Title text for black dip " + (dipIndex + 1));
+  var done = false;
+  function finish(commit) {
+    if (done) return;
+    done = true;
+    var text = input.value.trim();
+    input.replaceWith(btn);
+    if (commit && text !== current) applyDipTitle(dipIndex, text);
+  }
+  input.addEventListener("keydown", function (e) {
+    e.stopPropagation(); // the inspector's shortcuts must not fire mid-edit
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener("blur", function () { finish(true); });
+  btn.replaceWith(input);
+  input.focus();
+  input.select();
+}
+
+function applyDipTitle(dipIndex, text) {
+  if (!rev.planJson) return;
+  var built = (cre.result && cre.result.body) || {};
+  var body = {
+    plan_json: rev.planJson, dip: dipIndex, title: text,
+    fps: built.fps || fpsFrom($("cre-fps")), format: cre.format
+  };
+  if (built.audio) body.audio = built.audio;
+  if (built.canvas) body.canvas = built.canvas;
+  api("/api/plan/adjust", { method: "POST", body: body }).then(function (result) {
+    // same handling as the boundary control: the adjusted plan replaces
+    // the current one, exactly like an export (adjust never re-listens)
+    var prevTempo = (cre.result && cre.result.data && cre.result.data.plan &&
+      cre.result.data.plan.tempo) || 0;
+    if (prevTempo && result.plan && !result.plan.tempo) result.plan.tempo = prevTempo;
+    rev.planJson = (result && result.plan_json) || rev.planJson;
+    var exportBody = { plan_json: rev.planJson, fps: body.fps, format: body.format };
+    if (body.audio) exportBody.audio = body.audio;
+    if (body.canvas) exportBody.canvas = body.canvas;
+    cre.result = {
+      data: result, format: body.format,
+      body: (cre.result && cre.result.body) || null,
+      kind: "export", exportBody: exportBody
+    };
+    $("cre-resolve-msg").hidden = true;
+    $("cre-resolve-result").hidden = true;
+    renderCreResult(result);
+    renderStoryboard();
+    resetPreview(); // the preview draws titles over the dips — stale now
+    toast(text ? "Title updated — “" + text + "”." : "Title cleared.", "success");
+  }).catch(function (err) {
+    toast(err && err.message ? err.message : String(err), "error");
+    renderStoryboard(); // restore the board's committed state
+  });
 }
 
 /* `noPin` (optional) renders the card without the pin toggle — the Movie
@@ -5811,9 +6007,13 @@ function renderStoryboard() {
   var story = sbStoryLine(notes);
   $("cre-sb-story").textContent = story ? "Story — " + story : "";
   $("cre-sb-story").hidden = !story;
+  var musicNote = sbMusicLine(notes);
+  $("cre-sb-music").textContent = musicNote ? "♪ " + musicNote : "";
+  $("cre-sb-music").hidden = !musicNote;
   var acts = sbActTitles(notes);
   var act = 1;
-  if (entries.length && acts[act]) board.appendChild(sbActChip(act, acts[act]));
+  // the board groups by act where acts exist: full-width section headers
+  if (entries.length && acts[act]) board.appendChild(sbActHeader(act, acts[act]));
   var dipIndex = 0;
   entries.forEach(function (entry, i) {
     // dips are record gaps — every dip starting at/before this entry's
@@ -5822,7 +6022,7 @@ function renderStoryboard() {
       board.appendChild(sbDipCard(dipIndex, dips[dipIndex], plan.title_texts));
       dipIndex += 1;
       act += 1;
-      if (acts[act]) board.appendChild(sbActChip(act, acts[act]));
+      if (acts[act]) board.appendChild(sbActHeader(act, acts[act]));
     }
     board.appendChild(sbEntryCard(entry, i));
   });
@@ -5836,6 +6036,8 @@ function renderStoryboard() {
   if (insp.slot !== null && insp.slot >= entries.length) closeInspector();
   renderTimelineStrip();
   if (insp.slot !== null) renderInspector();
+  renderMissingHook(); // the step-1 coverage result, collapsed by the board
+  if ($("cre-arrange-tools").open) arrRender(); // the lane mirrors the board
 }
 
 /* ---- step 3: preview player (monteur.preview — Sehen ohne Resolve) ----

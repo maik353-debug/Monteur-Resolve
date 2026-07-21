@@ -3312,13 +3312,19 @@ class MonteurHandler(BaseHTTPRequestHandler):
         self._send_json({"slot": slot, "alternatives": alternatives})
 
     def _plan_adjust(self) -> None:
-        """POST /api/plan/adjust — one boundary tweak, rendered like export.
+        """POST /api/plan/adjust — one plan tweak, rendered like export.
 
-        monteur.montage.adjust_entry_boundary does the surgery (transition
-        set/cleared by the planner's own 0.5 s rule, black dip carved or
-        removed); the result renders through the same pure plan -> file
-        path as /api/create/export — the standard build-result shape, no
-        re-plan, no sift. Engine ValueErrors surface as 400s.
+        Two modes, both pure plan surgery (no re-plan, no sift), both
+        rendered through the same plan -> file path as /api/create/export
+        so the response is the standard build-result shape:
+
+        * boundary — ``{"slot", "transition"}``:
+          monteur.montage.adjust_entry_boundary does the surgery
+          (transition set/cleared by the planner's own 0.5 s rule, black
+          dip carved or removed). Engine ValueErrors surface as 400s.
+        * title — ``{"dip", "title"}``: edits ``plan.title_texts[dip]``
+          (the text on that black dip's title card) in place — padded to
+          the dips so the alignment invariant holds, "" clears the title.
         """
         from monteur.montage import (
             ARRANGEMENT_TRANSITIONS,
@@ -3331,6 +3337,9 @@ class MonteurHandler(BaseHTTPRequestHandler):
             raise ApiError(
                 400, "missing 'plan_json' (the plan a build result carries)"
             )
+        if "title" in payload or "dip" in payload:
+            self._plan_adjust_title(payload)
+            return
         transition = str(payload.get("transition") or "")
         if transition not in ARRANGEMENT_TRANSITIONS:
             valid = ", ".join(ARRANGEMENT_TRANSITIONS)
@@ -3346,6 +3355,47 @@ class MonteurHandler(BaseHTTPRequestHandler):
         # unremovable dip) raises ValueError -> the dispatcher's 400.
         adjusted = adjust_entry_boundary(plan, slot, transition)
         self._send_json(_plan_export_result(adjusted, payload))
+
+    def _plan_adjust_title(self, payload: dict) -> None:
+        """The title mode of /api/plan/adjust — pure title_texts surgery.
+
+        Sets the composed act title on ONE black dip: ``title_texts`` is
+        padded with "" up to the dips (keeping the dips <-> titles
+        alignment), then ``title_texts[dip]`` becomes the given text.
+        Entries, dips, cues — everything else — stay bit-identical; a
+        ``title:`` note says what changed. Renders like an export.
+        """
+        from monteur.montage import plan_from_dict
+
+        title = payload.get("title")
+        if not isinstance(title, str):
+            raise ApiError(400, "'title' must be a string (the title card's text)")
+        try:
+            dip = int(payload.get("dip"))
+        except (TypeError, ValueError):
+            raise ApiError(400, "'dip' must be a black-dip index (0-based)")
+        plan = plan_from_dict(payload["plan_json"])  # bad -> ValueError -> 400
+        if not plan.dips:
+            raise ApiError(
+                400, "the plan has no black dips — no title slots to edit"
+            )
+        if dip < 0 or dip >= len(plan.dips):
+            raise ApiError(
+                400,
+                f"dip {dip + 1} is not in this plan "
+                f"(it has {len(plan.dips)} black dips)",
+            )
+        titles = [str(text) for text in plan.title_texts]
+        while len(titles) < len(plan.dips):
+            titles.append("")
+        titles[dip] = title.strip()
+        plan.title_texts = titles
+        plan.notes = list(plan.notes) + [
+            f"title: dip {dip + 1} reads {titles[dip]!r}"
+            if titles[dip]
+            else f"title: dip {dip + 1} cleared"
+        ]
+        self._send_json(_plan_export_result(plan, payload))
 
     # -- "Sehen ohne Resolve": thumbnails + preview player -------------------
 

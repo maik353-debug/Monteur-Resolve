@@ -549,36 +549,164 @@ class TestArrangeApi:
         assert full["settings"]["arrangement"] == arrangement
 
 
-class TestArrangeUi:
-    """Static asserts on app.html: the Arrange step's markup and wiring."""
+def _step3_html(html):
+    """The Storyboard step's markup (between its section tag and step 4's)."""
+    return html.split('id="cre-step-3"', 1)[1].split('id="cre-step-4"', 1)[0]
+
+
+def _step4_html(html):
+    """The Your-cut step's markup (between its section tag and the inspector)."""
+    return html.split('id="cre-step-4"', 1)[1].split('<aside class="inspector"', 1)[0]
+
+
+class TestWizardStepsUi:
+    """Static asserts on app.html: the four-step wizard and its homes.
+
+    1 Footage / 2 Options / 3 Storyboard / 4 Your cut — the old Arrange
+    step dissolved into step 3's "Add / reorder scenes" section, and the
+    old result card split: the creative tools live in the storyboard, the
+    harvest lives in step 4.
+    """
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
-    def test_step_strip_has_the_conditional_arrange_step(self):
+    def test_step_strip_has_four_steps(self):
         html = _APP_HTML.read_text(encoding="utf-8")
-        # the opt-in checkbox in step 2 and the conditional wbar chip
-        assert 'id="cre-arrange"' in html
-        assert "Arrange the story myself" in html
-        assert '<span id="wbar-2b" hidden>' in html
-        # the step section itself, between steps 2 and 3
-        assert 'id="cre-step-2b"' in html
-        assert html.index('id="cre-step-2"') < html.index('id="cre-step-2b"') \
-            < html.index('id="cre-step-3"')
-        # the wizard walks 1 -> 2 -> 2b -> 3 only when opted in
-        assert 'creShowStep(cre.arrange.on ? "2b" : 3, true)' in html
-        assert "setArrangeOn" in html
+        for needle in (
+            '<span id="wbar-1" class="on"><b>1</b>Footage</span>',
+            '<span id="wbar-2"><b>2</b>Options</span>',
+            '<span id="wbar-3"><b>3</b>Storyboard</span>',
+            '<span id="wbar-4"><b>4</b>Your cut</span>',
+        ):
+            assert needle in html, needle
+        # the old conditional Arrange step is gone (dissolved into step 3)
+        assert "wbar-2b" not in html
+        assert 'id="cre-step-2b"' not in html
+        assert "Arrange the story myself" not in html
+        assert "setArrangeOn" not in html
+        # the four step sections, in order
+        assert html.index('id="cre-step-1"') < html.index('id="cre-step-2"') \
+            < html.index('id="cre-step-3"') < html.index('id="cre-step-4"')
+        assert "Step 1 of 4" in html
+        assert '"Step " + n + " of 4 — "' in html
+        # entering the storyboard runs the build — the working draft
+        assert "creShowStep(3, true);\n  startBuild(null);" in html
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
-    def test_palette_sequence_and_boundary_markup(self):
+    def test_storyboard_step_holds_the_creative_tools(self):
         html = _APP_HTML.read_text(encoding="utf-8")
-        assert 'id="cre-arr-palette"' in html
-        assert 'id="cre-arr-seq"' in html
-        assert 'id="cre-arr-filter"' in html   # find-search as the palette filter
-        assert 'id="cre-arr-count"' in html    # the live counter
-        assert "arr-bound" in html             # boundary control between cards
-        assert 'ARR_TRANSITIONS = ["cut", "dissolve", "smash"]' in html
-        assert '["", "impact", "whoosh", "riser"]' in html
-        assert 'id="cre-arr-sfx-hint"' in html  # hidden-with-hint without elements
+        step3 = _step3_html(html)
+        for needle in (
+            # story header + music-entry note + preview at the top
+            'id="cre-sb-story"',
+            'id="cre-sb-music"',
+            'id="cre-preview-btn"',
+            # the strip and the board
+            'id="cre-strip"',
+            'id="cre-sb-board"',
+            # the order editor and the coverage hook
+            'id="cre-arrange-tools"',
+            "Add / reorder scenes",
+            'id="cre-missing"',
+            # revise + director's notes iterate the draft here
+            'id="cre-rev-brief"',
+            'id="cre-dir-btn"',
+            'id="cre-dir-apply"',
+            # the path onward
+            'id="cre-next-3"',
+            "Continue to your cut",
+        ):
+            assert needle in step3, needle
+        # harvest controls do NOT live in the storyboard
+        for absent in (
+            'id="cre-resolve-btn"',
+            'id="cre-export-btn"',
+            'id="cre-download"',
+            'id="cre-kit-btn"',
+            'id="cre-save-draft"',
+            'id="yt-x-block"',
+        ):
+            assert absent not in step3, absent
+        # the music-entry note comes from the plan notes
+        assert "function sbMusicLine" in html
+        assert "music enters|music window" in html
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_step_4_is_a_calm_harvest_page(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        step4 = _step4_html(html)
+        for needle in (
+            # summary tiles + the story line
+            'id="cre-final-tiles"',
+            'id="cre-final-story"',
+            # Resolve build (with the render row), export, downloads, upload
+            'id="cre-resolve-btn"',
+            'id="cre-render-block"',
+            'id="cre-export-block"',
+            'id="cre-download"',
+            'id="yt-r-block"',
+            'id="yt-x-block"',
+            # publish kit + drafts
+            'id="cre-kit-btn"',
+            'id="cre-save-draft"',
+            'id="cre-draft-name"',
+            # the way back
+            'id="cre-back-4"',
+            "Back to storyboard",
+        ):
+            assert needle in step4, needle
+        # NO storyboard, NO revise, NO director block in the harvest
+        for absent in (
+            'id="cre-sb-board"',
+            'id="cre-strip"',
+            'id="cre-rev-brief"',
+            'id="cre-dir-btn"',
+            'id="cre-preview-btn"',
+            'id="cre-arr-palette"',
+        ):
+            assert absent not in step4, absent
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_palette_and_order_lane_live_in_the_storyboard(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        step3 = _step3_html(html)
+        for needle in (
+            'id="cre-arr-palette"',
+            'id="cre-arr-seq"',
+            'id="cre-arr-filter"',   # find-search as the palette filter
+            'id="cre-arr-count"',    # the live counter
+            'id="cre-arr-apply"',    # reorder/add -> rebuild with the order
+        ):
+            assert needle in step3, needle
+        # board order -> arrangement: derived live from the plan's entries
+        assert "function seqFromPlan" in html
+        assert "function arrEnsureSeq" in html
+        assert "cre.arrange.dirty" in html
         assert "/api/thumb?clip=" in html
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_dip_titles_are_editable(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            "function startDipTitleEdit",
+            "function applyDipTitle",
+            "sb-dip-input",
+            "dip: dipIndex, title: text",
+            '"/api/plan/adjust"',
+        ):
+            assert needle in html, needle
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_missing_hook_reads_the_step_1_coverage_result(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert "covState.last = cov" in html
+        assert "function renderMissingHook" in html
+        # no coverage yet -> a calm pointer back to step 1
+        assert "Check my coverage in step 1" in html
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_resume_lands_in_the_storyboard(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert "creShowStep(3, false);" in html
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_build_payload_and_drafts_carry_the_arrangement(self):
@@ -4785,6 +4913,78 @@ class TestInspectorApi:
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             _post(f"{server}/api/plan/adjust",
                   {"slot": 1, "transition": "cut"})
+        assert exc_info.value.code == 400
+
+    # -- plan/adjust: the title mode (editable dip titles) -----------------
+
+    def _plan_with_dip(self, server, cached):
+        """A plan carrying one black dip (via the boundary mode's smash)."""
+        plan = self._plan(cached)
+        return _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": plan, "slot": 2, "transition": "smash",
+             "audio": "original"},
+        )["plan_json"]
+
+    def test_adjust_title_is_pure_surgery_in_export_shape(self, server, cached):
+        smashed = self._plan_with_dip(server, cached)
+        data = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": smashed, "dip": 0, "title": "  THE RIDE  ",
+             "format": "edl", "audio": "original"},
+        )
+        # the standard export shape — tempo honestly 0, nothing re-listened
+        assert data["filename"] == "monteur_montage.edl"
+        assert data["content"].startswith("TITLE:")
+        assert data["plan"]["tempo"] == 0
+        adjusted = data["plan_json"]
+        # the title landed (trimmed), aligned with the dips
+        assert adjusted["title_texts"][0] == "THE RIDE"
+        assert len(adjusted["title_texts"]) == len(adjusted["dips"])
+        # pure surgery: entries and dips stay bit-identical
+        assert adjusted["entries"] == smashed["entries"]
+        assert adjusted["dips"] == smashed["dips"]
+        assert any("title: dip 1 reads 'THE RIDE'" in n
+                   for n in data["plan"]["notes"])
+        # the request's own plan_json is not mutated server-side
+        assert smashed.get("title_texts", []) in ([], [""])
+
+    def test_adjust_title_empty_clears(self, server, cached):
+        smashed = self._plan_with_dip(server, cached)
+        titled = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": smashed, "dip": 0, "title": "ACT ONE",
+             "audio": "original"},
+        )["plan_json"]
+        data = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": titled, "dip": 0, "title": "", "audio": "original"},
+        )
+        assert data["plan_json"]["title_texts"][0] == ""
+        assert any("title: dip 1 cleared" in n for n in data["plan"]["notes"])
+
+    def test_adjust_title_validation_400s(self, server, cached):
+        plan = self._plan(cached)  # carries no dips
+        smashed = self._plan_with_dip(server, cached)
+        cases = [
+            # a non-string title
+            ({"plan_json": smashed, "dip": 0, "title": 5}, "'title'"),
+            # a plan without dips has no title slots
+            ({"plan_json": plan, "dip": 0, "title": "x"}, "no black dips"),
+            # malformed / out-of-range dip indices
+            ({"plan_json": smashed, "dip": "x", "title": "x"}, "'dip'"),
+            ({"plan_json": smashed, "dip": None, "title": "x"}, "'dip'"),
+            ({"plan_json": smashed, "dip": 99, "title": "x"}, "not in this plan"),
+            ({"plan_json": smashed, "dip": -1, "title": "x"}, "not in this plan"),
+        ]
+        for payload, needle in cases:
+            with pytest.raises(urllib.error.HTTPError) as exc_info:
+                _post(f"{server}/api/plan/adjust", payload)
+            assert exc_info.value.code == 400
+            assert needle in json.loads(exc_info.value.read())["error"]
+        # the shared plan_json gate covers the title mode too
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/plan/adjust", {"dip": 0, "title": "x"})
         assert exc_info.value.code == 400
 
 
