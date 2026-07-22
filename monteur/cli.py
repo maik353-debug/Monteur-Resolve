@@ -944,6 +944,113 @@ def cmd_create(args: argparse.Namespace) -> None:
             print(line)
 
 
+def cmd_series(args: argparse.Namespace) -> None:
+    """Serien-Modus: one tour folder -> N different vertical Shorts.
+
+    A thin caller over :func:`monteur.series.plan_series` (Phase 1: the
+    engine + this hook; the Studio UI is a separate follow-up). Scans the
+    folder once, analyzes the song once, plans up to N shorts — each built
+    around a different strong moment, zero moment repeated across the whole
+    series — and writes one plan JSON (and, with --render, one MP4) per
+    short into the output directory.
+    """
+    from monteur.media import MonteurMediaError
+    from monteur.music import analyze_music
+    from monteur.series import DEFAULT_SHORT_SECONDS, plan_series
+    from monteur.sift import sift_directory
+
+    max_seconds = (
+        args.max_seconds if args.max_seconds is not None else DEFAULT_SHORT_SECONDS
+    )
+
+    if args.canvas not in ("vertical", "vertical-uhd"):
+        print(
+            f"Note: --canvas {args.canvas} is not vertical — shorts are a "
+            "9:16 format; Auto-Reframe applies on a vertical canvas."
+        )
+    if not args.music and args.audio != "original":
+        _fail(
+            "no music given — pass a song file, or add --audio original to "
+            "cut each short to the clips' own sound"
+        )
+    try:
+        from monteur.sift import list_media
+
+        count = len(list_media(args.folder))
+        print(
+            f"Scanning {count} clips in {args.folder} — this decodes each "
+            "clip, so it can take a few seconds per clip.",
+            flush=True,
+        )
+        reports = sift_directory(args.folder, progress=_sift_progress)
+    except MonteurMediaError as exc:
+        _fail(str(exc))
+    if not reports:
+        _fail(f"no video files found in {args.folder}")
+    print(
+        f"  {len(reports)} clips, "
+        f"{sum(len(r.moments) for r in reports)} good moments found"
+    )
+    if args.see:
+        _run_vision(reports, max_moments=args.max_moments)
+    music = None
+    if args.music:
+        print("Analyzing music ...")
+        try:
+            music = analyze_music(args.music)
+        except MonteurMediaError as exc:
+            _fail(str(exc))
+        print(
+            f"  {music.tempo:.0f} BPM, {len(music.beats)} beats, "
+            f"{music.duration:.0f}s"
+        )
+    try:
+        shorts = plan_series(
+            reports, music, count=args.count, canvas=args.canvas,
+            max_seconds=max_seconds, order=args.order,
+            allow_repeats=args.allow_repeats, transitions=args.transitions,
+        )
+    except ValueError as exc:
+        _fail(str(exc))
+    if not shorts:
+        _fail("no usable material found — run 'monteur sift' to see why")
+    if len(shorts) < args.count:
+        print(
+            f"\nSeries: {len(shorts)} of {args.count} requested shorts — the "
+            "footage did not yield more distinct strong moments."
+        )
+    else:
+        print(f"\nSeries: {len(shorts)} shorts")
+
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    audio = args.audio or ("music" if music else "original")
+    for i, short in enumerate(shorts, start=1):
+        print(f"\nShort {i}/{len(shorts)}: {short.note}")
+        stem = out_dir / f"short_{i:02d}"
+        _save_plan(short.plan, str(stem.with_suffix(".plan.json")))
+        if args.render:
+            # A real render of N videos reuses render_export per plan; the
+            # loop stays thin — one call per short's own plan.
+            from monteur.preview import render_export
+
+            def progress(done: int, total: int, label: str, _i: int = i) -> None:
+                print(f"  [short {_i}] [{done}/{total}] {label}", flush=True)
+
+            try:
+                result = render_export(
+                    short.plan, str(stem.with_suffix(".mp4")),
+                    canvas=short.canvas, fps=args.fps, audio=audio,
+                    quality=args.quality, progress=progress,
+                )
+            except (MonteurMediaError, ValueError) as exc:
+                _fail(str(exc))
+            print(
+                f"  -> {stem.with_suffix('.mp4')} "
+                f"({result['duration']:.1f}s, {result['width']}x{result['height']})"
+            )
+
+
 def _save_plan(plan, path: str) -> None:
     """Write a plan as JSON — the input for the next 'monteur revise'."""
     from monteur.montage import plan_to_dict
@@ -1713,6 +1820,71 @@ def build_parser() -> argparse.ArgumentParser:
              "(default 48; only with --see)",
     )
     p.set_defaults(func=cmd_create)
+
+    p = sub.add_parser(
+        "series",
+        help="Serien-Modus: one tour folder -> N different vertical Shorts, "
+             "each built around a different strong moment, zero moment "
+             "repeated across the series",
+    )
+    p.add_argument("folder", help="directory with your video clips (one long tour)")
+    p.add_argument(
+        "music", nargs="?", default=None,
+        help="song file reused for every short; omit for a no-music cut "
+             "(needs --audio original)",
+    )
+    p.add_argument(
+        "-n", "--count", type=int, required=True,
+        help="how many shorts to try to build (fewer come back when the "
+             "footage lacks that many distinct strong moments)",
+    )
+    p.add_argument(
+        "-o", "--output-dir", default="shorts", metavar="DIR",
+        help="directory for the per-short plans (and MP4s with --render); "
+             "default 'shorts'",
+    )
+    p.add_argument(
+        "--max-seconds", type=float, default=None,
+        help="cap each short's length in seconds (default: the short style's "
+             "own ~30 s; required without music)",
+    )
+    p.add_argument(
+        "--canvas", choices=["vertical", "vertical-uhd"], default="vertical-uhd",
+        help="the 9:16 delivery frame (default vertical-uhd 2160x3840); "
+             "Auto-Reframe centres each cut's attention point on it",
+    )
+    p.add_argument("--fps", type=float, default=25.0)
+    p.add_argument("--order", choices=["chronological", "best_first"], default="chronological")
+    p.add_argument(
+        "--audio", choices=["music", "mix", "original"], default=None,
+        help="what plays under each short (default: music when a song is "
+             "given, else the clips' own sound)",
+    )
+    p.add_argument(
+        "--transitions", choices=["auto", "cuts", "dissolves", "smash"],
+        default="auto",
+    )
+    p.add_argument(
+        "--allow-repeats", action="store_true",
+        help="let footage repeat WITHIN a short (zero-repeat ACROSS the "
+             "series always holds via the disjoint groups)",
+    )
+    p.add_argument(
+        "--render", action="store_true",
+        help="also render each short to an MP4 with Monteur's own engine "
+             "(reuses the export pipeline per plan)",
+    )
+    p.add_argument(
+        "--quality", choices=["draft", "high"], default="high",
+        help="render quality when --render is set (default high)",
+    )
+    p.add_argument(
+        "--see", action="store_true",
+        help="look at the footage with a vision model first (sharpens the "
+             "seed strength and the look-variety partition)",
+    )
+    p.add_argument("--max-moments", type=int, default=48)
+    p.set_defaults(func=cmd_series)
 
     p = sub.add_parser(
         "revise",
