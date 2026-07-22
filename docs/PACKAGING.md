@@ -21,7 +21,7 @@ On the OS you want to target (PyInstaller does **not** cross-compile — a
 Windows `.exe` must be built on Windows):
 
 ```bash
-pip install -e '.[app,build]'
+pip install -e ".[app,build]"
 python scripts/build_exe.py
 ```
 

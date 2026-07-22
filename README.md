@@ -59,7 +59,7 @@ the `anthropic` package).
 
 ```bash
 pip install -e .          # core
-pip install -e '.[ai]'    # with AI features (needs ANTHROPIC_API_KEY or Claude Code)
+pip install -e ".[ai]"    # with AI features (needs ANTHROPIC_API_KEY or Claude Code)
 
 cd ~/my-film-project
 monteur ui                  # launches Monteur Studio in your browser
@@ -70,7 +70,7 @@ monteur ui                  # launches Monteur Studio in your browser
 Run Monteur in its own native window instead of a browser tab:
 
 ```bash
-pip install -e '.[app]'     # adds pywebview (WebView2 on Windows)
+pip install -e ".[app]"     # adds pywebview (WebView2 on Windows)
 monteur ui --window
 ```
 
@@ -88,7 +88,7 @@ Everything below is also available from the command line.
 ### 0. Automatic first cut: footage + music
 
 ```bash
-pip install -e '.[media]'      # brings numpy + a bundled ffmpeg
+pip install -e ".[media]"      # brings numpy + a bundled ffmpeg
 monteur sift  ~/footage/day01    # what's usable? what's too dark/blurry/shaky?
 monteur create ~/footage/day01 ~/music/track.mp3 -o first_cut.fcpxml
 # -> import in Resolve: your best moments, cut to the beat
@@ -276,7 +276,7 @@ montage straight into Resolve, or compare two versions of a cut — all
 conversationally. Install the extra and register the server:
 
 ```bash
-pip install 'monteur[mcp]'
+pip install "monteur[mcp]"
 ```
 
 **Claude Desktop / claude.ai**: add this to your MCP configuration
@@ -329,7 +329,7 @@ print(create_papercut(transcript, fps=25, title="Interview A"))
 ## Development
 
 ```bash
-pip install -e '.[dev]'
+pip install -e ".[dev]"
 pytest
 ```
 
