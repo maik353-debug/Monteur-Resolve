@@ -504,6 +504,14 @@ svg text.axis {
 .seg-toggle button[aria-pressed="true"] { background: var(--surface-2); color: var(--ink); box-shadow: inset 0 0 0 1px var(--axis); }
 .pace-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .style-info { border-left: 2px solid var(--border); padding-left: 10px; margin-top: 8px; }
+/* the project meta line under the working-draft title (style · length ·
+   aspect · N clips → N cuts) — the clean NLE header */
+.proj-head { margin-bottom: 4px; }
+.proj-meta {
+  margin: 3px 0 0; font-family: var(--mono); font-size: 11.5px;
+  color: var(--ink-muted); letter-spacing: 0.02em;
+}
+.proj-meta b { color: var(--ink-2); font-weight: 650; }
 .pace-custom { display: inline-flex; align-items: center; gap: 5px; }
 .pace-custom input { width: 78px; padding: 5px 8px; font: inherit; font-size: 12.5px; color: var(--ink); background: var(--input-bg); border: 1px solid var(--border); border-radius: 3px; }
 .take-table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin: 4px 0 10px; }
@@ -1053,11 +1061,37 @@ svg text.axis {
   color: #fff; font-size: 21px; font-weight: 600; letter-spacing: 0.04em;
   line-height: 1.35;
 }
+/* in-frame overlays: SMPTE-style clock top-right, current shot bottom-left */
+.po-tc {
+  position: absolute; top: 7px; right: 9px; z-index: 2;
+  font-family: var(--mono); font-size: 12px; font-weight: 650;
+  color: #ffcf9e; letter-spacing: 0.04em; pointer-events: none;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+.po-shot {
+  position: absolute; left: 10px; bottom: 9px; right: 10px; z-index: 2;
+  font-size: 12.5px; color: #f4f4f6; pointer-events: none;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .playout-transport {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   margin-top: 8px; max-width: 640px;
 }
 .playout-transport .po-hint { margin: 0; }
+.po-transport { display: flex; align-items: center; gap: 4px; }
+.po-tbtn {
+  display: flex; align-items: center; justify-content: center;
+  width: 30px; height: 28px; padding: 0; font-size: 13px; line-height: 1;
+  color: var(--ink-2); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 3px; cursor: pointer;
+}
+.po-tbtn:hover, .po-tbtn:focus-visible { color: var(--ink); border-color: var(--accent); }
+.po-tbig {
+  width: 40px; height: 28px; font-size: 14px;
+  color: #fff; background: var(--accent); border-color: var(--accent);
+}
+.po-tbig:hover, .po-tbig:focus-visible { color: #fff; filter: brightness(1.08); }
 .po-time {
   font-family: var(--mono); font-size: 12px; color: var(--ink-2);
   min-width: 92px;
@@ -1212,7 +1246,32 @@ input.sb-dip-input {
    (markers on the dips), the A1 music lane (the canvas: energy curve,
    downbeat ticks, cut hairlines, the drop) and an A2 SFX lane (planned
    sound cues). A ruler on top carries the time ticks. */
-.tl-frame { display: flex; align-items: stretch; margin: 12px 0 5px; }
+/* timeline header: current timecode, the Snap toggle, the BPM/beat-grid
+   readout — the NLE toolbar over the tracks */
+.tl-toolbar {
+  display: flex; align-items: center; gap: 10px; margin: 10px 0 0;
+  padding: 5px 9px; border: 1px solid var(--border); border-bottom: 0;
+  border-radius: 3px 3px 0 0; background: var(--surface-2);
+}
+.tl-tc {
+  font-family: var(--mono); font-size: 12px; font-weight: 650;
+  color: var(--ink); letter-spacing: 0.02em; min-width: 84px;
+}
+.tl-toggle {
+  padding: 2px 10px; font-size: 10.5px; font-weight: 650;
+  letter-spacing: 0.04em; color: var(--ink-2);
+  background: var(--input-bg); border: 1px solid var(--border);
+  border-radius: 3px; cursor: pointer;
+}
+.tl-toggle[aria-pressed="true"] {
+  color: #fff; background: var(--accent); border-color: var(--accent);
+}
+.tl-bar-spacer { flex: 1 1 auto; }
+.tl-bpm {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.04em;
+  color: var(--ink-muted); white-space: nowrap;
+}
+.tl-frame { display: flex; align-items: stretch; margin: 0 0 5px; }
 .tl-gutter {
   flex: 0 0 60px; display: flex; flex-direction: column;
   border: 1px solid var(--border); border-right: 0; border-radius: 3px 0 0 3px;
@@ -1260,6 +1319,16 @@ input.sb-dip-input {
 .tl-block:first-child { border-left: 0; }
 .tl-block:hover, .tl-block:focus-visible { filter: brightness(1.22); }
 .tl-block.sel { box-shadow: inset 0 0 0 2px var(--accent); filter: none; z-index: 2; }
+.tl-block-lbl {
+  position: absolute; top: 3px; left: 4px; right: 3px;
+  font-family: var(--mono); font-size: 9px; line-height: 1.2;
+  color: rgba(255, 255, 255, 0.9); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; pointer-events: none;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.55);
+}
+:root[data-theme="light"] .tl-block-lbl {
+  color: rgba(20, 20, 24, 0.82); text-shadow: 0 1px 1px rgba(255, 255, 255, 0.5);
+}
 .tl-block.ph-opening, .tl-legend i.ph-opening { background: var(--phase-opening); }
 .tl-block.ph-build, .tl-legend i.ph-build { background: var(--phase-build); }
 .tl-block.ph-climax, .tl-legend i.ph-climax { background: var(--phase-climax); }
@@ -1291,9 +1360,12 @@ input.sb-dip-input {
 }
 .tl-sfxmark {
   position: absolute; top: 3px; bottom: 3px; min-width: 6px;
-  background: var(--sfx); border-radius: 2px; opacity: 0.92;
+  display: flex; align-items: center; padding: 0 4px; overflow: hidden;
+  background: var(--sfx); border-radius: 2px; opacity: 0.95;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.28);
+  font-size: 8.5px; line-height: 1; color: #f0ecf5; white-space: nowrap;
 }
+.tl-sfx-lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tl-legend {
   display: flex; flex-wrap: wrap; gap: 12px; margin: 6px 0 0;
   font-size: 10px; font-weight: 650; letter-spacing: 0.06em;
@@ -2072,7 +2144,10 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         <div id="cre-build-panel"></div>
         <p class="scan-note" id="cre-build-msg" role="status" hidden></p>
         <div id="cre-result" hidden>
-          <h2 class="seg-heading" id="cre-result-title" tabindex="-1" style="margin-top: 14px;">Your working draft</h2>
+          <div class="proj-head">
+            <h2 class="seg-heading" id="cre-result-title" tabindex="-1" style="margin: 14px 0 0;">Your working draft</h2>
+            <p class="proj-meta" id="cre-proj-meta" hidden></p>
+          </div>
           <p class="rev-rationale" id="cre-rev-rationale" role="status" hidden></p>
           <p class="sb-story" id="cre-sb-story" hidden></p>
           <p class="sb-music" id="cre-sb-music" hidden></p>
@@ -2089,13 +2164,21 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
                   <video class="po-video" id="po-video-a" preload="auto" playsinline muted></video>
                   <video class="po-video" id="po-video-b" preload="auto" playsinline muted></video>
                   <div class="playout-title" id="po-title" hidden></div>
+                  <div class="po-tc" id="po-tc" aria-hidden="true">0:00</div>
+                  <div class="po-shot" id="po-shot" aria-hidden="true" hidden></div>
                 </div>
                 <audio id="po-music" preload="auto"></audio>
               </div>
               <div class="playout-transport">
-                <button class="btn" id="po-play" type="button" aria-pressed="false" aria-label="Play or pause the draft (Space)">&#9654; Play</button>
+                <div class="po-transport" role="group" aria-label="Transport controls">
+                  <button class="po-tbtn" id="po-first" type="button" title="Jump to start" aria-label="Jump to start">&#9198;</button>
+                  <button class="po-tbtn" id="po-prev" type="button" title="Previous cut (←)" aria-label="Previous cut">&#9204;</button>
+                  <button class="po-tbtn po-tbig" id="po-play" type="button" aria-pressed="false" title="Play or pause (Space)" aria-label="Play or pause the draft">&#9654;</button>
+                  <button class="po-tbtn" id="po-next" type="button" title="Next cut (→)" aria-label="Next cut">&#9205;</button>
+                  <button class="po-tbtn" id="po-last" type="button" title="Jump to end" aria-label="Jump to end">&#9197;</button>
+                </div>
                 <span class="po-time" id="po-time">0:00 / 0:00</span>
-                <span class="help-small po-hint">Space plays &middot; &larr; &rarr; jump between cuts &middot; click or drag the timeline strip below to scrub. No render &mdash; the draft plays straight from your clips.</span>
+                <span class="help-small po-hint">Space plays &middot; &larr; &rarr; jump between cuts &middot; click the timeline to scrub.</span>
               </div>
               <p class="scan-note" id="po-note" role="status" hidden></p>
             </div>
@@ -2109,6 +2192,12 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           </div>
           <div class="kit-block" id="cre-storyboard" hidden>
             <p class="seg-heading">Timeline &amp; storyboard</p>
+            <div class="tl-toolbar" id="cre-tl-bar" hidden>
+              <span class="tl-tc" id="tl-tc">0:00</span>
+              <button class="tl-toggle" id="tl-snap" type="button" aria-pressed="true" title="Snap the playhead to the nearest downbeat when scrubbing">Snap</button>
+              <span class="tl-bar-spacer"></span>
+              <span class="tl-bpm" id="tl-bpm"></span>
+            </div>
             <div class="tl-frame" id="cre-tl-frame" hidden>
               <div class="tl-gutter" aria-hidden="true">
                 <div class="tlg tlg-ruler"></div>
@@ -6300,6 +6389,26 @@ function renderCreResult(data) {
     tile.appendChild(el("div", "tile-value", pair[1]));
     tiles.appendChild(tile);
   });
+  // the clean project meta line: style · length · aspect · clips → cuts
+  var metaEl = $("cre-proj-meta");
+  if (metaEl) {
+    var styleSpec = STYLES.filter(function (s) { return s[0] === cre.style; })[0];
+    var aspect = { wide: "16:9", vertical: "9:16", cine: "2.39:1" }[cre.shape] || "";
+    var poolN = (cre.poolClips || []).length;
+    var cuts = plan.cuts || (plan.entries || []).length || 0;
+    var parts = [];
+    if (styleSpec) parts.push(styleSpec[1]);
+    if (plan.duration) parts.push(fmtClock(plan.duration));
+    if (aspect) parts.push(aspect);
+    if (plan.tempo) parts.push(Math.round(plan.tempo) + " BPM");
+    parts.push((poolN ? poolN + " → " : "") + cuts + (cuts === 1 ? " cut" : " cuts"));
+    clear(metaEl);
+    parts.forEach(function (p, i) {
+      if (i) metaEl.appendChild(document.createTextNode(" · "));
+      metaEl.appendChild(el("b", null, p));
+    });
+    metaEl.hidden = false;
+  }
   var story = sbStoryLine((plan.notes || []).map(String));
   $("cre-final-story").textContent = story ? "Story — " + story : "";
   $("cre-final-story").hidden = !story;
@@ -7181,6 +7290,7 @@ function creResetRevise() {
   clear($("cre-strip-sfx"));
   $("cre-strip").hidden = true;
   $("cre-tl-frame").hidden = true;
+  $("cre-tl-bar").hidden = true;
   clear($("cre-sb-board"));
   $("cre-storyboard").hidden = true;
   $("cre-sb-story").hidden = true;
@@ -7827,11 +7937,24 @@ function poEntryOffset(seg) {
 }
 
 /* make segment k the visible one (swap the double buffer at boundaries) */
+/* the in-frame shot label (bottom-left): which shot is on screen now. A
+   clip reads "Shot N · file"; a black dip hides it (the centred title
+   overlay carries the dip's title instead). */
+function poSetShotLabel(seg) {
+  var host = $("po-shot");
+  if (!host) return;
+  if (!seg || seg.kind === "black" || !seg.entry) { host.hidden = true; return; }
+  var n = (seg.slot >= 0) ? "Shot " + (seg.slot + 1) + " · " : "";
+  host.textContent = n + baseName(seg.entry.clip_path || "");
+  host.hidden = false;
+}
+
 function poActivate(k, hard) {
   po.seg = k;
   var seg = po.segs[k];
   var title = $("po-title");
   if (!seg) return;
+  poSetShotLabel(seg);
   if (seg.kind === "black") {
     // dip: both buffers hidden — the stage is black; the title is DOM text
     po.active.classList.remove("on");
@@ -7979,6 +8102,8 @@ function poDriftCheck() {
 function poRender() {
   poApplyMusicGain(); // runs at 60 fps while playing — the 50 ms ramp is smooth
   $("po-time").textContent = fmtClock(po.t) + " / " + fmtClock(po.duration);
+  var tc = $("tl-tc"); if (tc) tc.textContent = fmtClock(po.t); // timeline header clock
+  var ptc = $("po-tc"); if (ptc) ptc.textContent = fmtClock(po.t); // in-frame clock
   var head = $("cre-strip-playhead");
   if (po.duration > 0 && po.segs.length && !$("cre-strip").hidden) {
     head.hidden = false;
@@ -8021,7 +8146,7 @@ function poTick() {
 
 function poUpdateTransport() {
   var btn = $("po-play");
-  btn.textContent = po.playing ? "❚❚ Pause" : "▶ Play";
+  btn.textContent = po.playing ? "⏸" : "▶"; // ⏸ / ▶
   btn.setAttribute("aria-pressed", String(po.playing));
   poRender();
 }
@@ -8141,10 +8266,38 @@ function poRebuild() {
 }
 
 $("po-play").addEventListener("click", poToggle);
+$("po-first").addEventListener("click", function () { if (po.segs.length) poSeek(0); });
+$("po-last").addEventListener("click", function () { if (po.segs.length) poSeek(po.duration); });
+$("po-prev").addEventListener("click", function () { poJumpCut(-1); });
+$("po-next").addEventListener("click", function () { poJumpCut(1); });
 $("po-music").addEventListener("error", function () {
   if ($("cre-playout").hidden || !this.dataset.url) return;
   creNote("po-note", "The song can't play in this browser (format not supported) — the pictures still play; the exact preview below has the full mix.");
 });
+
+/* Snap the scrub to the nearest downbeat when Snap is on (the beat grid).
+   cre.snap defaults on; the toolbar toggle flips it. Snapping applies only
+   to the scrub gesture — programmatic seeks (jump-cut, play) are exact. */
+var tlSnap = { on: true };
+function snapScrubTime(t) {
+  var plan = rev.planJson || {};
+  var marks = plan.beat_marks || [];
+  if (!tlSnap.on || !marks.length) return t;
+  var best = t, bestD = Infinity;
+  for (var i = 0; i < marks.length; i++) {
+    var d = Math.abs(marks[i] - t);
+    if (d < bestD) { bestD = d; best = marks[i]; }
+  }
+  // only snap when a downbeat is genuinely close (< half a typical bar)
+  return bestD <= 0.6 ? best : t;
+}
+(function () {
+  var snapBtn = $("tl-snap");
+  if (snapBtn) snapBtn.addEventListener("click", function () {
+    tlSnap.on = !tlSnap.on;
+    this.setAttribute("aria-pressed", String(tlSnap.on));
+  });
+})();
 
 /* the timeline strip is the scrubber: click/drag = seek the virtual clock */
 (function () {
@@ -8152,7 +8305,7 @@ $("po-music").addEventListener("error", function () {
   function timeAt(e) {
     var rect = strip.getBoundingClientRect();
     var x = Math.max(rect.left, Math.min(rect.right, e.clientX));
-    return (x - rect.left) / Math.max(1, rect.width) * po.duration;
+    return snapScrubTime((x - rect.left) / Math.max(1, rect.width) * po.duration);
   }
   strip.addEventListener("pointerdown", function (e) {
     if ($("cre-playout").hidden || !po.segs.length || e.button !== 0) return;
@@ -8553,9 +8706,16 @@ function renderTimelineStrip() {
   var entries = planSortedEntries();
   var duration = plan.duration ||
     (entries.length ? entries[entries.length - 1].record_end || 0 : 0);
-  if (!entries.length || !duration) { host.hidden = true; frame.hidden = true; return; }
+  var bar = $("cre-tl-bar");
+  if (!entries.length || !duration) { host.hidden = true; frame.hidden = true; bar.hidden = true; return; }
   host.hidden = false;
   frame.hidden = false;
+  bar.hidden = false;
+  // BPM readout from the plan's tempo; "beat grid" when downbeats exist
+  var bpm = Math.round(plan.tempo || 0);
+  var hasBeats = (plan.beat_marks || []).length > 0;
+  $("tl-bpm").textContent =
+    (bpm > 0 ? bpm + " BPM" : "no tempo") + (hasBeats ? " · beat grid" : "");
   var dips = ((plan.dips || []).slice()).sort(function (a, b) {
     return (a[0] || 0) - (b[0] || 0);
   });
@@ -8585,6 +8745,12 @@ function renderTimelineStrip() {
     block.dataset.basetitle = title;
     block.setAttribute("aria-label", title);
     block.classList.toggle("sel", insp.slot === i);
+    // clip label: shot number, plus a "drop" tag when the drop lands in it
+    var onDrop = (plan.drop_marks || []).some(function (t) {
+      return t >= (entry.record_start || 0) - 0.001 && t < (entry.record_end || 0) + 0.001;
+    });
+    block.appendChild(el("span", "tl-block-lbl",
+      String(i + 1) + (onDrop ? " · drop" : "")));
     block.addEventListener("click", function () { selectSlot(i); });
     blocks.appendChild(block);
   });
@@ -8668,6 +8834,7 @@ function renderSfxLane(duration, cues) {
     var kind = String(cue.kind || "sfx");
     var query = String(cue.query || "");
     var note = String(cue.note || "");
+    mark.appendChild(el("span", "tl-sfx-lbl", kind));
     mark.title = kind + (query ? " — " + query : "") + (note ? " · " + note : "");
     lane.appendChild(mark);
   });
@@ -8719,7 +8886,8 @@ function drawStripLane() {
     ctx.stroke();
     ctx.globalAlpha = 1;
   }
-  // planned silences: darker mute bands where the bed drops out
+  // planned silences: darker mute bands where the bed drops out, labelled
+  // "silence" when the band is wide enough to read
   (plan.music_gaps || []).forEach(function (gap) {
     var x0 = x(gap[0] || 0);
     var x1 = x(gap[1] || 0);
@@ -8727,6 +8895,15 @@ function drawStripLane() {
     ctx.fillStyle = cssVar("--input-bg") || "#000";
     ctx.fillRect(x0, 0, Math.max(1, x1 - x0), laneHeight);
     ctx.globalAlpha = 1;
+    if (x1 - x0 > 30) {
+      ctx.fillStyle = cssVar("--ink-muted");
+      ctx.font = "8px " + (cssVar("--mono") || "monospace");
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("silence", (x0 + x1) / 2, laneHeight / 2);
+      ctx.textAlign = "start";
+      ctx.textBaseline = "alphabetic";
+    }
   });
   // cut positions as hairlines
   ctx.strokeStyle = cssVar("--axis");

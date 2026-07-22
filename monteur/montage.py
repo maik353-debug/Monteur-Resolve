@@ -1225,6 +1225,10 @@ class MontagePlan:
     # Drop/chorus impact times in RECORD time (usually 0-3 values) — the
     # strip's accent markers. Written only when music exists and in range.
     drop_marks: list[float] = field(default_factory=list)
+    # The song's tempo in BPM (0 = unknown / no analyzed music). The
+    # timeline header reads it for the "N BPM" readout; serialized only
+    # when set, tolerant like the other strip metadata.
+    tempo: float = 0.0
     # --- adaptive music window (all additive; 0 = the full-length default) --
     # RECORD-time seconds where the music ENTERS (0 = with the first frame)
     # and where it ENDS (0 = the montage end). The record<->song mapping is
@@ -5168,6 +5172,7 @@ def plan_montage(
         plan.drop_marks = [
             round(t, 2) for t in grid_music.drops if -_EPS <= t <= length + _EPS
         ]
+        plan.tempo = round(float(getattr(grid_music, "tempo", 0.0)), 2)
     # Sliver elimination (blueprint 1.7): no generated slot under the
     # ~0.3 s floor, from ANY producing site — grid remainders, phase
     # bounds landing next to grid cuts, drop-forced insertions. Pinned
@@ -6648,6 +6653,8 @@ def plan_to_dict(plan: MontagePlan) -> dict:
         data["beat_marks"] = [float(t) for t in plan.beat_marks]
     if plan.drop_marks:
         data["drop_marks"] = [float(t) for t in plan.drop_marks]
+    if plan.tempo:
+        data["tempo"] = plan.tempo
     return data
 
 
@@ -6693,6 +6700,7 @@ def plan_from_dict(data: dict) -> MontagePlan:
             music_energy=[float(v) for v in data.get("music_energy", [])],
             beat_marks=[float(t) for t in data.get("beat_marks", [])],
             drop_marks=[float(t) for t in data.get("drop_marks", [])],
+            tempo=float(data.get("tempo", 0.0)),
             # Tolerant like title_texts: plans saved before the adaptive
             # music window existed simply have neither key.
             music_in=float(data.get("music_in", 0.0)),

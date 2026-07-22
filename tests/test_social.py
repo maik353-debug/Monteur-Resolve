@@ -408,13 +408,18 @@ def _parity_reports() -> list[ClipReport]:
 # auto / wedding / music_video plans are BYTE-IDENTICAL across the wave
 # (no dips, no dissolves on shifted boundaries, no slivers): byte-parity
 # protects the untouched paths, not the sanctioned default changes.
+# Regenerated when the plan gained the ``tempo`` field (the timeline
+# header's BPM readout): serialized only when music exists, so every
+# music-bearing golden shifts by exactly that one key and "travel-no-music"
+# stays byte-identical — the additive-only contract, field-by-field
+# verified.
 _PARITY_GOLDEN = {
-    "auto": "fa747bd06ecd7e7d21920a0259a5615d2a52272918f4427db46d3c43e08d55ad",
-    "travel": "1bc57f56a18b14ada91a4afe5e7b3dd79d4b590538d7f7113dab0b4ecd1cc43b",
-    "wedding": "bc3780121a56035e21a023f167e46b8ac2024cf1658103c6d1a382e6b2db6262",
-    "music_video": "1b9835d2fe20e6c9750c99f48417a41d0f154119d96685d67325848a2db213b0",
-    "trailer": "c07e61cbdb0642b6d149456dd53effc73ef830f25c62f0f1f741fab48c98e69d",
-    "trailer-best-paced": "665e32ea72468cd56358926da0ca498dd4f2723d15975c3dd91a78972ddbc9d9",
+    "auto": "3f2a33e6e6192044448ac63b651d6215054c53f6316cb795fd92eacd8a0fab24",
+    "travel": "ae8f2acbd8f5c457e031542fb3f0044612464c916b30f3874bafadd4e78bbe63",
+    "wedding": "6497deb736f84005be6aa38187b8f2a057cd7acb817a9ba35b3dc6b59c94eb55",
+    "music_video": "68e9430de26249d9d7ddc7e9e335532bfada0807a05f0f25d5a6d3abe1ce09cc",
+    "trailer": "998bffc5edfb5dd3b63d15e04c44c1d9ed6bc2e2902cd272b4219832bd367bf7",
+    "trailer-best-paced": "b999e7c73754f2922642d1008c69cf1f26ea83f363c08d2794cadce0f0283000",
     "travel-no-music": "2bdeb6c1d0e6752e4d81715255874393a5ac7a13308a27367025a588a5d8d00f",
 }
 # music_flow="continuous" = the SAME engine with gap planning disabled:
@@ -425,12 +430,12 @@ _PARITY_GOLDEN = {
 # same wave, same field-by-field verification. "continuous" keeps
 # promising exactly one thing: the song never breaks.)
 _PARITY_GOLDEN_CONTINUOUS = {
-    "auto": "f9d843f342b27ddde52eb44b387259e2664c538e3d93de108deb1096df015c18",
-    "travel": "d7aa65ec1f19fd3d8abaf349cfec41753916a87021106ef4564b3b1f2428574b",
-    "wedding": "0c3e4e4c5afe90b3b05a0b0a2a988186ba1ded67864f31151f6e7c50ec03aa7b",
-    "music_video": "b837650cce63b2284ea0c0f4152f82025d956ec3b98d2805429072f603ee1eef",
-    "trailer": "49ac59c2f4ac7f630e265fb26c9b78a8ed6e9c2f7dba3036c7bcc796ad865466",
-    "trailer-best-paced": "ff3a45ca4973dec78b04c3e2d5d292b232dfb12b341d24c60ca942662943f35b",
+    "auto": "d0a0e6808c44ef5aa445836f735d3ad67b78994813542f34f52f6198216153e5",
+    "travel": "737b8d2dc4ad08d4999dcecb4f34e80d921f88d15d9739454b8c67db36b32e21",
+    "wedding": "8c0359bdb700b1b285bb2ca74e3ed873d186d2a558033f7af8dbfc5bf4fe46dd",
+    "music_video": "9019968dee37b304a0ec02153ebfe75cee6b7b8308d79ec5c75a8bb95c9df334",
+    "trailer": "bfa312a669f1154291e46f9733ff15ea8fa9f4813c1bcb1e746dcfb48a6bd8d2",
+    "trailer-best-paced": "91ab38332c5c5d9571018845a172283479b79d18990fc39851a8cb7a297462ff",
 }
 
 

@@ -5551,6 +5551,24 @@ class TestProUiStatic:
             "plan.music_gaps",
             "tl-titlemark",
             "tl-sfxmark",
+            # clip/SFX labels + the silence gap label
+            "tl-block-lbl",
+            "function renderStripRuler",
+            # the NLE surface: timeline toolbar (timecode/Snap/BPM readout)
+            'id="cre-tl-bar"',
+            'id="tl-tc"',
+            'id="tl-snap"',
+            'id="tl-bpm"',
+            "plan.tempo",
+            "function snapScrubTime",
+            # program monitor: in-frame timecode + shot label + full transport
+            'id="po-tc"',
+            'id="po-shot"',
+            'id="po-first"',
+            'id="po-last"',
+            "function poSetShotLabel",
+            # the clean project meta line
+            'id="cre-proj-meta"',
         ):
             assert needle in source, needle
         # phase colors exist in BOTH themes
