@@ -118,6 +118,11 @@ class Project:
     exports: list[dict] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     migrated_from_draft: str = ""
+    #: Which tool made this project — "cut" (Create), "movie" or "analysis".
+    #: Drives the Home recents badge and type filter. Default "cut": the
+    #: Create workflow is the only writer today, and old manifests without
+    #: the key load as cuts.
+    type: str = "cut"
 
     @property
     def root(self) -> Path:
@@ -159,6 +164,9 @@ def project_to_dict(project: Project) -> dict:
         data["plan"] = project.plan
     if project.migrated_from_draft:
         data["migrated_from_draft"] = project.migrated_from_draft
+    # only-when-not-default, so existing "cut" manifests stay byte-identical
+    if project.type and project.type != "cut":
+        data["type"] = project.type
     return data
 
 
@@ -201,6 +209,7 @@ def project_from_dict(data: dict) -> Project:
         exports=[dict(e) for e in (data.get("exports") or []) if isinstance(e, dict)],
         notes=[str(n) for n in (data.get("notes") or [])],
         migrated_from_draft=str(data.get("migrated_from_draft") or ""),
+        type=str(data.get("type") or "cut"),
     )
 
 
@@ -258,6 +267,7 @@ def create_project(
     notes: list | None = None,
     migrated_from_draft: str = "",
     project_id: str = "",
+    type: str = "cut",
 ) -> Project:
     """Create, persist and return a new project.
 
@@ -279,6 +289,7 @@ def create_project(
         exports=[],
         notes=[str(n) for n in (notes or [])],
         migrated_from_draft=str(migrated_from_draft or ""),
+        type=str(type or "cut"),
     )
     for entry in media_pool or []:
         if isinstance(entry, dict) and entry.get("path"):
@@ -332,6 +343,7 @@ def list_projects() -> list[dict]:
                 "modified_at": project.modified_at,
                 "pool_size": len(project.media_pool),
                 "has_plan": project.has_plan,
+                "type": project.type or "cut",
             }
         )
     summaries.sort(key=lambda s: str(s.get("modified_at") or ""), reverse=True)

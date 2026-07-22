@@ -6662,6 +6662,13 @@ function renderCreResult(data) {
   if (metaEl) {
     var styleSpec = STYLES.filter(function (s) { return s[0] === cre.style; })[0];
     var aspect = { wide: "16:9", vertical: "9:16", cine: "2.39:1" }[cre.shape] || "";
+    // a Series Short carries its own (vertical) canvas — read the aspect from
+    // the active Short, not the options control
+    var activeShort = cre.series && cre.series.shorts && cre.series.shorts[cre.series.active];
+    if (activeShort) {
+      var cvs = String(activeShort.canvas || "");
+      aspect = /vertical/.test(cvs) ? "9:16" : /cine/.test(cvs) ? "2.39:1" : "16:9";
+    }
     var poolN = (cre.poolClips || []).length;
     var cuts = plan.cuts || (plan.entries || []).length || 0;
     var parts = [];
@@ -7007,7 +7014,10 @@ function renderPmRecents(list) {
     var strip = el("div", "pm-filmstrip");
     for (var i = 0; i < 6; i++) strip.appendChild(el("span"));
     thumb.appendChild(strip);
-    thumb.appendChild(el("span", "pm-badge", project.has_plan ? "Cut" : "Footage"));
+    var ptype = String(project.type || "cut");
+    thumb.appendChild(el("span", "pm-badge",
+      ptype === "movie" ? "Movie" : ptype === "analysis" ? "Analysis"
+        : (project.has_plan ? "Cut" : "Footage")));
     var del = el("button", "pm-card-del", "×");
     del.type = "button";
     del.setAttribute("aria-label", "Delete project " + String(project.name || ""));

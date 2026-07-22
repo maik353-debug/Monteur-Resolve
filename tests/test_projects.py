@@ -122,8 +122,24 @@ class TestCreateLoadSaveListDelete:
         assert by_id[b.id]["pool_size"] == 1
         assert by_id[b.id]["has_plan"] is False
         assert set(by_id[a.id]) == {
-            "id", "name", "created_at", "modified_at", "pool_size", "has_plan"
+            "id", "name", "created_at", "modified_at", "pool_size", "has_plan", "type"
         }
+        assert by_id[a.id]["type"] == "cut"  # Create is the default writer
+
+    def test_type_defaults_cut_and_is_byte_compatible(self):
+        p = create_project("A cut")
+        assert p.type == "cut"
+        # a cut manifest stays byte-identical to before the field existed
+        assert "type" not in project_to_dict(p)
+
+    def test_typed_project_round_trips(self):
+        m = create_project("A movie", type="movie")
+        assert project_to_dict(m)["type"] == "movie"
+        assert project_from_dict(project_to_dict(m)).type == "movie"
+        # old manifests without the key load as cuts
+        d = project_to_dict(m)
+        del d["type"]
+        assert project_from_dict(d).type == "cut"
 
     def test_list_newest_first(self, monkeypatch):
         monkeypatch.setattr(projects, "_now", lambda: "2020-01-01T00:00:00Z")
