@@ -1269,6 +1269,22 @@ class TestProjectsApi:
             _get(f"{server}/api/projects/nope/versions")
         assert exc.value.code == 404
 
+    def test_version_changes_vs_current(self, server):
+        pid = _post(f"{server}/api/projects", {"name": "chg"})["id"]
+        first = _tiny_plan_json()
+        _post(f"{server}/api/projects/{pid}", {"plan": first})
+        vid = _get(f"{server}/api/projects/{pid}/versions")["versions"][0]["id"]
+        # change the current cut: add a second entry
+        second = _tiny_plan_json()
+        entries = list(second.get("entries") or [])
+        extra = dict(entries[0]) if entries else {"clip_path": "/f/x.mp4"}
+        extra = {**extra, "clip_path": "/f/added.mp4", "source_start": 0.0, "source_end": 2.0,
+                 "record_start": 90.0, "record_end": 92.0}
+        second["entries"] = entries + [extra]
+        _post(f"{server}/api/projects/{pid}", {"plan": second})
+        data = _get(f"{server}/api/projects/{pid}/versions/{vid}/changes")
+        assert any(c["kind"] == "added" and "added.mp4" in c["summary"] for c in data["changes"])
+
     def test_get_unknown_is_404(self, server):
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             _get(f"{server}/api/projects/nope")

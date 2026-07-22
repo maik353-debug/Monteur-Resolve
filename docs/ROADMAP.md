@@ -32,8 +32,11 @@ Musical intelligence:
 
 Visual intelligence:
 - [x] Motion-direction matching at cut points (exit motion ~ entry motion)
-- [ ] Shot-size estimate (wide/medium/close via face size) and alternation
-      rules — no two near-identical framings back to back
+- [x] Shot-size estimate (wide/medium/close) and alternation rules — no two
+      near-identical framings back to back. `monteur/spatial.py` fills each
+      moment's `shot_size` from 64x36 frames (offline, cached in
+      `.monteur-spatial.json`); the montage casting penalises same-size
+      adjacency alongside the existing no-same-scene rule.
 - [x] Audio-based sift signals: wind noise, clipping, on-set silence
 - [x] Highlight detection from audio (laughter, cheers, action peaks)
 
@@ -84,7 +87,12 @@ Craft templates:
       Monteur's plan and adapt scoring preferences per project
 - [ ] Watch mode: new footage auto-sifted overnight, report ready in the
       morning
-- [ ] Change list between versions for sound/VFX handoffs
+- [x] Change list between versions for sound/VFX handoffs. `monteur/changelist.py`
+      diffs two plan snapshots into added / removed / re-trimmed / retimed /
+      transition-flipped shots plus length + tempo (matching shots by clip +
+      source overlap, so ripple shifts aren't reported). `monteur changes a b`,
+      `GET /api/projects/<id>/versions/<vid>/changes`, and a **Changes** button
+      per version in the Studio history panel (diffed against the current cut).
 - [x] Claude composes the cut (`--ai-cut`, Studio toggle): the engine
       builds the beat grid, phases and dips; Claude casts every slot
       from the vision-labeled moment inventory following a per-style

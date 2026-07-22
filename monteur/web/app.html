@@ -508,6 +508,14 @@ svg text.axis {
 .history-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .history-when { font-size: 12.5px; color: var(--ink); }
 .history-sub { font-size: 11.5px; color: var(--ink-2); }
+.history-item { border-bottom: 1px solid var(--acrylic-border); }
+.history-item:last-child { border-bottom: 0; }
+.history-item .history-row { border-bottom: 0; }
+.history-changes { padding: 2px 4px 10px; }
+.history-changelist { margin: 4px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; }
+.history-changelist li { font-size: 12px; color: var(--ink-2); }
+.history-changelist li.chg-added { color: var(--good); }
+.history-changelist li.chg-removed { color: var(--critical); }
 
 /* Help → Check for updates sheet */
 .update-body { margin: 12px 0 4px; font-size: 13px; display: flex; flex-direction: column; gap: 8px; }
@@ -4193,7 +4201,8 @@ function historyLoad() {
     var versions = (data && data.versions) || [];
     clear(list);
     if (!versions.length) { list.appendChild(el("p", "help-small", "No saved cuts yet.")); return; }
-    versions.forEach(function (v) {
+    versions.forEach(function (v, i) {
+      var item = el("div", "history-item");
       var row = el("div", "history-row");
       var meta = el("div", "history-meta");
       meta.appendChild(el("span", "history-when", relTime(v.created_at)));
@@ -4203,13 +4212,43 @@ function historyLoad() {
       if (v.duration) bits.push(fmtDuration(v.duration));
       meta.appendChild(el("span", "history-sub", bits.join(" · ")));
       row.appendChild(meta);
+      var detail = el("div", "history-changes"); detail.hidden = true;
+      // "Changes" compares this snapshot to the current cut (skip on the newest,
+      // which usually IS the current cut)
+      if (i > 0) {
+        var chg = el("button", "btn ghost small", "Changes"); chg.type = "button";
+        chg.addEventListener("click", function () { historyChanges(v.id, detail, chg); });
+        row.appendChild(chg);
+      }
       var btn = el("button", "btn small", "Restore"); btn.type = "button";
       btn.addEventListener("click", function () { historyRestore(v.id, btn); });
       row.appendChild(btn);
-      list.appendChild(row);
+      item.appendChild(row);
+      item.appendChild(detail);
+      list.appendChild(item);
     });
   }).catch(function (err) {
     list.innerHTML = '<p class="help-small">' + escapeHtml(err && err.message ? err.message : String(err)) + "</p>";
+  });
+}
+function historyChanges(versionId, detail, btn) {
+  if (!detail.hidden) { detail.hidden = true; return; } // toggle closed
+  detail.hidden = false;
+  detail.innerHTML = '<p class="help-small">Comparing to the current cut…</p>';
+  api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/versions/" + encodeURIComponent(versionId) + "/changes").then(function (data) {
+    var changes = (data && data.changes) || [];
+    clear(detail);
+    if (!changes.length) { detail.appendChild(el("p", "help-small", "No editorial changes since this version.")); return; }
+    detail.appendChild(el("p", "help-small", "Since this version → current cut:"));
+    var ul = el("ul", "history-changelist");
+    changes.forEach(function (c) {
+      var li = el("li", "chg-" + (c.kind || ""));
+      li.textContent = c.summary;
+      ul.appendChild(li);
+    });
+    detail.appendChild(ul);
+  }).catch(function (err) {
+    detail.innerHTML = '<p class="help-small">' + escapeHtml(err && err.message ? err.message : String(err)) + "</p>";
   });
 }
 function historyRestore(versionId, btn) {

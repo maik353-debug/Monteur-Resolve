@@ -3560,6 +3560,11 @@ class MonteurHandler(BaseHTTPRequestHandler):
                 vid = tail[: -len("/restore")]
                 if pid and vid and "/" not in pid and "/" not in vid:
                     return lambda: self._project_version_restore(pid, vid)
+            elif "/versions/" in rest and rest.endswith("/changes") and method == "GET":
+                pid, _, tail = rest.partition("/versions/")
+                vid = tail[: -len("/changes")]
+                if pid and vid and "/" not in pid and "/" not in vid:
+                    return lambda: self._project_version_changes(pid, vid)
             elif rest and "/" not in rest:
                 project_id = rest
                 if method == "GET":
@@ -4558,6 +4563,24 @@ class MonteurHandler(BaseHTTPRequestHandler):
         if not projects.restore_version(project, version_id):
             raise ApiError(404, f"unknown version {version_id!r}")
         self._send_json(projects.project_to_dict(project))
+
+    def _project_version_changes(self, project_id: str, version_id: str) -> None:
+        """GET /api/projects/<id>/versions/<vid>/changes — what changed since <vid>.
+
+        Diffs the snapshot against the project's CURRENT plan — the handoff list
+        (added / removed / re-trimmed / retimed / transition, plus length +
+        tempo) a sound or VFX editor needs.
+        """
+        from monteur import changelist, projects
+
+        project = projects.load_project(project_id)
+        if project is None:
+            raise ApiError(404, f"unknown project {project_id!r}")
+        old = projects.load_version(project, version_id)
+        if old is None:
+            raise ApiError(404, f"unknown version {version_id!r}")
+        cl = changelist.diff_plans(old, project.plan or {})
+        self._send_json(cl.to_dict())
 
     def _project_pool_get(self, project_id: str) -> None:
         """GET /api/projects/<id>/pool — the media pool resolved to clips.

@@ -1586,6 +1586,21 @@ def cmd_ui(args: argparse.Namespace) -> None:
         _fail(f"could not start Monteur Studio on port {args.port}: {exc}")
 
 
+def cmd_changes(args: argparse.Namespace) -> None:
+    import json
+
+    from monteur import changelist
+
+    try:
+        old = json.loads(Path(args.old).read_text(encoding="utf-8"))
+        new = json.loads(Path(args.new).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        _fail(f"could not read a plan file: {exc}")
+    cl = changelist.diff_plans(old, new)
+    print(changelist.format_change_list(
+        cl, old_label=Path(args.old).stem, new_label=Path(args.new).stem))
+
+
 def cmd_update(args: argparse.Namespace) -> None:
     from monteur import update as update_mod
     from monteur.settings import update_channel
@@ -2254,6 +2269,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="open in a native desktop window instead of a browser "
                         "(needs the [app] extra: pip install 'monteur[app]')")
     p.set_defaults(func=cmd_ui)
+
+    p = sub.add_parser("changes", help="change list between two saved plans (for sound/VFX handoff)")
+    p.add_argument("old", help="the earlier plan JSON (e.g. --save-plan output)")
+    p.add_argument("new", help="the later plan JSON")
+    p.set_defaults(func=cmd_changes)
 
     p = sub.add_parser("update", help="check for and install a newer Monteur build")
     p.add_argument("--check", action="store_true",
