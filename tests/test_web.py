@@ -942,8 +942,9 @@ class TestDraftsApi:
         assert 'id="cre-save-draft"' in html
         assert 'id="cre-draft-name"' in html
         assert "Save draft" in html
-        # the client speaks both new endpoints
-        assert "/api/drafts" in html
+        # persistence flipped to first-class projects: the client speaks the
+        # projects store (not /api/drafts) plus the plan -> file export
+        assert "/api/projects" in html
         assert "/api/create/export" in html
 
 
@@ -6145,7 +6146,9 @@ class TestNoRebuildOnCleanReturn:
             page.reload()
             page.click("#tab-create")
             page.wait_for_selector("#cre-drafts", state="visible", timeout=30_000)
-            page.click("#cre-drafts-list button[aria-label^='Resume draft']")
+            # persistence flipped to projects: the panel now lists real
+            # projects, opened via "Open project …" (was "Resume draft …")
+            page.click("#cre-drafts-list button[aria-label^='Open project']")
             page.wait_for_selector(
                 "#cre-sb-board .sb-card", state="visible", timeout=120_000
             )

@@ -2937,7 +2937,7 @@ var VIEWS = ["home", "create", "movie", "pacing", "assembly"];
 function setView(view) {
   if (state.view === "create" && view !== "create") creStopJobs(); // leaving the wizard stops its poll loops
   if (state.view === "movie" && view !== "movie") movStopJobs(); // leaving the movie view stops its poll loops
-  if (view === "create") { refreshDrafts(); creUpdatePages(); } // keep drafts + page-bar ticks current
+  if (view === "create") { refreshProjects(); creUpdatePages(); } // keep projects + page-bar ticks current
   state.view = view;
   VIEWS.forEach(function (v) {
     $("tab-" + v).setAttribute("aria-pressed", String(view === v));
@@ -2961,7 +2961,7 @@ VIEWS.forEach(function (v) {
   $("tab-" + v).addEventListener("click", function () { setView(v); });
 });
 /* Project-Manager action cards */
-$("pm-new").addEventListener("click", function () { setView("create"); creShowStep(1, false); });
+$("pm-new").addEventListener("click", function () { newProject(); });
 $("pm-series").addEventListener("click", function () {
   toast("Serien-Modus kommt bald — für jetzt starten wir einen einzelnen Cut.", "");
   setView("create"); creShowStep(1, false);
@@ -3983,7 +3983,8 @@ var cre = {
   transitions: "auto",    // "auto" | "cuts" | "dissolves" | "smash"
   order: "chronological", // "chronological" | "best_first"
   format: "fcpxml",       // download format
-  draftId: null,          // the saved draft this cut updates on re-save (null = new)
+  projectId: null,        // the real project this cut persists to (null = not created yet)
+  projectName: "",        // the current project's name (kept in sync with the store)
   buildFp: null,          // fingerprint of the options the working draft was BUILT with
                           // (set on build success / draft resume; null = no clean draft)
   aiCutTouched: false,    // has the user decided about "Claude composes the cut"?
@@ -4585,7 +4586,7 @@ function scanFolder() {
   cre.clips = null;
   cre.result = null; // footage changed — any previous build is stale
   cre.buildFp = null; // ...so the next storyboard visit builds fresh
-  cre.draftId = null; // ...a re-save after this is a NEW draft, not an update
+  // the project persists across a re-scan — only its footage/plan change
   cre.arrange.seq = []; // ...and an arranged sequence points at old scenes
   cre.arrange.dirty = false;
   creUpdatePages(); // footage/build reset — clear the Footage & Storyboard ticks
@@ -5077,7 +5078,7 @@ function creValidateStep2() {
     }
   });
 });
-$("cre-next-1").addEventListener("click", function () { creShowStep(2, true); });
+$("cre-next-1").addEventListener("click", function () { saveProject(); creShowStep(2, true); });
 // any option edit in step 2 may flip the continue button's rebuild hint —
 // chips bubble "click", text fields "input", selects/checkboxes "change"
 ["click", "input", "change"].forEach(function (kind) {
@@ -5482,12 +5483,11 @@ function startBuild(andThen) {
         // the options this draft was built with — until one changes, going
         // options -> storyboard just navigates instead of rebuilding
         cre.buildFp = buildFingerprintOf(body);
-        cre.draftId = null; // a fresh build is a new cut — re-save makes a new draft
-        refreshDrafts(); // the server just autosaved this build
         // a fresh build seeds the revision loop with its full plan
         rev.planJson = (result && result.plan_json) || null;
         rev.pins = [];
         rev.lastBody = null;
+        saveProject(); // persist this build into the project (always-saved)
         $("cre-rev-rationale").hidden = true;
         $("cre-rev-msg").hidden = true;
         creUpdatePages(); // a working draft exists — light the Storyboard tick
@@ -5572,13 +5572,15 @@ $("cre-download").addEventListener("click", function () {
   startBuild(deliver);
 });
 
-/* ---- drafts: save a cut as WIP, continue after a reload ---------------
-   The whole wizard state (folder, music, settings, the FULL plan_json,
-   pins, review) goes to POST /api/drafts; step 1's "Continue where you
-   left off" panel lists the saved drafts plus the server's autosave of
-   the last successful build/revise/apply. Resume restores the controls
-   and rebuilds the result card via POST /api/create/export — pure plan
-   -> file on the server, so nothing is ever re-planned. */
+/* ---- projects: every cut is a durable, always-saved project ----------
+   The whole wizard state (footage folder -> media_pool, settings ->
+   options, the FULL plan -> plan) persists to POST /api/projects/<id>;
+   step 1's "Continue where you left off" panel and the Project-Manager
+   home cards both list real projects (GET /api/projects). Opening a
+   project restores the controls and rebuilds the result card via POST
+   /api/create/export — pure plan -> file on the server, so nothing is
+   ever re-planned. A cut is created (New Cut) or lazily on first save,
+   then updated in place; there are no throwaway drafts. */
 
 function draftStyleOf(plan) {
   var notes = (plan && plan.notes) || [];
@@ -5608,36 +5610,35 @@ function relTime(iso) {
   return String(iso).slice(0, 10);
 }
 
-function draftSummaryText(draft) {
-  var s = draft.summary || {};
-  var parts = [fmtClock(s.duration || 0), (s.cuts || 0) + (s.cuts === 1 ? " cut" : " cuts")];
-  if (s.style && s.style !== "auto") parts.push(String(s.style));
-  return parts.join(" · ");
+function projectPoolText(project) {
+  var n = (project && project.pool_size) || 0;
+  if (!n) return "No footage yet";
+  return n === 1 ? "1 source in the pool" : n + " sources in the pool";
 }
 
 function renderDrafts(list) {
   var host = $("cre-drafts-list");
   clear(host);
   $("cre-drafts").hidden = !list.length;
-  list.forEach(function (draft) {
+  list.forEach(function (project) {
     var li = el("li", "seg-item");
-    li.appendChild(el("span", "seg-take", String(draft.name || "Draft")));
-    if (draft.autosave) li.appendChild(el("span", "sem-pill", "Auto-saved"));
-    li.appendChild(el("span", "seg-time", relTime(draft.saved_at)));
-    li.appendChild(el("span", "seg-label",
-      baseName(draft.folder || "") + " — " + draftSummaryText(draft)));
-    var resume = el("button", "btn small", "Resume");
+    li.appendChild(el("span", "seg-take", String(project.name || "Untitled cut")));
+    if (project.has_plan) li.appendChild(el("span", "sem-pill", "Plan ready"));
+    li.appendChild(el("span", "seg-time", relTime(project.modified_at)));
+    li.appendChild(el("span", "seg-label", projectPoolText(project)));
+    var resume = el("button", "btn small", "Open");
     resume.type = "button";
-    resume.setAttribute("aria-label", "Resume draft " + String(draft.name || ""));
-    resume.addEventListener("click", function () { resumeDraft(draft.id, resume); });
+    resume.setAttribute("aria-label", "Open project " + String(project.name || ""));
+    resume.addEventListener("click", function () { openProject(project.id, resume); });
     li.appendChild(resume);
     var del = el("button", "btn ghost small", "Delete");
     del.type = "button";
-    del.setAttribute("aria-label", "Delete draft " + String(draft.name || ""));
+    del.setAttribute("aria-label", "Delete project " + String(project.name || ""));
     del.addEventListener("click", function () {
       busy(del, function () {
-        return api("/api/drafts/" + encodeURIComponent(String(draft.id)), { method: "DELETE" }).then(function () {
-          refreshDrafts();
+        return api("/api/projects/" + encodeURIComponent(String(project.id)), { method: "DELETE" }).then(function () {
+          if (String(project.id) === String(cre.projectId)) { cre.projectId = null; cre.projectName = ""; }
+          refreshProjects();
         });
       });
     });
@@ -5653,52 +5654,78 @@ function renderPmRecents(list) {
   var empty = $("pm-recents-empty");
   if (empty) empty.hidden = !!list.length;
   host.hidden = !list.length;
-  list.slice(0, 6).forEach(function (draft) {
+  list.slice(0, 6).forEach(function (project) {
     var card = el("button", "pm-card");
     card.type = "button";
-    card.setAttribute("aria-label", "Resume " + String(draft.name || "draft"));
+    card.setAttribute("aria-label", "Open " + String(project.name || "project"));
     var thumb = el("div", "pm-card-thumb");
     var strip = el("div", "pm-filmstrip");
     for (var i = 0; i < 6; i++) strip.appendChild(el("span"));
     thumb.appendChild(strip);
-    thumb.appendChild(el("span", "pm-badge", draft.autosave ? "Auto" : "Draft"));
-    var s = draft.summary || {};
-    thumb.appendChild(el("span", "pm-dur", fmtClock(s.duration || 0)));
+    thumb.appendChild(el("span", "pm-badge", project.has_plan ? "Cut" : "Draft"));
     var del = el("button", "pm-card-del", "×");
     del.type = "button";
-    del.setAttribute("aria-label", "Delete draft " + String(draft.name || ""));
+    del.setAttribute("aria-label", "Delete project " + String(project.name || ""));
     del.addEventListener("click", function (e) {
       e.stopPropagation();
       busy(del, function () {
-        return api("/api/drafts/" + encodeURIComponent(String(draft.id)), { method: "DELETE" })
-          .then(function () { refreshDrafts(); });
+        return api("/api/projects/" + encodeURIComponent(String(project.id)), { method: "DELETE" })
+          .then(function () {
+            if (String(project.id) === String(cre.projectId)) { cre.projectId = null; cre.projectName = ""; }
+            refreshProjects();
+          });
       });
     });
     thumb.appendChild(del);
     card.appendChild(thumb);
     var meta = el("div", "pm-card-meta");
-    meta.appendChild(el("h3", null, String(draft.name || "Untitled cut")));
-    var bits = [relTime(draft.saved_at)];
-    if (draft.folder) bits.push(baseName(draft.folder));
-    var sum = draftSummaryText(draft);
-    if (sum) bits.push(sum);
+    meta.appendChild(el("h3", null, String(project.name || "Untitled cut")));
+    var bits = [relTime(project.modified_at), projectPoolText(project)];
+    if (project.has_plan) bits.push("Plan ready");
     meta.appendChild(el("p", null, bits.filter(Boolean).join(" · ")));
     card.appendChild(meta);
-    card.addEventListener("click", function () { setView("create"); resumeDraft(draft.id, card); });
+    card.addEventListener("click", function () { setView("create"); openProject(project.id, card); });
     host.appendChild(card);
   });
 }
 
-function refreshDrafts() {
-  api("/api/drafts").then(function (data) {
-    var list = (data && data.drafts) || [];
+function refreshProjects() {
+  api("/api/projects").then(function (data) {
+    var list = (data && data.projects) || [];
     renderDrafts(list);      // the wizard's "Continue where you left off" panel
     renderPmRecents(list);   // ...and the Project-Manager home cards
   }).catch(function () { /* the panel is a convenience — never an error state */ });
 }
 
-/* the current wizard controls as a draft's "settings" — the same keys a
-   build payload carries, so autosaved and hand-saved drafts restore alike */
+/* start a brand-new, always-saved project: it exists immediately (no
+   footage required yet), the wizard opens blank at step 1, and every
+   later change autosaves into it. */
+function newProject() {
+  $("cre-folder").value = "";
+  $("cre-music").value = "";
+  $("cre-draft-name").value = "";
+  $("cre-draft-msg").hidden = true;
+  cre.clips = null;
+  cre.result = null;
+  // buildFp is only ever consulted while cre.result + rev.planJson exist
+  // (both cleared here), so it needs no reset — leaving the 4-place invariant
+  cre.arrange.seq = [];
+  cre.arrange.dirty = false;
+  creResetRevise();       // clear any plan/storyboard left from the previous cut
+  creUpdatePages();
+  cre.projectId = null;
+  cre.projectName = "New cut";
+  setView("create");
+  creShowStep(1, false);
+  api("/api/projects", { method: "POST", body: { name: "New cut" } }).then(function (project) {
+    cre.projectId = (project && project.id) || null;
+    cre.projectName = (project && project.name) || "New cut";
+    refreshProjects();
+  }).catch(function () { /* offline: the project is created lazily on first autosave */ });
+}
+
+/* the current wizard controls as a project's "options" — the same keys a
+   build payload carries, so autosaved and restored projects behave alike */
 function draftSettingsFromState() {
   var body = creBuildBody();
   var settings = {};
@@ -5710,34 +5737,88 @@ function draftSettingsFromState() {
   return settings;
 }
 
+/* the current wizard state as a project manifest: the footage folder
+   becomes a single media_pool entry (Increment B makes the pool
+   multi-entry); the controls become options; the built plan becomes the
+   plan. The resume-only extras (music path, pins, tempo, the director's
+   review) ride inside options — keys draftSettingsFromState/restore never
+   read, so they round-trip without colliding with the build settings. */
+function projectManifestFromState() {
+  var options = draftSettingsFromState();
+  var folder = $("cre-folder").value.trim();
+  var music = $("cre-music").value.trim();
+  if (music) options.music = music;
+  if (rev.pins && rev.pins.length) options.pins = rev.pins.slice();
+  var tempo = (cre.result && cre.result.data && cre.result.data.plan && cre.result.data.plan.tempo) || 0;
+  if (tempo) options.tempo = tempo;
+  if (dnotes.review) options.review = dnotes.review;
+  var pool = folder ? [{ path: folder, kind: "folder" }] : [];
+  // "New cut" auto-names itself from the footage folder once one is chosen
+  var name = (cre.projectName && cre.projectName !== "New cut")
+    ? cre.projectName
+    : (folder ? baseName(folder) : (cre.projectName || "New cut"));
+  return { name: name, media_pool: pool, options: options, plan: (rev.planJson || null) };
+}
+
+/* persist the current wizard state into the project (creating it first if
+   New Cut was skipped). Returns a promise; failures are swallowed so a
+   background autosave never interrupts the edit. */
+var creatingProject = null; // a create in flight — later saves chain onto it
+function saveProject() {
+  var folder = $("cre-folder").value.trim();
+  // nothing worth persisting yet — never spawn an empty project on a stray blur
+  if (!cre.projectId && !folder && !rev.planJson) return Promise.resolve(null);
+  var update = function (id) {
+    return api("/api/projects/" + encodeURIComponent(String(id)),
+      { method: "POST", body: projectManifestFromState() })
+      .then(function (project) {
+        if (project && project.name) cre.projectName = String(project.name);
+        refreshProjects();
+        return project;
+      });
+  };
+  if (cre.projectId) return update(cre.projectId).catch(function () { /* autosave is best-effort */ });
+  // a create may already be racing (debounced save + advance) — chain onto it
+  // instead of spawning a second project, then take the plain update path
+  if (creatingProject) return creatingProject.then(function () { return saveProject(); });
+  var name = projectManifestFromState().name;
+  creatingProject = api("/api/projects", { method: "POST", body: { name: name } })
+    .then(function (project) {
+      cre.projectId = (project && project.id) || null;
+      if (project && project.name) cre.projectName = String(project.name);
+    }).catch(function () { /* autosave is best-effort */ })
+    .then(function () { creatingProject = null; });
+  return creatingProject.then(function () {
+    if (!cre.projectId) return null;
+    return update(cre.projectId);
+  });
+}
+
+/* debounced autosave — folder/music edits settle before the write, exactly
+   as the wizard used to lean on the server's post-build autosave. */
+var projectSaveTimer = null;
+function scheduleProjectSave() {
+  if (projectSaveTimer) clearTimeout(projectSaveTimer);
+  projectSaveTimer = setTimeout(function () { projectSaveTimer = null; saveProject(); }, 800);
+}
+
 $("cre-save-draft").addEventListener("click", function () {
   if (!cre.result || !rev.planJson) return;
-  var built = (cre.result && cre.result.body) || {};
-  var record = {
-    name: $("cre-draft-name").value.trim()
-      || defaultDraftName((cre.result.data && cre.result.data.plan) || {}),
-    folder: built.folder || $("cre-folder").value.trim(),
-    music: built.music || $("cre-music").value.trim(),
-    settings: draftSettingsFromState(),
-    plan_json: rev.planJson,
-    pins: rev.pins.slice(),
-    // export never re-listens to the song — remember the tempo for the card
-    tempo: (cre.result.data && cre.result.data.plan && cre.result.data.plan.tempo) || 0
-  };
-  if (cre.draftId) record.id = cre.draftId; // re-saving updates the same draft
-  if (dnotes.review) record.review = dnotes.review;
+  var typed = $("cre-draft-name").value.trim();
+  if (typed) cre.projectName = typed; // the field renames the project
   busy($("cre-save-draft"), function () {
-    return api("/api/drafts", { method: "POST", body: record }).then(function (stored) {
-      cre.draftId = (stored && stored.id) || null;
-      if (stored && stored.name) $("cre-draft-name").value = String(stored.name);
-      creNote("cre-draft-msg", "Draft saved. You'll find it under “Continue where you left off” in step 1 — it survives reloads.");
-      refreshDrafts();
+    return saveProject().then(function () {
+      if (cre.projectName) $("cre-draft-name").value = cre.projectName;
+      creNote("cre-draft-msg", "Saved. This cut lives in your projects — it survives reloads and shows up on the home screen.");
     });
   });
 });
 $("cre-draft-name").addEventListener("keydown", function (e) {
   if (e.key === "Enter") { e.preventDefault(); $("cre-save-draft").click(); }
 });
+/* footage/music edits autosave into the project (debounced) */
+$("cre-folder").addEventListener("input", scheduleProjectSave);
+$("cre-music").addEventListener("input", scheduleProjectSave);
 
 /* canvas key -> the wizard's shape + resolution controls (see CANVAS_KEYS) */
 var CANVAS_TO_SHAPE = {
@@ -5827,12 +5908,56 @@ function restoreWizardFromDraft(draft) {
   setPlatform(typeof s.platform === "string" && s.platform ? s.platform : "custom", false);
 }
 
-function resumeDraft(draftId, btn) {
+/* a project manifest -> the draft-shaped bag restoreWizardFromDraft reads:
+   media_pool[0] -> folder, options -> settings, plan -> plan_json, and the
+   resume-only extras (music/pins/tempo/review) unpacked back out of options. */
+function projectToDraftShape(project) {
+  var options = (project && project.options) || {};
+  var pool = (project && project.media_pool) || [];
+  var folder = "";
+  for (var i = 0; i < pool.length; i++) {
+    if (!pool[i] || !pool[i].path) continue;
+    if (pool[i].kind === "folder") { folder = String(pool[i].path); break; }
+    if (!folder) folder = String(pool[i].path); // fall back to the first entry
+  }
+  var settings = {};
+  Object.keys(options).forEach(function (k) {
+    if (k !== "music" && k !== "pins" && k !== "tempo" && k !== "review") settings[k] = options[k];
+  });
+  return {
+    id: project.id,
+    name: project.name || "",
+    folder: folder,
+    music: options.music || "",
+    settings: settings,
+    plan_json: (project && project.plan) || null,
+    pins: Array.isArray(options.pins) ? options.pins : [],
+    tempo: options.tempo || 0,
+    review: options.review || null
+  };
+}
+
+function openProject(id, btn) {
   if (buildPanel.running() || revisePanel.running() || directPanel.running()) return;
   busy(btn, function () {
-    return api("/api/drafts/" + encodeURIComponent(String(draftId))).then(function (draft) {
-      if (!draft || !draft.plan_json) throw new Error("This draft has no plan to resume — build a new cut instead.");
+    return api("/api/projects/" + encodeURIComponent(String(id))).then(function (project) {
+      if (!project || !project.id) throw new Error("This project could not be opened.");
+      var draft = projectToDraftShape(project);
+      cre.projectId = project.id;
+      cre.projectName = draft.name || "New cut";
       restoreWizardFromDraft(draft);
+      if (draft.name) $("cre-draft-name").value = String(draft.name);
+      if (!draft.plan_json) {
+        // no plan yet — land in step 1 to keep building where it was left.
+        // buildFp needs no reset: it's only read while cre.result + planJson
+        // exist, and both are cleared here (keeps the 4-place invariant).
+        cre.result = null;
+        creResetRevise();
+        creUpdatePages();
+        creShowStep(1, false);
+        toast("Project opened — pick up where you left off.", "success");
+        return;
+      }
       var s = draft.settings || {};
       var exportBody = {
         plan_json: draft.plan_json,
@@ -5844,7 +5969,7 @@ function resumeDraft(draftId, btn) {
       // rebuild the result card FROM the stored plan — no re-planning
       return api("/api/create/export", { method: "POST", body: exportBody }).then(function (result) {
         // the export's tempo is honestly 0 (nothing re-listened) — the
-        // draft remembers what the build knew, so the card stays complete
+        // project remembers what the build knew, so the card stays complete
         if (draft.tempo && result.plan && !result.plan.tempo) result.plan.tempo = draft.tempo;
         rev.planJson = draft.plan_json;
         rev.pins = (draft.pins || []).slice();
@@ -5854,9 +5979,8 @@ function resumeDraft(draftId, btn) {
           body: creBuildBody(), // reconstructed from the restored controls
           kind: "export", exportBody: exportBody
         };
-        cre.draftId = draft.autosave ? null : (draft.id || null);
-        // the restored controls ARE the settings this draft was built with:
-        // resume -> options -> storyboard must not rebuild either
+        // the restored controls ARE the settings this cut was built with:
+        // open -> options -> storyboard must not rebuild either
         cre.buildFp = buildFingerprint();
         $("cre-rev-rationale").hidden = true;
         $("cre-rev-msg").hidden = true;
@@ -5868,10 +5992,9 @@ function resumeDraft(draftId, btn) {
         resetPreview(); // the restored plan renders fresh — the button is back
         if (draft.review) renderDirectorReview(draft.review);
         renderCreResult(result);
-        if (!draft.autosave && draft.name) $("cre-draft-name").value = String(draft.name);
         creShowStep(3, false);
         $("cre-result-title").focus();
-        toast("Draft resumed — your cut is back, downloads and revisions included.", "success");
+        toast("Project opened — your cut is back, downloads and revisions included.", "success");
       });
     });
   });
@@ -7226,10 +7349,10 @@ function startRevise(body, andThen) {
     revisePanel.start(data.job, {
       onDone: function (result) {
         setReviseBusy(false);
-        refreshDrafts(); // the server just autosaved this revision
         rev.lastBody = body;
         rev.planJson = (result && result.plan_json) || rev.planJson;
         rev.pins = []; // the kept shots live in the new plan now
+        saveProject(); // persist this revision into the project (always-saved)
         cre.result = {
           data: result, format: body.format,
           body: (cre.result && cre.result.body) || null, kind: "revise"
@@ -7414,10 +7537,10 @@ function startDirectApply(body, andThen) {
     directPanel.start(data.job, {
       onDone: function (result) {
         setDirectApplyBusy(false);
-        refreshDrafts(); // the server just autosaved this improved cut
         dnotes.lastApplyBody = body;
         rev.planJson = (result && result.plan_json) || rev.planJson;
         rev.pins = [];
+        saveProject(); // persist this improved cut into the project (always-saved)
         cre.result = {
           data: result, format: body.format,
           body: (cre.result && cre.result.body) || null, kind: "direct-apply"
@@ -10055,7 +10178,7 @@ $("set-yt-disconnect").addEventListener("click", function () {
 updateMainVisibility();
 refreshVersions();
 loadResolve();
-refreshDrafts(); // reload-safety: offer "Continue where you left off" right away
+refreshProjects(); // reload-safety: offer "Continue where you left off" right away
 reattachActiveJob(); // ...and reattach the UI to a scan the reload forgot but the server still runs
 
 })();
