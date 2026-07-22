@@ -1045,6 +1045,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
 .job-top { display: flex; align-items: center; gap: 10px; }
 .job-status { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
 .job-count { font-size: 11px; color: var(--ink-muted); font-family: var(--mono); white-space: nowrap; }
+.job-elapsed { font-size: 11px; color: var(--ink-muted); font-family: var(--mono); white-space: nowrap; opacity: .85; }
 .job-bar { height: 5px; border-radius: 2px; background: var(--meter-track); overflow: hidden; margin: 9px 0 7px; }
 .job-bar > span { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 2px; transition: width 0.25s ease; }
 .job-bar.indet > span { width: 30%; animation: jobslide 1.2s ease-in-out infinite alternate; }
@@ -3931,10 +3932,12 @@ function makeJobPanel(hostId, texts) {
   status.setAttribute("role", "status");
   status.setAttribute("aria-live", "polite");
   var count = el("span", "job-count", "");
+  var elapsed = el("span", "job-elapsed", "");  // honest liveness timer while running
   var cancelBtn = el("button", "btn ghost small", "Cancel");
   cancelBtn.type = "button";
   top.appendChild(status);
   top.appendChild(count);
+  top.appendChild(elapsed);
   top.appendChild(cancelBtn);
   var bar = el("div", "job-bar indet");
   bar.setAttribute("role", "progressbar");
@@ -3954,8 +3957,10 @@ function makeJobPanel(hostId, texts) {
     if (active) {
       active.stopped = true;
       if (active.timer) window.clearTimeout(active.timer);
+      if (active.heart) window.clearInterval(active.heart);
       active = null;
     }
+    elapsed.textContent = "";
     root.hidden = true;
   }
 
@@ -4077,12 +4082,30 @@ function makeJobPanel(hostId, texts) {
     status.textContent = texts.starting;
     count.textContent = "";
     cancelBtn.disabled = false;
-    var run = { jobId: jobId, timer: null, stopped: false };
+    var run = { jobId: jobId, timer: null, heart: null, stopped: false, startedAt: Date.now() };
     active = run;
+
+    // Honest heartbeat: as long as the server says the job is running, show a
+    // ticking "running for M:SS" so a silent phase (e.g. Claude reading one
+    // frame per moment from huge files) never looks frozen.
+    function fmtElapsed(ms) {
+      var s = Math.max(0, Math.round(ms / 1000)), m = Math.floor(s / 60);
+      return m + ":" + ("0" + (s % 60)).slice(-2);
+    }
+    function beat() {
+      if (run.stopped) return;
+      var secs = (Date.now() - run.startedAt) / 1000;
+      elapsed.textContent = "⏳ " + fmtElapsed(Date.now() - run.startedAt) +
+        (secs > 20 ? " · large files take a moment" : "");
+    }
+    beat();
+    run.heart = window.setInterval(beat, 1000);
 
     function finish(kind, payload) {
       if (run.stopped) return;
       run.stopped = true;
+      if (run.heart) window.clearInterval(run.heart);
+      elapsed.textContent = "";
       if (active === run) active = null;
       root.hidden = true;
       if (kind === "done") handlers.onDone(payload);
