@@ -111,6 +111,16 @@ Craft templates:
 
 ## v1.0 — Product
 
+- [ ] **Native app shell (REQUIRED, not a browser tab).** Monteur must feel
+      like real software: its OWN window, modern Windows (Fluent) design, no
+      browser chrome, no address bar. Recommended path: wrap the existing
+      local Studio UI in a native webview (pywebview → WebView2 on Windows =
+      modern Edge Chromium in a native window; bundles with the Python we
+      already ship; minimal launcher change). Tauri is the richer-native
+      alternative (Rust toolchain, smaller binary) if we want fully native
+      chrome. Then restyle app.html toward a Fluent look (title bar, mica/
+      acrylic surfaces, native-feeling controls). This is the packaging spike
+      with a concrete requirement. — Maik, explicit.
 - [ ] Package Studio as a desktop app (installers, no Python required)
 - [ ] Resolve plugin panel (Workflow Integration)
 - [ ] Licensing/pricing model (indie editors first)
