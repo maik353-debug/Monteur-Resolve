@@ -444,7 +444,22 @@ svg text.axis {
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* ---------- settings modal (AI — Claude connection) --------------------- */
-.settings-card { width: min(480px, 100%); max-height: calc(100vh - 40px); overflow-y: auto; }
+.settings-card { width: min(760px, 100%); max-height: calc(100vh - 40px); }
+/* tabbed settings: a left rail of sections, the chosen one's controls on the right */
+.set-body { display: flex; margin-top: 12px; min-height: 340px; }
+.set-tabs {
+  flex: 0 0 172px; display: flex; flex-direction: column; gap: 2px;
+  padding-right: 14px; border-right: 1px solid var(--border);
+}
+.set-tab {
+  text-align: left; border: 0; background: transparent; color: var(--ink-2);
+  font-size: 12.5px; padding: 7px 11px; border-radius: 5px; cursor: pointer; white-space: nowrap;
+}
+.set-tab:hover, .set-tab:focus-visible { background: var(--surface-2); color: var(--ink); outline: none; }
+.set-tab.on { background: var(--accent); color: #fff; font-weight: 600; }
+.set-panes { flex: 1; min-width: 0; padding-left: 18px; max-height: calc(100vh - 150px); overflow-y: auto; }
+.set-pane > h3 { font-size: 14px; font-weight: 650; margin-bottom: 6px; }
+.set-pane > .set-section { margin-top: 0; padding-top: 0; border-top: 0; }
 .set-status { margin: 6px 0 0; font-size: 12.5px; font-weight: 600; color: var(--ink); }
 .set-status.off { color: var(--warning); }
 .set-env-note { margin-top: 4px; }
@@ -1759,12 +1774,6 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         <path d="M8 1.4 V3.6 M8 12.4 V14.6 M1.4 8 H3.6 M12.4 8 H14.6 M3.3 3.3 L4.9 4.9 M11.1 11.1 L12.7 12.7 M12.7 3.3 L11.1 4.9 M4.9 11.1 L3.3 12.7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
       </svg>
     </button>
-    <button class="theme-btn" id="theme-toggle" type="button" aria-label="Switch color theme">
-      <svg viewBox="0 0 16 16" aria-hidden="true">
-        <circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" stroke-width="1.5"/>
-        <path d="M8 2.5 a5.5 5.5 0 0 1 0 11 Z" fill="currentColor"/>
-      </svg>
-    </button>
     <!-- native window caption buttons (shown only in the pywebview shell) -->
     <div class="tb-caption" id="tb-caption">
       <button class="capbtn cap-min" id="cap-min" type="button" title="Minimize" aria-label="Minimize">
@@ -2988,7 +2997,28 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
 
 <div class="modal" id="settings-modal" hidden>
   <div class="modal-card settings-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-    <h2 id="settings-title">AI &mdash; Claude connection</h2>
+    <h2 id="settings-title">Settings</h2>
+    <div class="set-body">
+      <nav class="set-tabs" id="set-tabs" role="tablist" aria-label="Settings sections">
+        <button class="set-tab on" data-pane="appearance" type="button" role="tab" aria-selected="true">Appearance</button>
+        <button class="set-tab" data-pane="ai" type="button" role="tab" aria-selected="false">AI · Claude</button>
+        <button class="set-tab" data-pane="resolve" type="button" role="tab" aria-selected="false">DaVinci Resolve</button>
+        <button class="set-tab" data-pane="youtube" type="button" role="tab" aria-selected="false">YouTube</button>
+      </nav>
+      <div class="set-panes">
+
+    <section class="set-pane" id="set-pane-appearance" role="tabpanel">
+      <h3>Appearance</h3>
+      <p class="help-small">How Monteur looks. Dark is tuned for the editing surface; light is available too.</p>
+      <label class="set-key-label" for="theme-dark">Colour theme</label>
+      <div class="seg-toggle" role="group" aria-label="Colour theme">
+        <button type="button" id="theme-light" aria-pressed="false">Light</button>
+        <button type="button" id="theme-dark" aria-pressed="true">Dark</button>
+      </div>
+    </section>
+
+    <section class="set-pane" id="set-pane-ai" role="tabpanel" hidden>
+    <h3>AI &mdash; Claude connection</h3>
     <p class="set-status" id="set-status" role="status"></p>
     <p class="help-small set-env-note" id="set-env-note" hidden>These settings are overridden by this machine&rsquo;s MONTEUR_AI_BACKEND environment variable &mdash; the choice below takes effect again once it is unset.</p>
 
@@ -3032,7 +3062,9 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
     </div>
 
     <p class="help-small">Changes apply immediately &mdash; the next thing you ask Claude for uses them. No restart needed.</p>
+    </section>
 
+    <section class="set-pane" id="set-pane-resolve" role="tabpanel" hidden>
     <div class="set-section" id="set-resolve-section">
       <h3 id="set-rv-title">DaVinci Resolve &mdash; live connection</h3>
       <p class="set-status" id="set-rv-status" role="status">Checking DaVinci Resolve&hellip;</p>
@@ -3068,7 +3100,9 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         <p class="help-small">&ldquo;Find a compatible Python&rdquo; normally fills this in for you &mdash; set it by hand only if you keep a special Python somewhere.</p>
       </div>
     </div>
+    </section>
 
+    <section class="set-pane" id="set-pane-youtube" role="tabpanel" hidden>
     <div class="set-section" id="set-yt-section">
       <h3 id="set-yt-title">YouTube &mdash; upload connection</h3>
       <p class="set-status" id="set-yt-status" role="status">Not configured</p>
@@ -3101,6 +3135,10 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         <span class="help-small set-test-result" id="set-yt-result" role="status" aria-live="polite"></span>
       </div>
     </div>
+    </section>
+
+      </div><!-- .set-panes -->
+    </div><!-- .set-body -->
 
     <div class="modal-actions">
       <button class="btn ghost" id="settings-close" type="button">Close</button>
@@ -3677,7 +3715,7 @@ var APP_MENUS = [
   { label: "View", items: [
     { label: "Home", run: function () { setView("home"); } },
     { sep: true },
-    { label: "Toggle light / dark", run: function () { var t = $("theme-toggle"); if (t) t.click(); } }
+    { label: "Toggle light / dark", run: function () { if (window.monteurTheme) window.monteurTheme.toggle(); } }
   ] },
   { label: "Help", items: [
     { label: "About Monteur", run: function () { toast("Monteur Studio — footage in, set a direction, iterate, finished video out.", ""); } }
@@ -11619,9 +11657,10 @@ function openSettings(scrollTo) {
   api("/api/settings").then(function (s) {
     renderSettings(s);
     $("settings-modal").hidden = false;
+    if (scrollTo === "youtube") setSettingsTab("youtube");
+    else if (scrollTo) setSettingsTab("resolve");
+    else setSettingsTab("appearance");
     $("settings-close").focus();
-    if (scrollTo === "youtube") $("set-yt-section").scrollIntoView({ block: "start" });
-    else if (scrollTo) $("set-resolve-section").scrollIntoView({ block: "start" });
   }).catch(function (err) {
     toast(err && err.message ? err.message : String(err), "error");
   });
@@ -11631,6 +11670,23 @@ function closeSettings() {
   $("settings-modal").hidden = true;
   $("settings-open").focus();
 }
+
+function setSettingsTab(pane) {
+  var tabs = document.querySelectorAll("#set-tabs .set-tab");
+  for (var i = 0; i < tabs.length; i++) {
+    var on = tabs[i].getAttribute("data-pane") === pane;
+    tabs[i].classList.toggle("on", on);
+    tabs[i].setAttribute("aria-selected", on ? "true" : "false");
+  }
+  var panes = document.querySelectorAll("#settings-modal .set-pane");
+  for (var j = 0; j < panes.length; j++) {
+    panes[j].hidden = panes[j].id !== ("set-pane-" + pane);
+  }
+}
+
+Array.prototype.forEach.call(document.querySelectorAll("#set-tabs .set-tab"), function (tab) {
+  tab.addEventListener("click", function () { setSettingsTab(tab.getAttribute("data-pane")); });
+});
 
 $("settings-open").addEventListener("click", function () { openSettings(false); });
 $("settings-close").addEventListener("click", closeSettings);
@@ -12080,22 +12136,31 @@ reattachActiveJob(); // ...and reattach the UI to a scan the reload forgot but t
 })();
 </script>
 <script>
-/* theme toggle — purely visual, separate from the app logic above */
+/* theme — purely visual, separate from the app logic above.
+   Lives in Settings › Appearance now; exposed as window.monteurTheme
+   so the menu and any other caller can flip it. */
 (function () {
   var root = document.documentElement;
-  var btn = document.getElementById("theme-toggle");
-  function label() {
-    var light = root.getAttribute("data-theme") === "light";
-    btn.setAttribute("aria-label", light ? "Switch to dark theme" : "Switch to light theme");
+  var bLight = document.getElementById("theme-light");
+  var bDark = document.getElementById("theme-dark");
+  function current() { return root.getAttribute("data-theme") === "light" ? "light" : "dark"; }
+  function reflect() {
+    var light = current() === "light";
+    if (bLight) bLight.setAttribute("aria-pressed", light ? "true" : "false");
+    if (bDark) bDark.setAttribute("aria-pressed", light ? "false" : "true");
   }
-  label();
-  btn.addEventListener("click", function () {
-    var toLight = root.getAttribute("data-theme") !== "light";
-    if (toLight) root.setAttribute("data-theme", "light");
+  function set(theme) {
+    var light = theme === "light";
+    if (light) root.setAttribute("data-theme", "light");
     else root.removeAttribute("data-theme");
-    try { localStorage.setItem("monteur-theme", toLight ? "light" : "dark"); } catch (e) {}
-    label();
-  });
+    try { localStorage.setItem("monteur-theme", light ? "light" : "dark"); } catch (e) {}
+    reflect();
+  }
+  function toggle() { set(current() === "light" ? "dark" : "light"); }
+  if (bLight) bLight.addEventListener("click", function () { set("light"); });
+  if (bDark) bDark.addEventListener("click", function () { set("dark"); });
+  reflect();
+  window.monteurTheme = { set: set, toggle: toggle, current: current };
 })();
 </script>
 </body>
