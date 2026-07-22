@@ -341,6 +341,41 @@ class TestCreateApi:
             for n in plan_json["notes"]
         )
 
+    def test_series_builds_distinct_shorts(self, server):
+        # One tour -> several Shorts, each a full plan, no moment repeated.
+        data = _post(
+            f"{server}/api/create/series",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav", "series": 2},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert job["kind"] == "series"
+        shorts = job["result"]["shorts"]
+        assert 1 <= len(shorts) <= 2  # honest degradation if too few seeds
+        seen = set()
+        for i, short in enumerate(shorts):
+            assert short["index"] == i
+            assert short["plan_json"]["monteur_plan"]  # a real save-plan
+            assert short["cuts"] >= 1 and short["duration"] > 0
+            assert "clip_path" in short["seed"]
+            # the headline promise: no source moment appears in two shorts
+            for e in short["plan_json"]["entries"]:
+                key = (e["clip_path"], round(e["source_start"], 2), round(e["source_end"], 2))
+                assert key not in seen, "a moment repeated across the series"
+                seen.add(key)
+        if len(shorts) == 2:
+            assert shorts[0]["seed"]["clip_path"] != shorts[1]["seed"]["clip_path"] \
+                or shorts[0]["seed"]["start"] != shorts[1]["seed"]["start"]
+
+    def test_series_needs_at_least_two(self, server):
+        data = _post(
+            f"{server}/api/create/series",
+            {"folder": self.DEMO, "music": f"{self.DEMO}/song.wav", "series": 1},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "at least 2" in job["message"]
+
     def test_build_forwards_music_flow(self, server):
         # "continuous" passes through untouched — the engine plans zero
         # deliberate silences and serializes without the music_gaps key.

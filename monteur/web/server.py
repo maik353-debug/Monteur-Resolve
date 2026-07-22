@@ -1955,6 +1955,90 @@ def _run_build_job(job: dict, payload: dict) -> None:
         job["state"] = "error"
 
 
+def _run_series_job(job: dict, payload: dict) -> None:
+    """Daemon-thread body for POST /api/create/series.
+
+    One tour -> up to ``series`` genuinely different Shorts, zero moment
+    repeated across the set (:func:`monteur.series.plan_series`). Reuses the
+    exact sift/vision/music pipeline the single-cut build runs
+    (:func:`_plan_from_payload`) so a series sees the same material a cut
+    would; the single montage that call also produces is discarded. Each
+    short carries its own full plan (save-plan format), its seed moment (for
+    the picker's label + thumbnail) and the "why this short" note.
+    """
+    from monteur.ai import MonteurAIError
+    from monteur.media import MonteurMediaError
+    from monteur.montage import BEST_FIRST, plan_to_dict
+    from monteur.series import plan_series
+    from monteur.sift import SiftCancelled
+
+    try:
+        try:
+            count = int(payload.get("series") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("'series' must be a whole number of videos")
+        if count < 2:
+            raise ValueError("a series needs at least 2 videos")
+        count = min(count, 8)  # a sane upper bound for one tour
+        # reports + music from the shared pipeline (the single plan it also
+        # builds is not used here — plan_series builds one plan per short)
+        _plan, reports, music, vision = _plan_from_payload(job, payload)
+        kwargs: dict = {}
+        if payload.get("order") == "best_first":
+            kwargs["order"] = BEST_FIRST
+        if payload.get("transitions"):
+            kwargs["transitions"] = str(payload["transitions"])
+        if payload.get("allow_repeats") is not None:
+            kwargs["allow_repeats"] = bool(payload["allow_repeats"])
+        if payload.get("fps"):
+            kwargs["fps"] = float(payload["fps"])
+        # shorts are vertical by default; honour an explicit canvas choice
+        canvas = str(payload.get("canvas") or "vertical-uhd")
+        shorts = plan_series(reports, music, count=count, canvas=canvas, **kwargs)
+        if not shorts:
+            raise ValueError(
+                "no usable moments for a series — the footage needs a few "
+                "distinct strong moments to seed different Shorts"
+            )
+        out = []
+        for i, short in enumerate(shorts):
+            out.append({
+                "index": i,
+                "plan_json": plan_to_dict(short.plan),
+                "seed": {
+                    "clip_path": short.seed.clip_path,
+                    "start": short.seed.start,
+                    "end": short.seed.end,
+                    "label": short.seed.label,
+                    "score": short.seed.score,
+                },
+                "note": short.note,
+                "canvas": short.canvas,
+                "duration": short.plan.duration,
+                "cuts": len(short.plan.entries),
+            })
+        result = {
+            "shorts": out,
+            "count": len(out),
+            "requested": count,
+            "tempo": music.tempo if music is not None else 0,
+        }
+        if vision["error"]:
+            result["vision_error"] = vision["error"]
+        elif vision["ran"]:
+            result["vision_notes"] = vision["notes"]
+        job["result"] = result
+        job["state"] = "done"
+    except SiftCancelled:
+        job["state"] = "cancelled"
+    except (MonteurAIError, MonteurMediaError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
 def _run_pick_job(job: dict, payload: dict) -> None:
     """Daemon-thread body for POST /api/create/pick (rank candidate songs)."""
     from monteur.media import MonteurMediaError
@@ -3253,6 +3337,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/assembly/export"): self._assembly_export,
             ("POST", "/api/create/scan"): self._create_scan,
             ("POST", "/api/create/build"): self._create_build,
+            ("POST", "/api/create/series"): self._create_series,
             ("POST", "/api/create/pick"): self._create_pick,
             ("POST", "/api/create/kit"): self._create_kit,
             ("POST", "/api/create/revise"): self._create_revise,
@@ -3551,6 +3636,20 @@ class MonteurHandler(BaseHTTPRequestHandler):
             target=_run_build_job,
             args=(job, payload),
             name=f"monteur-build-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _create_series(self) -> None:
+        payload = self._read_json()
+        if not payload.get("folder"):
+            raise ApiError(400, "missing 'folder' (path to your footage)")
+        _validate_platform(payload)
+        job = _new_job("series")
+        threading.Thread(
+            target=_run_series_job,
+            args=(job, payload),
+            name=f"monteur-series-{job['id']}",
             daemon=True,
         ).start()
         self._send_json({"job": job["id"]})
