@@ -498,6 +498,17 @@ svg text.axis {
   background: var(--surface-2); border: 1px solid var(--border);
   border-radius: 4px; padding: 2px 7px; white-space: nowrap;
 }
+/* Project cut-history sheet */
+.history-list { margin: 12px 0 4px; display: flex; flex-direction: column; max-height: 320px; overflow-y: auto; }
+.history-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 9px 4px; border-bottom: 1px solid var(--acrylic-border);
+}
+.history-row:last-child { border-bottom: 0; }
+.history-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.history-when { font-size: 12.5px; color: var(--ink); }
+.history-sub { font-size: 11.5px; color: var(--ink-2); }
+
 /* Help → Check for updates sheet */
 .update-body { margin: 12px 0 4px; font-size: 13px; display: flex; flex-direction: column; gap: 8px; }
 .update-body p { margin: 0; }
@@ -2398,6 +2409,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           <div class="proj-head">
             <h2 class="seg-heading" id="cre-result-title" tabindex="-1" style="margin: 14px 0 0;">Your working draft</h2>
             <p class="proj-meta" id="cre-proj-meta" hidden></p>
+            <button class="btn ghost small" id="cre-history" type="button" hidden>History</button>
           </div>
           <p class="rev-rationale" id="cre-rev-rationale" role="status" hidden></p>
           <p class="sb-story" id="cre-sb-story" hidden></p>
@@ -4094,6 +4106,75 @@ function runUpdateInstall() {
   });
 }
 var updateState = null;
+
+/* Project history: every distinct cut is a restorable snapshot. This lists
+   them (newest first) and restores one — the plan you leave is snapshotted
+   first, so restoring is itself reversible. */
+function openHistory() {
+  if (!cre.projectId) { toast("Save this cut first — history needs a project."); return; }
+  var modal = $("history-modal");
+  if (!modal) {
+    modal = el("div", "modal"); modal.id = "history-modal"; modal.hidden = true;
+    var card = el("div", "modal-card"); card.setAttribute("role", "dialog");
+    card.setAttribute("aria-modal", "true"); card.setAttribute("aria-label", "Cut history");
+    card.appendChild(el("h2", null, "Cut history"));
+    card.appendChild(el("p", "help-small", "Every distinct cut you make is saved here. Restoring one keeps the current cut too — nothing is lost."));
+    var list = el("div", "history-list"); list.id = "history-list";
+    card.appendChild(list);
+    var actions = el("div", "modal-actions");
+    var close = el("button", "btn ghost", "Close"); close.type = "button";
+    close.addEventListener("click", function () { modal.hidden = true; });
+    actions.appendChild(close); card.appendChild(actions);
+    modal.appendChild(card);
+    modal.addEventListener("click", function (e) { if (e.target === modal) modal.hidden = true; });
+    modal.addEventListener("keydown", function (e) { if (e.key === "Escape") modal.hidden = true; });
+    document.body.appendChild(modal);
+  }
+  modal.hidden = false;
+  historyLoad();
+}
+function historyLoad() {
+  var list = $("history-list");
+  list.innerHTML = '<p class="help-small">Loading…</p>';
+  api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/versions").then(function (data) {
+    var versions = (data && data.versions) || [];
+    clear(list);
+    if (!versions.length) { list.appendChild(el("p", "help-small", "No saved cuts yet.")); return; }
+    versions.forEach(function (v) {
+      var row = el("div", "history-row");
+      var meta = el("div", "history-meta");
+      meta.appendChild(el("span", "history-when", relTime(v.created_at)));
+      var bits = [];
+      if (v.label) bits.push(v.label);
+      if (v.shots) bits.push(v.shots + (v.shots === 1 ? " shot" : " shots"));
+      if (v.duration) bits.push(fmtDuration(v.duration));
+      meta.appendChild(el("span", "history-sub", bits.join(" · ")));
+      row.appendChild(meta);
+      var btn = el("button", "btn small", "Restore"); btn.type = "button";
+      btn.addEventListener("click", function () { historyRestore(v.id, btn); });
+      row.appendChild(btn);
+      list.appendChild(row);
+    });
+  }).catch(function (err) {
+    list.innerHTML = '<p class="help-small">' + escapeHtml(err && err.message ? err.message : String(err)) + "</p>";
+  });
+}
+function historyRestore(versionId, btn) {
+  busy(btn, function () {
+    return api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/versions/" + encodeURIComponent(versionId) + "/restore", { method: "POST", body: {} })
+      .then(function (project) {
+        $("history-modal").hidden = true;
+        toast("Restored an earlier cut.", "");
+        return openProject(project.id, document.createElement("button")); // reload the wizard from the restored plan
+      });
+  });
+}
+function fmtDuration(sec) {
+  sec = Math.round(sec || 0);
+  return Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0");
+}
+// test seam (like window.monteurTheme): open history for a given project
+window.monteurHistory = function (projectId) { if (projectId) cre.projectId = projectId; openHistory(); };
 
 /* recent-projects type filter (All / Create / Movie / Analysis) — cards
    carry a data-type, the chips toggle which types are shown */
@@ -7232,6 +7313,7 @@ function renderCreResult(data) {
   $("cre-export-result").hidden = true;
   prepareExportRow();
   $("cre-result").hidden = false;
+  $("cre-history").hidden = !cre.projectId; // saved cuts have a restorable history
   renderSeriesStrip(); // shows the Short picker when a series is active
   // the harvest step (4: Your cut) is reachable once a draft exists
   $("cre-next-3").disabled = false;
@@ -7304,6 +7386,7 @@ function startBuild(andThen) {
   });
 }
 $("cre-build-btn").addEventListener("click", function () { startBuild(null); });
+$("cre-history").addEventListener("click", openHistory);
 
 /* ================= Series: one tour -> several Shorts =================
    When "Number of videos" is >1 the build posts to /api/create/series and

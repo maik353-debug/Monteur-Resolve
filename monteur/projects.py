@@ -117,6 +117,10 @@ class Project:
     plan: dict | None = None
     exports: list[dict] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: Lightweight index of saved cuts — each ``{"id","created_at","label",
+    #: "shots","duration"}``. The full plan snapshot lives in
+    #: ``versions/<id>.json``, so listing history never reads every plan.
+    versions: list[dict] = field(default_factory=list)
     migrated_from_draft: str = ""
     #: Which tool made this project — "cut" (Create), "movie" or "analysis".
     #: Drives the Home recents badge and type filter. Default "cut": the
@@ -162,6 +166,8 @@ def project_to_dict(project: Project) -> dict:
     }
     if project.has_plan:
         data["plan"] = project.plan
+    if project.versions:  # only-when-non-empty keeps historyless manifests unchanged
+        data["versions"] = [dict(v) for v in project.versions]
     if project.migrated_from_draft:
         data["migrated_from_draft"] = project.migrated_from_draft
     # only-when-not-default, so existing "cut" manifests stay byte-identical
@@ -208,6 +214,7 @@ def project_from_dict(data: dict) -> Project:
         plan=plan if isinstance(plan, dict) and plan else None,
         exports=[dict(e) for e in (data.get("exports") or []) if isinstance(e, dict)],
         notes=[str(n) for n in (data.get("notes") or [])],
+        versions=[dict(v) for v in (data.get("versions") or []) if isinstance(v, dict) and v.get("id")],
         migrated_from_draft=str(data.get("migrated_from_draft") or ""),
         type=str(data.get("type") or "cut"),
     )
@@ -407,6 +414,95 @@ def remove_from_pool(project: Project, path: str | Path) -> bool:
     if len(kept) == len(project.media_pool):
         return False
     project.media_pool = kept
+    save_project(project)
+    return True
+
+
+# --- version history (never lose a cut) --------------------------------------
+
+#: keep at most this many snapshots per project (oldest dropped first)
+_MAX_VERSIONS = 50
+
+
+def _version_path(project: Project, version_id: str) -> Path:
+    return project.root / "versions" / f"{version_id}.json"
+
+
+def _plan_stats(plan: dict) -> dict:
+    """Cheap summary of a plan for the history index (no montage import)."""
+    entries = plan.get("entries") if isinstance(plan, dict) else None
+    shots = len(entries) if isinstance(entries, list) else 0
+    duration = 0.0
+    if isinstance(entries, list):
+        for e in entries:
+            if isinstance(e, dict):
+                try:
+                    duration += float(e.get("duration") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+    return {"shots": shots, "duration": round(duration, 2)}
+
+
+def add_version(project: Project, plan: dict, label: str = "") -> dict | None:
+    """Snapshot ``plan`` as a restorable cut. Returns the index entry.
+
+    A no-op (returns ``None``) when ``plan`` is empty or identical to the most
+    recent snapshot — autosave can call this freely without piling up dupes.
+    The full plan lands in ``versions/<id>.json``; a slim entry goes into the
+    manifest index. Oldest snapshots beyond :data:`_MAX_VERSIONS` are pruned.
+    """
+    if not isinstance(plan, dict) or not plan:
+        return None
+    if project.versions:
+        last = load_version(project, project.versions[-1]["id"])
+        if last == plan:
+            return None  # nothing changed since the last cut
+    version_id = uuid.uuid4().hex[:12]
+    entry = {"id": version_id, "created_at": _now(), "label": str(label or "").strip()}
+    entry.update(_plan_stats(plan))
+    path = _version_path(project, version_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+    tmp.write_text(json.dumps({**entry, "plan": plan}, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    project.versions.append(entry)
+    while len(project.versions) > _MAX_VERSIONS:
+        dropped = project.versions.pop(0)
+        try:
+            _version_path(project, dropped["id"]).unlink()
+        except OSError:
+            pass
+    save_project(project)
+    return entry
+
+
+def list_versions(project: Project) -> list[dict]:
+    """The history index, newest first."""
+    return list(reversed(project.versions))
+
+
+def load_version(project: Project, version_id: str) -> dict | None:
+    """The full plan of a snapshot, or ``None`` if it's missing."""
+    try:
+        data = json.loads(_version_path(project, version_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    plan = data.get("plan") if isinstance(data, dict) else None
+    return plan if isinstance(plan, dict) and plan else None
+
+
+def restore_version(project: Project, version_id: str) -> bool:
+    """Make a past snapshot the project's current plan and save. True on success.
+
+    The current plan is snapshotted first (labelled), so restoring is itself
+    reversible — you never lose the cut you're leaving.
+    """
+    plan = load_version(project, version_id)
+    if plan is None:
+        return False
+    if project.has_plan and project.plan != plan:
+        add_version(project, project.plan, label="before restore")
+    project.plan = plan
     save_project(project)
     return True
 

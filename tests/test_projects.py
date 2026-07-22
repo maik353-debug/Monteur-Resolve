@@ -343,3 +343,73 @@ class TestMigration:
         monkeypatch.setenv("MONTEUR_DRAFTS_PATH", str(tmp_path / "empty.json"))
         assert migrate_drafts() == []
         assert list_projects() == []
+
+
+class TestVersionHistory:
+    """Never lose a cut: every distinct plan is a restorable snapshot."""
+
+    def test_add_and_list_versions_newest_first(self):
+        p = create_project("v")
+        a = projects.add_version(p, _plan_json(cuts=2), label="first")
+        b = projects.add_version(p, _plan_json(cuts=3), label="second")
+        assert a and b and a["id"] != b["id"]
+        listed = projects.list_versions(p)
+        assert [v["label"] for v in listed] == ["second", "first"]  # newest first
+        assert listed[0]["shots"] == 3  # cheap stats recorded in the index
+
+    def test_add_version_dedupes_identical_plan(self):
+        p = create_project("v")
+        plan = _plan_json()
+        assert projects.add_version(p, plan) is not None
+        assert projects.add_version(p, plan) is None  # unchanged -> no new snapshot
+        assert len(p.versions) == 1
+
+    def test_add_version_ignores_empty_plan(self):
+        p = create_project("v")
+        assert projects.add_version(p, {}) is None
+        assert p.versions == []
+
+    def test_load_version_returns_full_plan(self):
+        p = create_project("v")
+        plan = _plan_json(cuts=3)
+        entry = projects.add_version(p, plan)
+        assert projects.load_version(p, entry["id"]) == plan
+        assert projects.load_version(p, "nope") is None
+
+    def test_restore_brings_a_past_cut_back(self):
+        p = create_project("v")
+        old = _plan_json(cuts=2)
+        projects.add_version(p, old)
+        new = _plan_json(cuts=5)
+        p.plan = new
+        save_project(p)
+        old_id = p.versions[0]["id"]
+        assert projects.restore_version(p, old_id) is True
+        assert p.plan == old
+        # restoring snapshotted the plan we left, so it's reversible
+        assert any(v.get("label") == "before restore" for v in p.versions)
+
+    def test_restore_unknown_version_is_false(self):
+        p = create_project("v")
+        assert projects.restore_version(p, "missing") is False
+
+    def test_versions_survive_reload(self):
+        p = create_project("v")
+        projects.add_version(p, _plan_json(cuts=2), label="keep")
+        reloaded = load_project(p.id)
+        assert [v["label"] for v in reloaded.versions] == ["keep"]
+        assert projects.load_version(reloaded, reloaded.versions[0]["id"]) is not None
+
+    def test_history_is_capped(self, monkeypatch):
+        monkeypatch.setattr(projects, "_MAX_VERSIONS", 3)
+        p = create_project("v")
+        for i in range(5):
+            projects.add_version(p, _plan_json(cuts=i + 1))
+        assert len(p.versions) == 3  # oldest pruned
+        # the pruned snapshot files are gone too
+        files = list((p.root / "versions").glob("*.json"))
+        assert len(files) == 3
+
+    def test_empty_history_stays_out_of_manifest(self):
+        p = create_project("v")
+        assert "versions" not in project_to_dict(p)  # byte-identical to before

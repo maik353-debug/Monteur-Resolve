@@ -111,24 +111,22 @@ Craft templates:
 
 ## Project persistence (REQUIRED — never lose a project)
 
-- [ ] **First-class Monteur project format.** Today: settings/drafts/preferences
-      persist as JSON in `~/.monteur/`, and the Movie mode has real project
-      folders (`movie.save_project`), but the Cut/Create workflow only
-      autosaves to a shared `drafts.json` and `project.py` stores only version
-      history. Elevate a CUT to a durable, first-class project:
-      - Each project = a folder (a projects root under `~/.monteur/projects/<slug>/`
-        or a user-chosen location) with a manifest — a custom `.monteur` bundle
-        (project.json inside): name, footage folder PATH (media is never copied —
-        "your files are never moved"), the chosen options, the current
-        MontagePlan (already JSON-serializable via `plan_to_dict`), version
-        history, export history, timestamps.
-      - Subfolders for exports / versions / proxies. Global config stays in
-        `~/.monteur/settings.json`; preferences global.
-      - A `monteur/projects.py` (or extend `project.py`) with save/load/list;
-        MIGRATE existing `drafts.json` into projects so nothing is lost.
-      - The new Project-Manager home lists these real projects (currently it
-        lists drafts as a bridge). — Maik, explicit: "auf keinen Fall Projekte
-        verlieren." Backend track right after the UI pages land.
+- [x] **First-class Monteur project format.** DONE (`monteur/projects.py`): a
+      Cut is a durable `.monteur` bundle — a folder `<root>/<id>/` with a
+      versioned `project.json` manifest (name, media pool, options, the current
+      MontagePlan, exports, notes, timestamps) plus `versions/` and `exports/`
+      subfolders. Media is REFERENCED by absolute path, never copied ("your
+      files are never moved"). Full CRUD + pool add/remove; the Home lists these
+      real projects; `migrate_drafts()` runs on every listing so existing
+      `drafts.json` drafts become projects, idempotent and lossless. Global
+      config stays in `~/.monteur/settings.json`.
+- [x] **Version history — never lose a cut.** Every distinct plan saved becomes
+      a restorable snapshot in `versions/<id>.json` (a slim index in the
+      manifest; autosave dedupes so identical saves don't pile up, capped at 50).
+      Restore brings a past cut back and snapshots the one you're leaving first,
+      so it's reversible. Studio: a **History** button on the working draft
+      (`GET /api/projects/<id>/versions`, `POST …/versions/<vid>/restore`). —
+      Maik, explicit: "auf keinen Fall Projekte verlieren."
 - [ ] **Unified model (Maik):** everything is ONE always-saved project. A
       project = a MEDIA POOL (files/folders referenced from disk, Resolve-style
       — never imported/moved) + the DERIVED INFORMATION (sift reports, AI

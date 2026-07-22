@@ -1123,6 +1123,10 @@ class TestDraftsApi:
         # projects store (not /api/drafts) plus the plan -> file export
         assert "/api/projects" in html
         assert "/api/create/export" in html
+        # cut history: a History button + the versions/restore client calls
+        assert 'id="cre-history"' in html
+        assert "function openHistory" in html
+        assert "/versions" in html and "/restore" in html
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_media_page_is_a_three_panel_workspace(self):
@@ -1188,6 +1192,34 @@ class TestProjectsApi:
 
         assert _delete(f"{server}/api/projects/{pid}") == {"deleted": True}
         assert _get(f"{server}/api/projects") == {"projects": []}
+
+    def test_saving_a_plan_snapshots_a_version(self, server):
+        pid = _post(f"{server}/api/projects", {"name": "hist"})["id"]
+        # first plan -> one snapshot
+        _post(f"{server}/api/projects/{pid}", {"plan": _tiny_plan_json()})
+        versions = _get(f"{server}/api/projects/{pid}/versions")["versions"]
+        assert len(versions) == 1
+        # saving the SAME plan again does not pile up a duplicate
+        _post(f"{server}/api/projects/{pid}", {"plan": _tiny_plan_json()})
+        assert len(_get(f"{server}/api/projects/{pid}/versions")["versions"]) == 1
+
+    def test_restore_a_past_version(self, server):
+        pid = _post(f"{server}/api/projects", {"name": "hist"})["id"]
+        first = _tiny_plan_json()
+        second = _tiny_plan_json()
+        second["notes"] = ["style \"travel\": changed"]  # a genuinely different cut
+        _post(f"{server}/api/projects/{pid}", {"plan": first})
+        _post(f"{server}/api/projects/{pid}", {"plan": second})
+        versions = _get(f"{server}/api/projects/{pid}/versions")["versions"]
+        assert len(versions) == 2
+        oldest = versions[-1]["id"]  # the first cut
+        restored = _post(f"{server}/api/projects/{pid}/versions/{oldest}/restore", {})
+        assert restored["plan"] == first
+
+    def test_versions_unknown_project_is_404(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(f"{server}/api/projects/nope/versions")
+        assert exc.value.code == 404
 
     def test_get_unknown_is_404(self, server):
         with pytest.raises(urllib.error.HTTPError) as exc_info:

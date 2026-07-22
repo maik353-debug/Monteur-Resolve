@@ -3531,6 +3531,15 @@ class MonteurHandler(BaseHTTPRequestHandler):
                 pid = rest[: -len("/see")]
                 if pid and "/" not in pid:
                     return lambda: self._project_see(pid)
+            elif rest.endswith("/versions") and method == "GET":
+                pid = rest[: -len("/versions")]
+                if pid and "/" not in pid:
+                    return lambda: self._project_versions(pid)
+            elif "/versions/" in rest and rest.endswith("/restore") and method == "POST":
+                pid, _, tail = rest.partition("/versions/")
+                vid = tail[: -len("/restore")]
+                if pid and vid and "/" not in pid and "/" not in vid:
+                    return lambda: self._project_version_restore(pid, vid)
             elif rest and "/" not in rest:
                 project_id = rest
                 if method == "GET":
@@ -4494,6 +4503,10 @@ class MonteurHandler(BaseHTTPRequestHandler):
         if "plan" in payload:
             plan = payload["plan"]
             project.plan = plan if isinstance(plan, dict) and plan else None
+            # snapshot every distinct cut so a past version is never lost
+            # (add_version dedupes against the last snapshot, so autosave is safe)
+            if project.plan:
+                projects.add_version(project, project.plan)
         if isinstance(payload.get("exports"), list):
             project.exports = [e for e in payload["exports"] if isinstance(e, dict)]
         if isinstance(payload.get("notes"), list):
@@ -4505,6 +4518,26 @@ class MonteurHandler(BaseHTTPRequestHandler):
         from monteur import projects
 
         self._send_json({"deleted": projects.delete_project(project_id)})
+
+    def _project_versions(self, project_id: str) -> None:
+        """GET /api/projects/<id>/versions — the saved-cut history, newest first."""
+        from monteur import projects
+
+        project = projects.load_project(project_id)
+        if project is None:
+            raise ApiError(404, f"unknown project {project_id!r}")
+        self._send_json({"versions": projects.list_versions(project)})
+
+    def _project_version_restore(self, project_id: str, version_id: str) -> None:
+        """POST /api/projects/<id>/versions/<vid>/restore — bring a past cut back."""
+        from monteur import projects
+
+        project = projects.load_project(project_id)
+        if project is None:
+            raise ApiError(404, f"unknown project {project_id!r}")
+        if not projects.restore_version(project, version_id):
+            raise ApiError(404, f"unknown version {version_id!r}")
+        self._send_json(projects.project_to_dict(project))
 
     def _project_pool_get(self, project_id: str) -> None:
         """GET /api/projects/<id>/pool — the media pool resolved to clips.
