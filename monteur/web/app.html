@@ -712,6 +712,58 @@ svg text.axis {
 .sem-tags { color: var(--ink-muted); overflow-wrap: anywhere; }
 .vision-notes { margin: 4px 0 8px; }
 .vision-notes p { font-size: 11.5px; color: var(--ink-muted); margin-top: 3px; }
+/* the media pool (Increment B): a bin of REFERENCED clips, never copied */
+.pool-add { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; margin-bottom: 8px; }
+.pool-add input { flex: 1 1 240px; }
+.pool-local {
+  display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600;
+  color: var(--ink-2); background: var(--row-wash); border: 1px solid var(--border);
+  border-radius: 3px; padding: 6px 11px; margin: 6px 0 4px;
+}
+.pool-lock {
+  flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--series-1);
+  box-shadow: 0 0 0 3px var(--warn-wash, rgba(120,180,120,0.18));
+}
+.pool-empty {
+  font-size: 12.5px; color: var(--ink-muted); text-align: center;
+  border: 1px dashed var(--border); border-radius: 4px; padding: 22px 14px; margin: 10px 0;
+}
+.pool-actions { display: flex; gap: 10px; align-items: center; margin: 10px 0 4px; flex-wrap: wrap; }
+.pool-count { font-family: var(--mono); font-size: 11.5px; color: var(--ink-muted); }
+.pool-card { position: relative; display: flex; flex-direction: column; cursor: pointer; transition: box-shadow 0.12s, border-color 0.12s; }
+.pool-card:hover { border-color: var(--accent); }
+.pool-card.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.pool-thumb {
+  width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 3px;
+  background: var(--row-wash); display: block; margin-bottom: 8px;
+}
+.pool-thumb-wrap { position: relative; }
+.pool-play {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  opacity: 0; transition: opacity 0.12s; pointer-events: none; margin-bottom: 8px;
+}
+.pool-card:hover .pool-play { opacity: 1; }
+.pool-play span {
+  width: 34px; height: 34px; border-radius: 50%; background: rgba(20,20,24,0.66);
+  color: #fff; display: flex; align-items: center; justify-content: center; font-size: 14px;
+}
+.pool-check {
+  position: absolute; top: 6px; left: 6px; width: 20px; height: 20px; margin: 0;
+  accent-color: var(--accent); cursor: pointer; z-index: 2;
+}
+.pool-remove {
+  position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; line-height: 1;
+  border: none; border-radius: 50%; background: rgba(20,20,24,0.72); color: #fff;
+  font-size: 15px; cursor: pointer; display: flex; align-items: center; justify-content: center; z-index: 2;
+}
+.pool-remove:hover { background: var(--critical); }
+.pool-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.pool-chip {
+  font-family: var(--mono); font-size: 9.5px; font-weight: 600; letter-spacing: 0.04em;
+  border-radius: 2px; padding: 1px 6px 2px; white-space: nowrap;
+  background: var(--row-wash); color: var(--ink-muted); box-shadow: inset 0 0 0 1px var(--border);
+}
+.pool-chip.on { background: var(--warn-wash); color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 .wiz-nav { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
 .radio-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 6px 0 14px; }
 @media (max-width: 700px) { .radio-cards { grid-template-columns: 1fr; } }
@@ -1506,18 +1558,34 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           <ul class="seg-list" id="cre-drafts-list"></ul>
           <p class="scan-note" id="cre-drafts-msg" role="status" hidden></p>
         </div>
-        <label class="sr-only" for="cre-folder">Footage folder path</label>
-        <div class="path-row">
-          <input type="text" id="cre-folder" placeholder="/Users/you/Movies/my-trip" spellcheck="false" autocomplete="off">
-          <button class="btn ghost" id="cre-browse-folder" type="button">Browse&hellip;</button>
-          <button class="btn primary" id="cre-scan-btn" type="button">Scan my clips<span class="spin" aria-hidden="true"></span></button>
+        <!-- The media pool: files/folders REFERENCED from disk (Resolve-style),
+             never copied or moved. cre-folder stays as the derived scan/build
+             folder (hidden) so the sift/plan pipeline downstream is unchanged —
+             only this Footage page's UX becomes a pool. -->
+        <input type="text" id="cre-folder" hidden aria-hidden="true">
+        <div class="pool-add">
+          <label class="sr-only" for="cre-pool-path">Add a file or folder path</label>
+          <input type="text" id="cre-pool-path" placeholder="Paste a file or folder path&hellip;" spellcheck="false" autocomplete="off">
+          <button class="btn" id="cre-pool-add-path" type="button">Add path</button>
+          <button class="btn ghost" id="cre-browse-folder" type="button">Add folder&hellip;</button>
         </div>
-        <p class="hint-small">Use Browse to pick the folder — or paste its path (macOS: right-click the folder, hold Option, “Copy as Pathname”; Windows: Shift + right-click, “Copy as path”).</p>
+        <p class="hint-small">Browse to add a folder — or paste any file/folder path (macOS: right-click, hold Option, “Copy as Pathname”; Windows: Shift + right-click, “Copy as path”). Add as many as you like.</p>
+        <p class="pool-local" id="cre-pool-local"><span class="pool-lock" aria-hidden="true"></span>Local &amp; unchanged — your files are never moved or copied.</p>
+        <p class="hint-small" id="cre-pool-guide" hidden>Pick the clips you want, then <strong>Analyze selected</strong> — Monteur watches only those and finds the good parts. Click a clip to watch it first.</p>
+        <div class="clip-grid pool-grid" id="cre-pool-grid"></div>
+        <p class="pool-empty" id="cre-pool-empty">Add your footage — files stay where they are.</p>
+        <p class="scan-note" id="cre-pool-msg" role="status" hidden></p>
+        <div class="pool-actions" id="cre-pool-actions" hidden>
+          <button class="btn ghost" id="cre-pool-selall" type="button">Select all</button>
+          <span class="pool-count" id="cre-pool-count" aria-live="polite">None selected</span>
+          <button class="btn primary" id="cre-scan-btn" type="button" disabled>Analyze selected<span class="spin" aria-hidden="true"></span></button>
+          <button class="btn" id="cre-see-btn" type="button" disabled>Let Claude check selected<span class="spin" aria-hidden="true"></span></button>
+        </div>
         <label class="see-check">
           <input type="checkbox" id="cre-see">
-          <span>Let Claude watch your clips</span>
+          <span>Let Claude label them too while analyzing</span>
         </label>
-        <p class="help-small" style="max-width: 620px; margin: 0 0 14px;">Needs the anthropic package and your Anthropic API key (ANTHROPIC_API_KEY) on the machine running <code>monteur ui</code>. Claude looks at one frame per good moment (about a cent per scan) and labels what it shows.</p>
+        <p class="help-small" style="max-width: 620px; margin: 0 0 14px;">Needs the anthropic package and your Anthropic API key (ANTHROPIC_API_KEY) on the machine running <code>monteur ui</code>. Claude looks at one frame per good moment (about a cent per scan) and labels what it shows. “Let Claude check selected” runs the same on just the clips you tick — usually the good ones, after analysis.</p>
         <div id="cre-scan-panel"></div>
         <p class="scan-note" id="cre-scan-msg" role="status" hidden></p>
         <p class="scan-note" id="cre-proxy-status" role="status" aria-live="polite" hidden></p>
@@ -3971,6 +4039,9 @@ $("plan-btn").addEventListener("click", function () { buildPlan($("plan-btn")); 
 var cre = {
   step: 1,
   clips: null,            // clips array from the last finished scan job
+  pool: [],               // the media pool: {path, kind} references (Increment B)
+  poolClips: [],          // the pool resolved to clip cards (name, thumb, status)
+  poolSel: {},            // selected clip paths (staged flow) — {path: true}
   result: null,           // {data, format} from the last finished build job
   audio: "music",         // "music" | "mix" | "original"
   lenMode: "target",      // "whole" | "target" — target by default so a 2:30 song never sneaks in
@@ -4244,8 +4315,12 @@ function setScanBusy(on) {
   var btn = $("cre-scan-btn");
   btn.classList.toggle("busy", on);
   btn.disabled = on;
+  var see = $("cre-see-btn");
+  if (see) see.disabled = on;
   $("cre-folder").disabled = on;
   $("cre-browse-folder").disabled = on;
+  var addPath = $("cre-pool-add-path");
+  if (addPath) addPath.disabled = on;
 }
 function setBuildBusy(on) {
   var btn = $("cre-build-btn");
@@ -4443,7 +4518,264 @@ function browsePath(kind, inputId, btnId) {
     hideBrowseButtons(); // headless — fall back to the text input silently
   }).then(function () { btn.disabled = false; });
 }
-$("cre-browse-folder").addEventListener("click", function () { browsePath("folder", "cre-folder", "cre-browse-folder"); });
+/* "Add folder…" — the native picker adds the chosen folder to the pool as a
+   REFERENCE (its clips expand into cards); silent headless fallback like the
+   other Browse buttons. */
+$("cre-browse-folder").addEventListener("click", function () {
+  if (!pickAvailable) return;
+  var btn = $("cre-browse-folder");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  api("/api/pick", { method: "POST", body: { kind: "folder" } }).then(function (data) {
+    if (data && data.error) { hideBrowseButtons(); return; }
+    if (data && data.path) return poolAdd(String(data.path), "folder");
+  }).catch(function () {
+    hideBrowseButtons(); // headless — the paste-a-path input still works
+  }).then(function () { btn.disabled = false; });
+});
+
+/* ================= the media pool (Increment B, staged) =================
+   The Footage page is a bin of REFERENCED clips. The user picks a SUBSET,
+   watches them, then analyzes only those, then Claude-checks only the good
+   ones — control, not a blind bulk scan. The pool IS the project's
+   media_pool; media is never moved or copied. */
+
+function dirName(path) {
+  var s = String(path).replace(/[\\/]+$/, "");
+  var i = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"));
+  return i > 0 ? s.slice(0, i) : (i === 0 ? s.slice(0, 1) : "");
+}
+
+/* the single folder the sift/plan pipeline scans downstream (build/storyboard):
+   the first folder in the pool, else the folder holding the first file. Keeps
+   the whole downstream single-folder and unchanged. */
+function poolScanFolder() {
+  var pool = cre.pool || [];
+  for (var i = 0; i < pool.length; i++) {
+    if (pool[i] && pool[i].kind === "folder" && pool[i].path) return String(pool[i].path);
+  }
+  for (var j = 0; j < pool.length; j++) {
+    if (pool[j] && pool[j].path) return dirName(pool[j].path);
+  }
+  return "";
+}
+
+/* which pool ENTRY a clip belongs to — a file entry is itself, a folder entry
+   owns every clip directly inside it. Removing a clip removes that owning
+   reference (a folder drops all of its clips). */
+function poolOwnerPath(clipPath, entries) {
+  entries = entries || [];
+  for (var i = 0; i < entries.length; i++) {
+    if (entries[i].kind === "file" && entries[i].path === clipPath) return entries[i].path;
+  }
+  var dir = dirName(clipPath);
+  for (var j = 0; j < entries.length; j++) {
+    if (entries[j].kind === "folder" && entries[j].path === dir) return entries[j].path;
+  }
+  return clipPath;
+}
+
+function thumbUrl(clipPath, w) {
+  return "/api/thumb?clip=" + encodeURIComponent(String(clipPath)) + "&w=" + (w || 320);
+}
+
+function poolSelectedPaths() {
+  return (cre.poolClips || [])
+    .map(function (c) { return c.path; })
+    .filter(function (p) { return cre.poolSel[p]; });
+}
+
+/* reflect the selection in the action bar: the count and which staged actions
+   are enabled. Never runs while a job is live (the spin owns the buttons). */
+function poolSyncActions() {
+  var sel = poolSelectedPaths();
+  var n = sel.length;
+  var count = $("cre-pool-count");
+  count.textContent = n === 0 ? "None selected"
+    : (n + " selected");
+  var busy = scanPanel.running();
+  $("cre-scan-btn").disabled = busy || n === 0;
+  $("cre-see-btn").disabled = busy || n === 0;
+  $("cre-scan-btn").firstChild.textContent = n > 0 ? "Analyze selected (" + n + ")" : "Analyze selected";
+  $("cre-see-btn").firstChild.textContent = n > 0 ? "Let Claude check selected (" + n + ")" : "Let Claude check selected";
+  var allSel = n > 0 && n === (cre.poolClips || []).length;
+  $("cre-pool-selall").textContent = allSel ? "Clear selection" : "Select all";
+}
+
+function poolChip(label, on) {
+  return el("span", "pool-chip" + (on ? " on" : ""), label);
+}
+
+function renderPool(data) {
+  cre.pool = ((data && data.entries) || []).map(function (e) {
+    return { path: String(e.path || ""), kind: e.kind === "folder" ? "folder" : "file" };
+  });
+  cre.poolClips = (data && data.clips) || [];
+  var entries = (data && data.entries) || [];
+  // drop selections for clips that are no longer in the pool
+  var present = {};
+  cre.poolClips.forEach(function (c) { present[c.path] = true; });
+  Object.keys(cre.poolSel).forEach(function (p) { if (!present[p]) delete cre.poolSel[p]; });
+
+  var grid = $("cre-pool-grid");
+  clear(grid);
+  cre.poolClips.forEach(function (clip) {
+    var card = el("div", "clip-card pool-card");
+    if (cre.poolSel[clip.path]) card.classList.add("selected");
+    card.setAttribute("role", "button");
+    card.setAttribute("tabindex", "0");
+    card.setAttribute("aria-pressed", String(!!cre.poolSel[clip.path]));
+
+    var check = el("input", "pool-check");
+    check.type = "checkbox";
+    check.checked = !!cre.poolSel[clip.path];
+    check.setAttribute("aria-label", "Select " + clip.name);
+    check.addEventListener("click", function (e) { e.stopPropagation(); });
+    check.addEventListener("change", function () { poolToggle(clip.path, this.checked); });
+    card.appendChild(check);
+
+    var remove = el("button", "pool-remove", "×");
+    remove.type = "button";
+    remove.title = "Remove from the pool — your file stays on disk";
+    remove.setAttribute("aria-label", "Remove " + clip.name + " from the pool");
+    remove.addEventListener("click", function (e) {
+      e.stopPropagation();
+      poolRemove(poolOwnerPath(clip.path, entries));
+    });
+    card.appendChild(remove);
+
+    var wrap = el("div", "pool-thumb-wrap");
+    var img = el("img", "pool-thumb");
+    img.alt = "";
+    img.loading = "lazy";
+    img.src = thumbUrl(clip.path, 320);
+    wrap.appendChild(img);
+    var play = el("div", "pool-play");
+    play.appendChild(el("span", null, "▶"));
+    wrap.appendChild(play);
+    card.appendChild(wrap);
+
+    card.appendChild(el("p", "clip-name", clip.name));
+    if (clip.sifted && typeof clip.usable_ratio === "number") {
+      card.appendChild(el("p", "clip-meta",
+        fmtClock(clip.duration || 0) + " · " + Math.round((clip.usable_ratio || 0) * 100) + "% usable"));
+    }
+    var badges = el("div", "pool-badges");
+    badges.appendChild(poolChip("sifted", clip.sifted));
+    badges.appendChild(poolChip("proxy ready", clip.proxy_fresh));
+    badges.appendChild(poolChip("labeled", clip.labeled));
+    card.appendChild(badges);
+
+    // click the card to WATCH it (checkbox/remove stopPropagation above)
+    card.addEventListener("click", function () { openMiniPlayer(clip.path, 0, 0, clip.name); });
+    card.addEventListener("keydown", function (e) {
+      if (e.key === " ") { e.preventDefault(); poolToggle(clip.path, !cre.poolSel[clip.path]); }
+      else if (e.key === "Enter") { e.preventDefault(); openMiniPlayer(clip.path, 0, 0, clip.name); }
+    });
+    grid.appendChild(card);
+  });
+
+  var empty = cre.poolClips.length === 0;
+  $("cre-pool-empty").hidden = !empty;
+  $("cre-pool-grid").hidden = empty;
+  $("cre-pool-actions").hidden = empty;
+  $("cre-pool-guide").hidden = empty;
+  poolSyncActions();
+}
+
+function poolToggle(path, on) {
+  if (on) cre.poolSel[path] = true; else delete cre.poolSel[path];
+  var card = null;
+  // update just this card's visual state without a full re-render
+  var checks = $("cre-pool-grid").querySelectorAll(".pool-card");
+  cre.poolClips.forEach(function (clip, i) {
+    if (clip.path === path && checks[i]) {
+      checks[i].classList.toggle("selected", !!on);
+      checks[i].setAttribute("aria-pressed", String(!!on));
+      var box = checks[i].querySelector(".pool-check");
+      if (box) box.checked = !!on;
+    }
+  });
+  poolSyncActions();
+}
+
+$("cre-pool-selall").addEventListener("click", function () {
+  var all = cre.poolClips || [];
+  var allSel = all.length > 0 && poolSelectedPaths().length === all.length;
+  cre.poolSel = {};
+  if (!allSel) all.forEach(function (c) { cre.poolSel[c.path] = true; });
+  renderPool({ clips: cre.poolClips, entries: (cre.pool || []).map(function (e) { return { path: e.path, kind: e.kind }; }) });
+});
+
+/* fetch + render the project's pool (with per-clip cached status). No project
+   or offline -> the friendly empty state; a failed refresh keeps what's shown. */
+function loadPool() {
+  if (!cre.projectId) { renderPool({ clips: [], entries: [] }); return Promise.resolve(); }
+  return api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/pool")
+    .then(function (data) { renderPool(data); })
+    .catch(function () { /* offline: keep whatever is shown */ });
+}
+
+/* ensure a project exists (New Cut may have been skipped), then resolve its id
+   — mirrors saveProject's create-first discipline so adding footage never
+   spawns a second project. */
+function ensurePoolProject() {
+  if (cre.projectId) return Promise.resolve(cre.projectId);
+  if (creatingProject) return creatingProject.then(function () { return cre.projectId; });
+  var name = projectManifestFromState().name;
+  creatingProject = api("/api/projects", { method: "POST", body: { name: name } })
+    .then(function (project) {
+      cre.projectId = (project && project.id) || null;
+      if (project && project.name) cre.projectName = String(project.name);
+    }).catch(function () { /* offline */ })
+    .then(function () { creatingProject = null; });
+  return creatingProject.then(function () { return cre.projectId; });
+}
+
+function poolAdd(path, kind) {
+  path = String(path || "").trim();
+  if (!path) return Promise.resolve();
+  $("cre-pool-msg").hidden = true;
+  return ensurePoolProject().then(function (id) {
+    if (!id) { creNote("cre-pool-msg", "Couldn't reach the project store — try again.", true); return; }
+    return api("/api/projects/" + encodeURIComponent(String(id)) + "/pool",
+      { method: "POST", body: { add: { path: path, kind: kind || "" } } })
+      .then(function (data) {
+        renderPool(data);
+        $("cre-pool-path").value = "";
+        $("cre-folder").value = poolScanFolder(); // feed the downstream pipeline
+        saveProject();       // autosave the reference into the project
+        creUpdatePages();
+      });
+  }).catch(function (err) {
+    creNote("cre-pool-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+
+function poolRemove(entryPath) {
+  if (!cre.projectId) return Promise.resolve();
+  $("cre-pool-msg").hidden = true;
+  return api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/pool",
+    { method: "POST", body: { remove: String(entryPath) } })
+    .then(function (data) {
+      renderPool(data);
+      $("cre-folder").value = poolScanFolder();
+      saveProject();
+      creUpdatePages();
+    }).catch(function (err) {
+      creNote("cre-pool-msg", err && err.message ? err.message : String(err), true);
+    });
+}
+
+$("cre-pool-add-path").addEventListener("click", function () {
+  var path = $("cre-pool-path").value.trim();
+  if (!path) { $("cre-pool-path").focus(); return; }
+  poolAdd(path, "");
+});
+$("cre-pool-path").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); $("cre-pool-add-path").click(); }
+});
+
 $("cre-browse-music").addEventListener("click", function () { browsePath("music", "cre-music", "cre-browse-music"); });
 $("cre-browse-musicdir").addEventListener("click", function () { browsePath("folder", "cre-music-dir", "cre-browse-musicdir"); });
 $("cre-browse-kit").addEventListener("click", function () { browsePath("folder", "cre-kit-dir", "cre-browse-kit"); });
@@ -4530,19 +4862,24 @@ function attachScanJob(jobId) {
       // a labeled scan is what makes the composed cut sharp — suggest it
       if (!cre.aiCutTouched) $("cre-ai-cut").checked = scanHasVision(cre.clips);
       updateSuggestion();
-      toast("Scanned " + cre.clips.length + (cre.clips.length === 1 ? " clip." : " clips."), "success");
-      if (cre.clips.length) $("cre-next-1").focus();
+      // refresh the pool cards' status chips (sifted / proxy / labeled)
+      loadPool();
+      var n = cre.clips.length;
+      toast("Analyzed " + n + (n === 1 ? " clip." : " clips."), "success");
+      if (n) $("cre-next-1").focus();
     },
     onCancelled: function () {
       clearActiveJob();
       setScanBusy(false);
-      creNote("cre-scan-msg", "Scan cancelled — nothing was changed. Scan again whenever you're ready.");
+      creNote("cre-scan-msg", "Analysis cancelled — nothing was changed. Your files are untouched.");
+      poolSyncActions();
       $("cre-scan-btn").focus();
     },
     onError: function (message) {
       clearActiveJob();
       setScanBusy(false);
       creNote("cre-scan-msg", message, true);
+      poolSyncActions();
       toast(message, "error");
     }
   });
@@ -4571,26 +4908,30 @@ function reattachActiveJob() {
   });
 }
 
-function scanFolder() {
+/* STAGED analysis: sift (or Claude-check) ONLY the selected clips. Shared by
+   "Analyze selected" (endpoint "analyze", optional see) and "Let Claude check
+   selected" (endpoint "see"). Reuses the scan panel + heartbeat + Cancel +
+   reload-reattach unchanged — the job's shape and kind ("scan") are the same. */
+function runStagedAnalysis(endpoint, opts) {
   if (scanPanel.running()) return;
-  var folder = $("cre-folder").value.trim();
-  if (!folder) {
-    toast("Pick your footage folder first — Browse… or paste its path.");
-    $("cre-folder").focus();
+  opts = opts || {};
+  var clips = poolSelectedPaths();
+  if (!clips.length) {
+    toast("Pick the clips to " + (endpoint === "see" ? "check" : "analyze") + " first — tick them in the pool.");
     return;
   }
+  if (!cre.projectId) { toast("Add footage to the pool first."); return; }
   $("cre-scan-msg").hidden = true;
   $("cre-vision-msg").hidden = true;
   $("cre-vision-notes").hidden = true;
-  startProxyWatch(null); // a fresh scan restarts the proxy status line
+  startProxyWatch(null); // fresh analysis restarts the proxy status line
   cre.clips = null;
-  cre.result = null; // footage changed — any previous build is stale
+  cre.result = null;  // footage knowledge changed — any previous build is stale
   cre.buildFp = null; // ...so the next storyboard visit builds fresh
-  // the project persists across a re-scan — only its footage/plan change
-  cre.arrange.seq = []; // ...and an arranged sequence points at old scenes
+  cre.arrange.seq = [];
   cre.arrange.dirty = false;
-  creUpdatePages(); // footage/build reset — clear the Footage & Storyboard ticks
-  creResetRevise(); // ...and so is any plan the revision loop still holds
+  creUpdatePages();
+  creResetRevise();
   $("cre-result").hidden = true;
   $("cre-find-msg").hidden = true;
   clear($("cre-find-results"));
@@ -4599,23 +4940,32 @@ function scanFolder() {
   $("cre-legend").hidden = true;
   $("cre-next-1").hidden = true;
   updateSuggestion();
-  setScanBusy(true);
-  var body = { folder: folder };
-  if (seeEnabled()) body.see = true;
-  api("/api/create/scan", { method: "POST", body: body }).then(function (data) {
+  // the derived folder still feeds build/storyboard downstream
+  $("cre-folder").value = poolScanFolder();
+  setScanBusy(true); // disables both staged buttons for the job's duration
+  var body = { clips: clips };
+  if (endpoint === "analyze" && (opts.see || seeEnabled())) body.see = true;
+  api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/" + endpoint,
+    { method: "POST", body: body }).then(function (data) {
     // remember this job so a browser reload can reattach to it while it runs
-    saveActiveJob({ jobId: data.job, kind: "scan", folder: folder, see: seeEnabled(), ts: Date.now() });
+    saveActiveJob({ jobId: data.job, kind: "scan", folder: poolScanFolder(), ts: Date.now() });
     attachScanJob(data.job);
   }).catch(function (err) {
     setScanBusy(false);
+    poolSyncActions();
     var message = err && err.message ? err.message : String(err);
     creNote("cre-scan-msg", message, true);
     toast(message, "error");
   });
 }
-$("cre-scan-btn").addEventListener("click", scanFolder);
-$("cre-folder").addEventListener("keydown", function (e) {
-  if (e.key === "Enter") { e.preventDefault(); scanFolder(); }
+function analyzeSelected() { runStagedAnalysis("analyze", {}); }
+function seeSelected() { runStagedAnalysis("see", {}); }
+/* scanFolder kept as a thin alias: some flows still call it to (re)analyze */
+function scanFolder() { analyzeSelected(); }
+$("cre-scan-btn").addEventListener("click", analyzeSelected);
+$("cre-see-btn").addEventListener("click", seeSelected);
+$("cre-pool-path").addEventListener("keydown", function (e) {
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); analyzeSelected(); }
 });
 
 /* dominant problem for a clip with no server note */
@@ -5711,6 +6061,9 @@ function newProject() {
   // (both cleared here), so it needs no reset — leaving the 4-place invariant
   cre.arrange.seq = [];
   cre.arrange.dirty = false;
+  cre.pool = [];              // a fresh project starts with an empty pool
+  cre.poolSel = {};
+  renderPool({ clips: [], entries: [] });
   creResetRevise();       // clear any plan/storyboard left from the previous cut
   creUpdatePages();
   cre.projectId = null;
@@ -5737,23 +6090,26 @@ function draftSettingsFromState() {
   return settings;
 }
 
-/* the current wizard state as a project manifest: the footage folder
-   becomes a single media_pool entry (Increment B makes the pool
-   multi-entry); the controls become options; the built plan becomes the
-   plan. The resume-only extras (music path, pins, tempo, the director's
-   review) ride inside options — keys draftSettingsFromState/restore never
-   read, so they round-trip without colliding with the build settings. */
+/* the current wizard state as a project manifest: the MEDIA POOL is
+   cre.pool (multi-entry, Increment B) — the pool endpoint is the primary
+   mutator, and this keeps the manifest in sync on every autosave; the
+   controls become options; the built plan becomes the plan. The resume-only
+   extras (music path, pins, tempo, the director's review) ride inside options
+   — keys draftSettingsFromState/restore never read, so they round-trip
+   without colliding with the build settings. */
 function projectManifestFromState() {
   var options = draftSettingsFromState();
-  var folder = $("cre-folder").value.trim();
   var music = $("cre-music").value.trim();
   if (music) options.music = music;
   if (rev.pins && rev.pins.length) options.pins = rev.pins.slice();
   var tempo = (cre.result && cre.result.data && cre.result.data.plan && cre.result.data.plan.tempo) || 0;
   if (tempo) options.tempo = tempo;
   if (dnotes.review) options.review = dnotes.review;
-  var pool = folder ? [{ path: folder, kind: "folder" }] : [];
-  // "New cut" auto-names itself from the footage folder once one is chosen
+  var pool = (cre.pool || []).map(function (e) {
+    return { path: e.path, kind: e.kind === "folder" ? "folder" : "file" };
+  });
+  // "New cut" auto-names itself from the first pooled folder once one exists
+  var folder = poolScanFolder();
   var name = (cre.projectName && cre.projectName !== "New cut")
     ? cre.projectName
     : (folder ? baseName(folder) : (cre.projectName || "New cut"));
@@ -5767,7 +6123,7 @@ var creatingProject = null; // a create in flight — later saves chain onto it
 function saveProject() {
   var folder = $("cre-folder").value.trim();
   // nothing worth persisting yet — never spawn an empty project on a stray blur
-  if (!cre.projectId && !folder && !rev.planJson) return Promise.resolve(null);
+  if (!cre.projectId && !folder && !(cre.pool && cre.pool.length) && !rev.planJson) return Promise.resolve(null);
   var update = function (id) {
     return api("/api/projects/" + encodeURIComponent(String(id)),
       { method: "POST", body: projectManifestFromState() })
@@ -5946,6 +6302,14 @@ function openProject(id, btn) {
       cre.projectId = project.id;
       cre.projectName = draft.name || "New cut";
       restoreWizardFromDraft(draft);
+      // the media pool comes from the manifest (multi-entry); fetch it fresh so
+      // the cards carry per-clip status, then feed the downstream scan folder
+      cre.pool = (project.media_pool || []).map(function (e) {
+        return { path: String(e.path || ""), kind: e.kind === "folder" ? "folder" : "file" };
+      });
+      cre.poolSel = {};
+      $("cre-folder").value = poolScanFolder();
+      loadPool();
       if (draft.name) $("cre-draft-name").value = String(draft.name);
       if (!draft.plan_json) {
         // no plan yet — land in step 1 to keep building where it was left.

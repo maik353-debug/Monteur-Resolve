@@ -1030,6 +1030,223 @@ class TestProjectsApi:
         assert [p["id"] for p in again] == [pid]
 
 
+class TestProjectPoolApi:
+    """GET/POST /api/projects/<id>/pool — the media pool (Increment B).
+
+    The pool RESOLVES the project's referenced files/folders into clip cards
+    with cheap cached status, and add/remove only ever touches the REFERENCE
+    list — never a byte of media on disk.
+    """
+
+    def _new_project(self, server):
+        return _post(f"{server}/api/projects", {"name": "pool cut"})["id"]
+
+    def test_pool_lists_clips_from_a_folder_entry_with_status_flags(
+        self, server, tmp_path
+    ):
+        footage = tmp_path / "footage"
+        footage.mkdir()
+        (footage / "a.mp4").write_bytes(b"not really a video")
+        (footage / "b.mov").write_bytes(b"nor is this one")
+        (footage / "notes.txt").write_text("ignored — not media")
+
+        pid = self._new_project(server)
+        pool = _post(
+            f"{server}/api/projects/{pid}/pool",
+            {"add": {"path": str(footage), "kind": "folder"}},
+        )
+        names = sorted(c["name"] for c in pool["clips"])
+        assert names == ["a.mp4", "b.mov"]  # the .txt is not media
+        for clip in pool["clips"]:
+            assert clip["kind"] == "file"
+            assert clip["thumb"] is True
+            # nothing scanned/proxied/labeled yet — cheap flags all read False
+            assert clip["sifted"] is False
+            assert clip["proxy_fresh"] is False
+            assert clip["labeled"] is False
+            assert Path(clip["path"]).is_absolute()
+        # the folder entry reports how many clips it expands to
+        assert pool["entries"] == [
+            {"path": str(footage), "kind": "folder", "clip_count": 2}
+        ]
+
+    def test_pool_get_matches_post(self, server, tmp_path):
+        footage = tmp_path / "shoot"
+        footage.mkdir()
+        (footage / "one.mp4").write_bytes(b"x")
+        pid = self._new_project(server)
+        _post(
+            f"{server}/api/projects/{pid}/pool",
+            {"add": {"path": str(footage), "kind": "folder"}},
+        )
+        got = _get(f"{server}/api/projects/{pid}/pool")
+        assert [c["name"] for c in got["clips"]] == ["one.mp4"]
+
+    def test_labeled_flag_reads_the_vision_cache(self, server, tmp_path):
+        from monteur.vision import CACHE_FILENAME
+
+        footage = tmp_path / "labeled"
+        footage.mkdir()
+        clip = footage / "hero.mp4"
+        clip.write_bytes(b"x")
+        # a .monteur-vision.json next to the footage marks the clip labeled;
+        # the key discipline is "<abspath>|<mtime>|<window>|<model>"
+        (footage / CACHE_FILENAME).write_text(
+            json.dumps(
+                {f"{clip.resolve()}|123.0|0.00-1.00|m": {"label": "a summit"}}
+            )
+        )
+        pid = self._new_project(server)
+        pool = _post(
+            f"{server}/api/projects/{pid}/pool",
+            {"add": {"path": str(footage), "kind": "folder"}},
+        )
+        assert pool["clips"][0]["labeled"] is True
+
+    def test_add_then_remove_never_touches_the_media_file(self, server, tmp_path):
+        # The whole promise of the pool: referencing local footage moves and
+        # copies NOTHING. Create a real file, add it, remove it — and prove it
+        # is byte-for-byte and mtime identical, and was never duplicated.
+        media_dir = tmp_path / "media"
+        media_dir.mkdir()
+        clip = media_dir / "precious.mp4"
+        clip.write_bytes(b"the original pixels, untouched")
+        before_bytes = clip.read_bytes()
+        before_stat = clip.stat()
+        before_files = sorted(p.name for p in media_dir.iterdir())
+
+        pid = self._new_project(server)
+        added = _post(
+            f"{server}/api/projects/{pid}/pool",
+            {"add": {"path": str(clip), "kind": "file"}},
+        )
+        assert [c["name"] for c in added["clips"]] == ["precious.mp4"]
+
+        removed = _post(
+            f"{server}/api/projects/{pid}/pool", {"remove": str(clip)}
+        )
+        assert removed["clips"] == []
+
+        # the reference list changed; the FILE did not
+        assert clip.read_bytes() == before_bytes
+        assert clip.stat().st_mtime_ns == before_stat.st_mtime_ns
+        assert clip.stat().st_size == before_stat.st_size
+        # and no copy was made anywhere beside it
+        assert sorted(p.name for p in media_dir.iterdir()) == before_files
+
+    def test_add_updates_the_reference_list_only(self, server, tmp_path):
+        clip = tmp_path / "ref.mp4"
+        clip.write_bytes(b"x")
+        pid = self._new_project(server)
+        _post(
+            f"{server}/api/projects/{pid}/pool",
+            {"add": {"path": str(clip), "kind": "file"}},
+        )
+        manifest = _get(f"{server}/api/projects/{pid}")
+        assert manifest["media_pool"][0]["path"] == str(clip)
+        assert manifest["media_pool"][0]["kind"] == "file"
+
+    def test_pool_of_unknown_project_is_404(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _get(f"{server}/api/projects/nope/pool")
+        assert exc_info.value.code == 404
+
+    def test_pool_update_needs_add_or_remove(self, server):
+        pid = self._new_project(server)
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/projects/{pid}/pool", {"bogus": True})
+        assert exc_info.value.code == 400
+
+
+class TestProjectAnalyzeApi:
+    """POST /api/projects/<id>/analyze + /see — the STAGED, subset flow.
+
+    The pool's primary actions operate on a SELECTION: analyze only the chosen
+    clips, then Claude-check only the good ones. Both are cancellable jobs the
+    scan panel drives, and neither ever modifies a byte of the referenced media.
+    """
+
+    DEMO = str(_DEMO_FOOTAGE)
+
+    @pytest.fixture(autouse=True)
+    def _needs_demo_media(self):
+        if not Path(self.DEMO).is_dir():
+            pytest.skip("demo footage not generated in this environment")
+        # start from clean caches — a prior test's full DEMO scan would
+        # otherwise leave every clip "sifted", hiding the subset behaviour
+        _clear_scan_cache()
+
+    def _project_with_demo(self, server):
+        pid = _post(f"{server}/api/projects", {"name": "staged"})["id"]
+        _post(
+            f"{server}/api/projects/{pid}/pool",
+            {"add": {"path": self.DEMO, "kind": "folder"}},
+        )
+        return pid
+
+    def _pool_clip_paths(self, server, pid):
+        return [c["path"] for c in _get(f"{server}/api/projects/{pid}/pool")["clips"]]
+
+    def test_analyze_sifts_only_the_selected_clips(self, server):
+        pid = self._project_with_demo(server)
+        clips = self._pool_clip_paths(server, pid)
+        assert len(clips) >= 3  # the demo footage has several clips
+        chosen = clips[:2]
+
+        before_mtime = {p: Path(p).stat().st_mtime_ns for p in clips}
+        before_bytes = {p: Path(p).read_bytes() for p in chosen}
+
+        data = _post(f"{server}/api/projects/{pid}/analyze", {"clips": chosen})
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert job["kind"] == "scan"  # reuses the scan panel plumbing
+        assert len(job["result"]["clips"]) == 2
+
+        by_path = {
+            c["path"]: c
+            for c in _get(f"{server}/api/projects/{pid}/pool")["clips"]
+        }
+        # ONLY the selected clips are now sifted — the rest stay untouched
+        for path in chosen:
+            assert by_path[path]["sifted"] is True
+            assert "usable_ratio" in by_path[path]
+        for path in clips:
+            if path not in chosen:
+                assert by_path[path]["sifted"] is False
+
+        # analyze reads frames but NEVER writes the media
+        for path in clips:
+            assert Path(path).stat().st_mtime_ns == before_mtime[path]
+        for path in chosen:
+            assert Path(path).read_bytes() == before_bytes[path]
+
+    def test_analyze_rejects_clips_not_in_the_pool(self, server):
+        pid = _post(f"{server}/api/projects", {"name": "empty"})["id"]
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(
+                f"{server}/api/projects/{pid}/analyze",
+                {"clips": ["/nowhere/ghost.mp4"]},
+            )
+        assert exc_info.value.code == 400
+
+    def test_analyze_needs_a_non_empty_clip_list(self, server):
+        pid = self._project_with_demo(server)
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/projects/{pid}/analyze", {"clips": []})
+        assert exc_info.value.code == 400
+
+    def test_see_runs_on_the_selected_subset(self, server):
+        pid = self._project_with_demo(server)
+        clips = self._pool_clip_paths(server, pid)
+        data = _post(f"{server}/api/projects/{pid}/see", {"clips": clips[:1]})
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done"
+        assert len(job["result"]["clips"]) == 1
+        # with no ANTHROPIC_API_KEY in tests, vision soft-fails (an upgrade, not
+        # a gate) — the sift still succeeded either way
+        assert "vision_error" in job["result"] or "vision_notes" in job["result"]
+
+
 class TestCreateExportApi:
     """POST /api/create/export — plan_json -> timeline file, synchronous."""
 
@@ -1122,6 +1339,11 @@ def _clear_scan_cache():
 
     with web_server._SCAN_CACHE_LOCK:
         web_server._SCAN_CACHE.clear()
+    # the per-clip cache (staged pool analysis) is a module global too — a
+    # build reuses it when a folder is fully covered, so reset it alongside
+    # the folder cache or a prior test's reports leak into "fresh sift" cases
+    with web_server._CLIP_CACHE_LOCK:
+        web_server._CLIP_CACHE.clear()
 
 
 class TestVisionApi:
@@ -5676,6 +5898,22 @@ def _launch_chromium(playwright):
     return None
 
 
+def _pool_scan(page, folder, timeout=120_000):
+    """Drive the media-pool Footage step (Increment B): reference a folder,
+    select every resolved clip, then Analyze selected — the staged replacement
+    for the old "fill #cre-folder + click Scan" preamble. Downstream (build,
+    storyboard, playout, export) is unchanged, so the acceptance tests only
+    swap this entry step."""
+    page.fill("#cre-pool-path", folder)
+    page.click("#cre-pool-add-path")
+    page.wait_for_selector(
+        "#cre-pool-grid .pool-card", state="visible", timeout=timeout
+    )
+    page.click("#cre-pool-selall")  # tick every resolved clip
+    page.wait_for_selector("#cre-scan-btn:not([disabled])", timeout=10_000)
+    page.click("#cre-scan-btn")     # Analyze selected
+
+
 class TestPlayoutAcceptance:
     """Playwright: scan → storyboard → play/scrub the draft → moment player.
 
@@ -5723,8 +5961,7 @@ class TestPlayoutAcceptance:
             # ---- step 1: scan, then the quiet proxy status line -----------
             page.goto(server)
             page.click("#tab-create")
-            page.fill("#cre-folder", self.DEMO)
-            page.click("#cre-scan-btn")
+            _pool_scan(page, self.DEMO)
             page.wait_for_selector("#cre-next-1", state="visible", timeout=120_000)
             page.wait_for_function(
                 "document.getElementById('cre-proxy-status')"
@@ -5910,8 +6147,7 @@ class TestPlayoutAcceptance:
             # scan -> step 2 with the demo song (audio mode stays "music")
             page.goto(server)
             page.click("#tab-create")
-            page.fill("#cre-folder", self.DEMO)
-            page.click("#cre-scan-btn")
+            _pool_scan(page, self.DEMO)
             page.wait_for_selector("#cre-next-1", state="visible", timeout=120_000)
             page.click("#cre-next-1")
             page.fill("#cre-music", f"{self.DEMO}/song.wav")
@@ -6071,8 +6307,7 @@ class TestNoRebuildOnCleanReturn:
             # ---- step 1: scan ------------------------------------------------
             page.goto(server)
             page.click("#tab-create")
-            page.fill("#cre-folder", self.DEMO)
-            page.click("#cre-scan-btn")
+            _pool_scan(page, self.DEMO)
             page.wait_for_selector("#cre-next-1", state="visible", timeout=120_000)
 
             # ---- step 2 -> 3: the ONE initial build --------------------------
@@ -6311,8 +6546,7 @@ class TestPlayoutMusicFreeRun:
             # ---- step 1: scan ------------------------------------------------
             page.goto(server)
             page.click("#tab-create")
-            page.fill("#cre-folder", self.DEMO)
-            page.click("#cre-scan-btn")
+            _pool_scan(page, self.DEMO)
             page.wait_for_selector("#cre-next-1", state="visible", timeout=120_000)
 
             # ---- step 2: slim options; pace + transitions in Fine-tune -------

@@ -57,6 +57,15 @@ API (all JSON):
 * ``GET  /api/projects/<id>``                                   -> the full manifest
 * ``POST /api/projects/<id>`` manifest fields to update         -> the manifest
 * ``DELETE /api/projects/<id>``                                 -> {"deleted": bool}
+* ``GET  /api/projects/<id>/pool``                              -> {"clips": [...],
+    "entries": [...]}  (the media pool resolved to clips + cached status)
+* ``POST /api/projects/<id>/pool`` {"add":{path,kind}} |
+    {"remove": path}                                            -> the resolved pool
+* ``POST /api/projects/<id>/analyze`` {"clips":[abs paths],
+    "see"?}                                                     -> {"job": id}
+    (sift ONLY the selected clips; optional vision when see=true)
+* ``POST /api/projects/<id>/see`` {"clips":[abs paths]}         -> {"job": id}
+    (Claude-vision ONLY the selected clips — the staged "check" step)
 * ``POST /api/create/resolve`` {"plan_json", "fps"?, "name"?,
   "canvas"?, "audio"?}                                          -> {"job": id}
 * ``POST /api/resolve/render`` {"timeline"?, "target_dir",
@@ -664,6 +673,44 @@ _JOBS_LOCK = threading.Lock()
 _SCAN_CACHE: dict = {}
 _SCAN_CACHE_LOCK = threading.Lock()
 
+# Per-CLIP sift reports, keyed by absolute path -> (mtime, ClipReport). The
+# media pool's STAGED flow analyzes a chosen SUBSET of clips (not a whole
+# folder), so results are remembered clip-by-clip: the pool listing reads a
+# clip's status from here, "Let Claude check" reuses the same reports, and a
+# build assembles a folder's reports from here when every clip is analyzed.
+# Populated by every sift (folder scan AND subset analyze) via
+# :func:`_remember_clip_reports`; freshness is per-clip by mtime, so an edited
+# or replaced clip is a natural miss.
+_CLIP_CACHE: dict[str, tuple[float, object]] = {}
+_CLIP_CACHE_LOCK = threading.Lock()
+
+
+def _remember_clip_reports(reports: list) -> None:
+    """Cache each clip's report keyed by absolute path + mtime (subset-safe)."""
+    with _CLIP_CACHE_LOCK:
+        for report in reports:
+            try:
+                path = os.path.abspath(report.path)
+                _CLIP_CACHE[path] = (os.path.getmtime(path), report)
+            except (OSError, AttributeError):
+                continue  # a vanished clip is simply not remembered
+
+
+def _cached_clip_report(path: str):
+    """The cached report for one clip, or None unless present AND mtime-fresh."""
+    ab = os.path.abspath(path)
+    with _CLIP_CACHE_LOCK:
+        entry = _CLIP_CACHE.get(ab)
+    if not entry:
+        return None
+    mtime, report = entry
+    try:
+        if os.path.getmtime(ab) != mtime:
+            return None
+    except OSError:
+        return None
+    return report
+
 # One native file dialog at a time; Tk lives entirely inside a dedicated thread.
 _PICK_LOCK = threading.Lock()
 
@@ -1002,30 +1049,149 @@ def _remember_scan(folder: str, reports: list) -> None:
         _SCAN_CACHE.update(
             folder=os.path.abspath(folder), mtimes=mtimes, reports=list(reports)
         )
+    # Also remember each clip individually, so the pool's per-clip status and
+    # a later subset "check" reuse a full folder scan without re-sifting.
+    _remember_clip_reports(reports)
 
 
 def _cached_reports(folder: str):
-    """The cached sift reports, or None unless the folder matches AND every
-    file's mtime is unchanged (no additions, removals or edits)."""
+    """The cached sift reports for a folder, or None when none are fresh.
+
+    Two sources, in order: the whole-folder scan cache (a matching folder with
+    every file's mtime unchanged), then the per-clip cache — a build reuses
+    subset-analyzed footage when EVERY clip in the folder has a fresh report
+    (the staged "analyze selected" path, once the whole folder is covered)."""
     from monteur.media import MonteurMediaError, list_media
 
     with _SCAN_CACHE_LOCK:
         cache = dict(_SCAN_CACHE)
-    if not cache or cache["folder"] != os.path.abspath(folder):
-        return None
     try:
-        current = {os.path.abspath(str(p)) for p in list_media(folder)}
+        media = [os.path.abspath(str(p)) for p in list_media(folder)]
     except MonteurMediaError:
         return None
-    if current != set(cache["mtimes"]):
-        return None  # files were added or removed since the scan
-    try:
-        for path, mtime in cache["mtimes"].items():
-            if os.path.getmtime(path) != mtime:
-                return None
-    except OSError:
+    if not media:
         return None
-    return cache["reports"]
+    current = set(media)
+    if cache and cache["folder"] == os.path.abspath(folder) and current == set(
+        cache["mtimes"]
+    ):
+        try:
+            if all(
+                os.path.getmtime(path) == mtime
+                for path, mtime in cache["mtimes"].items()
+            ):
+                return cache["reports"]
+        except OSError:
+            pass
+    # Fall back to the per-clip cache: reuse only when the WHOLE folder is
+    # covered by fresh per-clip reports (a partial analysis re-sifts on build).
+    assembled = []
+    for path in media:
+        report = _cached_clip_report(path)
+        if report is None:
+            return None
+        assembled.append(report)
+    return assembled
+
+
+# --- the media pool: resolve referenced files/folders -> clips + status ---
+#
+# The pool is the project's ``media_pool`` — absolute paths REFERENCED from
+# disk (Resolve-style), never copied or moved. Resolving it to clip cards is
+# deliberately CHEAP: expand each folder with :func:`list_media` (a directory
+# listing), then read each clip's status entirely from caches we already
+# keep — no re-sift, no re-decode, no probe. So the pool page reflects "we
+# store knowledge, not video" instantly, however large the shoot.
+
+
+def _vision_labeled_paths(folder: str) -> set[str]:
+    """Absolute clip paths with a vision label in ``folder``'s cache.
+
+    Reads the folder's ``.monteur-vision.json`` (one small file) and keys off
+    each entry's clip path — the cache key is ``"<abspath>|<mtime>|<win>|
+    <model>"`` (see :func:`monteur.vision._moment_key`). Missing/unreadable/
+    malformed cache -> an empty set (labeling is an upgrade, never a gate).
+    """
+    from monteur.vision import CACHE_FILENAME
+
+    cache_file = os.path.join(folder, CACHE_FILENAME)
+    try:
+        data = json.loads(Path(cache_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    labeled: set[str] = set()
+    for key in data:
+        head = str(key).split("|", 1)[0]
+        if head:
+            labeled.add(os.path.abspath(head))
+    return labeled
+
+
+def _resolve_pool(project) -> dict:
+    """Expand a project's ``media_pool`` into ``{clips, entries}`` with status.
+
+    Each folder entry becomes its member clips (:func:`list_media`); a file
+    entry is itself. Every clip carries CHEAP, CACHED status flags read from
+    the machinery we already keep: ``sifted`` (a fresh per-clip report exists,
+    from the staged "analyze selected" pass or a full scan — carrying its
+    ``usable_ratio``/``duration``), ``proxy_fresh``
+    (:func:`monteur.proxies.fresh_proxy`), ``labeled`` (in the folder's
+    ``.monteur-vision.json``). Nothing here opens or decodes a clip.
+    """
+    from monteur import proxies as proxies_mod
+    from monteur.sift import list_media
+
+    labeled_by_dir: dict[str, set[str]] = {}
+
+    def labeled_for(directory: str) -> set[str]:
+        key = os.path.abspath(directory)
+        cached = labeled_by_dir.get(key)
+        if cached is None:
+            cached = _vision_labeled_paths(key)
+            labeled_by_dir[key] = cached
+        return cached
+
+    clips: list[dict] = []
+    entries: list[dict] = []
+    seen: set[str] = set()
+    for entry in project.media_pool:
+        path = str(entry.get("path") or "")
+        if not path:
+            continue
+        kind = entry.get("kind") if entry.get("kind") in ("file", "folder") else "file"
+        if kind == "folder":
+            try:
+                members = [str(p) for p in list_media(path)]
+            except Exception:  # noqa: BLE001 — a gone/bad folder lists as empty
+                members = []
+        else:
+            members = [path]
+        entries.append(
+            {"path": os.path.abspath(path), "kind": kind, "clip_count": len(members)}
+        )
+        for member in members:
+            ab = os.path.abspath(member)
+            if ab in seen:
+                continue  # a clip referenced twice (folder + file) shows once
+            seen.add(ab)
+            report = _cached_clip_report(ab)
+            clip = {
+                "path": ab,
+                "name": os.path.basename(ab),
+                "kind": "file",
+                "thumb": True,
+                "sifted": report is not None,
+                "proxy_fresh": proxies_mod.fresh_proxy(ab) is not None,
+                "labeled": ab in labeled_for(os.path.dirname(ab)),
+            }
+            if report is not None:
+                clip["usable_ratio"] = report.usable_ratio
+                clip["duration"] = report.duration
+                clip["moments"] = len(report.moments)
+            clips.append(clip)
+    return {"clips": clips, "entries": entries}
 
 
 # --- the shot inspector's instant endpoints ------------------------------
@@ -1214,6 +1380,176 @@ def _run_scan_job(job: dict, folder: str, see: bool = False) -> None:
         job["result"] = result
         job["state"] = "done"
     except SiftCancelled:
+        job["state"] = "cancelled"
+    except (MonteurMediaError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
+def _start_clip_proxies_job(clips: list) -> dict:
+    """Kick a background proxies job for a SPECIFIC list of clips; return it.
+
+    The staged pool analyzes a subset, so proxies follow that subset (not a
+    whole folder). Best-effort like the folder proxies job: it never gates.
+    """
+    import importlib
+
+    job = _new_job("proxies")
+
+    def run() -> None:
+        from monteur.media import MonteurMediaError
+
+        try:
+            paths = [str(p) for p in clips]
+            if not paths:
+                raise MonteurMediaError("no clips to proxy")
+            proxies = importlib.import_module("monteur.proxies")
+
+            def progress(done: int, total: int, name: str) -> None:
+                with _JOBS_LOCK:
+                    job["progress"].append(
+                        {"stage": "proxy", "index": done, "total": total, "name": name}
+                    )
+
+            made, errors = proxies.ensure_proxies(
+                paths, progress=progress, cancel=job["cancel"]
+            )
+            if job["cancel"].is_set():
+                job["state"] = "cancelled"
+                return
+            try:
+                proxies.prune_proxies()
+            except Exception:  # noqa: BLE001 — pruning must never fail the job
+                pass
+            job["result"] = {
+                "ready": len(made),
+                "total": len(paths),
+                "errors": [
+                    f"{Path(path).name}: {message}"
+                    for path, message in errors.items()
+                ],
+            }
+            job["state"] = "done"
+        except (MonteurMediaError, ValueError) as exc:
+            job["message"] = str(exc)
+            job["state"] = "error"
+        except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+            job["message"] = f"internal error: {exc}"
+            job["state"] = "error"
+
+    threading.Thread(
+        target=run, name=f"monteur-proxies-{job['id']}", daemon=True
+    ).start()
+    return job
+
+
+def _analyze_selected(job: dict, clips: list) -> list:
+    """Sift each of ``clips`` (a chosen subset), with per-clip job progress.
+
+    Reuses :func:`monteur.sift.analyze_clip` — the SAME engine a folder scan
+    runs, one clip at a time — so the staged "analyze selected" is honest sift
+    data. Cancellation is threaded into every ffmpeg call; a set flag raises
+    out (SiftCancelled / MediaCancelled) and the caller marks the job
+    cancelled. Reports are remembered in the per-clip cache."""
+    from monteur.sift import analyze_clip
+
+    reports = []
+    total = len(clips)
+    for index, path in enumerate(clips, start=1):
+        name = os.path.basename(str(path))
+        with _JOBS_LOCK:
+            job["progress"].append(
+                {"index": index, "total": total, "name": name, "stage": "start"}
+            )
+        report = analyze_clip(str(path), cancel=job["cancel"])
+        reports.append(report)
+        with _JOBS_LOCK:
+            job["progress"].append(
+                {
+                    "index": index,
+                    "total": total,
+                    "name": name,
+                    "stage": "done",
+                    "usable_ratio": report.usable_ratio,
+                }
+            )
+    _remember_clip_reports(reports)
+    return reports
+
+
+def _run_analyze_job(job: dict, clips: list, see: bool = False) -> None:
+    """Daemon body for POST /api/projects/<id>/analyze — sift a SUBSET.
+
+    Produces the SAME result shape as the folder scan ({"clips", optional
+    "vision_*", "proxies_job"}) so the Studio's scan panel + heartbeat +
+    Cancel + reload-reattach drive it unchanged. Optionally runs the vision
+    pass on the just-analyzed clips when ``see`` is set."""
+    from monteur.media import MediaCancelled, MonteurMediaError
+    from monteur.sift import SiftCancelled
+
+    try:
+        reports = _analyze_selected(job, clips)
+        result: dict = {}
+        if see and reports:
+            notes, error = _apply_vision(job, reports)
+            if error:
+                result["vision_error"] = error
+            else:
+                result["vision_notes"] = notes
+            _remember_clip_reports(reports)  # annotations landed in place
+        result["clips"] = [asdict(r) for r in reports]
+        try:
+            result["proxies_job"] = _start_clip_proxies_job(
+                [r.path for r in reports]
+            )["id"]
+        except Exception:  # noqa: BLE001 — proxies are an upgrade, not a gate
+            pass
+        job["result"] = result
+        job["state"] = "done"
+    except (SiftCancelled, MediaCancelled):
+        job["state"] = "cancelled"
+    except (MonteurMediaError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
+def _run_see_job(job: dict, clips: list) -> None:
+    """Daemon body for POST /api/projects/<id>/see — Claude-check a SUBSET.
+
+    Vision on ONLY the chosen clips (typically the good ones judged after
+    analysis). Reuses a clip's cached report when fresh; sifts any that were
+    not analyzed yet, so this step stands alone. Same result shape + panel
+    plumbing as the analyze/scan jobs."""
+    from monteur.media import MediaCancelled, MonteurMediaError
+    from monteur.sift import SiftCancelled, analyze_clip
+
+    try:
+        reports = []
+        for path in clips:
+            if job["cancel"].is_set():
+                raise SiftCancelled()
+            report = _cached_clip_report(str(path))
+            if report is None:
+                report = analyze_clip(str(path), cancel=job["cancel"])
+            reports.append(report)
+        _remember_clip_reports(reports)
+        result: dict = {}
+        notes, error = _apply_vision(job, reports)
+        if error:
+            result["vision_error"] = error
+        else:
+            result["vision_notes"] = notes
+        _remember_clip_reports(reports)  # annotations landed in place
+        result["clips"] = [asdict(r) for r in reports]
+        job["result"] = result
+        job["state"] = "done"
+    except (SiftCancelled, MediaCancelled):
         job["state"] = "cancelled"
     except (MonteurMediaError, ValueError) as exc:
         job["message"] = str(exc)
@@ -2973,8 +3309,24 @@ class MonteurHandler(BaseHTTPRequestHandler):
                 if method == "DELETE":
                     return lambda: self._drafts_delete(draft_id)
         if path.startswith("/api/projects/"):
-            project_id = path[len("/api/projects/"):]
-            if project_id and "/" not in project_id:
+            rest = path[len("/api/projects/"):]
+            if rest.endswith("/pool"):
+                pool_id = rest[: -len("/pool")]
+                if pool_id and "/" not in pool_id:
+                    if method == "GET":
+                        return lambda: self._project_pool_get(pool_id)
+                    if method == "POST":
+                        return lambda: self._project_pool_update(pool_id)
+            elif rest.endswith("/analyze") and method == "POST":
+                pid = rest[: -len("/analyze")]
+                if pid and "/" not in pid:
+                    return lambda: self._project_analyze(pid)
+            elif rest.endswith("/see") and method == "POST":
+                pid = rest[: -len("/see")]
+                if pid and "/" not in pid:
+                    return lambda: self._project_see(pid)
+            elif rest and "/" not in rest:
+                project_id = rest
                 if method == "GET":
                     return lambda: self._projects_get(project_id)
                 if method == "POST":
@@ -3933,6 +4285,109 @@ class MonteurHandler(BaseHTTPRequestHandler):
         from monteur import projects
 
         self._send_json({"deleted": projects.delete_project(project_id)})
+
+    def _project_pool_get(self, project_id: str) -> None:
+        """GET /api/projects/<id>/pool — the media pool resolved to clips.
+
+        Expands the project's referenced files/folders into clip cards, each
+        with cheap cached status (sifted / proxy_fresh / labeled). No media is
+        opened or decoded — the pool page shows KNOWLEDGE, not video.
+        """
+        from monteur import projects
+
+        project = projects.load_project(project_id)
+        if project is None:
+            raise ApiError(404, f"unknown project {project_id!r}")
+        self._send_json(_resolve_pool(project))
+
+    def _project_pool_update(self, project_id: str) -> None:
+        """POST /api/projects/<id>/pool {"add":{path,kind}} | {"remove":path}.
+
+        Adds or removes a REFERENCE in the media pool — the file/folder on
+        disk is never touched, only the project's reference list. Returns the
+        re-resolved pool so the page re-renders in one round trip.
+        """
+        from monteur import projects
+
+        project = projects.load_project(project_id)
+        if project is None:
+            raise ApiError(404, f"unknown project {project_id!r}")
+        payload = self._read_json()
+        add = payload.get("add")
+        remove = payload.get("remove")
+        if isinstance(add, dict) and str(add.get("path") or "").strip():
+            projects.add_to_pool(project, add["path"], add.get("kind"))
+        elif isinstance(add, str) and add.strip():
+            projects.add_to_pool(project, add)
+        elif isinstance(remove, str) and remove.strip():
+            projects.remove_from_pool(project, remove)
+        else:
+            raise ApiError(
+                400,
+                "expected {'add': {'path','kind'?}} or {'remove': '<path>'}",
+            )
+        self._send_json(_resolve_pool(project))
+
+    def _pool_clip_list(self, project_id: str) -> tuple[list, bool]:
+        """Validate a {clips:[abs paths], see?} body against a project's pool.
+
+        The clips must be a non-empty list of paths that the project actually
+        references (a file entry or a member of a folder entry) — so an
+        analyze/see request can only sift footage already in the pool. Returns
+        ``(chosen_abs_paths, see)``."""
+        from monteur import projects
+
+        project = projects.load_project(project_id)
+        if project is None:
+            raise ApiError(404, f"unknown project {project_id!r}")
+        payload = self._read_json()
+        raw = payload.get("clips")
+        if not isinstance(raw, list) or not raw:
+            raise ApiError(400, "missing 'clips' (a non-empty list of clip paths)")
+        wanted = [os.path.abspath(str(p)) for p in raw if str(p).strip()]
+        if not wanted:
+            raise ApiError(400, "missing 'clips' (a non-empty list of clip paths)")
+        pooled = {c["path"] for c in _resolve_pool(project)["clips"]}
+        chosen = [p for p in wanted if p in pooled]
+        if not chosen:
+            raise ApiError(
+                400,
+                "none of the selected clips are in this project's pool — add "
+                "them first",
+            )
+        return chosen, bool(payload.get("see"))
+
+    def _project_analyze(self, project_id: str) -> None:
+        """POST /api/projects/<id>/analyze {clips:[paths], see?} — sift a subset.
+
+        Analyzes ONLY the selected clips (the staged pool's primary action),
+        as a cancellable job the scan panel drives; optionally runs vision when
+        ``see`` is set. Returns ``{"job": id}``."""
+        clips, see = self._pool_clip_list(project_id)
+        job = _new_job("scan")
+        threading.Thread(
+            target=_run_analyze_job,
+            args=(job, clips, see),
+            name=f"monteur-analyze-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _project_see(self, project_id: str) -> None:
+        """POST /api/projects/<id>/see {clips:[paths]} — Claude-check a subset.
+
+        Runs the vision pass on ONLY the selected clips (typically the good
+        ones judged after analysis), as its own explicit cancellable job.
+        Returns ``{"job": id}``."""
+        clips, _see = self._pool_clip_list(project_id)
+        job = _new_job("scan")
+        threading.Thread(
+            target=_run_see_job,
+            args=(job, clips),
+            name=f"monteur-see-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
 
     def _learn_signal(self, family: str, context: str, direction: str) -> None:
         """Record a correction signal, best-effort (learning never blocks an edit)."""
