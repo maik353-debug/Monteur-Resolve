@@ -6797,6 +6797,40 @@ class TestNativeShell:
         # the menu carries real actions (File has New Cut + Close window)
         assert '"New Cut"' in source and '"Close window"' in source
 
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_menu_has_accelerators_and_shortcut_sheet(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            # a single source of truth for the accelerators
+            "var SHORTCUTS",
+            "function comboMatches",
+            "function openShortcuts",
+            "Keyboard shortcuts",
+            # real accelerators, shown in the menu and wired globally
+            '"Ctrl+N"', '"Ctrl+Shift+N"', '"Ctrl+,"', '"Ctrl+1"',
+            # the richer menu framework
+            "function buildMenuItem",
+            "function openSubmenu",
+            "Open Recent",           # dynamic submenu of recent projects
+            "recentSubmenu",
+            "nativeOnly",            # Close window only in the native shell
+            "mi-key", "mi-check", "mi-arrow",
+        ):
+            assert needle in source, needle
+        # View is page-navigation with a checkmark on the current view
+        assert '"Home"' in source and '"Create"' in source and '"Movie"' in source
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_fluent_materials_present(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            "--acrylic:", "--acrylic-strong:", "--mica:", "--shadow-flyout:",
+            # acrylic flyouts + dialogs, mica title bar
+            "backdrop-filter: blur(30px)",
+            "background-image: var(--mica)",
+        ):
+            assert needle in source, needle
+
     def test_window_controls_never_raise(self):
         import types
 

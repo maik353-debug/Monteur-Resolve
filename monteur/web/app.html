@@ -60,6 +60,14 @@
   --ember: #ff9a3c;
   --sel: #4a90e2;
   --clip: #3a5568; --clip-2: #40607a; --music: #3d7a4e; --sfx: #6a4b86; --title: #4a4a52; --grade: #3f6b74;
+  /* Fluent materials — acrylic (translucent, blurred flyouts/dialogs), mica
+     (a faint tint on the title bar), and a soft flyout elevation. */
+  --acrylic: rgba(40, 40, 48, 0.72);
+  --acrylic-strong: rgba(30, 30, 36, 0.86);
+  --acrylic-border: rgba(255, 255, 255, 0.09);
+  --fluent-sheen: rgba(255, 255, 255, 0.06);
+  --shadow-flyout: 0 16px 44px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
+  --mica: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0) 60%);
 }
 :root[data-theme="light"] {
   color-scheme: light;
@@ -96,6 +104,12 @@
   --phase-climax: #eed7ba;
   --phase-outro: #dbcfe8;
   --clip: #6f8ba1; --clip-2: #7f97ad; --music: #6ba97c; --sfx: #9b7fb8; --title: #b6b6be; --grade: #6ea6ad;
+  --acrylic: rgba(249, 249, 251, 0.80);
+  --acrylic-strong: rgba(252, 252, 253, 0.92);
+  --acrylic-border: rgba(0, 0, 0, 0.08);
+  --fluent-sheen: rgba(255, 255, 255, 0.75);
+  --shadow-flyout: 0 16px 44px rgba(30, 31, 36, 0.22), 0 2px 8px rgba(30, 31, 36, 0.12);
+  --mica: linear-gradient(180deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0) 60%);
   --btn-bg: var(--accent);
   --btn-ink: #ffffff;
   --veil: rgba(233, 233, 236, 0.85);
@@ -159,28 +173,45 @@ h1, h2, h3, p { margin: 0; }
 .menu-wrap { position: relative; }
 .menu-top {
   border: 0; background: transparent; color: var(--ink-2); cursor: default;
-  font-size: 12.5px; padding: 4px 9px; border-radius: 4px; white-space: nowrap;
+  font-size: 12.5px; padding: 4px 9px; border-radius: 5px; white-space: nowrap;
+  transition: background 0.1s, color 0.1s;
 }
 .menu-top:hover, .menu-top.open { background: var(--surface-2); color: var(--ink); }
-.menu-pop {
-  position: absolute; top: calc(100% + 3px); left: 0; z-index: 300; min-width: 210px;
-  padding: 5px; border: 1px solid var(--border); border-radius: 8px;
-  background: var(--surface); box-shadow: 0 14px 36px rgba(0, 0, 0, 0.45);
-  -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
+/* acrylic flyout — translucent, blurred, soft elevation (Fluent) */
+.menu-pop, .menu-sub {
+  position: absolute; z-index: 300; min-width: 224px;
+  padding: 5px; border: 1px solid var(--acrylic-border); border-radius: 8px;
+  background: var(--acrylic); box-shadow: var(--shadow-flyout);
+  -webkit-backdrop-filter: blur(30px) saturate(1.7); backdrop-filter: blur(30px) saturate(1.7);
 }
+.menu-pop { top: calc(100% + 4px); left: 0; }
+.menu-wrap { position: relative; }
+.menu-sub-wrap { position: relative; }
+.menu-sub { top: -6px; left: 100%; margin-left: 3px; }
 .menu-item {
-  display: flex; width: 100%; align-items: center; justify-content: space-between;
+  display: flex; width: 100%; align-items: center;
   gap: 18px; text-align: left; border: 0; background: transparent; color: var(--ink);
-  cursor: default; font-size: 12.5px; padding: 6px 10px; border-radius: 5px; white-space: nowrap;
+  cursor: default; font-size: 12.5px; padding: 6px 10px 6px 26px; border-radius: 5px; white-space: nowrap;
+  position: relative; transition: background 0.08s, color 0.08s;
 }
-.menu-item:hover, .menu-item:focus-visible { background: var(--accent); color: #fff; outline: none; }
-.menu-item .mi-key { font-family: var(--mono); font-size: 10.5px; color: var(--ink-muted); }
-.menu-item:hover .mi-key { color: rgba(255, 255, 255, 0.75); }
-.menu-sep { height: 1px; margin: 5px 6px; background: var(--border); }
+.menu-item > .mi-label { flex: 1 1 auto; }
+.menu-item:hover, .menu-item:focus-visible, .menu-item.open { background: var(--accent); color: #fff; outline: none; }
+.menu-item .mi-key { font-family: var(--mono); font-size: 10.5px; color: var(--ink-muted); letter-spacing: 0.02em; }
+.menu-item:hover .mi-key, .menu-item.open .mi-key { color: rgba(255, 255, 255, 0.78); }
+.menu-item .mi-check { position: absolute; left: 9px; font-size: 11px; line-height: 1; opacity: 0; }
+.menu-item.checked .mi-check { opacity: 1; }
+.menu-item .mi-arrow { font-size: 10px; opacity: 0.7; margin-left: 2px; }
+.menu-item.disabled { color: var(--ink-muted); pointer-events: none; opacity: 0.55; }
+.menu-item.disabled .mi-key { opacity: 0.6; }
+.menu-sep { height: 1px; margin: 5px 8px; background: var(--acrylic-border); }
 
 .tb-caption { display: none; align-items: stretch; margin-left: 8px; }
 :root.native-shell .tb-caption { display: flex; }
-:root.native-shell .topbar { padding-right: 0; -webkit-app-region: drag; app-region: drag; }
+/* mica: a faint tint layered on the title bar in the native window */
+:root.native-shell .topbar {
+  padding-right: 0; -webkit-app-region: drag; app-region: drag;
+  background-image: var(--mica);
+}
 :root.native-shell .topbar button,
 :root.native-shell .topbar .menu-top,
 :root.native-shell .topbar input,
@@ -430,8 +461,18 @@ svg text.axis {
 .toast .close { flex: none; border: 0; background: none; color: var(--ink-muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 1px 4px; border-radius: 3px; }
 .toast .close:hover { color: var(--ink); background: var(--surface); }
 
-.modal { position: fixed; inset: 0; z-index: 70; display: flex; align-items: center; justify-content: center; background: var(--veil); padding: 20px; }
-.modal-card { width: min(400px, 100%); background: var(--surface); border: 1px solid var(--axis); border-radius: 4px; box-shadow: var(--shadow); padding: 16px 18px; }
+.modal {
+  position: fixed; inset: 0; z-index: 70; display: flex; align-items: center; justify-content: center;
+  background: var(--veil); padding: 20px;
+  -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+}
+/* Fluent content dialog — acrylic surface, soft elevation, a hairline sheen */
+.modal-card {
+  width: min(400px, 100%); border-radius: 8px; padding: 16px 18px;
+  background: var(--acrylic-strong); border: 1px solid var(--acrylic-border);
+  box-shadow: var(--shadow-flyout), inset 0 1px 0 var(--fluent-sheen);
+  -webkit-backdrop-filter: blur(40px) saturate(1.6); backdrop-filter: blur(40px) saturate(1.6);
+}
 .modal-card h2 { font-size: 11px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-muted); }
 .modal-sub { margin: 6px 0 12px; font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; }
 .fps-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
@@ -444,6 +485,19 @@ svg text.axis {
 .fps-custom { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); margin-bottom: 14px; }
 .fps-custom input { width: 90px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 3px; background: var(--input-bg); color: var(--ink); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+/* Help → Keyboard shortcuts sheet */
+.shortcut-list { margin: 12px 0 4px; display: flex; flex-direction: column; }
+.shortcut-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 24px;
+  padding: 7px 4px; border-bottom: 1px solid var(--acrylic-border);
+}
+.shortcut-row:last-child { border-bottom: 0; }
+.shortcut-label { font-size: 12.5px; color: var(--ink); }
+.shortcut-row .mi-key {
+  font-family: var(--mono); font-size: 11px; color: var(--ink-2);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 4px; padding: 2px 7px; white-space: nowrap;
+}
 
 /* ---------- settings modal (AI — Claude connection) --------------------- */
 .settings-card { width: min(760px, 100%); max-height: calc(100vh - 40px); }
@@ -453,12 +507,20 @@ svg text.axis {
   flex: 0 0 172px; display: flex; flex-direction: column; gap: 2px;
   padding-right: 14px; border-right: 1px solid var(--border);
 }
+/* Fluent NavigationView items: quiet by default, a soft selected fill with a
+   left accent pill for the current section (not a loud full-accent block) */
 .set-tab {
-  text-align: left; border: 0; background: transparent; color: var(--ink-2);
-  font-size: 12.5px; padding: 7px 11px; border-radius: 5px; cursor: pointer; white-space: nowrap;
+  position: relative; text-align: left; border: 0; background: transparent; color: var(--ink-2);
+  font-size: 12.5px; padding: 7px 11px 7px 14px; border-radius: 5px; cursor: pointer; white-space: nowrap;
+  transition: background 0.1s, color 0.1s;
+}
+.set-tab::before {
+  content: ""; position: absolute; left: 3px; top: 50%; transform: translateY(-50%) scaleY(0);
+  width: 3px; height: 16px; border-radius: 2px; background: var(--accent); transition: transform 0.14s;
 }
 .set-tab:hover, .set-tab:focus-visible { background: var(--surface-2); color: var(--ink); outline: none; }
-.set-tab.on { background: var(--accent); color: #fff; font-weight: 600; }
+.set-tab.on { background: var(--surface-2); color: var(--ink); font-weight: 600; }
+.set-tab.on::before { transform: translateY(-50%) scaleY(1); }
 .set-panes { flex: 1; min-width: 0; padding-left: 18px; max-height: calc(100vh - 150px); overflow-y: auto; }
 .set-pane > h3 { font-size: 14px; font-weight: 650; margin-bottom: 6px; }
 .set-pane > .set-section { margin-top: 0; padding-top: 0; border-top: 0; }
@@ -3693,31 +3755,140 @@ $("asm-back").addEventListener("click", function () { setView("movie"); });
   else window.addEventListener("pywebviewready", activate);
 })();
 
-/* the native window's menu bar (File / View / Help) — built once, shown only
-   in the shell (CSS gates .tb-menu on .native-shell). Every item runs a real
-   action; add one to APP_MENUS and it appears. */
+/* the app menu bar (File / View / Help) — the universal control surface,
+   shown in the browser and the native window alike. Every item runs a real
+   action; add one to APP_MENUS and it appears. Items support: run, key
+   (accelerator hint), sub (submenu — array or function), checked and disabled
+   (bool or function), and sep. */
 function nativeWindowCall(name) {
   var api = window.pywebview && window.pywebview.api;
   try { if (api && api[name]) api[name](); } catch (e) { /* never crash the UI */ }
 }
+function inNativeShell() { return document.documentElement.classList.contains("native-shell"); }
+
+/* one place every menu action lives, so the menu and the keyboard shortcuts
+   below can't drift apart */
+var MENU = {
+  newCut: function () { newProject(); },
+  newMovie: function () { setView("movie"); },
+  analyze: function () { setView("pacing"); },
+  home: function () { setView("home"); },
+  create: function () { setView("create"); },
+  movie: function () { setView("movie"); },
+  settings: function () { openSettings(false); },
+  shortcuts: function () { openShortcuts(); },
+  about: function () { toast("Monteur Studio — footage in, set a direction, iterate, finished video out.", ""); },
+  closeWindow: function () { nativeWindowCall("close"); }
+};
+
+/* recent projects, cached from the last /api/projects load, drive File → Open Recent */
+var recentProjects = [];
+function openRecentProject(p) {
+  var ptype = String(p.type || "cut");
+  if (ptype === "movie") {
+    setView("movie");
+    if (p.movie_path) movOpenPath(p.movie_path);
+  } else {
+    setView("create");
+    openProject(p.id, document.createElement("button")); // detached button = harmless busy target
+  }
+}
+function recentSubmenu() {
+  if (!recentProjects.length) return [{ label: "No recent projects", disabled: true }];
+  return recentProjects.slice(0, 8).map(function (p) {
+    return { label: String(p.name || "Untitled"), run: function () { openRecentProject(p); } };
+  });
+}
+
 var APP_MENUS = [
   { label: "File", items: [
-    { label: "New Cut", run: function () { newProject(); } },
-    { label: "New Movie", run: function () { setView("movie"); } },
-    { label: "Analyze a timeline…", run: function () { setView("pacing"); } },
+    { label: "New Cut", key: "Ctrl+N", run: MENU.newCut },
+    { label: "New Movie", key: "Ctrl+Shift+N", run: MENU.newMovie },
+    { label: "Analyze a timeline…", run: MENU.analyze },
     { sep: true },
-    { label: "Settings…", run: function () { openSettings(false); } },
+    { label: "Open Recent", sub: recentSubmenu, disabled: function () { return recentProjects.length === 0; } },
     { sep: true },
-    { label: "Close window", run: function () { nativeWindowCall("close"); } }
+    { label: "Settings…", key: "Ctrl+,", run: MENU.settings },
+    { sep: true, nativeOnly: true },
+    { label: "Close window", nativeOnly: true, run: MENU.closeWindow }
   ] },
   { label: "View", items: [
-    { label: "Home", run: function () { setView("home"); } }
+    { label: "Home", key: "Ctrl+1", checked: function () { return state.view === "home"; }, run: MENU.home },
+    { label: "Create", key: "Ctrl+2", checked: function () { return state.view === "create"; }, run: MENU.create },
+    { label: "Movie", key: "Ctrl+3", checked: function () { return state.view === "movie"; }, run: MENU.movie },
+    { label: "Analyze", key: "Ctrl+4", checked: function () { return state.view === "pacing"; }, run: MENU.analyze }
   ] },
   { label: "Help", items: [
-    { label: "About Monteur", run: function () { toast("Monteur Studio — footage in, set a direction, iterate, finished video out.", ""); } }
+    { label: "Keyboard shortcuts", key: "Ctrl+/", run: MENU.shortcuts },
+    { label: "About Monteur", run: MENU.about }
   ] }
 ];
+
+/* keyboard accelerators — the single source the shortcuts sheet also reads */
+var SHORTCUTS = [
+  { combo: "Ctrl+N", label: "New Cut", run: MENU.newCut },
+  { combo: "Ctrl+Shift+N", label: "New Movie", run: MENU.newMovie },
+  { combo: "Ctrl+1", label: "Go to Home", run: MENU.home },
+  { combo: "Ctrl+2", label: "Go to Create", run: MENU.create },
+  { combo: "Ctrl+3", label: "Go to Movie", run: MENU.movie },
+  { combo: "Ctrl+4", label: "Go to Analyze", run: MENU.analyze },
+  { combo: "Ctrl+,", label: "Settings", run: MENU.settings },
+  { combo: "Ctrl+/", label: "Keyboard shortcuts", run: MENU.shortcuts }
+];
+function comboMatches(combo, e) {
+  var parts = combo.toLowerCase().split("+");
+  var key = parts[parts.length - 1];
+  if ((parts.indexOf("ctrl") >= 0) !== (e.ctrlKey || e.metaKey)) return false;
+  if ((parts.indexOf("shift") >= 0) !== e.shiftKey) return false;
+  if ((parts.indexOf("alt") >= 0) !== e.altKey) return false;
+  return (e.key || "").toLowerCase() === key;
+}
+
 var menuState = { open: null };
+function resolveVal(v) { return typeof v === "function" ? v() : v; }
+function visibleItems(items) {
+  return items.filter(function (it) { return !it.nativeOnly || inNativeShell(); });
+}
+/* build one row (a div, so submenus can nest valid markup) */
+function buildMenuItem(item, host) {
+  if (item.sep) return el("div", "menu-sep");
+  var mi = el("div", "menu-item");
+  mi.setAttribute("role", "menuitem");
+  mi.setAttribute("tabindex", "-1");
+  var check = el("span", "mi-check", "✓"); check.setAttribute("aria-hidden", "true");
+  mi.appendChild(check);
+  mi.appendChild(el("span", "mi-label", item.label));
+  if (item.sub) mi.appendChild(el("span", "mi-arrow", "›"));
+  else if (item.key) mi.appendChild(el("span", "mi-key", item.key));
+  if (resolveVal(item.checked)) mi.classList.add("checked");
+  if (resolveVal(item.disabled)) { mi.classList.add("disabled"); mi.setAttribute("aria-disabled", "true"); }
+  if (item.sub) {
+    mi.addEventListener("mouseenter", function () { openSubmenu(mi, item); });
+    mi.addEventListener("click", function (e) { e.stopPropagation(); });
+  } else {
+    mi.addEventListener("mouseenter", function () { clearSubmenus(host); });
+    mi.addEventListener("click", function (e) {
+      e.stopPropagation();
+      if (mi.classList.contains("disabled")) return;
+      closeMenus();
+      try { item.run(); } catch (err) { /* an action must not break the menu */ }
+    });
+  }
+  return mi;
+}
+function clearSubmenus(pop) {
+  Array.prototype.forEach.call(pop.querySelectorAll(".menu-sub"), function (s) { s.remove(); });
+  Array.prototype.forEach.call(pop.querySelectorAll(".menu-item.open"), function (s) { s.classList.remove("open"); });
+}
+function openSubmenu(parentItem, item) {
+  var pop = parentItem.parentNode;
+  clearSubmenus(pop);
+  parentItem.classList.add("open");
+  var sub = el("div", "menu-sub");
+  sub.setAttribute("role", "menu");
+  visibleItems(resolveVal(item.sub) || []).forEach(function (sit) { sub.appendChild(buildMenuItem(sit, pop)); });
+  parentItem.appendChild(sub);
+}
 function closeMenus() {
   if (!menuState.open) return;
   var pop = menuState.open.querySelector(".menu-pop"); if (pop) pop.remove();
@@ -3729,18 +3900,7 @@ function openMenu(wrap, menu, top) {
   closeMenus();
   var pop = el("div", "menu-pop");
   pop.setAttribute("role", "menu");
-  menu.items.forEach(function (item) {
-    if (item.sep) { pop.appendChild(el("div", "menu-sep")); return; }
-    var mi = el("button", "menu-item");
-    mi.type = "button";
-    mi.setAttribute("role", "menuitem");
-    mi.appendChild(el("span", null, item.label));
-    mi.addEventListener("click", function (e) {
-      e.stopPropagation(); closeMenus();
-      try { item.run(); } catch (err) { /* an action must not break the menu */ }
-    });
-    pop.appendChild(mi);
-  });
+  visibleItems(menu.items).forEach(function (item) { pop.appendChild(buildMenuItem(item, pop)); });
   wrap.appendChild(pop);
   top.classList.add("open"); top.setAttribute("aria-expanded", "true");
   menuState.open = wrap;
@@ -3768,7 +3928,47 @@ function renderAppMenus() {
 }
 document.addEventListener("click", function () { closeMenus(); });
 document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeMenus(); });
+/* global accelerators */
+window.addEventListener("keydown", function (e) {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  for (var i = 0; i < SHORTCUTS.length; i++) {
+    if (comboMatches(SHORTCUTS[i].combo, e)) {
+      e.preventDefault(); closeMenus(); try { SHORTCUTS[i].run(); } catch (err) {}
+      return;
+    }
+  }
+});
 renderAppMenus();
+
+/* Help → Keyboard shortcuts: a small acrylic sheet, built once, listing the
+   accelerators from the single SHORTCUTS source */
+function openShortcuts() {
+  var modal = $("shortcuts-modal");
+  if (!modal) {
+    modal = el("div", "modal"); modal.id = "shortcuts-modal"; modal.hidden = true;
+    var card = el("div", "modal-card"); card.setAttribute("role", "dialog");
+    card.setAttribute("aria-modal", "true"); card.setAttribute("aria-label", "Keyboard shortcuts");
+    card.appendChild(el("h2", null, "Keyboard shortcuts"));
+    var list = el("div", "shortcut-list");
+    SHORTCUTS.forEach(function (s) {
+      var row = el("div", "shortcut-row");
+      row.appendChild(el("span", "shortcut-label", s.label));
+      row.appendChild(el("span", "mi-key", s.combo));
+      list.appendChild(row);
+    });
+    card.appendChild(list);
+    var actions = el("div", "modal-actions");
+    var close = el("button", "btn ghost", "Close"); close.type = "button";
+    close.addEventListener("click", function () { modal.hidden = true; });
+    actions.appendChild(close);
+    card.appendChild(actions);
+    modal.appendChild(card);
+    modal.addEventListener("click", function (e) { if (e.target === modal) modal.hidden = true; });
+    modal.addEventListener("keydown", function (e) { if (e.key === "Escape") modal.hidden = true; });
+    document.body.appendChild(modal);
+  }
+  modal.hidden = false;
+}
 
 /* recent-projects type filter (All / Create / Movie / Analysis) — cards
    carry a data-type, the chips toggle which types are shown */
@@ -7262,6 +7462,7 @@ function renderPmRecents(list) {
 function refreshProjects() {
   api("/api/projects").then(function (data) {
     var list = (data && data.projects) || [];
+    recentProjects = list;   // feeds File → Open Recent
     renderPmRecents(list);   // the Project-Manager home cards (open a project here)
   }).catch(function () { /* the panel is a convenience — never an error state */ });
 }
