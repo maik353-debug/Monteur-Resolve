@@ -27,6 +27,22 @@ class MonteurMediaError(RuntimeError):
     """Raised when ffmpeg/numpy are unavailable or decoding fails."""
 
 
+class MediaCancelled(RuntimeError):
+    """Raised when a cancellable ffmpeg run is killed mid-flight.
+
+    Deliberately NOT a subclass of :class:`MonteurMediaError` so the
+    ``except MonteurMediaError`` handlers that turn a decode failure into a
+    soft per-clip note do NOT swallow a cancellation — it must propagate all
+    the way up so the caller can tear the whole run down promptly.
+    """
+
+
+# How often the cancellable :func:`_run` wakes to check the cancel flag while
+# an ffmpeg subprocess is running. Small enough that a set cancel kills the
+# running process within a fraction of a second, large enough not to spin.
+_CANCEL_POLL_S = 0.15
+
+
 def _numpy():
     try:
         import numpy
@@ -59,10 +75,36 @@ def find_ffmpeg() -> str:
     )
 
 
-def _run(cmd: list[str], runner=None) -> subprocess.CompletedProcess:
-    runner = runner or subprocess.run
-    result = runner(cmd, capture_output=True)
-    return result
+def _run(cmd: list[str], runner=None, cancel=None) -> subprocess.CompletedProcess:
+    """Run ``cmd`` and capture its output.
+
+    ``cancel`` — anything with ``.is_set()`` (e.g. a ``threading.Event``) —
+    makes the run KILLABLE: instead of blocking in ``subprocess.run`` until
+    ffmpeg finishes, the process is polled and, the moment ``cancel`` is set,
+    killed within ~``_CANCEL_POLL_S`` and :class:`MediaCancelled` is raised.
+
+    When ``cancel is None`` (the default) this is byte-identical to the
+    original blocking implementation: ``runner`` (or ``subprocess.run``) is
+    called with ``capture_output=True`` and its result returned unchanged, so
+    every existing caller, test and fixture behaves exactly as before. The
+    poll-and-kill path engages ONLY when a real cancel object is passed.
+    """
+    if cancel is None:
+        runner = runner or subprocess.run
+        return runner(cmd, capture_output=True)
+    # Cancellable path: run ffmpeg under our own control and poll the flag.
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    while True:
+        try:
+            stdout, stderr = proc.communicate(timeout=_CANCEL_POLL_S)
+        except subprocess.TimeoutExpired:
+            if cancel.is_set():
+                proc.kill()
+                proc.wait()  # reap — never leave a zombie behind
+                raise MediaCancelled("ffmpeg run cancelled")
+            continue  # still running, cancel not set — keep polling
+        # communicate() has already drained both pipes on normal completion.
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 @dataclass
@@ -85,12 +127,12 @@ _AUDIO_RE = re.compile(r"Stream #\d+:\d+.*Audio:")
 _TIMECODE_RE = re.compile(r"timecode\s*:\s*(\d{1,2}:\d{2}:\d{2}[:;]\d{1,3})")
 
 
-def probe(path: str | Path, runner=None) -> MediaInfo:
+def probe(path: str | Path, runner=None, cancel=None) -> MediaInfo:
     """Read duration/fps/size/audio from ffmpeg's stream info."""
     path = Path(path)
     if not path.exists():
         raise MonteurMediaError(f"no such file: {path}")
-    result = _run([find_ffmpeg(), "-hide_banner", "-i", str(path)], runner)
+    result = _run([find_ffmpeg(), "-hide_banner", "-i", str(path)], runner, cancel)
     text = result.stderr.decode("utf-8", "replace")
     m = _DURATION_RE.search(text)
     if not m:
@@ -129,7 +171,7 @@ def start_timecode_seconds(info: MediaInfo) -> float:
     return frames / info.fps
 
 
-def read_audio(path: str | Path, rate: int = 22050, runner=None):
+def read_audio(path: str | Path, rate: int = 22050, runner=None, cancel=None):
     """Decode a file's audio to mono float32 at ``rate`` Hz (numpy array)."""
     np = _numpy()
     result = _run(
@@ -138,6 +180,7 @@ def read_audio(path: str | Path, rate: int = 22050, runner=None):
             "-vn", "-f", "f32le", "-ac", "1", "-ar", str(rate), "-",
         ],
         runner,
+        cancel,
     )
     if result.returncode != 0 or not result.stdout:
         stderr = result.stderr.decode("utf-8", "replace")[-400:]
@@ -268,6 +311,7 @@ def _full_decode_metrics(
     samples_per_second: float,
     size: tuple[int, int],
     runner=None,
+    cancel=None,
 ) -> list[FrameMetric]:
     """The original uniform-sampling path: decode every frame, fps-filter down."""
     np = _numpy()
@@ -279,6 +323,7 @@ def _full_decode_metrics(
             "-f", "rawvideo", "-",
         ],
         runner,
+        cancel,
     )
     frame_bytes = width * height
     if result.returncode != 0 or len(result.stdout) < frame_bytes:
@@ -297,6 +342,7 @@ def _keyframe_metrics(
     size: tuple[int, int],
     duration: float,
     runner=None,
+    cancel=None,
 ) -> list[FrameMetric] | None:
     """Keyframe-only sampling; returns None whenever the fast path can't be trusted.
 
@@ -321,6 +367,7 @@ def _keyframe_metrics(
             "-fps_mode", "passthrough", "-f", "rawvideo", "-",
         ],
         runner,
+        cancel,
     )
     frame_bytes = width * height
     if result.returncode != 0 or len(result.stdout) < frame_bytes:
@@ -351,6 +398,7 @@ def frame_metrics(
     samples_per_second: float = 2.0,
     size: tuple[int, int] = (160, 90),
     runner=None,
+    cancel=None,
 ) -> list[FrameMetric]:
     """Decode downscaled grayscale frames and compute quality metrics.
 
@@ -371,14 +419,16 @@ def frame_metrics(
     """
     duration = 0.0
     try:
-        duration = probe(path, runner).duration
+        duration = probe(path, runner, cancel).duration
     except MonteurMediaError:
         pass  # let the full-decode path produce the canonical error
     if duration >= _KEYFRAME_MIN_DURATION:
-        metrics = _keyframe_metrics(path, samples_per_second, size, duration, runner)
+        metrics = _keyframe_metrics(
+            path, samples_per_second, size, duration, runner, cancel
+        )
         if metrics is not None:
             return metrics
-    return _full_decode_metrics(path, samples_per_second, size, runner)
+    return _full_decode_metrics(path, samples_per_second, size, runner, cancel)
 
 
 def extract_rgb_frame(
@@ -386,6 +436,7 @@ def extract_rgb_frame(
     time_s: float,
     size: tuple[int, int] = (64, 36),
     runner=None,
+    cancel=None,
 ):
     """One downscaled RGB frame at ``time_s`` as a numpy uint8 array (H, W, 3).
 
@@ -407,6 +458,7 @@ def extract_rgb_frame(
             "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
         ],
         runner,
+        cancel,
     )
     frame_bytes = width * height * 3
     if result.returncode != 0 or len(result.stdout) < frame_bytes:
@@ -440,7 +492,7 @@ class AudioMetric:
 
 
 def audio_metrics(
-    path: str | Path, rate: int = 22050, window: float = 0.5, runner=None
+    path: str | Path, rate: int = 22050, window: float = 0.5, runner=None, cancel=None
 ) -> list[AudioMetric]:
     """Per-``window``-second audio quality metrics for a file.
 
@@ -449,9 +501,9 @@ def audio_metrics(
     analysed; a sub-window tail is dropped.
     """
     np = _numpy()
-    if not probe(path, runner).has_audio:
+    if not probe(path, runner, cancel).has_audio:
         return []
-    samples = read_audio(path, rate=rate, runner=runner)
+    samples = read_audio(path, rate=rate, runner=runner, cancel=cancel)
     win = max(1, int(round(window * rate)))
     count = len(samples) // win
     freqs = np.fft.rfftfreq(win, d=1.0 / rate)

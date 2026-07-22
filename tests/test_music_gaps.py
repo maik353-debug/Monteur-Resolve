@@ -462,7 +462,7 @@ class TestRenderGraphs:
 
         cmds: list[list[str]] = []
         monkeypatch.setattr(
-            preview, "_run_ffmpeg", lambda args, label: cmds.append(list(args))
+            preview, "_run_ffmpeg", lambda args, label, cancel=None: cmds.append(list(args))
         )
         monkeypatch.setattr(
             preview,
@@ -482,7 +482,7 @@ class TestRenderGraphs:
 
         cmds: list[list[str]] = []
         monkeypatch.setattr(
-            preview, "_run_ffmpeg", lambda args, label: cmds.append(list(args))
+            preview, "_run_ffmpeg", lambda args, label, cancel=None: cmds.append(list(args))
         )
         monkeypatch.setattr(
             preview,
@@ -503,7 +503,7 @@ class TestRenderGraphs:
 
         cmds: list[list[str]] = []
         monkeypatch.setattr(
-            preview, "_run_ffmpeg", lambda args, label: cmds.append(list(args))
+            preview, "_run_ffmpeg", lambda args, label, cancel=None: cmds.append(list(args))
         )
         monkeypatch.setattr(
             preview,

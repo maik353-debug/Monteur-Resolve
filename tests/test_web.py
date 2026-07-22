@@ -3728,7 +3728,7 @@ class TestExportVideoApi:
 
         def fake_export(
             plan, out_path, *, canvas, fps, audio, quality, progress=None,
-            size=None,
+            size=None, cancel=None,
         ):
             calls.append(
                 {
@@ -4673,7 +4673,7 @@ class TestMovieResultParityApi:
         calls = []
 
         def fake_export(plan, out_path, *, canvas, fps, audio, quality,
-                        progress=None, size=None):
+                        progress=None, size=None, cancel=None):
             calls.append(
                 {"entries": len(plan.entries), "canvas": canvas,
                  "fps": fps, "audio": audio, "out_path": out_path}

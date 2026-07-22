@@ -294,7 +294,7 @@ def test_sift_directory_runs_daylight_pass(monkeypatch):
     )
     monkeypatch.setattr(
         sift_module, "analyze_clip",
-        lambda path: ClipReport(
+        lambda path, cancel=None: ClipReport(
             path=str(path), duration=6.0, moments=[Moment(0.0, 1.0, 0.5)]
         ),
     )
@@ -323,7 +323,7 @@ def test_sift_directory_survives_daylight_failure(monkeypatch):
     )
     monkeypatch.setattr(
         sift_module, "analyze_clip",
-        lambda path: ClipReport(
+        lambda path, cancel=None: ClipReport(
             path=str(path), duration=6.0, moments=[Moment(0.0, 1.0, 0.5)]
         ),
     )

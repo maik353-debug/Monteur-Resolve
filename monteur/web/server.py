@@ -723,7 +723,7 @@ def _run_preview_job(job: dict, payload: dict) -> None:
     finished preview at a time — the latest); a FAILED render deletes
     nothing, so the last good preview keeps playing.
     """
-    from monteur.media import MonteurMediaError
+    from monteur.media import MediaCancelled, MonteurMediaError
     from monteur.montage import plan_from_dict
 
     try:
@@ -751,7 +751,8 @@ def _run_preview_job(job: dict, payload: dict) -> None:
         token = secrets.token_hex(8)
         out_path = os.path.join(directory, f"{token}.mp4")
         result = render_preview(
-            plan, out_path, width=width, audio=audio, progress=progress
+            plan, out_path, width=width, audio=audio, progress=progress,
+            cancel=job["cancel"],
         )
         # Cap the directory at THE latest preview: the fresh file replaces
         # every older one (best-effort — a locked file loses us nothing).
@@ -767,6 +768,8 @@ def _run_preview_job(job: dict, payload: dict) -> None:
             "width": result["width"],
         }
         job["state"] = "done"
+    except MediaCancelled:
+        job["state"] = "cancelled"
     except (MonteurMediaError, ValueError) as exc:
         job["message"] = str(exc)
         job["state"] = "error"
@@ -787,7 +790,7 @@ def _run_export_video_job(job: dict, payload: dict) -> None:
     with parents; the result carries the engine's honest ``notes``
     (missing dissolve handles, skipped titles, missing SFX files).
     """
-    from monteur.media import MonteurMediaError
+    from monteur.media import MediaCancelled, MonteurMediaError
     from monteur.montage import plan_from_dict
 
     try:
@@ -820,7 +823,7 @@ def _run_export_video_job(job: dict, payload: dict) -> None:
 
         result = render_export(
             plan, out_path, canvas=canvas, fps=fps, audio=audio,
-            quality=quality, progress=progress,
+            quality=quality, progress=progress, cancel=job["cancel"],
         )
         job["result"] = {
             "path": result["path"],
@@ -829,6 +832,8 @@ def _run_export_video_job(job: dict, payload: dict) -> None:
             "notes": list(result.get("notes") or []),
         }
         job["state"] = "done"
+    except MediaCancelled:
+        job["state"] = "cancelled"
     except (MonteurMediaError, ValueError, OSError) as exc:
         job["message"] = str(exc)
         job["state"] = "error"

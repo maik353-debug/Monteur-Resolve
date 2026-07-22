@@ -69,7 +69,13 @@ import math
 import re
 
 from monteur import reframe as _reframe
-from monteur.media import MonteurMediaError, find_ffmpeg, probe
+from monteur.media import (
+    MediaCancelled,
+    MonteurMediaError,
+    _CANCEL_POLL_S,
+    find_ffmpeg,
+    probe,
+)
 from monteur.montage import (
     MontagePlan,
     jl_audio_edits,
@@ -203,11 +209,42 @@ _FONT_CANDIDATES = (
 )
 
 
-def _run_ffmpeg(args: list[str], label: str) -> None:
-    """Run ffmpeg with ``args``; raise MonteurMediaError on any failure."""
+def _subprocess_run_cancellable(cmd: list[str], cancel):
+    """``subprocess.run(cmd, capture_output=True)`` that a cancel can kill.
+
+    ``cancel is None`` (the default everywhere) → the plain blocking
+    ``subprocess.run`` call, byte-identical to before. When a cancel object
+    (anything with ``.is_set()``) is passed, ffmpeg runs under a Popen that is
+    polled every ``_CANCEL_POLL_S``; the moment the flag is set the process is
+    killed (and reaped — no zombies) and :class:`MediaCancelled` is raised.
+    Mirrors :func:`monteur.media._run`'s poll-and-kill loop.
+    """
+    if cancel is None:
+        return subprocess.run(cmd, capture_output=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    while True:
+        try:
+            stdout, stderr = proc.communicate(timeout=_CANCEL_POLL_S)
+        except subprocess.TimeoutExpired:
+            if cancel.is_set():
+                proc.kill()
+                proc.wait()  # reap — never leave a zombie behind
+                raise MediaCancelled("ffmpeg run cancelled")
+            continue
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
+def _run_ffmpeg(args: list[str], label: str, cancel=None) -> None:
+    """Run ffmpeg with ``args``; raise MonteurMediaError on any failure.
+
+    ``cancel`` (anything with ``.is_set()``) makes the run killable: a set
+    flag kills the running ffmpeg within a poll interval and raises
+    :class:`MediaCancelled`. ``cancel=None`` (the default) is byte-identical
+    to the original blocking ``subprocess.run`` behaviour.
+    """
     cmd = [find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", *args]
     try:
-        result = subprocess.run(cmd, capture_output=True)
+        result = _subprocess_run_cancellable(cmd, cancel)
     except OSError as exc:  # binary vanished / not executable
         raise MonteurMediaError(f"could not run ffmpeg while {label}: {exc}") from exc
     if result.returncode != 0:
@@ -215,18 +252,18 @@ def _run_ffmpeg(args: list[str], label: str) -> None:
         raise MonteurMediaError(f"ffmpeg failed while {label}: {tail}")
 
 
-def _run_ffmpeg_capture(args: list[str], label: str) -> str:
+def _run_ffmpeg_capture(args: list[str], label: str, cancel=None) -> str:
     """Like :func:`_run_ffmpeg` but at ``-loglevel info``, returning stderr.
 
     The measurement runs need what ffmpeg PRINTS: loudnorm's
     ``print_format=json`` block (the two-pass first pass, blueprint 1.4)
     and ``volumedetect``'s levels (the mix-mode prominence measure) both
     land on stderr at info level. Failures raise exactly like
-    :func:`_run_ffmpeg`.
+    :func:`_run_ffmpeg`; ``cancel`` behaves identically too.
     """
     cmd = [find_ffmpeg(), "-hide_banner", "-nostats", "-loglevel", "info", "-y", *args]
     try:
-        result = subprocess.run(cmd, capture_output=True)
+        result = _subprocess_run_cancellable(cmd, cancel)
     except OSError as exc:
         raise MonteurMediaError(f"could not run ffmpeg while {label}: {exc}") from exc
     stderr = result.stderr.decode("utf-8", "replace")
@@ -570,6 +607,7 @@ def render_preview(
     progress=None,
     fade_in_s: float | None = None,
     fade_out_s: float | None = None,
+    cancel=None,
 ) -> dict:
     """Render ``plan`` to a small uniform MP4 at ``out_path`` — no Resolve.
 
@@ -671,6 +709,7 @@ def render_preview(
                         *encode, *audio_args, seg,
                     ],
                     f"encoding segment {i + 1}/{len(segments)} ({name})",
+                    cancel,
                 )
                 tick(name)
             else:
@@ -700,6 +739,7 @@ def render_preview(
                     ],
                     f"encoding segment {i + 1}/{len(segments)} "
                     f"({'title' if i in titles else 'black dip'})",
+                    cancel,
                 )
                 tick("title" if i in titles else "black")
             paths.append(seg)
@@ -777,7 +817,7 @@ def render_preview(
                 chain += "," + ",".join(af)
             final += ["-filter_complex", chain + "[a]", "-map", "[a]", *audio_encode]
         final += ["-t", f"{plan.duration:.3f}", str(out_path)]
-        _run_ffmpeg(final, f"muxing the preview to {Path(out_path).name}")
+        _run_ffmpeg(final, f"muxing the preview to {Path(out_path).name}", cancel)
         tick("mux")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -1228,6 +1268,7 @@ def render_export(
     progress=None,
     size: tuple[int, int] | None = None,
     jl_cuts: bool = False,
+    cancel=None,
 ) -> dict:
     """Render ``plan`` to a finished, upload-ready MP4 — no Resolve.
 
@@ -1442,6 +1483,7 @@ def render_export(
                         "-map", "0:v:0", "-vf", seg_cover, *seg_encode, "-an", seg,
                     ],
                     f"encoding export segment {i + 1}/{len(segments)} ({name})",
+                    cancel,
                 )
                 tick(name)
             else:
@@ -1462,6 +1504,7 @@ def render_export(
                     args,
                     f"encoding export segment {i + 1}/{len(segments)} "
                     f"({'title' if i in titles else 'black dip'})",
+                    cancel,
                 )
                 tick("title" if i in titles else "black")
             paths.append(seg)
@@ -1494,7 +1537,7 @@ def render_export(
                     ]
                     label = f"extracting sound for segment {i + 1}/{len(segments)}"
                     if audio == "mix":
-                        stderr = _run_ffmpeg_capture(extract, label)
+                        stderr = _run_ffmpeg_capture(extract, label, cancel)
                         level = _parse_mean_volume(stderr)
                         if level is not None:
                             part_levels.append((i, level))
@@ -1502,7 +1545,7 @@ def render_export(
                         if peak is not None:
                             part_peaks[i] = peak
                     else:
-                        _run_ffmpeg(extract, label)
+                        _run_ffmpeg(extract, label, cancel)
                 else:
                     _run_ffmpeg(
                         [
@@ -1510,6 +1553,7 @@ def render_export(
                             *pcm, part,
                         ],
                         f"generating silence for segment {i + 1}/{len(segments)}",
+                        cancel,
                     )
                 bed_parts.append(part)
             bed_list = Path(tmpdir) / "bed.txt"
@@ -1527,6 +1571,7 @@ def render_export(
                     "-c", "copy", bed_path,
                 ],
                 "joining the original-sound bed",
+                cancel,
             )
             tick("audio bed")
 
@@ -1725,6 +1770,7 @@ def render_export(
                     "-map", "[a]", "-f", "null", "-",
                 ],
                 "measuring the export loudness",
+                cancel,
             )
             measured = _parse_loudnorm_stats(stderr)
         except MonteurMediaError:
@@ -1778,7 +1824,7 @@ def render_export(
             "-movflags", "+faststart",
             "-t", f"{plan.duration:.3f}", str(out_path),
         ]
-        _run_ffmpeg(final, f"rendering the export to {Path(out_path).name}")
+        _run_ffmpeg(final, f"rendering the export to {Path(out_path).name}", cancel)
         tick("mux")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

@@ -154,7 +154,7 @@ _LOUDNORM_STDERR = """
 
 
 def _mock_export(monkeypatch, tmp_path, capture):
-    monkeypatch.setattr(preview, "_run_ffmpeg", lambda args, label: None)
+    monkeypatch.setattr(preview, "_run_ffmpeg", lambda args, label, cancel=None: None)
     monkeypatch.setattr(preview, "_run_ffmpeg_capture", capture)
     monkeypatch.setattr(
         preview,
@@ -174,7 +174,7 @@ def _mock_export(monkeypatch, tmp_path, capture):
 
 
 def test_render_export_returns_measured_lufs(monkeypatch, tmp_path):
-    result = _mock_export(monkeypatch, tmp_path, lambda args, label: _LOUDNORM_STDERR)
+    result = _mock_export(monkeypatch, tmp_path, lambda args, label, cancel=None: _LOUDNORM_STDERR)
     assert result["measured_lufs"] == pytest.approx(-23.61)
     # The loop can now critique the real export's loudness without a re-pass.
     metric = critique(
@@ -187,7 +187,7 @@ def test_render_export_returns_measured_lufs(monkeypatch, tmp_path):
 def test_render_export_omits_lufs_when_measurement_failed(monkeypatch, tmp_path):
     # A measurement pass that returns nothing parseable degrades to single
     # pass — and honestly OMITS the field (never a guessed number).
-    result = _mock_export(monkeypatch, tmp_path, lambda args, label: "no json here")
+    result = _mock_export(monkeypatch, tmp_path, lambda args, label, cancel=None: "no json here")
     assert "measured_lufs" not in result
     assert any("single-pass" in n for n in result["notes"])
 

@@ -502,7 +502,7 @@ def test_preview_draws_the_title_on_the_dip_segment(monkeypatch, tmp_path):
 
     calls: list[list[str]] = []
 
-    def fake_run(args, label):
+    def fake_run(args, label, cancel=None):
         calls.append(list(args))
 
     monkeypatch.setattr(preview, "_run_ffmpeg", fake_run)
@@ -533,7 +533,7 @@ def test_preview_without_drawtext_stays_plain_black(monkeypatch, tmp_path):
     from monteur import preview
 
     calls: list[list[str]] = []
-    monkeypatch.setattr(preview, "_run_ffmpeg", lambda args, label: calls.append(list(args)))
+    monkeypatch.setattr(preview, "_run_ffmpeg", lambda args, label, cancel=None: calls.append(list(args)))
     monkeypatch.setattr(preview, "_supports_drawtext", lambda: False)
     monkeypatch.setattr(
         preview,

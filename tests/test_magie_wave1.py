@@ -311,7 +311,7 @@ class TestTwoPassLoudnorm:
         filter_complex string and the result dict."""
         cmds: list[list[str]] = []
 
-        def fake_run(args, label):
+        def fake_run(args, label, cancel=None):
             cmds.append(list(args))
 
         monkeypatch.setattr(preview, "_run_ffmpeg", fake_run)
@@ -339,7 +339,7 @@ class TestTwoPassLoudnorm:
     def test_measured_values_are_injected_into_pass_two(self, monkeypatch, tmp_path):
         measure_cmds: list[list[str]] = []
 
-        def fake_capture(args, label):
+        def fake_capture(args, label, cancel=None):
             measure_cmds.append(list(args))
             return LOUDNORM_STDERR
 
@@ -362,7 +362,7 @@ class TestTwoPassLoudnorm:
         # its own rule, and the export says so instead of hiding it.
         peaky = LOUDNORM_STDERR.replace('"input_tp" : "-11.83"', '"input_tp" : "-2.0"')
         graph, result = self._mock_export(
-            monkeypatch, tmp_path, lambda args, label: peaky
+            monkeypatch, tmp_path, lambda args, label, cancel=None: peaky
         )
         assert "linear=true" in graph  # the two-pass values still ride along
         assert any(
@@ -374,7 +374,7 @@ class TestTwoPassLoudnorm:
     ):
         from monteur.media import MonteurMediaError
 
-        def broken_capture(args, label):
+        def broken_capture(args, label, cancel=None):
             raise MonteurMediaError("boom")
 
         graph, result = self._mock_export(monkeypatch, tmp_path, broken_capture)

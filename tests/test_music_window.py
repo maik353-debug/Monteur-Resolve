@@ -400,7 +400,7 @@ def test_render_preview_command_delays_the_music(monkeypatch, tmp_path):
 
     cmds: list[list[str]] = []
     monkeypatch.setattr(
-        preview, "_run_ffmpeg", lambda args, label: cmds.append(list(args))
+        preview, "_run_ffmpeg", lambda args, label, cancel=None: cmds.append(list(args))
     )
     monkeypatch.setattr(
         preview,
@@ -424,7 +424,7 @@ def test_render_preview_mix_command_windows_the_music_chain(monkeypatch, tmp_pat
 
     cmds: list[list[str]] = []
     monkeypatch.setattr(
-        preview, "_run_ffmpeg", lambda args, label: cmds.append(list(args))
+        preview, "_run_ffmpeg", lambda args, label, cancel=None: cmds.append(list(args))
     )
     monkeypatch.setattr(
         preview,

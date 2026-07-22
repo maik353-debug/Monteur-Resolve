@@ -343,7 +343,7 @@ def _fake_sift(monkeypatch, names):
 
     monkeypatch.setattr(sift_module, "list_media", lambda directory: [Path(n) for n in names])
 
-    def fake_analyze(path):
+    def fake_analyze(path, cancel=None):
         return ClipReport(path=str(path), duration=6.0, moments=[Moment(0.0, 1.0, 0.5)])
 
     monkeypatch.setattr(sift_module, "analyze_clip", fake_analyze)
@@ -426,7 +426,7 @@ def test_cancel_before_start_skips_everything(monkeypatch):
     monkeypatch.setattr(
         sift_module,
         "analyze_clip",
-        lambda path: calls.append(path) or ClipReport(path=str(path), duration=6.0),
+        lambda path, cancel=None: calls.append(path) or ClipReport(path=str(path), duration=6.0),
     )
     cancel = threading.Event()
     cancel.set()  # cancelled before the sift even begins
@@ -453,7 +453,7 @@ def test_cancel_mid_run_skips_pending_clips(monkeypatch):
     cancel = threading.Event()
     analysed = []
 
-    def analyze_then_cancel(path):
+    def analyze_then_cancel(path, cancel=None):
         analysed.append(str(path))
         cancel.set()  # the user hits cancel while clip 1 is being analysed
         return ClipReport(path=str(path), duration=6.0)
@@ -486,7 +486,7 @@ def test_sift_directory_analyzes_clips_concurrently(monkeypatch):
     )
     spans = {}
 
-    def slow_analyze(path):
+    def slow_analyze(path, cancel=None):
         begin = time.monotonic()
         time.sleep(0.3)
         spans[str(path)] = (begin, time.monotonic())
@@ -516,7 +516,7 @@ def test_sift_directory_clip_failure_does_not_cancel_others(monkeypatch):
         sift_module, "list_media", lambda directory: [Path(n) for n in names]
     )
 
-    def flaky_analyze(path):
+    def flaky_analyze(path, cancel=None):
         if "bad" in str(path):
             raise MonteurMediaError("decode exploded")
         return ClipReport(
@@ -548,13 +548,15 @@ def _patch_media(monkeypatch, metrics, duration, audio=None):
     monkeypatch.setattr(
         sift_module,
         "probe",
-        lambda p: MediaInfo(
+        lambda p, cancel=None: MediaInfo(
             path=str(p), duration=duration, fps=2.0, width=160, height=90,
             has_audio=bool(audio),
         ),
     )
-    monkeypatch.setattr(sift_module, "frame_metrics", lambda p: metrics)
-    monkeypatch.setattr(sift_module, "audio_metrics", lambda p: audio or [])
+    monkeypatch.setattr(sift_module, "frame_metrics", lambda p, cancel=None: metrics)
+    monkeypatch.setattr(
+        sift_module, "audio_metrics", lambda p, cancel=None: audio or []
+    )
 
 
 def test_analyze_flat_log_clip_usable_and_yields_moments(monkeypatch):
@@ -717,13 +719,13 @@ def test_analyze_clip_fills_media_start_from_probe(monkeypatch):
     monkeypatch.setattr(
         sift_module,
         "probe",
-        lambda p: MediaInfo(
+        lambda p, cancel=None: MediaInfo(
             path=str(p), duration=12.0, fps=25.0, width=160, height=90,
             has_audio=False, start_timecode="01:47:52:08",
         ),
     )
-    monkeypatch.setattr(sift_module, "frame_metrics", lambda p: metrics)
-    monkeypatch.setattr(sift_module, "audio_metrics", lambda p: [])
+    monkeypatch.setattr(sift_module, "frame_metrics", lambda p, cancel=None: metrics)
+    monkeypatch.setattr(sift_module, "audio_metrics", lambda p, cancel=None: [])
 
     report = analyze_clip("dji_0001.mp4")
     assert report.media_start == pytest.approx(1 * 3600 + 47 * 60 + 52 + 8 / 25)

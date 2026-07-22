@@ -77,6 +77,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from monteur.media import (
+    MediaCancelled,
     MonteurMediaError,
     AudioMetric,
     FrameMetric,
@@ -629,15 +630,21 @@ def _reraise_if_ffmpeg_missing(exc: MonteurMediaError) -> None:
         raise exc
 
 
-def analyze_clip(path: str) -> ClipReport:
+def analyze_clip(path: str, cancel=None) -> ClipReport:
     """Full report for one clip (decodes frames via monteur.media).
 
     Clips that are too short or fail to decode come back as a report with an
     explanatory note instead of raising; only a missing ffmpeg re-raises.
+
+    ``cancel`` — anything with ``.is_set()`` — is threaded into every ffmpeg
+    subprocess this clip runs (probe, frame decode, audio decode). When it is
+    set mid-decode the running ffmpeg is killed and :class:`MediaCancelled`
+    propagates OUT of this function (it is not a :class:`MonteurMediaError`,
+    so the soft per-stage handlers below never swallow it).
     """
     path = str(path)
     try:
-        info = probe(path)
+        info = probe(path, cancel=cancel)
     except MonteurMediaError as exc:
         _reraise_if_ffmpeg_missing(exc)
         return ClipReport(path=path, duration=0.0, notes=[f"could not analyze: {exc}"])
@@ -652,7 +659,7 @@ def analyze_clip(path: str) -> ClipReport:
         return report
 
     try:
-        metrics = frame_metrics(path)
+        metrics = frame_metrics(path, cancel=cancel)
     except MonteurMediaError as exc:
         _reraise_if_ffmpeg_missing(exc)
         report.notes.append(f"could not decode frames: {exc}")
@@ -677,7 +684,7 @@ def analyze_clip(path: str) -> ClipReport:
     # Audio features are best-effort: no audio stream or a failed audio
     # decode silently skips them (highlights stay 0.0, no audio notes).
     try:
-        audio = audio_metrics(path) if info.has_audio else []
+        audio = audio_metrics(path, cancel=cancel) if info.has_audio else []
     except MonteurMediaError as exc:
         _reraise_if_ffmpeg_missing(exc)
         audio = []
@@ -801,10 +808,12 @@ def sift_directory(
 
     ``cancel`` is an optional :class:`threading.Event`. It is checked before
     each clip is submitted for analysis (and again when a queued clip is about
-    to start): clips already being analysed run to completion, pending clips
-    are skipped. Once every in-flight clip has drained, a cancelled run raises
-    :class:`SiftCancelled` instead of returning reports. ``cancel=None`` (the
-    default) disables cancellation entirely.
+    to start) AND is threaded down into every ffmpeg subprocess, so a clip
+    that is already being analysed has its running ffmpeg KILLED within a poll
+    interval (~0.15 s) rather than running to completion. Pending clips are
+    skipped; a cancelled run raises :class:`SiftCancelled` instead of
+    returning reports. ``cancel=None`` (the default) disables cancellation
+    entirely.
     """
     media = list_media(directory)
     total = len(media)
@@ -825,7 +834,13 @@ def sift_directory(
         name = Path(media_path).name
         _locked_progress(index, name, "start", None)
         try:
-            report = analyze_clip(str(media_path))
+            report = analyze_clip(str(media_path), cancel=cancel)
+        except MediaCancelled:
+            # This clip's ffmpeg was killed mid-decode by a set cancel. Drop
+            # the in-flight clip silently; the final _cancelled() check below
+            # turns the run into a SiftCancelled — so the pool tears down fast
+            # instead of draining every already-running clip to completion.
+            return None
         except MonteurMediaError as exc:
             _reraise_if_ffmpeg_missing(exc)
             report = ClipReport(
@@ -841,6 +856,11 @@ def sift_directory(
             if _cancelled():
                 raise SiftCancelled("sift cancelled")
             results.append(_analyze_one(i, p))
+        # A cancel that landed WHILE the last clip was decoding (its ffmpeg
+        # killed -> _analyze_one returned None) is caught here too, so a
+        # cancelled run never returns partial reports or annotates a None.
+        if _cancelled():
+            raise SiftCancelled("sift cancelled")
         _annotate_daylight(results)
         _annotate_spatial(results)
         return results
@@ -852,7 +872,8 @@ def sift_directory(
             futures.append(pool.submit(_analyze_one, i, p))
         # futures[] is in sorted file order, so gathering by index keeps the
         # returned report order identical to the sequential implementation.
-        # On cancellation this drains: already-running clips finish here.
+        # On cancellation each in-flight clip's ffmpeg is killed (see
+        # _analyze_one's MediaCancelled handler), so gathering returns fast.
         results = [f.result() for f in futures]
     if _cancelled():
         raise SiftCancelled("sift cancelled")

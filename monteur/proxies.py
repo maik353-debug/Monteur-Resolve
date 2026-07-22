@@ -51,7 +51,7 @@ import os
 import secrets
 from pathlib import Path
 
-from monteur.media import MonteurMediaError, probe
+from monteur.media import MediaCancelled, MonteurMediaError, probe
 
 # Shared ffmpeg runner — one error contract for every engine (see the
 # module docstring; reusing it here is deliberate, not an accident).
@@ -122,7 +122,7 @@ def fresh_proxy(clip_path: str | Path) -> Path | None:
     return None
 
 
-def ensure_proxy(clip_path: str | Path, *, progress=None) -> Path:
+def ensure_proxy(clip_path: str | Path, *, progress=None, cancel=None) -> Path:
     """Transcode ``clip_path`` into the proxy cache (once) and return the
     proxy's path.
 
@@ -131,9 +131,11 @@ def ensure_proxy(clip_path: str | Path, *, progress=None) -> Path:
     ``.part`` name and moves into place atomically, so two concurrent
     callers can never serve half a file. ``progress(done, total, name)``
     — when given — is called once when the file is ready (fresh or
-    transcoded alike). Raises :class:`MonteurMediaError` when the clip is
-    missing/unreadable or ffmpeg fails (passthrough — callers decide how
-    soft to be).
+    transcoded alike). ``cancel`` (anything with ``.is_set()``) is threaded
+    into the transcode so a set flag kills the running ffmpeg within a poll
+    interval and raises :class:`monteur.media.MediaCancelled`. Raises
+    :class:`MonteurMediaError` when the clip is missing/unreadable or ffmpeg
+    fails (passthrough — callers decide how soft to be).
     """
     clip = os.path.abspath(str(clip_path))
     name = Path(clip).name
@@ -171,7 +173,7 @@ def ensure_proxy(clip_path: str | Path, *, progress=None) -> Path:
         args += ["-an"]
     args += ["-movflags", "+faststart", str(part)]
     try:
-        run_ffmpeg(args, f"transcoding a playback proxy for {name}")
+        run_ffmpeg(args, f"transcoding a playback proxy for {name}", cancel)
         if not part.is_file() or part.stat().st_size == 0:
             raise MonteurMediaError(f"ffmpeg wrote no proxy for {name}")
         os.replace(part, proxy)
@@ -195,7 +197,9 @@ def ensure_proxies(
     that clip simply falls back to the original file).
     ``progress(done, total, name)`` fires once per finished file (fresh
     cache hits included). ``cancel`` — an object with ``is_set()`` (e.g.
-    a ``threading.Event``) — stops the batch between files.
+    a ``threading.Event``) — stops the batch between files AND is threaded
+    into each transcode, so the ffmpeg RUNNING when cancel is set is killed
+    within a poll interval rather than finishing first.
     """
     items = [str(p) for p in paths]
     total = len(items)
@@ -206,7 +210,12 @@ def ensure_proxies(
             break
         name = Path(path).name
         try:
-            made[path] = str(ensure_proxy(path))
+            made[path] = str(ensure_proxy(path, cancel=cancel))
+        except MediaCancelled:
+            # The running transcode was killed mid-flight by a set cancel.
+            # Stop the batch immediately (the caller re-checks cancel and
+            # reports the job as cancelled); nothing partial is recorded.
+            break
         except MonteurMediaError as exc:
             errors[path] = str(exc)
         if progress is not None:
