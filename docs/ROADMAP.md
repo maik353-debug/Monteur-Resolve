@@ -109,6 +109,27 @@ Craft templates:
       search, preview against the timeline, direct download
       (enterprise-api-support@artlist.io once the product is public)
 
+## Project persistence (REQUIRED — never lose a project)
+
+- [ ] **First-class Monteur project format.** Today: settings/drafts/preferences
+      persist as JSON in `~/.monteur/`, and the Movie mode has real project
+      folders (`movie.save_project`), but the Cut/Create workflow only
+      autosaves to a shared `drafts.json` and `project.py` stores only version
+      history. Elevate a CUT to a durable, first-class project:
+      - Each project = a folder (a projects root under `~/.monteur/projects/<slug>/`
+        or a user-chosen location) with a manifest — a custom `.monteur` bundle
+        (project.json inside): name, footage folder PATH (media is never copied —
+        "your files are never moved"), the chosen options, the current
+        MontagePlan (already JSON-serializable via `plan_to_dict`), version
+        history, export history, timestamps.
+      - Subfolders for exports / versions / proxies. Global config stays in
+        `~/.monteur/settings.json`; preferences global.
+      - A `monteur/projects.py` (or extend `project.py`) with save/load/list;
+        MIGRATE existing `drafts.json` into projects so nothing is lost.
+      - The new Project-Manager home lists these real projects (currently it
+        lists drafts as a bridge). — Maik, explicit: "auf keinen Fall Projekte
+        verlieren." Backend track right after the UI pages land.
+
 ## v1.0 — Product
 
 - [ ] **Native app shell (REQUIRED, not a browser tab).** Monteur must feel
