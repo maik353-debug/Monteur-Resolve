@@ -919,7 +919,7 @@ svg text.axis {
   color: var(--ink-muted); margin: 16px 0 7px;
 }
 .wiz-cols > div > .fgroup-title:first-child { margin-top: 0; }
-.wiz-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 24px; }
+.wiz-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 24px; align-items: start; }
 @media (max-width: 860px) { .wiz-cols { grid-template-columns: 1fr; } }
 .path-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
 .path-row input[type="text"] {
@@ -1234,11 +1234,19 @@ svg text.axis {
 .link-btn:hover { color: var(--accent-soft); }
 
 /* send to Resolve (result card) */
+/* the three outputs on "Your cut" read as distinct cards, like Home/Media Pool */
 .resolve-send { margin: 4px 0 2px; }
+.resolve-send, .render-block.card {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 14px 16px; margin: 12px 0 0; border-top: 1px solid var(--border);
+}
 .resolve-send .help-small { margin-top: 8px; max-width: 620px; }
 
 /* render the video (inside the Resolve-build success block) */
 .render-block { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+/* nested blocks (YouTube upload inside a render result) stay flat, not cards */
+.render-block.card .render-block { border-radius: 0; background: none; padding: 12px 0 0; margin-top: 12px; border-left: 0; border-right: 0; border-bottom: 0; }
+.render-block .seg-heading:first-child { margin-top: 0; }
 .render-ready {
   margin: 10px 0 4px; padding: 10px 12px; border-radius: 6px;
   background: var(--good-wash); border: 1px solid var(--good);
@@ -2212,23 +2220,29 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             <p class="wiz-lead">Pick the song your cut should follow and how the finished cut should feel. Monteur reads the song&rsquo;s beat and places every cut on the rhythm.</p>
           </div>
         </div>
-        <h3 class="fgroup-title">What are you making?</h3>
-        <div class="seg-toggle" role="group" aria-label="What are you making?" id="cre-platform-row">
-          <button type="button" id="plat-youtube" aria-pressed="false">YouTube</button>
-          <button type="button" id="plat-short" aria-pressed="false">Short</button>
-          <button type="button" id="plat-reel" aria-pressed="false">Reel</button>
-          <button type="button" id="plat-tiktok" aria-pressed="false">TikTok</button>
-          <button type="button" id="plat-custom" aria-pressed="true">Custom</button>
+        <div class="wiz-cols">
+          <div>
+            <h3 class="fgroup-title">What are you making?</h3>
+            <div class="seg-toggle" role="group" aria-label="What are you making?" id="cre-platform-row">
+              <button type="button" id="plat-youtube" aria-pressed="false">YouTube</button>
+              <button type="button" id="plat-short" aria-pressed="false">Short</button>
+              <button type="button" id="plat-reel" aria-pressed="false">Reel</button>
+              <button type="button" id="plat-tiktok" aria-pressed="false">TikTok</button>
+              <button type="button" id="plat-custom" aria-pressed="true">Custom</button>
+            </div>
+            <p class="help-small" id="cre-platform-info" aria-live="polite">Your own mix &mdash; shape, length and style stay exactly as you set them below.</p>
+          </div>
+          <div>
+            <h3 class="fgroup-title">How many videos?</h3>
+            <div class="seg-toggle" role="group" aria-label="How many videos" id="cre-series-row">
+              <button type="button" id="series-1" aria-pressed="true">One cut</button>
+              <button type="button" id="series-2" aria-pressed="false">2 Shorts</button>
+              <button type="button" id="series-3" aria-pressed="false">3</button>
+              <button type="button" id="series-4" aria-pressed="false">4</button>
+            </div>
+            <p class="help-small" id="cre-series-info" aria-live="polite">One cut from your footage. Pick 2&ndash;4 to turn a single tour into that many distinct vertical Shorts &mdash; no moment repeats.</p>
+          </div>
         </div>
-        <p class="help-small" id="cre-platform-info" aria-live="polite">Your own mix &mdash; shape, length and style stay exactly as you set them below.</p>
-        <h3 class="fgroup-title">How many videos?</h3>
-        <div class="seg-toggle" role="group" aria-label="How many videos" id="cre-series-row">
-          <button type="button" id="series-1" aria-pressed="true">One cut</button>
-          <button type="button" id="series-2" aria-pressed="false">2 Shorts</button>
-          <button type="button" id="series-3" aria-pressed="false">3</button>
-          <button type="button" id="series-4" aria-pressed="false">4</button>
-        </div>
-        <p class="help-small" id="cre-series-info" aria-live="polite">One cut from your footage. Pick 2&ndash;4 to turn a single tour into that many distinct vertical Shorts &mdash; no moment repeats across the set.</p>
         <div class="wiz-cols">
           <div>
             <h3 class="fgroup-title">Soundtrack</h3>
@@ -2596,7 +2610,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           <span class="step-chip" aria-hidden="true">5</span>
           <div>
             <h1 id="cre-h5" tabindex="-1">Your cut</h1>
-            <p class="wiz-lead">The finished cut, ready to harvest &mdash; build it as a real timeline in DaVinci Resolve, download the file, export the video, publish. Changing the cut itself lives in the storyboard; the look lives in Color.</p>
+            <p class="wiz-lead">Send the finished cut out &mdash; a live Resolve timeline, an exported video, or a timeline file. Change the cut in Storyboard; the look lives in Color.</p>
           </div>
         </div>
         <div class="wiz-nav">
@@ -2607,7 +2621,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
 
         <div class="resolve-send">
             <button class="btn primary" id="cre-resolve-btn" type="button">Build in DaVinci Resolve<span class="spin" aria-hidden="true"></span></button>
-            <p class="help-small">One click, no file: builds this cut as a timeline directly in the Resolve project you have open — cuts at their true positions, act titles as real Text+, black title gaps, canvas and cine crop applied. Dissolves and the black fade-in/out are the one thing Resolve's scripting cannot create: those live in the downloaded file below (import it when you want them), or drag a quick fade in Resolve by hand.</p>
+            <p class="help-small">Builds this cut as a live timeline in your open Resolve project — no file, cuts at their true positions with act titles, canvas and cine crop. Dissolves and the black fade in/out come from the downloaded file below (Resolve scripting can’t create those).</p>
             <div id="cre-resolve-panel"></div>
             <p class="scan-note" id="cre-resolve-msg" role="status" hidden></p>
             <div id="cre-resolve-result" hidden>
@@ -2669,9 +2683,9 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
               </div>
             </div>
           </div>
-          <div class="render-block" id="cre-export-block">
+          <div class="render-block card" id="cre-export-block">
             <p class="seg-heading">Export video</p>
-            <p class="help-small">No Resolve? Monteur&rsquo;s own engine renders the finished, upload-ready MP4 right here &mdash; real dissolves, act titles on the black dips, your placed sound effects and YouTube-friendly loudness included. Pick where the file should go.</p>
+            <p class="help-small">No Resolve? Monteur&rsquo;s own engine renders a finished, upload-ready MP4 right here &mdash; dissolves, titles, sound effects and broadcast loudness included.</p>
             <label class="sr-only" for="cre-export-dir">Folder for the exported video</label>
             <div class="path-row">
               <input type="text" id="cre-export-dir" placeholder="/Users/you/Movies/my-trip/monteur-export" spellcheck="false" autocomplete="off">
@@ -2725,30 +2739,33 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
               </div>
             </div>
           </div>
-          <div class="export-bar">
-            <div class="export-field">
-              <span id="cre-fmt-label">File format</span>
-              <div class="seg-toggle" role="group" aria-labelledby="cre-fmt-label">
-                <button type="button" id="cre-fmt-edl" aria-pressed="false">EDL</button>
-                <button type="button" id="cre-fmt-fcpxml" aria-pressed="true">FCPXML</button>
+          <div class="render-block card" id="cre-download-block">
+            <p class="seg-heading">Download the timeline file</p>
+            <p class="help-small">A timeline file to import into Resolve (or any NLE). FCPXML relinks most easily.</p>
+            <div class="export-bar">
+              <div class="export-field">
+                <span id="cre-fmt-label">File format</span>
+                <div class="seg-toggle" role="group" aria-labelledby="cre-fmt-label">
+                  <button type="button" id="cre-fmt-edl" aria-pressed="false">EDL</button>
+                  <button type="button" id="cre-fmt-fcpxml" aria-pressed="true">FCPXML</button>
+                </div>
               </div>
+              <button class="btn primary" id="cre-download" type="button">Download timeline<span class="spin" aria-hidden="true"></span></button>
+              <label class="export-field">Cut name
+                <input type="text" id="cre-draft-name" spellcheck="false" autocomplete="off">
+              </label>
+              <button class="btn" id="cre-save-draft" type="button">Save cut<span class="spin" aria-hidden="true"></span></button>
             </div>
-            <button class="btn primary" id="cre-download" type="button">Download timeline<span class="spin" aria-hidden="true"></span></button>
-            <label class="export-field">Cut name
-              <input type="text" id="cre-draft-name" spellcheck="false" autocomplete="off">
-            </label>
-            <button class="btn" id="cre-save-draft" type="button">Save cut<span class="spin" aria-hidden="true"></span></button>
+            <p class="scan-note" id="cre-draft-msg" role="status" hidden></p>
+            <ol class="howto">
+              <li>In Resolve: File → Import → Timeline… and pick the downloaded file.</li>
+              <li>When asked where the media lives, point it at your footage folder.</li>
+              <li>Press play, then fine-tune from there.</li>
+            </ol>
           </div>
-          <p class="scan-note" id="cre-draft-msg" role="status" hidden></p>
-          <p class="seg-heading">Next: import into DaVinci Resolve</p>
-          <ol class="howto">
-            <li>In Resolve, choose File → Import → Timeline… and pick the downloaded file.</li>
-            <li>When Resolve asks where the media lives, point it at your footage folder.</li>
-            <li>Press play — then fine-tune from there. FCPXML relinks most easily.</li>
-          </ol>
-          <div class="kit-block" id="cre-kit">
+          <div class="kit-block render-block card" id="cre-kit">
             <p class="seg-heading">Publish kit — the upload package for this cut</p>
-            <p class="help-small">Uploading a video means writing a title, a description, chapters and tags, and hunting for a thumbnail — the kit drafts all of that from the cut above so publishing takes minutes, not an evening. It writes one <code>publish.md</code> with title suggestions and a short description (drafted by Claude when your Anthropic API key is set or Claude Code — the <code>claude</code> command — is installed; otherwise from an honest offline template that says so), YouTube chapter timestamps taken from the cut&rsquo;s own scene changes, a ready-to-paste tag list, and real thumbnail stills of your strongest moments in a <code>thumbs/</code> folder. A planned SFX layer adds its sound-design shopping list with Artlist search links.</p>
+            <p class="help-small">Drafts the whole upload package from this cut: a <code>publish.md</code> with title ideas, a description and a ready-to-paste tag list, YouTube chapters from the cut’s scene changes, and thumbnail stills of your strongest moments in <code>thumbs/</code>.</p>
             <label class="sr-only" for="cre-kit-dir">Folder to write the publish kit into</label>
             <div class="path-row">
               <input type="text" id="cre-kit-dir" placeholder="/Users/you/Movies/my-trip/publish" spellcheck="false" autocomplete="off">
