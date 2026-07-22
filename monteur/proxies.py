@@ -256,3 +256,48 @@ def prune_proxies(max_gb: float = PROXY_MAX_GB) -> list[Path]:
         total -= size
         removed.append(path)
     return removed
+
+
+def cache_size() -> dict:
+    """Total bytes and file count of the proxy cache (best-effort, never raises).
+
+    Proxies are a global, project-independent cache (keyed by clip path), so
+    deleting a project can't safely delete "its" proxies — a shared clip may
+    still be used elsewhere. This backs the Settings display + the cap.
+    """
+    directory = proxies_dir()
+    total = 0
+    count = 0
+    try:
+        for path in directory.iterdir():
+            if path.suffix != ".mp4":
+                continue
+            try:
+                total += path.stat().st_size
+                count += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return {"bytes": total, "count": count}
+
+
+def clear_proxies() -> int:
+    """Delete every cached proxy; returns how many were removed.
+
+    Safe: proxies are pure derivatives — anything still needed is re-transcoded
+    on next playback. Use for the Settings "Clear cache" action.
+    """
+    directory = proxies_dir()
+    removed = 0
+    try:
+        candidates = [p for p in directory.iterdir() if p.suffix == ".mp4"]
+    except OSError:
+        return 0
+    for path in candidates:
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed

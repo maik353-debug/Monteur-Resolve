@@ -3129,6 +3129,13 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
       <div class="set-test-row">
         <button class="btn small" id="set-check-updates" type="button">Check for updates&hellip;</button>
       </div>
+
+      <h3 style="margin-top: 22px;">Storage</h3>
+      <p class="help-small">Monteur keeps small playback proxies of your clips so the player scrubs instantly. They&rsquo;re a shared cache — deleting a project leaves them (another project may use the same clips), and the cache is capped and pruned automatically. Clear it any time to reclaim space; proxies rebuild on next playback.</p>
+      <p class="set-version" id="set-cache-line">Proxy cache: &hellip;</p>
+      <div class="set-test-row">
+        <button class="btn small" id="set-cache-clear" type="button"><span class="spin" aria-hidden="true"></span>Clear proxy cache</button>
+      </div>
     </section>
 
     <section class="set-pane" id="set-pane-ai" role="tabpanel" hidden>
@@ -12081,6 +12088,7 @@ function renderUpdateSettings(s) {
   var chan = s.update_channel === "dev" ? "dev" : "stable";
   $("chan-stable").setAttribute("aria-pressed", chan === "stable" ? "true" : "false");
   $("chan-dev").setAttribute("aria-pressed", chan === "dev" ? "true" : "false");
+  refreshCacheLine();
 }
 
 /* The Resolve half of the settings view: the saved worker-Python path and
@@ -12165,6 +12173,30 @@ $("settings-modal").addEventListener("keydown", function (e) {
   });
 });
 $("set-check-updates").addEventListener("click", function () { closeSettings(); openUpdate(); });
+
+/* proxy cache size + clear */
+function humanBytes(n) {
+  n = n || 0;
+  if (n < 1024) return n + " B";
+  var u = ["KB", "MB", "GB", "TB"], i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return (n >= 10 ? Math.round(n) : Math.round(n * 10) / 10) + " " + u[i];
+}
+function refreshCacheLine() {
+  var line = $("set-cache-line");
+  if (!line) return;
+  api("/api/cache").then(function (d) {
+    line.textContent = "Proxy cache: " + humanBytes(d.proxy_bytes) + " · " + d.proxy_count + (d.proxy_count === 1 ? " file" : " files");
+  }).catch(function () { line.textContent = "Proxy cache: —"; });
+}
+$("set-cache-clear").addEventListener("click", function () {
+  busy($("set-cache-clear"), function () {
+    return api("/api/cache/clear", { method: "POST", body: {} }).then(function (d) {
+      $("set-cache-line").textContent = "Proxy cache: " + humanBytes(d.proxy_bytes) + " · " + d.proxy_count + (d.proxy_count === 1 ? " file" : " files");
+      toast("Proxy cache cleared (" + d.removed + (d.removed === 1 ? " file" : " files") + ").", "");
+    });
+  });
+});
 
 ["set-b-auto", "set-b-api", "set-b-cli"].forEach(function (id) {
   $(id).addEventListener("change", function () {

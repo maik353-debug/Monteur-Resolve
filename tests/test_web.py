@@ -110,6 +110,27 @@ def _edl_payload(**extra):
     }
 
 
+class TestCacheApi:
+    """The proxy-cache size + clear endpoints (Settings → Storage)."""
+
+    def test_cache_size_and_clear(self, server, tmp_path, monkeypatch):
+        from monteur import proxies
+
+        monkeypatch.setenv("MONTEUR_PROXIES_PATH", str(tmp_path / "px"))
+        d = proxies.proxies_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / ("a" * 32 + ".mp4")).write_bytes(b"x" * 500)
+        (d / ("b" * 32 + ".mp4")).write_bytes(b"x" * 250)
+
+        got = _get(f"{server}/api/cache")
+        assert got == {"proxy_bytes": 750, "proxy_count": 2}
+
+        cleared = _post(f"{server}/api/cache/clear", {})
+        assert cleared["removed"] == 2
+        assert cleared["proxy_bytes"] == 0 and cleared["proxy_count"] == 0
+        assert _get(f"{server}/api/cache") == {"proxy_bytes": 0, "proxy_count": 0}
+
+
 class TestAppDataRoot:
     """The windowed app must write its working files to ~/.monteur, never cwd.
 

@@ -3510,6 +3510,8 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/youtube/prefill"): self._youtube_prefill,
             ("GET", "/api/update/check"): self._update_check,
             ("POST", "/api/update/install"): self._update_install,
+            ("GET", "/api/cache"): self._cache_get,
+            ("POST", "/api/cache/clear"): self._cache_clear,
         }
         if (method, path) in routes:
             return routes[(method, path)]
@@ -5250,6 +5252,23 @@ class MonteurHandler(BaseHTTPRequestHandler):
         ).start()
         self._send_json({"job": job["id"]})
 
+    # -- proxy cache (monteur.proxies) ----------------------------------------
+
+    def _cache_get(self) -> None:
+        """GET /api/cache — proxy cache size + count for the Settings display."""
+        from monteur import proxies
+
+        info = proxies.cache_size()
+        self._send_json({"proxy_bytes": info["bytes"], "proxy_count": info["count"]})
+
+    def _cache_clear(self) -> None:
+        """POST /api/cache/clear — delete every cached proxy (they re-transcode)."""
+        from monteur import proxies
+
+        removed = proxies.clear_proxies()
+        info = proxies.cache_size()
+        self._send_json({"removed": removed, "proxy_bytes": info["bytes"], "proxy_count": info["count"]})
+
     def _resolve_status(self) -> None:
         # Isolated in a child process: Resolve's native module can hard-crash
         # (access violation) under an incompatible Python, and that would take
@@ -5387,6 +5406,15 @@ def serve(
         print(f"Port {port} is busy — using {server.server_address[1]} instead.", flush=True)
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"Monteur Studio running at {url}", flush=True)
+    # keep the proxy cache bounded even between generations — deleting projects
+    # leaves their proxies (a shared, project-independent cache), so enforce the
+    # size cap on startup, not only after a proxy build. Best-effort, off-thread.
+    try:
+        from monteur import proxies as _proxies
+
+        threading.Thread(target=_proxies.prune_proxies, name="monteur-proxy-prune", daemon=True).start()
+    except Exception:  # noqa: BLE001 - cache upkeep must never block startup
+        pass
     print("Leave this window open. Press Ctrl+C here to stop.", flush=True)
     if ready is not None:
         ready.set()

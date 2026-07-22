@@ -245,6 +245,47 @@ class TestPrune:
         assert proxies.prune_proxies() == []
 
 
+class TestCacheSizeAndClear:
+    def _fill(self, proxies, sizes):
+        directory = proxies.proxies_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        for index, size in enumerate(sizes):
+            (directory / f"{index:032x}.mp4").write_bytes(b"p" * size)
+
+    def test_cache_size_totals_bytes_and_count(self):
+        from monteur import proxies
+
+        self._fill(proxies, [100, 250, 50])
+        info = proxies.cache_size()
+        assert info == {"bytes": 400, "count": 3}
+
+    def test_cache_size_without_dir_is_zero(self):
+        from monteur import proxies
+
+        assert proxies.cache_size() == {"bytes": 0, "count": 0}
+
+    def test_cache_size_ignores_non_proxy_files(self):
+        from monteur import proxies
+
+        d = proxies.proxies_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "abc.mp4").write_bytes(b"pppp")
+        (d / "notes.txt").write_bytes(b"ignore me")
+        assert proxies.cache_size() == {"bytes": 4, "count": 1}
+
+    def test_clear_removes_all_proxies(self):
+        from monteur import proxies
+
+        self._fill(proxies, [10, 20, 30])
+        assert proxies.clear_proxies() == 3
+        assert proxies.cache_size() == {"bytes": 0, "count": 0}
+
+    def test_clear_without_dir_is_zero(self):
+        from monteur import proxies
+
+        assert proxies.clear_proxies() == 0
+
+
 @needs_demo
 class TestCli:
     def test_monteur_proxies_command(self, capsys):
