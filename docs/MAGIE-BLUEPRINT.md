@@ -209,7 +209,61 @@ messbar weniger gleichgroße Nachbar-Paare, Etablier-Shot vorn. Reime: erkannt u
 gesetzt, Zero-Repeat unverletzt. Haus-Garantien wie immer; Bild-Scoring als
 Tie-Breaker, nie über Sync/Drop/Rhythmus.
 
-## Welle 4 — Detail-Synthese folgt vor ihrer Umsetzung
-Render→Watch→Refine-Selbstschleife (das System misst sein eigenes Preview gegen die
-Abnahme-Metriken der Wellen 1–3 und iteriert, bis sie erfüllt sind) + lernende
-Präferenzen aus Nutzer-Korrekturen. Grounded im Post-W3-Code vor Umsetzung.
+## Welle 4 — Detail-Spezifikation (verbindlich; verankert im Post-W3-Code)
+
+Grundthese W4: Bis hier baut Monteur EINEN Schnitt und hofft, dass er sitzt. W4
+schließt die Schleife — das System bewertet seinen eigenen Schnitt gegen die
+Abnahme-Metriken der Wellen 1–3, iteriert deterministisch bis sie erfüllt sind,
+und lernt aus den Korrekturen des Nutzers. Alles offline, deterministisch,
+unter Erhalt der Haus-Garantien.
+
+### 4.1 Selbst-Kritik (der „Watch"-Teil)
+Anker: Plan-`notes` (Koinzidenz/Stille/Drops), `monteur.coverage`, render_export
+misst `input_i` (LUFS, preview.py:1089).
+- `critique(plan, *, measured_lufs=None) -> Scorecard`: ein deterministischer
+  Prüfbericht gegen JEDE Abnahme-Metrik der Wellen 1–3 — Peak-Koinzidenz-Rate
+  (aus Peak/Beat im Plan, ±0.25 s), Stille-Ehrlichkeit (jede music_gap hat einen
+  Träger), Sliver-Freiheit (kein Slot < 0.3 s), Shot-Grammatik-Verstöße (gleich
+  große Nachbarn), Drop-Treffer, und — wenn gemessen — Integrated Loudness gegen
+  −14 ±1 LU. Jede Metrik: Wert + Bestanden/Durchgefallen + welche Slots schuld
+  sind. Rein aus dem Plan (+ optionaler Messung), kein Video-Redecode nötig.
+- render_export gibt seinen gemessenen `input_i` im Ergebnis zurück (heute nur
+  intern), damit die Schleife ohne Extra-Pass messen kann.
+
+### 4.2 Refine-Schleife (der „Refine"-Teil)
+- `refine_plan(reports, music, ..., budget=N) -> (best_plan, history)`: plant,
+  kritisiert, und wenn Metriken durchfallen, dreht sie GEZIELT an den passenden
+  Stellschrauben (deterministisch, nicht zufällig) und plant neu — z. B. zu viele
+  Sliver → Cut-Dichte runter; Koinzidenz schwach → aim/lead nachjustieren;
+  Grammatik-Verstöße → Ordering-Gewicht hoch. Behält den Plan mit dem besten
+  Scorecard-Aggregat. Beschränkte Iterationen (budget), voll deterministisch:
+  gleiche Eingabe → gleiche Schleife → gleicher Gewinner. Die bestehende
+  Ein-Schuss-Planung bleibt der Default; refine ist opt-in (ein Flag /
+  Studio-Knopf „bis es sitzt"), damit alle Byte-Paritäten unberührt bleiben.
+- Notes protokollieren die Schleife ehrlich („refine: 3 Durchläufe, Koinzidenz
+  71%→94%, Loudness angenommen"), keine stille Iteration.
+
+### 4.3 Lernende Präferenzen (aus Nutzer-Korrekturen)
+Anker: Studio-Edits `/api/plan/adjust` (Slot/Transition/Boundary),
+`/api/alternatives` (Swap), `~/.monteur/` (drafts.json/settings.json Muster).
+- Ein Präferenz-Store `~/.monteur/preferences.json` (Env-Override wie drafts/
+  settings, für Test-Isolation). Wenn der Nutzer einen Slot swappt, eine Grenze
+  zieht oder eine Transition ändert, wird das SIGNAL abstrahiert gespeichert —
+  nicht „Clip X statt Y", sondern die Richtung (z. B. „bevorzugt längere Holds
+  in ruhigen Phasen", „mag close-ups am Klimax", „weniger Dissolves"). 
+- Beim nächsten Planen fließen die Präferenzen als KLEINE Casting-/Ordering-
+  Bias-Terme ein — Tie-Breaker, nie über Sync/Drop/Rhythmus, nie Zero-Repeat
+  verletzend. Leerer Store ⇒ byte-identisch zum heutigen Verhalten (Fallback-
+  Parität). Deterministisch bei gegebenem Store.
+- Konservativ: nur robuste, wiederholte Signale zählen (ein einzelner Swap
+  kippt nichts); der Store ist inspizierbar/löschbar (der Nutzer sieht die CLI
+  nie, aber die App kann „gelerntes zurücksetzen" bieten).
+
+### Abnahme (Welle 4)
+Kritik: der Scorecard stimmt mit unabhängiger Messung überein (LUFS, Koinzidenz-
+Rate) auf echtem Render. Refine: ein absichtlich schwacher Erst-Plan wird über
+die Schleife nachweislich besser (Metrik steigt), deterministisch reproduzierbar,
+und der Default (ohne refine) bleibt byte-identisch. Lernen: ein simuliertes
+Korrektur-Signal verschiebt eine spätere Casting-Entscheidung in die erwartete
+Richtung, leerer Store bleibt byte-identisch, Zero-Repeat/Sync/Drop unverletzt.
+Haus-Garantien wie immer.
