@@ -6022,7 +6022,7 @@ class TestPlayoutAcceptance:
 
             # ---- step 1: scan, then the quiet proxy status line -----------
             page.goto(server)
-            page.click("#tab-create")
+            page.click("#pm-new")  # enter the create workflow from the Home hub
             _pool_scan(page, self.DEMO)
             page.wait_for_selector("#cre-next-1", state="visible", timeout=120_000)
             page.wait_for_function(
@@ -6208,7 +6208,7 @@ class TestPlayoutAcceptance:
 
             # scan -> step 2 with the demo song (audio mode stays "music")
             page.goto(server)
-            page.click("#tab-create")
+            page.click("#pm-new")  # enter the create workflow from the Home hub
             _pool_scan(page, self.DEMO)
             page.wait_for_selector("#cre-next-1", state="visible", timeout=120_000)
             page.click("#cre-next-1")
@@ -6368,7 +6368,7 @@ class TestNoRebuildOnCleanReturn:
 
             # ---- step 1: scan ------------------------------------------------
             page.goto(server)
-            page.click("#tab-create")
+            page.click("#pm-new")  # enter the create workflow from the Home hub
             _pool_scan(page, self.DEMO)
             page.wait_for_selector("#cre-next-1", state="visible", timeout=120_000)
 
@@ -6609,7 +6609,7 @@ class TestPlayoutMusicFreeRun:
 
             # ---- step 1: scan ------------------------------------------------
             page.goto(server)
-            page.click("#tab-create")
+            page.click("#pm-new")  # enter the create workflow from the Home hub
             _pool_scan(page, self.DEMO)
             page.wait_for_selector("#cre-next-1", state="visible", timeout=120_000)
 

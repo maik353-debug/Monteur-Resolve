@@ -161,16 +161,24 @@ h1, h2, h3, p { margin: 0; }
   font-size: 10px; font-weight: 600; letter-spacing: 0.18em;
   text-transform: uppercase; color: var(--ink-muted); white-space: nowrap;
 }
-.view-switch { display: flex; gap: 2px; justify-content: center; }
-.view-tab {
-  border: 1px solid transparent; background: none; color: var(--ink-muted);
-  padding: 4px 14px; border-radius: 3px; cursor: pointer;
+/* context-aware topbar center (the old .view-switch mode tabs are gone) */
+.tb-context { display: flex; align-items: center; gap: 10px; justify-content: center; min-width: 0; }
+.tb-back {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: 1px solid var(--border); background: none; color: var(--ink-muted);
+  padding: 4px 12px 4px 10px; border-radius: 3px; cursor: pointer;
   font-size: 11px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase;
   white-space: nowrap;
 }
-.view-tab:hover { color: var(--ink); background: var(--surface-2); }
-.view-tab[aria-pressed="true"] {
-  color: var(--accent); background: var(--surface); border-color: var(--border);
+.tb-back:hover { color: var(--ink); background: var(--surface-2); border-color: var(--axis); }
+.tb-back .tb-back-chev { font-size: 15px; line-height: 1; font-weight: 700; }
+.tb-ctx-title {
+  font-size: 12px; font-weight: 650; color: var(--ink); letter-spacing: 0.02em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 44vw;
+}
+.tb-home-label {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--ink-muted); white-space: nowrap;
 }
 .tb-right { display: flex; justify-content: flex-end; align-items: center; gap: 6px; }
 .theme-btn {
@@ -576,6 +584,14 @@ svg text.axis {
   font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
   color: var(--ink-muted); border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px;
 }
+/* secondary "Tools" line: keeps Assembly reachable from the hub without a
+   fifth card, so no working view is orphaned once the mode tabs are gone. */
+.pm-tools { font-size: 12px; color: var(--ink-muted); margin: -20px 0 30px; letter-spacing: 0.01em; }
+.pm-tools .pm-link {
+  background: none; border: 0; padding: 0; cursor: pointer; font: inherit;
+  color: var(--accent); text-decoration: underline; text-underline-offset: 2px;
+}
+.pm-tools .pm-link:hover, .pm-tools .pm-link:focus-visible { color: var(--ink); }
 .pm-sub {
   font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em;
   text-transform: uppercase; color: var(--ink-muted); margin: 0 0 12px;
@@ -1419,7 +1435,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
 
 @media (max-width: 760px) {
   .topbar { grid-template-columns: auto 1fr; height: auto; padding: 6px 10px; row-gap: 4px; }
-  .topbar .view-switch { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; flex-wrap: wrap; }
+  .topbar .tb-context { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; flex-wrap: wrap; }
   .tb-right { grid-column: 2; grid-row: 1; }
   .app { flex-direction: column; }
   .sidebar { width: 100%; max-height: 40vh; border-right: 0; border-bottom: 1px solid var(--border); }
@@ -1448,13 +1464,18 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
     <span class="wordmark">Monteur</span>
     <span class="wordmark-sub">Studio</span>
   </div>
-  <nav class="view-switch" aria-label="Studio view">
-    <button class="view-tab" id="tab-home" type="button" aria-pressed="true">Home</button>
-    <button class="view-tab" id="tab-create" type="button" aria-pressed="false">Create</button>
-    <button class="view-tab" id="tab-movie" type="button" aria-pressed="false">Movie</button>
-    <button class="view-tab" id="tab-pacing" type="button" aria-pressed="false">Pacing</button>
-    <button class="view-tab" id="tab-assembly" type="button" aria-pressed="false">Assembly</button>
-  </nav>
+  <!-- Context-aware center: on Home just a quiet "Projects" label; inside any
+       working view a "‹ Projects" back-to-hub control + the view's context
+       title. This replaces the old persistent mode-tab row so the app reads as
+       one suite (a project hub, and pages inside a project) rather than five
+       separate apps. -->
+  <div class="tb-context" id="tb-context" aria-label="Location">
+    <button class="tb-back" id="tb-back" type="button" hidden>
+      <span class="tb-back-chev" aria-hidden="true">&#8249;</span> Projects
+    </button>
+    <span class="tb-ctx-title" id="tb-ctx-title" hidden></span>
+    <span class="tb-home-label" id="tb-home-label">Projects</span>
+  </div>
   <div class="tb-right">
     <button class="theme-btn" id="settings-open" type="button" aria-label="Settings">
       <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -1495,7 +1516,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
     <section id="home">
       <p class="pm-eyebrow">Project Manager</p>
       <h1 class="pm-title">Welcome back.</h1>
-      <p class="pm-lead">Pick up a cut where you left it — or start something new.</p>
+      <p class="pm-lead">Open a project — or start something new.</p>
       <div class="pm-actions">
         <button class="pm-act primary" id="pm-new" type="button">
           <span class="pm-act-ic" aria-hidden="true">
@@ -1526,6 +1547,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           <p>See the rhythm of a cut and compare versions as your edit evolves.</p>
         </button>
       </div>
+      <p class="pm-tools">Tools · <button class="pm-link" id="pm-assembly" type="button">Assembly</button> — match takes against a screenplay into a rough assembly.</p>
       <p class="pm-sub">Recent projects</p>
       <div class="pm-recents" id="pm-recents"></div>
       <p class="pm-empty" id="pm-recents-empty">No recent projects yet — your saved drafts and last builds show up here.</p>
@@ -1705,21 +1727,21 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             <!-- CENTRE: MEDIA POOL (drop target) -->
             <div class="ws-col ws-poolcol">
               <div class="ws-poolhead" id="cre-pool-actions">
-                <span class="ws-cnt" id="ws-pool-total">0 im Pool</span>
-                <span class="ws-selc" id="cre-pool-count" aria-live="polite">Keine ausgewählt</span>
+                <span class="ws-cnt" id="ws-pool-total">0 in pool</span>
+                <span class="ws-selc" id="cre-pool-count" aria-live="polite">None selected</span>
                 <span class="ws-spacer"></span>
-                <button class="ws-linkbtn" id="cre-pool-selall" type="button">Alle auswählen</button>
-                <label class="ws-see-inline" title="Let Claude label the clips while analyzing"><input type="checkbox" id="cre-see"> Claude labelt mit</label>
+                <button class="ws-linkbtn" id="cre-pool-selall" type="button">Select all</button>
+                <label class="ws-see-inline" title="Let Claude label the clips while analyzing"><input type="checkbox" id="cre-see"> Claude labels too</label>
               </div>
               <div class="ws-poolwrap pool-grid-view" id="cre-pool-drop">
                 <div class="clip-grid pool-grid" id="cre-pool-grid"></div>
-                <p class="pool-empty" id="cre-pool-empty">Zieh Videos aus dem Explorer hierher — deine Dateien bleiben, wo sie sind.</p>
-                <div class="ws-dropzone" id="cre-pool-dropzone" hidden>In den Media Pool ablegen</div>
+                <p class="pool-empty" id="cre-pool-empty">Drag videos in from the Explorer.</p>
+                <div class="ws-dropzone" id="cre-pool-dropzone" hidden>Drop into the Media Pool</div>
               </div>
               <div class="ws-poolfoot">
                 <div class="ws-add">
                   <label class="sr-only" for="cre-pool-path">Add a file or folder path</label>
-                  <input type="text" id="cre-pool-path" placeholder="Pfad einfügen&hellip;" spellcheck="false" autocomplete="off">
+                  <input type="text" id="cre-pool-path" placeholder="Paste a path&hellip;" spellcheck="false" autocomplete="off">
                   <button class="btn small" id="cre-pool-add-path" type="button">&plus; Add</button>
                 </div>
                 <div id="cre-scan-panel"></div>
@@ -1735,20 +1757,20 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
               <div class="ws-panelhead">Player</div>
               <div class="ws-viewer">
                 <video id="ws-video" playsinline preload="auto"></video>
-                <div class="ws-viewer-empty" id="ws-viewer-empty">Klick einen Clip, um ihn hier zu sehen</div>
+                <div class="ws-viewer-empty" id="ws-viewer-empty">Click a clip to watch it here</div>
               </div>
               <div class="ws-inspector">
                 <div class="ws-pfld"><label>Clip</label><div class="v" id="ws-insp-name">&mdash;</div></div>
-                <div class="ws-pfld"><label>Auf der Platte</label><div class="v ws-path" id="ws-insp-path">&mdash;</div></div>
-                <div class="ws-pfld"><label>Analyse</label><div class="v" id="ws-insp-analysis">Noch nicht analysiert</div></div>
-                <div class="ws-pfld"><label>Claude sieht</label><div class="ws-pchips" id="ws-insp-labels"><span class="ws-dim">&mdash;</span></div></div>
+                <div class="ws-pfld"><label>On disk</label><div class="v ws-path" id="ws-insp-path">&mdash;</div></div>
+                <div class="ws-pfld"><label>Analysis</label><div class="v" id="ws-insp-analysis">Not analyzed yet</div></div>
+                <div class="ws-pfld"><label>Claude sees</label><div class="ws-pchips" id="ws-insp-labels"><span class="ws-dim">&mdash;</span></div></div>
 
                 <details class="fine-tune rank-details" id="cre-find">
                   <summary>Search your footage — what did Claude see?</summary>
                   <div class="rank-body">
                     <label class="sr-only" for="cre-find-query">Search query</label>
                     <div class="path-row">
-                      <input type="text" id="cre-find-query" placeholder="kurven, sonnenuntergang, hero&hellip;" spellcheck="false" autocomplete="off">
+                      <input type="text" id="cre-find-query" placeholder="curves, sunset, hero&hellip;" spellcheck="false" autocomplete="off">
                       <button class="btn" id="cre-find-btn" type="button">Search<span class="spin" aria-hidden="true"></span></button>
                     </div>
                     <p class="help-small">Searches the labels Claude wrote during a &ldquo;Let Claude watch&rdquo; scan — offline and instant, no API call. Try &ldquo;hero&rdquo; for the money shots.</p>
@@ -1791,7 +1813,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           <!-- STATUS BAR: only the knowledge summary -->
           <div class="ws-statusbar">
             <span class="ws-spacer"></span>
-            <span class="mono" id="ws-status">0 im Pool · 0 gesichtet · 0 Proxies · 0 von Claude bewertet</span>
+            <span class="mono" id="ws-status">0 in pool · 0 sifted · 0 proxies · 0 rated by Claude</span>
           </div>
         </div>
       </section>
@@ -3168,14 +3190,33 @@ function renderTrend() {
 
 var VIEWS = ["home", "create", "movie", "pacing", "assembly"];
 
+// the topbar center title for each working view; create shows the project name
+var VIEW_TITLES = { movie: "Movie", pacing: "Analysis", assembly: "Assembly" };
+
+/* Drive the context-aware topbar off the current view. On Home: a quiet
+   "Projects" label, no back control. Inside a view: the "‹ Projects" back
+   affordance + a context title (project name for a cut, else the view name).
+   Guarded so it is a no-op if the elements are ever absent. */
+function updateTopbarContext() {
+  var v = state.view, onHome = v === "home";
+  var back = $("tb-back"), title = $("tb-ctx-title"), homeLbl = $("tb-home-label");
+  if (back) back.hidden = onHome;
+  if (homeLbl) homeLbl.hidden = !onHome;
+  if (title) {
+    var t = onHome ? "" : (v === "create" ? (cre.projectName || "New cut") : (VIEW_TITLES[v] || ""));
+    title.textContent = t;
+    title.hidden = !t;
+  }
+}
+
 function setView(view) {
   if (state.view === "create" && view !== "create") creStopJobs(); // leaving the wizard stops its poll loops
   if (state.view === "movie" && view !== "movie") movStopJobs(); // leaving the movie view stops its poll loops
   if (view === "create") { refreshProjects(); creUpdatePages(); } // keep projects + page-bar ticks current
   state.view = view;
-  VIEWS.forEach(function (v) {
-    $("tab-" + v).setAttribute("aria-pressed", String(view === v));
-  });
+  // active-state now lives in the contextual header, not a persistent tab row —
+  // no #tab-* elements to touch, so nothing here crashes if they are absent.
+  updateTopbarContext();
   updateMainVisibility();
 }
 function updateMainVisibility() {
@@ -3191,17 +3232,18 @@ function updateMainVisibility() {
   // so Home and the Create wizard stay uncluttered.
   $("app-sidebar").hidden = !pacing;
 }
-VIEWS.forEach(function (v) {
-  $("tab-" + v).addEventListener("click", function () { setView(v); });
-});
-/* Project-Manager action cards */
+/* "‹ Projects" — return to the hub from any working view. setView already
+   stops the create/movie poll loops, exactly as the old tab switch did. */
+$("tb-back").addEventListener("click", function () { setView("home"); refreshProjects(); });
+/* Project-Manager action cards — Home is the hub every view is reached from */
 $("pm-new").addEventListener("click", function () { newProject(); });
 $("pm-series").addEventListener("click", function () {
-  toast("Serien-Modus kommt bald — für jetzt starten wir einen einzelnen Cut.", "");
+  toast("Series mode is coming soon — for now we'll start a single cut.", "");
   setView("create"); creShowStep(1, false);
 });
 $("pm-movie").addEventListener("click", function () { setView("movie"); });
 $("pm-analysis").addEventListener("click", function () { setView("pacing"); });
+$("pm-assembly").addEventListener("click", function () { setView("assembly"); });
 
 /* ================= dashboard ================= */
 
@@ -4619,6 +4661,7 @@ function creUpdatePages() {
     b.className = cls.join(" ");
     b.setAttribute("aria-current", i === n ? "step" : "false");
   });
+  updateTopbarContext(); // keep the topbar's context title in sync with the project name
 }
 
 function creShowStep(n, focusHeading) {
@@ -4769,14 +4812,14 @@ function poolSyncActions() {
   var sel = poolSelectedPaths();
   var n = sel.length;
   var count = $("cre-pool-count");
-  count.textContent = n === 0 ? "Keine ausgewählt" : (n + " ausgewählt");
+  count.textContent = n === 0 ? "None selected" : (n + " selected");
   var busy = scanPanel.running();
   $("cre-scan-btn").disabled = busy || n === 0;
   $("cre-see-btn").disabled = busy || n === 0;
   $("cre-scan-btn").firstChild.textContent = n > 0 ? "Analyze selected (" + n + ")" : "Analyze selected";
   $("cre-see-btn").firstChild.textContent = n > 0 ? "Check with Claude (" + n + ")" : "Check with Claude";
   var allSel = n > 0 && n === (cre.poolClips || []).length;
-  $("cre-pool-selall").textContent = allSel ? "Auswahl aufheben" : "Alle auswählen";
+  $("cre-pool-selall").textContent = allSel ? "Deselect all" : "Select all";
 }
 
 function poolChip(label, on) {
@@ -4860,7 +4903,7 @@ function renderPool(data) {
   poolSyncActions();
 }
 
-/* the pool header count ("N im Pool") + the knowledge status bar. Both read
+/* the pool header count ("N in pool") + the knowledge status bar. Both read
    purely from the resolved pool's cheap cached flags — no probe, no decode. */
 function wsUpdateStatus() {
   var clips = cre.poolClips || [];
@@ -4872,10 +4915,10 @@ function wsUpdateStatus() {
     if (c.labeled) labeled++;
   });
   var total = $("ws-pool-total");
-  if (total) total.textContent = n + " im Pool";
+  if (total) total.textContent = n + " in pool";
   var bar = $("ws-status");
-  if (bar) bar.textContent = n + " im Pool · " + sifted + " gesichtet · " +
-    proxied + " Proxies · " + labeled + " von Claude bewertet";
+  if (bar) bar.textContent = n + " in pool · " + sifted + " sifted · " +
+    proxied + " proxies · " + labeled + " rated by Claude";
 }
 
 function poolToggle(path, on) {
@@ -5013,7 +5056,7 @@ function wsExplorerLoad(path) {
       if (list) {
         clear(list);
         list.appendChild(el("p", "ws-empty-note",
-          "Ordner nicht lesbar — Pfad einfügen oder „Add folder…“."));
+          "Folder not readable — paste a path or use “Add folder…”."));
       }
     });
 }
@@ -5087,7 +5130,7 @@ function renderExplorer(data) {
   });
   files.forEach(function (f) { list.appendChild(wsExplorerRow(f)); });
   if (!folders.length && !files.length && !data.parent) {
-    list.appendChild(el("p", "ws-empty-note", "Leerer Ordner."));
+    list.appendChild(el("p", "ws-empty-note", "Empty folder."));
   }
 }
 
@@ -5144,11 +5187,11 @@ function wsLoadClip(path, name) {
   $("ws-insp-path").textContent = path;
   var summary;
   if (clip.sifted && typeof clip.usable_ratio === "number") {
-    summary = Math.round((clip.usable_ratio || 0) * 100) + "% usable · " + (clip.moments || 0) + " Momente";
+    summary = Math.round((clip.usable_ratio || 0) * 100) + "% usable · " + (clip.moments || 0) + " moments";
   } else if (clip.sifted) {
-    summary = "Analysiert";
+    summary = "Analyzed";
   } else {
-    summary = "Noch nicht analysiert";
+    summary = "Not analyzed yet";
   }
   $("ws-insp-analysis").textContent = summary;
   var host = $("ws-insp-labels");
@@ -6388,7 +6431,7 @@ function renderPmRecents(list) {
     var strip = el("div", "pm-filmstrip");
     for (var i = 0; i < 6; i++) strip.appendChild(el("span"));
     thumb.appendChild(strip);
-    thumb.appendChild(el("span", "pm-badge", project.has_plan ? "Cut" : "Draft"));
+    thumb.appendChild(el("span", "pm-badge", project.has_plan ? "Cut" : "Footage"));
     var del = el("button", "pm-card-del", "×");
     del.type = "button";
     del.setAttribute("aria-label", "Delete project " + String(project.name || ""));
@@ -6694,7 +6737,7 @@ function openProject(id, btn) {
         creResetRevise();
         creUpdatePages();
         creShowStep(1, false);
-        toast("Project opened — pick up where you left off.", "success");
+        toast("Project opened.", "success");
         return;
       }
       var s = draft.settings || {};
@@ -10915,6 +10958,7 @@ $("set-yt-disconnect").addEventListener("click", function () {
 /* ================= boot ================= */
 
 updateMainVisibility();
+updateTopbarContext(); // paint the contextual topbar for the boot view (Home)
 refreshVersions();
 loadResolve();
 refreshProjects(); // reload-safety: list the real projects on Home right away
