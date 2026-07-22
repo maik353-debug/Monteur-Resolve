@@ -1878,8 +1878,8 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
 
     <section id="create" hidden>
       <p class="eyebrow">Create a first cut</p>
-      <p class="wiz-progress" id="wiz-progress">Step 1 of 4 — Your footage</p>
-      <nav class="wiz-bar" aria-label="Create — jump to any page"><span id="wbar-1" class="on"><b>1</b>Footage</span><span id="wbar-2"><b>2</b>Options</span><span id="wbar-3"><b>3</b>Storyboard</span><span id="wbar-4"><b>4</b>Your cut</span></nav>
+      <p class="wiz-progress" id="wiz-progress">Step 1 of 5 — Your footage</p>
+      <nav class="wiz-bar" id="wiz-bar" aria-label="Create — jump to any page"></nav>
       <p class="wiz-saved" id="wiz-saved"><span class="wiz-saved-dot" aria-hidden="true"></span>All saved — move between pages freely, nothing is reset.</p>
 
       <section class="wiz-step ws-step" id="cre-step-1" aria-labelledby="cre-h1">
@@ -2199,7 +2199,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         <div class="wiz-nav">
           <button class="btn ghost" id="cre-back-3" type="button">← Back</button>
           <button class="btn" id="cre-build-btn" type="button">Rebuild draft<span class="spin" aria-hidden="true"></span></button>
-          <button class="btn primary" id="cre-next-3" type="button" disabled>Continue to your cut →</button>
+          <button class="btn primary" id="cre-next-3" type="button" disabled>Continue to colour →</button>
         </div>
         <div id="cre-build-panel"></div>
         <p class="scan-note" id="cre-build-msg" role="status" hidden></p>
@@ -2337,24 +2337,24 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             </div>
           </div>
           <div class="wiz-nav" style="margin-top: 18px;">
-            <button class="btn primary" id="cre-next-3b" type="button" disabled>Continue to your cut →</button>
+            <button class="btn primary" id="cre-next-3b" type="button" disabled>Continue to colour →</button>
           </div>
         </div>
       </section>
 
+      <!-- COLOR page: the grade on its own page (Edit -> Color -> Deliver) -->
       <section class="wiz-step" id="cre-step-4" hidden aria-labelledby="cre-h4">
         <div class="step-head">
           <span class="step-chip" aria-hidden="true">4</span>
           <div>
-            <h1 id="cre-h4" tabindex="-1">Your cut</h1>
-            <p class="wiz-lead">The finished cut, ready to harvest &mdash; build it as a real timeline in DaVinci Resolve, download the file, export the video, publish. Changing the cut itself lives in the storyboard.</p>
+            <h1 id="cre-h4" tabindex="-1">Look &amp; colour</h1>
+            <p class="wiz-lead">Grade the whole cut on one adjustment layer &mdash; pick a look, then fine-tune. Non-destructive and local; it bakes into Monteur&rsquo;s own export, never the Resolve build.</p>
           </div>
         </div>
         <div class="wiz-nav">
           <button class="btn ghost" id="cre-back-4" type="button">← Back to storyboard</button>
+          <button class="btn primary" id="cre-next-4" type="button">Continue to your cut →</button>
         </div>
-        <section class="tiles" id="cre-final-tiles" aria-label="Cut summary" style="margin: 14px 0 4px;"></section>
-        <p class="sb-story" id="cre-final-story" hidden></p>
 
         <div class="color-block" id="cre-color">
           <p class="seg-heading">Look &amp; colour</p>
@@ -2385,6 +2385,22 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             </div>
           </div>
         </div>
+      </section>
+
+      <!-- YOUR CUT (harvest / deliver) page -->
+      <section class="wiz-step" id="cre-step-5" hidden aria-labelledby="cre-h5">
+        <div class="step-head">
+          <span class="step-chip" aria-hidden="true">5</span>
+          <div>
+            <h1 id="cre-h5" tabindex="-1">Your cut</h1>
+            <p class="wiz-lead">The finished cut, ready to harvest &mdash; build it as a real timeline in DaVinci Resolve, download the file, export the video, publish. Changing the cut itself lives in the storyboard; the look lives in Color.</p>
+          </div>
+        </div>
+        <div class="wiz-nav">
+          <button class="btn ghost" id="cre-back-5" type="button">← Back to colour</button>
+        </div>
+        <section class="tiles" id="cre-final-tiles" aria-label="Cut summary" style="margin: 14px 0 4px;"></section>
+        <p class="sb-story" id="cre-final-story" hidden></p>
 
         <div class="resolve-send">
             <button class="btn primary" id="cre-resolve-btn" type="button">Build in DaVinci Resolve<span class="spin" aria-hidden="true"></span></button>
@@ -4900,20 +4916,73 @@ function creNote(id, message, isError) {
 
 /* the page bar's ✓ ticks are STATUS ONLY — they mark what's done but never
    gate navigation (every page stays clickable). Recomputed live from state. */
+/* ============ the Create wizard's pages: ONE source of truth ============
+   Add a page here (plus its <section id="cre-step-N"> and #cre-hN heading)
+   and the step strip, the "Step N of M" line, the page-bar ticks, the
+   show/hide loop, the free-nav clicks and the per-page poll-loop ownership
+   all follow. No step number is hardcoded anywhere below.
+
+   Each entry: key (stable id), label (the chip), heading (the progress
+   line), done() (page-bar "done" tick), and stopLoops() (the poll loops
+   this page owns — stopped when you leave it). Closures resolve their
+   panels at call time, so init order does not matter. */
+var WIZ_STEPS = [
+  {
+    key: "footage", label: "Footage", heading: "Your footage",
+    done: function () { return !!(cre.clips && cre.clips.length); },
+    stopLoops: function () {
+      if (scanPanel.running()) { scanPanel.stop(); setScanBusy(false); }
+      if (coveragePanel.running()) { coveragePanel.stop(); setCoverageBusy(false); }
+    }
+  },
+  {
+    key: "options", label: "Options", heading: "Music & options",
+    done: function () { return !!cre.optionsVisited; },
+    stopLoops: function () {
+      if (rankPanel.running()) { rankPanel.stop(); setRankBusy(false); }
+    }
+  },
+  {
+    key: "storyboard", label: "Storyboard", heading: "Storyboard",
+    done: function () { return !!(cre.result && rev.planJson); },
+    stopLoops: function () {
+      if (buildPanel.running()) { buildPanel.stop(); setBuildBusy(false); }
+      if (revisePanel.running()) { revisePanel.stop(); setReviseBusy(false); }
+      if (directPanel.running()) { directPanel.stop(); setDirectBusy(false); setDirectApplyBusy(false); }
+      if (previewPanel.running()) { previewPanel.stop(); setPreviewBusy(false); }
+    }
+  },
+  {
+    key: "color", label: "Color", heading: "Look & colour",
+    done: function () { return !gradeIsNeutral(cre.grade) || !!cre.grade.look; }
+  },
+  {
+    key: "cut", label: "Your cut", heading: "Your cut",
+    done: function () { return false; },
+    stopLoops: function () {
+      if (kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
+      if (resolveBuildPanel.running()) { resolveBuildPanel.stop(); setResolveBuildBusy(false); }
+      if (renderPanel.running()) { renderPanel.stop(); setRenderBusy(false); }
+      if (exportPanel.running()) { exportPanel.stop(); setExportBusy(false); }
+    }
+  }
+];
+function creStepCount() { return WIZ_STEPS.length; }
+function creStepIndex(key) {
+  for (var i = 0; i < WIZ_STEPS.length; i++) if (WIZ_STEPS[i].key === key) return i + 1;
+  return 1;
+}
+function creStepKey(n) { var s = WIZ_STEPS[n - 1]; return s ? s.key : ""; }
+
 function creUpdatePages() {
   var n = cre.step;
-  var done = {
-    1: !!(cre.clips && cre.clips.length),
-    2: !!cre.optionsVisited,
-    3: !!(cre.result && rev.planJson),
-    4: false
-  };
-  [1, 2, 3, 4].forEach(function (i) {
+  WIZ_STEPS.forEach(function (step, idx) {
+    var i = idx + 1;
     var b = $("wbar-" + i);
     if (!b) return;
     var cls = [];
     if (i === n) cls.push("on");
-    if (done[i]) cls.push("done");
+    if (step.done && step.done()) cls.push("done");
     b.className = cls.join(" ");
     b.setAttribute("aria-current", i === n ? "step" : "false");
   });
@@ -4921,44 +4990,37 @@ function creUpdatePages() {
 }
 
 function creShowStep(n, focusHeading) {
-  // each step owns its poll loops — leaving the step stops them
-  if (n !== 1 && scanPanel.running()) { scanPanel.stop(); setScanBusy(false); }
-  if (n !== 1 && coveragePanel.running()) { coveragePanel.stop(); setCoverageBusy(false); }
-  if (n !== 2 && rankPanel.running()) { rankPanel.stop(); setRankBusy(false); }
-  // step 3 (Storyboard) owns the draft loops: build, revise, review, preview
-  if (n !== 3 && buildPanel.running()) { buildPanel.stop(); setBuildBusy(false); }
-  if (n !== 3 && revisePanel.running()) { revisePanel.stop(); setReviseBusy(false); }
-  if (n !== 3 && directPanel.running()) { directPanel.stop(); setDirectBusy(false); setDirectApplyBusy(false); }
-  if (n !== 3 && previewPanel.running()) { previewPanel.stop(); setPreviewBusy(false); }
-  // step 4 (Your cut) owns the harvest loops: Resolve, render, export, kit
-  if (n !== 4 && kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
-  if (n !== 4 && resolveBuildPanel.running()) { resolveBuildPanel.stop(); setResolveBuildBusy(false); }
-  if (n !== 4 && renderPanel.running()) { renderPanel.stop(); setRenderBusy(false); }
-  if (n !== 4 && exportPanel.running()) { exportPanel.stop(); setExportBusy(false); }
+  // each page owns its poll loops — leaving a page stops them
+  WIZ_STEPS.forEach(function (step, idx) {
+    if (idx + 1 !== n && step.stopLoops) step.stopLoops();
+  });
   cre.step = n;
-  var names = { 1: "Your footage", 2: "Music & options", 3: "Storyboard", 4: "Your cut" };
-  $("wiz-progress").textContent = "Step " + n + " of 4 — " + names[n];
-  [1, 2, 3, 4].forEach(function (i) {
-    $("cre-step-" + i).hidden = i !== n;
+  var step = WIZ_STEPS[n - 1] || WIZ_STEPS[0];
+  $("wiz-progress").textContent =
+    "Step " + n + " of " + WIZ_STEPS.length + " — " + step.heading;
+  WIZ_STEPS.forEach(function (s, idx) {
+    var sec = $("cre-step-" + (idx + 1));
+    if (sec) sec.hidden = (idx + 1) !== n;
   });
   // the Footage page is a full-window NLE workspace; the rest keep the
   // centred wizard column
   var createEl = $("create");
-  if (createEl) createEl.classList.toggle("ws-mode", n === 1);
-  if (n === 1) {
+  if (createEl) createEl.classList.toggle("ws-mode", step.key === "footage");
+  if (step.key === "footage") {
     if (!wsExplorer.loaded) wsExplorerLoad("");  // first visit: list the home dir
   } else {
     wsPause();  // never play the workspace clip off-screen
   }
-  if (n === 2) cre.optionsVisited = true;
+  if (step.key === "options") cre.optionsVisited = true;
   creUpdatePages();
-  if (n !== 3) {
+  if (step.key !== "storyboard") {
     closeInspector(); // the drawer belongs to the storyboard
     poPause();        // ...and so does the playout — never play off-screen
     closeMiniPlayer();
   }
-  if (n === 3 && $("cre-arrange-tools").open) arrRender();
-  if (n === 2) syncContinueHint(); // fresh look at "would this click rebuild?"
+  if (step.key === "storyboard" && $("cre-arrange-tools").open) arrRender();
+  if (step.key === "options") syncContinueHint(); // fresh look at "would this click rebuild?"
+  if (step.key === "color") applyGradePreview(); // reflect the grade on the controls
   if (focusHeading) $("cre-h" + n).focus();
 }
 
@@ -6121,26 +6183,38 @@ function creValidateStep2() {
   return true;
 }
 
-/* free navigation: the page bar jumps DIRECTLY to any page (raw creShowStep —
-   never a rebuild). The next/back buttons below stay as a linear convenience. */
-[1, 2, 3, 4].forEach(function (i) {
-  var b = $("wbar-" + i);
-  b.setAttribute("role", "button");
-  b.setAttribute("tabindex", "0");
-  b.addEventListener("click", function () { creShowStep(i, true); });
-  b.addEventListener("keydown", function (e) {
-    if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
-      e.preventDefault(); creShowStep(i, true);
-    }
+/* the step strip is rendered FROM WIZ_STEPS — add a page to that list and a
+   chip appears here automatically. Free navigation: the page bar jumps
+   DIRECTLY to any page (raw creShowStep — never a rebuild); the next/back
+   buttons below stay as a linear convenience. */
+(function renderWizBar() {
+  var nav = $("wiz-bar");
+  if (!nav) return;
+  clear(nav);
+  WIZ_STEPS.forEach(function (step, idx) {
+    var i = idx + 1;
+    var span = el("span", i === 1 ? "on" : null);
+    span.id = "wbar-" + i;
+    span.appendChild(el("b", null, String(i)));
+    span.appendChild(document.createTextNode(step.label));
+    span.setAttribute("role", "button");
+    span.setAttribute("tabindex", "0");
+    span.addEventListener("click", function () { creShowStep(i, true); });
+    span.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+        e.preventDefault(); creShowStep(i, true);
+      }
+    });
+    nav.appendChild(span);
   });
-});
-$("cre-next-1").addEventListener("click", function () { saveProject(); creShowStep(2, true); });
+})();
+$("cre-next-1").addEventListener("click", function () { saveProject(); creShowStep(creStepIndex("options"), true); });
 // any option edit in step 2 may flip the continue button's rebuild hint —
 // chips bubble "click", text fields "input", selects/checkboxes "change"
 ["click", "input", "change"].forEach(function (kind) {
   $("cre-step-2").addEventListener(kind, function () { syncContinueHint(); });
 });
-$("cre-back-2").addEventListener("click", function () { creShowStep(1, true); });
+$("cre-back-2").addEventListener("click", function () { creShowStep(creStepIndex("footage"), true); });
 $("cre-next-2").addEventListener("click", function () {
   if (!creValidateStep2()) return;
   // the FIRST visit builds — the result IS the working draft. After that,
@@ -6148,20 +6222,26 @@ $("cre-next-2").addEventListener("click", function () {
   // every revise/apply/adjust since the build) is simply shown again.
   // Only a changed option — or step 3's "Rebuild draft" — builds anew.
   if (cre.result && rev.planJson && !buildIsDirty()) {
-    creShowStep(3, true);
+    creShowStep(creStepIndex("storyboard"), true);
     return;
   }
-  creShowStep(3, true);
+  creShowStep(creStepIndex("storyboard"), true);
   startBuild(null);
 });
-$("cre-back-3").addEventListener("click", function () { creShowStep(2, true); });
-function creGoHarvest() {
+$("cre-back-3").addEventListener("click", function () { creShowStep(creStepIndex("options"), true); });
+/* Storyboard -> Color (the grade), then Color -> Your cut (the harvest) */
+function creGoColor() {
   if (!cre.result || !rev.planJson) return;
-  creShowStep(4, true);
+  creShowStep(creStepIndex("color"), true);
 }
-$("cre-next-3").addEventListener("click", creGoHarvest);
-$("cre-next-3b").addEventListener("click", creGoHarvest);
-$("cre-back-4").addEventListener("click", function () { creShowStep(3, true); });
+$("cre-next-3").addEventListener("click", creGoColor);
+$("cre-next-3b").addEventListener("click", creGoColor);
+$("cre-back-4").addEventListener("click", function () { creShowStep(creStepIndex("storyboard"), true); });
+$("cre-next-4").addEventListener("click", function () {
+  if (!cre.result || !rev.planJson) return;
+  creShowStep(creStepIndex("cut"), true);
+});
+$("cre-back-5").addEventListener("click", function () { creShowStep(creStepIndex("color"), true); });
 
 /* ---- step 3: "Add / reorder scenes" — the board's order editor ---------
    The palette + lane from the old Arrange step, re-homed into the

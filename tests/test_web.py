@@ -663,41 +663,52 @@ def _step3_html(html):
 
 
 def _step4_html(html):
+    """The Color step's markup (between its section tag and step 5's)."""
+    return html.split('id="cre-step-4"', 1)[1].split('id="cre-step-5"', 1)[0]
+
+
+def _step5_html(html):
     """The Your-cut step's markup (between its section tag and the inspector)."""
-    return html.split('id="cre-step-4"', 1)[1].split('<aside class="inspector"', 1)[0]
+    return html.split('id="cre-step-5"', 1)[1].split('<aside class="inspector"', 1)[0]
 
 
 class TestWizardStepsUi:
-    """Static asserts on app.html: the four-step wizard and its homes.
+    """Static asserts on app.html: the DATA-DRIVEN wizard and its homes.
 
-    1 Footage / 2 Options / 3 Storyboard / 4 Your cut — the old Arrange
-    step dissolved into step 3's "Add / reorder scenes" section, and the
-    old result card split: the creative tools live in the storyboard, the
-    harvest lives in step 4.
+    1 Footage / 2 Options / 3 Storyboard / 4 Color / 5 Your cut. The step
+    strip, the "Step N of M" line, the page-bar ticks and the show/hide
+    loop all derive from the WIZ_STEPS list — no step number is hardcoded.
+    The creative tools live in the storyboard, the grade is its own Color
+    page, and the harvest lives in the last page.
     """
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
-    def test_step_strip_has_four_steps(self):
+    def test_step_strip_is_data_driven(self):
         html = _APP_HTML.read_text(encoding="utf-8")
-        for needle in (
-            '<span id="wbar-1" class="on"><b>1</b>Footage</span>',
-            '<span id="wbar-2"><b>2</b>Options</span>',
-            '<span id="wbar-3"><b>3</b>Storyboard</span>',
-            '<span id="wbar-4"><b>4</b>Your cut</span>',
-        ):
-            assert needle in html, needle
+        # the single source of truth: the WIZ_STEPS list, in order
+        assert "var WIZ_STEPS = [" in html
+        order = [html.index('key: "%s"' % k) for k in
+                 ("footage", "options", "storyboard", "color", "cut")]
+        assert order == sorted(order), "WIZ_STEPS out of order"
+        for label in ('"Footage"', '"Options"', '"Storyboard"',
+                      '"Look & colour"', '"Your cut"'):
+            assert label in html, label
+        # the bar is RENDERED from the list, not hardcoded spans
+        assert "function renderWizBar" in html
+        assert 'id="wbar-"' not in html  # no static wbar spans
+        # count + progress derive from WIZ_STEPS.length — no "of 4"/"of 5"
+        assert '"Step " + n + " of " + WIZ_STEPS.length' in html
+        assert '" of 4 — "' not in html and '" of 5 — "' not in html
         # the old conditional Arrange step is gone (dissolved into step 3)
         assert "wbar-2b" not in html
         assert 'id="cre-step-2b"' not in html
         assert "Arrange the story myself" not in html
-        assert "setArrangeOn" not in html
-        # the four step sections, in order
+        # the five step sections, in order
         assert html.index('id="cre-step-1"') < html.index('id="cre-step-2"') \
-            < html.index('id="cre-step-3"') < html.index('id="cre-step-4"')
-        assert "Step 1 of 4" in html
-        assert '"Step " + n + " of 4 — "' in html
+            < html.index('id="cre-step-3"') < html.index('id="cre-step-4"') \
+            < html.index('id="cre-step-5"')
         # entering the storyboard runs the build — the working draft
-        assert "creShowStep(3, true);\n  startBuild(null);" in html
+        assert 'creShowStep(creStepIndex("storyboard"), true);\n  startBuild(null);' in html
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_storyboard_step_holds_the_creative_tools(self):
@@ -719,9 +730,9 @@ class TestWizardStepsUi:
             'id="cre-rev-brief"',
             'id="cre-dir-btn"',
             'id="cre-dir-apply"',
-            # the path onward
+            # the path onward — the storyboard now leads to the Color page
             'id="cre-next-3"',
-            "Continue to your cut",
+            "Continue to colour",
         ):
             assert needle in step3, needle
         # harvest controls do NOT live in the storyboard
@@ -739,9 +750,37 @@ class TestWizardStepsUi:
         assert "music enters|music window" in html
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
-    def test_step_4_is_a_calm_harvest_page(self):
+    def test_color_is_its_own_page(self):
         html = _APP_HTML.read_text(encoding="utf-8")
         step4 = _step4_html(html)
+        for needle in (
+            'id="cre-h4"',
+            "Look &amp; colour",
+            # the grade controls live here now
+            'id="cre-color"',
+            'id="cre-look-chips"',
+            'id="cg-brightness"',
+            'id="cre-color-frame"',
+            # navigation: back to storyboard, on to the cut
+            'id="cre-back-4"',
+            "Back to storyboard",
+            'id="cre-next-4"',
+            "Continue to your cut",
+        ):
+            assert needle in step4, needle
+        # the Color page is JUST the grade — no harvest, no storyboard
+        for absent in (
+            'id="cre-export-btn"',
+            'id="cre-resolve-btn"',
+            'id="cre-sb-board"',
+            'id="cre-final-tiles"',
+        ):
+            assert absent not in step4, absent
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_last_page_is_a_calm_harvest_page(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        step5 = _step5_html(html)
         for needle in (
             # summary tiles + the story line
             'id="cre-final-tiles"',
@@ -757,12 +796,12 @@ class TestWizardStepsUi:
             'id="cre-kit-btn"',
             'id="cre-save-draft"',
             'id="cre-draft-name"',
-            # the way back
-            'id="cre-back-4"',
-            "Back to storyboard",
+            # the way back — to the Color page
+            'id="cre-back-5"',
+            "Back to colour",
         ):
-            assert needle in step4, needle
-        # NO storyboard, NO revise, NO director block in the harvest
+            assert needle in step5, needle
+        # NO storyboard, NO revise, NO director block, NO grade in the harvest
         for absent in (
             'id="cre-sb-board"',
             'id="cre-strip"',
@@ -770,8 +809,10 @@ class TestWizardStepsUi:
             'id="cre-dir-btn"',
             'id="cre-preview-btn"',
             'id="cre-arr-palette"',
+            'id="cre-color"',
+            'id="cre-look-chips"',
         ):
-            assert absent not in step4, absent
+            assert absent not in step5, absent
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_palette_and_order_lane_live_in_the_storyboard(self):
@@ -6391,7 +6432,7 @@ class TestNoRebuildOnCleanReturn:
         # clean draft -> pure navigation, no job
         assert "if (cre.result && rev.planJson && !buildIsDirty())" in html
         # ...and the dirty/no-draft path still builds exactly as before
-        assert "creShowStep(3, true);\n  startBuild(null);" in html
+        assert 'creShowStep(creStepIndex("storyboard"), true);\n  startBuild(null);' in html
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_fingerprint_is_stored_on_build_success_and_resume(self):
@@ -6425,7 +6466,7 @@ class TestNoRebuildOnCleanReturn:
         button = html.split('id="cre-next-2"', 1)[1].split("</button>", 1)[0]
         assert 'id="cre-next-2-hint" hidden' in button
         # ...and is refreshed on step entry and on step-2 edits
-        assert "if (n === 2) syncContinueHint();" in html
+        assert 'if (step.key === "options") syncContinueHint();' in html
         assert '$("cre-step-2").addEventListener(kind' in html
 
     # ---- the bug's exact reproduction, in a real browser -------------------
