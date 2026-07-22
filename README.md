@@ -22,8 +22,17 @@ act two — and it hands finished timelines to DaVinci Resolve.
   sections, genre reference bands, per-scene view, and version comparison
   with a plain-language verdict ("v5 is cut faster, with a more even
   rhythm, and runs 40s shorter").
-- **Monteur Studio** — a local app in your browser with guided,
-  step-by-step workflows. No timeline jargon required to get started.
+- **Monteur Studio** — the app: a suite of three tools reached from one
+  hub — **Create** (a social cut from your footage, Series of shorts
+  included), **Movie** (a film from a screenplay), and **Analysis** (read a
+  timeline's rhythm). Runs in its own native desktop window (Windows/macOS/
+  Linux) or your browser. A Resolve-style **Media Pool** (your files stay on
+  disk, never copied), a real-time player that plays the cut as you shape it,
+  a deterministic **Color** page (looks + basic grade, baked into the export),
+  and a **page bar** you move along like an NLE.
+- **Never lose a project** — every cut is a durable, always-saved project
+  (its own `.monteur` bundle), and every distinct version is a restorable
+  snapshot. Installing, updating and even uninstalling never touch your work.
 - **Assembly & papercut (dialogue/doc material)** — match take transcripts
   against a screenplay, or tick takes in a transcript checklist, and render
   the selects as a timeline.
@@ -55,6 +64,22 @@ pip install -e '.[ai]'    # with AI features (needs ANTHROPIC_API_KEY or Claude 
 cd ~/my-film-project
 monteur ui                  # launches Monteur Studio in your browser
 ```
+
+### Desktop app
+
+Run Monteur in its own native window instead of a browser tab:
+
+```bash
+pip install -e '.[app]'     # adds pywebview (WebView2 on Windows)
+monteur ui --window
+```
+
+To ship it as an installed app (no Python on the target), build a
+self-contained executable and a real Windows installer — see
+[`docs/PACKAGING.md`](docs/PACKAGING.md). The packaged app **updates itself**:
+**Help → Check for updates…** (or `monteur update`) downloads a small,
+checksummed app payload and applies it on the next launch — no reinstall. A
+stable and a dev channel are selectable in Settings → Updates.
 
 Everything below is also available from the command line.
 
