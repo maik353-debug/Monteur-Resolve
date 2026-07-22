@@ -861,8 +861,14 @@ def _run_export_video_job(job: dict, payload: dict) -> None:
     from monteur.media import MediaCancelled, MonteurMediaError
     from monteur.montage import plan_from_dict
 
+    from monteur.color import grade_from_dict
+
     try:
         plan = plan_from_dict(payload.get("plan_json") or {})  # bad -> ValueError
+        # a colour grade only when one was sent; absent -> None -> the export
+        # is byte-identical to before grading existed
+        _grade_payload = payload.get("grade")
+        grade = grade_from_dict(_grade_payload) if _grade_payload else None
         if not plan.entries:
             raise ValueError("the plan has no entries — nothing to export")
         audio = payload.get("audio") or ("music" if plan.music_path else "original")
@@ -891,7 +897,7 @@ def _run_export_video_job(job: dict, payload: dict) -> None:
 
         result = render_export(
             plan, out_path, canvas=canvas, fps=fps, audio=audio,
-            quality=quality, progress=progress, cancel=job["cancel"],
+            quality=quality, progress=progress, grade=grade, cancel=job["cancel"],
         )
         job["result"] = {
             "path": result["path"],

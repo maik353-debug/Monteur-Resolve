@@ -4101,7 +4101,7 @@ class TestExportVideoApi:
 
         def fake_export(
             plan, out_path, *, canvas, fps, audio, quality, progress=None,
-            size=None, cancel=None,
+            size=None, grade=None, cancel=None,
         ):
             calls.append(
                 {
@@ -4112,6 +4112,7 @@ class TestExportVideoApi:
                     "audio": audio,
                     "quality": quality,
                     "size": size,
+                    "grade": grade,
                 }
             )
             if progress is not None:
@@ -4160,6 +4161,7 @@ class TestExportVideoApi:
                 "audio": "music",
                 "quality": "high",
                 "size": None,
+                "grade": None,
             }
         ]
         # the target folder was created with parents before the render
@@ -4193,8 +4195,24 @@ class TestExportVideoApi:
                 "audio": "mix",
                 "quality": "medium",
                 "size": None,
+                "grade": None,
             }
         ]
+        assert calls[0]["grade"] is None  # no grade sent -> neutral (None)
+
+    def test_export_forwards_the_colour_grade(self, server, monkeypatch, tmp_path):
+        from monteur.color import Grade
+
+        calls = self._patch_export(monkeypatch)
+        job = self._export(
+            server, target_dir=str(tmp_path),
+            grade={"brightness": 0.2, "contrast": -0.3, "warmth": 0.5, "look": "custom"},
+        )
+        assert job["state"] == "done"
+        g = calls[0]["grade"]
+        assert isinstance(g, Grade)
+        assert (g.brightness, g.contrast, g.warmth) == (0.2, -0.3, 0.5)
+        assert g.saturation == 0.0  # absent control defaults neutral
 
     def test_export_audio_defaults_to_original_without_music(
         self, server, monkeypatch, tmp_path
@@ -5046,7 +5064,7 @@ class TestMovieResultParityApi:
         calls = []
 
         def fake_export(plan, out_path, *, canvas, fps, audio, quality,
-                        progress=None, size=None, cancel=None):
+                        progress=None, size=None, grade=None, cancel=None):
             calls.append(
                 {"entries": len(plan.entries), "canvas": canvas,
                  "fps": fps, "audio": audio, "out_path": out_path}
@@ -5576,6 +5594,37 @@ class TestProUiStatic:
         # the lane colour tokens are defined in BOTH themes
         for token in ("--music:", "--sfx:", "--title:", "--clip:"):
             assert source.count(token) == 2, token
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_look_and_colour_markup_and_wiring(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            # the Look & colour block: preview + look chips + four sliders
+            'id="cre-color"',
+            'id="cre-color-frame"',
+            'id="cre-color-warm"',
+            'id="cre-look-chips"',
+            'id="cg-brightness"',
+            'id="cg-contrast"',
+            'id="cg-saturation"',
+            'id="cg-warmth"',
+            'id="cg-reset"',
+            # the JS: presets, the export payload dict, the live CSS preview
+            "COLOR_LOOKS",
+            "function gradeToDict",
+            "function gradeCss",
+            "function applyGradePreview",
+            "function setGradeLook",
+            "function colorPreviewFrame",
+            # the grade rides on the export payload and persists in the project
+            "body.grade = gradeDict",
+            "options.grade = gradeToDict",
+            "restoreGrade",
+        ):
+            assert needle in source, needle
+        # all six looks are wired
+        for look in ("neutral", "filmic", "muted", "warm", "cool", "faded"):
+            assert look in source, look
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_inspector_markup_and_wiring(self):

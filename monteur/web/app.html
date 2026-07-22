@@ -504,6 +504,47 @@ svg text.axis {
 .seg-toggle button[aria-pressed="true"] { background: var(--surface-2); color: var(--ink); box-shadow: inset 0 0 0 1px var(--axis); }
 .pace-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .style-info { border-left: 2px solid var(--border); padding-left: 10px; margin-top: 8px; }
+/* ===== Look & colour (the grade) ===== */
+.color-block {
+  margin-top: 16px; padding: 14px; border: 1px solid var(--border);
+  border-radius: 4px; background: var(--surface-2);
+}
+.color-grid {
+  display: grid; grid-template-columns: minmax(220px, 340px) 1fr;
+  gap: 16px; margin-top: 10px; align-items: start;
+}
+.color-preview {
+  position: relative; aspect-ratio: 16 / 9; border-radius: 3px;
+  overflow: hidden; background: #000; border: 1px solid var(--border);
+}
+.color-preview img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.color-warm {
+  position: absolute; inset: 0; pointer-events: none; opacity: 0;
+  mix-blend-mode: soft-light; background: #ff9a3c;
+}
+.color-pv-tag {
+  position: absolute; top: 6px; left: 7px; z-index: 2;
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: #e8e9ee; padding: 1px 5px;
+  background: rgba(0, 0, 0, 0.5); border-radius: 2px;
+}
+.look-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.look-chip {
+  padding: 4px 11px; font-size: 11.5px; font-weight: 600;
+  color: var(--ink-2); background: var(--input-bg);
+  border: 1px solid var(--border); border-radius: 14px; cursor: pointer;
+}
+.look-chip:hover, .look-chip:focus-visible { border-color: var(--accent); }
+.look-chip[aria-pressed="true"] {
+  color: #fff; background: var(--accent); border-color: var(--accent);
+}
+.color-sliders { display: flex; flex-direction: column; gap: 9px; }
+.cg-row { display: grid; grid-template-columns: 78px 1fr 34px; align-items: center; gap: 10px; }
+.cg-name { font-size: 12px; color: var(--ink-2); }
+.cg-row input[type="range"] { width: 100%; accent-color: var(--accent); }
+.cg-val { font-family: var(--mono); font-size: 11px; color: var(--ink-muted); text-align: right; }
+#cg-reset { margin-top: 12px; align-self: flex-start; }
+@media (max-width: 640px) { .color-grid { grid-template-columns: 1fr; } }
 /* the project meta line under the working-draft title (style · length ·
    aspect · N clips → N cuts) — the clean NLE header */
 .proj-head { margin-bottom: 4px; }
@@ -2293,6 +2334,37 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         </div>
         <section class="tiles" id="cre-final-tiles" aria-label="Cut summary" style="margin: 14px 0 4px;"></section>
         <p class="sb-story" id="cre-final-story" hidden></p>
+
+        <div class="color-block" id="cre-color">
+          <p class="seg-heading">Look &amp; colour</p>
+          <p class="help-small">A gentle, deterministic grade baked into the exported video — pick a look, then fine-tune. Local and repeatable; no Resolve needed. The preview is a guide, the exported file is the reference.</p>
+          <div class="color-grid">
+            <div class="color-preview" id="cre-color-preview">
+              <img id="cre-color-frame" alt="Grade preview frame">
+              <div class="color-warm" id="cre-color-warm" aria-hidden="true"></div>
+              <span class="color-pv-tag" aria-hidden="true">Preview</span>
+            </div>
+            <div class="color-controls">
+              <div class="look-chips" id="cre-look-chips" role="group" aria-label="Colour looks"></div>
+              <div class="color-sliders">
+                <label class="cg-row"><span class="cg-name">Brightness</span>
+                  <input type="range" id="cg-brightness" min="-100" max="100" value="0" step="1">
+                  <span class="cg-val" id="cg-brightness-val">0</span></label>
+                <label class="cg-row"><span class="cg-name">Contrast</span>
+                  <input type="range" id="cg-contrast" min="-100" max="100" value="0" step="1">
+                  <span class="cg-val" id="cg-contrast-val">0</span></label>
+                <label class="cg-row"><span class="cg-name">Colour</span>
+                  <input type="range" id="cg-saturation" min="-100" max="100" value="0" step="1">
+                  <span class="cg-val" id="cg-saturation-val">0</span></label>
+                <label class="cg-row"><span class="cg-name">Warmth</span>
+                  <input type="range" id="cg-warmth" min="-100" max="100" value="0" step="1">
+                  <span class="cg-val" id="cg-warmth-val">0</span></label>
+              </div>
+              <button class="btn ghost small" id="cg-reset" type="button">Reset to neutral</button>
+            </div>
+          </div>
+        </div>
+
         <div class="resolve-send">
             <button class="btn primary" id="cre-resolve-btn" type="button">Build in DaVinci Resolve<span class="spin" aria-hidden="true"></span></button>
             <p class="help-small">One click, no file: builds this cut as a timeline directly in the Resolve project you have open — cuts at their true positions, act titles as real Text+, black title gaps, canvas and cine crop applied. Dissolves and the black fade-in/out are the one thing Resolve's scripting cannot create: those live in the downloaded file below (import it when you want them), or drag a quick fade in Resolve by hand.</p>
@@ -4426,6 +4498,7 @@ var cre = {
   format: "fcpxml",       // download format
   projectId: null,        // the real project this cut persists to (null = not created yet)
   projectName: "",        // the current project's name (kept in sync with the store)
+  grade: { brightness: 0, contrast: 0, saturation: 0, warmth: 0, look: "" }, // the colour grade (step 4)
   buildFp: null,          // fingerprint of the options the working draft was BUILT with
                           // (set on build success / draft resume; null = no clean draft)
   aiCutTouched: false,    // has the user decided about "Claude composes the cut"?
@@ -6409,6 +6482,8 @@ function renderCreResult(data) {
     });
     metaEl.hidden = false;
   }
+  colorPreviewFrame(plan);   // the Look & colour preview frame
+  applyGradePreview();       // reflect the (restored) grade on the controls
   var story = sbStoryLine((plan.notes || []).map(String));
   $("cre-final-story").textContent = story ? "Story — " + story : "";
   $("cre-final-story").hidden = !story;
@@ -6664,6 +6739,7 @@ function newProject() {
   cre.pool = [];              // a fresh project starts with an empty pool
   cre.poolSel = {};
   renderPool({ clips: [], entries: [] });
+  restoreGrade(null);         // a fresh project starts on a neutral grade
   creResetRevise();       // clear any plan/storyboard left from the previous cut
   creUpdatePages();
   cre.projectId = null;
@@ -6705,6 +6781,7 @@ function projectManifestFromState() {
   var tempo = (cre.result && cre.result.data && cre.result.data.plan && cre.result.data.plan.tempo) || 0;
   if (tempo) options.tempo = tempo;
   if (dnotes.review) options.review = dnotes.review;
+  if (!gradeIsNeutral(cre.grade) || cre.grade.look) options.grade = gradeToDict(cre.grade);
   var pool = (cre.pool || []).map(function (e) {
     return { path: e.path, kind: e.kind === "folder" ? "folder" : "file" };
   });
@@ -6878,7 +6955,7 @@ function projectToDraftShape(project) {
   }
   var settings = {};
   Object.keys(options).forEach(function (k) {
-    if (k !== "music" && k !== "pins" && k !== "tempo" && k !== "review") settings[k] = options[k];
+    if (k !== "music" && k !== "pins" && k !== "tempo" && k !== "review" && k !== "grade") settings[k] = options[k];
   });
   return {
     id: project.id,
@@ -6889,8 +6966,20 @@ function projectToDraftShape(project) {
     plan_json: (project && project.plan) || null,
     pins: Array.isArray(options.pins) ? options.pins : [],
     tempo: options.tempo || 0,
-    review: options.review || null
+    review: options.review || null,
+    grade: (options.grade && typeof options.grade === "object") ? options.grade : null
   };
+}
+
+/* apply a stored grade dict onto cre.grade (tolerant: absent -> neutral) */
+function restoreGrade(gradeDict) {
+  var d = gradeDict || {};
+  cre.grade = {
+    brightness: +d.brightness || 0, contrast: +d.contrast || 0,
+    saturation: +d.saturation || 0, warmth: +d.warmth || 0,
+    look: String(d.look || "")
+  };
+  applyGradePreview();
 }
 
 function openProject(id, btn) {
@@ -6902,6 +6991,7 @@ function openProject(id, btn) {
       cre.projectId = project.id;
       cre.projectName = draft.name || "New cut";
       restoreWizardFromDraft(draft);
+      restoreGrade(draft.grade); // the saved Look & colour grade
       // the media pool comes from the manifest (multi-entry); fetch it fresh so
       // the cards carry per-clip status, then feed the downstream scan folder
       cre.pool = (project.media_pool || []).map(function (e) {
@@ -9475,6 +9565,9 @@ function exportVideo() {
   };
   // the audio mode follows the build's, exactly like the preview player
   if (built.audio) body.audio = built.audio;
+  // the Look & colour grade — omitted when neutral (export stays untouched)
+  var gradeDict = gradeToDict(cre.grade);
+  if (gradeDict.brightness !== undefined) body.grade = gradeDict;
   $("cre-export-msg").hidden = true;
   $("cre-export-result").hidden = true;
   setExportBusy(true);
@@ -9506,6 +9599,125 @@ function exportVideo() {
     creNote("cre-export-msg", err && err.message ? err.message : String(err), true);
   });
 }
+/* ================= Look & colour (the grade) =================
+   Four normalized controls (-1..1, 0 = neutral) and subtle presets, mirror
+   of monteur.color. The four numbers ARE what the export bakes (server:
+   grade_from_dict -> render_export); the live preview approximates them
+   with CSS (brightness/contrast/saturate + a warmth tint overlay). */
+var COLOR_LOOKS = {
+  neutral: { brightness: 0, contrast: 0, saturation: 0, warmth: 0 },
+  filmic: { brightness: -0.05, contrast: 0.28, saturation: -0.12, warmth: 0.14 },
+  muted: { brightness: 0.03, contrast: -0.08, saturation: -0.35, warmth: -0.05 },
+  warm: { brightness: 0.02, contrast: 0.05, saturation: 0.06, warmth: 0.40 },
+  cool: { brightness: 0.0, contrast: 0.05, saturation: -0.05, warmth: -0.38 },
+  faded: { brightness: 0.10, contrast: -0.22, saturation: -0.18, warmth: 0.06 }
+};
+var COLOR_LOOK_META = [
+  ["neutral", "Neutral"], ["filmic", "Filmic"], ["muted", "Muted"],
+  ["warm", "Warm"], ["cool", "Cool"], ["faded", "Faded"]
+];
+
+function gradeIsNeutral(g) {
+  return Math.abs(g.brightness) < 1e-6 && Math.abs(g.contrast) < 1e-6 &&
+    Math.abs(g.saturation) < 1e-6 && Math.abs(g.warmth) < 1e-6;
+}
+/* the payload the export sends — {} when neutral, so an ungraded export
+   stays byte-identical (server tolerates absent/None) */
+function gradeToDict(g) {
+  if (gradeIsNeutral(g)) return g.look ? { look: g.look } : {};
+  return {
+    brightness: g.brightness, contrast: g.contrast,
+    saturation: g.saturation, warmth: g.warmth, look: g.look || "custom"
+  };
+}
+/* CSS approximation for the live preview (the ffmpeg bake is the truth) */
+function gradeCss(g) {
+  return "brightness(" + (1 + g.brightness * 0.25).toFixed(3) + ") " +
+    "contrast(" + (1 + g.contrast * 0.45).toFixed(3) + ") " +
+    "saturate(" + Math.max(0, 1 + g.saturation).toFixed(3) + ")";
+}
+function applyGradePreview() {
+  var g = cre.grade;
+  var frame = $("cre-color-frame");
+  if (frame) frame.style.filter = gradeCss(g);
+  var warm = $("cre-color-warm");
+  if (warm) {
+    // warm tint (orange) for positive warmth, cool (blue) for negative
+    warm.style.background = g.warmth >= 0 ? "#ff9a3c" : "#4a90e2";
+    warm.style.opacity = String(Math.min(0.5, Math.abs(g.warmth) * 0.32));
+  }
+  // slider positions + numeric readouts
+  [["brightness", "cg-brightness"], ["contrast", "cg-contrast"],
+   ["saturation", "cg-saturation"], ["warmth", "cg-warmth"]].forEach(function (p) {
+    var v = Math.round(g[p[0]] * 100);
+    var slider = $(p[1]); if (slider) slider.value = String(v);
+    var out = $(p[1] + "-val"); if (out) out.textContent = (v > 0 ? "+" : "") + v;
+  });
+  // active look chip
+  Array.prototype.forEach.call($("cre-look-chips").children, function (chip) {
+    chip.setAttribute("aria-pressed", String(chip.dataset.look === g.look));
+  });
+}
+function setGradeLook(name) {
+  var base = COLOR_LOOKS[name] || COLOR_LOOKS.neutral;
+  cre.grade = {
+    brightness: base.brightness, contrast: base.contrast,
+    saturation: base.saturation, warmth: base.warmth, look: name
+  };
+  applyGradePreview();
+  saveProject(); // grade lives in the always-saved project
+}
+function renderLookChips() {
+  var host = $("cre-look-chips");
+  if (!host || host.children.length) return; // build once
+  COLOR_LOOK_META.forEach(function (row) {
+    var chip = el("button", "look-chip", row[1]);
+    chip.type = "button";
+    chip.dataset.look = row[0];
+    chip.setAttribute("aria-pressed", "false");
+    chip.addEventListener("click", function () { setGradeLook(row[0]); });
+    host.appendChild(chip);
+  });
+}
+(function wireGradeSliders() {
+  [["brightness", "cg-brightness"], ["contrast", "cg-contrast"],
+   ["saturation", "cg-saturation"], ["warmth", "cg-warmth"]].forEach(function (p) {
+    var slider = $(p[1]);
+    if (!slider) return;
+    slider.addEventListener("input", function () {
+      cre.grade[p[0]] = (parseInt(this.value, 10) || 0) / 100;
+      cre.grade.look = "custom"; // a manual tweak is no longer a named look
+      applyGradePreview();
+    });
+    slider.addEventListener("change", function () { saveProject(); });
+  });
+  var reset = $("cg-reset");
+  if (reset) reset.addEventListener("click", function () { setGradeLook("neutral"); });
+})();
+renderLookChips();
+
+/* the preview frame: a representative shot from the cut (a hero/drop frame
+   when there is one, else the middle shot's midpoint) */
+function colorPreviewFrame(plan) {
+  var entries = (plan.entries || []).slice().sort(function (a, b) {
+    return (a.record_start || 0) - (b.record_start || 0);
+  });
+  if (!entries.length) return;
+  var pick = entries[Math.floor(entries.length / 2)];
+  (plan.drop_marks || []).some(function (t) {
+    for (var i = 0; i < entries.length; i++) {
+      if (t >= (entries[i].record_start || 0) && t < (entries[i].record_end || 0)) {
+        pick = entries[i]; return true;
+      }
+    }
+    return false;
+  });
+  var mid = ((pick.source_start || 0) + (pick.source_end || 0)) / 2;
+  var frame = $("cre-color-frame");
+  if (frame) frame.src = "/api/thumb?clip=" +
+    encodeURIComponent(String(pick.clip_path || "")) + "&t=" + mid.toFixed(3) + "&w=640";
+}
+
 $("cre-export-btn").addEventListener("click", exportVideo);
 
 /* ---- Upload to YouTube (both success states share this logic) ----------
