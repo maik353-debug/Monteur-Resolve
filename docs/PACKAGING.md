@@ -77,10 +77,47 @@ unpacks it into `~/.monteur/payloads/<version>/`, and the shell runs it next
 launch. A source checkout never installs anything — it points you at `git pull`
 / `pip install -U monteur`.
 
+## A real Windows installer
+
+`scripts/build_exe.py` gives you a portable `.exe` ("download and run"). To
+ship an actual *installed* app — Start-menu + Desktop shortcuts, an
+Add/Remove-Programs entry with an uninstaller — build the Inno Setup installer:
+
+```bash
+python scripts/build_exe.py          # 1) the shell + payload
+python scripts/build_installer.py    # 2) the installer (Windows + Inno Setup 6)
+# -> dist/Monteur-Setup-<version>.exe
+```
+
+- **Per-user install** (`PrivilegesRequired=lowest`) into
+  `%LOCALAPPDATA%\Programs\Monteur` — no admin prompt, and it matches the
+  self-update model (payloads land in `%USERPROFILE%\.monteur`, writable
+  without elevation).
+- Start-menu + optional Desktop shortcut; a proper uninstaller in
+  Programs & Features.
+- Needs Inno Setup 6 (`iscc` on PATH, https://jrsoftware.org/isdl.php); it's
+  Windows-only, so build it on Windows. The `.iss` is `packaging/monteur.iss`.
+
+macOS/Linux installers (`.dmg` / `.AppImage`) are future work; the portable
+build already runs there.
+
+## Your data is safe across install / update / uninstall
+
+Everything persistent — **projects, settings, downloaded payloads, proxies,
+version history** — lives under `%USERPROFILE%\.monteur` (`~/.monteur`),
+entirely outside the install folder. Consequences:
+
+- Installing or updating never touches your projects.
+- **Uninstalling leaves `~/.monteur` in place** (the `.iss` deliberately has no
+  `[UninstallDelete]` for it) — your work is never removed by removing the app.
+- The windowed app writes its working files (analysis version store, crash log)
+  to `~/.monteur/studio`, never into its read-only install folder — so a
+  per-user or Program Files install both work.
+
 ## Notes
 
 - The `[app]` extra (pywebview) must be present in the build environment.
 - On Windows, pywebview uses WebView2 (bundled with modern Edge — nothing extra
   on the target). macOS/Linux use WebKit / GTK·Qt; the same spec covers them.
-- The checksum guards integrity, not authenticity. Code-signing the shell (and
-  eventually signing the payload) is the next hardening step.
+- The checksum guards integrity, not authenticity. Code-signing the shell +
+  installer (so Windows SmartScreen trusts them) is the next hardening step.

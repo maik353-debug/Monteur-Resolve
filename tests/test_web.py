@@ -110,6 +110,29 @@ def _edl_payload(**extra):
     }
 
 
+class TestAppDataRoot:
+    """The windowed app must write its working files to ~/.monteur, never cwd.
+
+    The install folder (Program Files) is read-only for a per-user run, so the
+    analysis version store + crash log — which use serve()'s project_root —
+    have to default somewhere under the user profile.
+    """
+
+    def test_data_root_is_under_the_monteur_dir(self, tmp_path, monkeypatch):
+        from monteur.web import server
+
+        monkeypatch.setenv("MONTEUR_SETTINGS_PATH", str(tmp_path / "cfg" / "settings.json"))
+        root = server._app_data_root()
+        assert root == tmp_path / "cfg" / "studio"
+        assert root.is_dir()  # created on demand, writable
+
+    def test_data_root_never_the_cwd(self, tmp_path, monkeypatch):
+        from monteur.web import server
+
+        monkeypatch.setenv("MONTEUR_SETTINGS_PATH", str(tmp_path / "settings.json"))
+        assert server._app_data_root() != Path(".").resolve()
+
+
 class TestUpdateApi:
     """The in-app updater endpoints (network always monkeypatched away)."""
 

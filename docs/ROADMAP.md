@@ -161,8 +161,15 @@ Craft templates:
       `packaging/`, `[build]` extra) produces one self-contained executable
       that wraps `serve_app` — `app.html` is bundled next to `server.py`, the
       window opens via WebView2 on Windows. Verified end to end (the frozen
-      binary serves the Studio + API). NEXT: code-signing + a real installer
-      (MSI/DMG), and an app icon. See `docs/PACKAGING.md`.
+      binary serves the Studio + API). A real Windows installer follows via
+      Inno Setup (`scripts/build_installer.py`, `packaging/monteur.iss`):
+      per-user install, Start-menu + Desktop shortcuts, an Add/Remove-Programs
+      uninstaller. Data safety is a guarantee — projects/settings/payloads/
+      proxies/history live in `~/.monteur`, outside the install folder, so
+      install/update/uninstall never touch them, and the windowed app writes
+      its working files to `~/.monteur/studio`, never its read-only install
+      dir. NEXT: code-sign the shell + installer (SmartScreen trust); an app
+      icon; macOS `.dmg` / Linux `.AppImage`. See `docs/PACKAGING.md`.
 - [x] **In-app updates (payload split, Electron-style).** The app is split
       into a rarely-changing **shell** (the ~70 MB executable) and a small
       **payload** (`monteur` + `app.html`, ~650 KB). Help → Check for updates…

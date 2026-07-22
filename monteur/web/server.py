@@ -3143,6 +3143,24 @@ def _app_version() -> str:
     return str(getattr(monteur, "__version__", "0") or "0")
 
 
+def _app_data_root() -> Path:
+    """A persistent, user-writable root for the windowed app's working files.
+
+    ``~/.monteur/studio`` (next to settings/projects/payloads), created on
+    demand — so an installed build writes state to the user profile, never into
+    its read-only install folder. Honors ``MONTEUR_SETTINGS_PATH`` so a
+    relocated data dir keeps everything together.
+    """
+    from monteur.settings import settings_path
+
+    root = settings_path().parent / "studio"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return Path.home() / ".monteur" / "studio"
+    return root
+
+
 def _settings_view() -> dict:
     """The JSON view GET and POST /api/settings share.
 
@@ -5463,6 +5481,14 @@ def serve_app(
     (``serve(open_browser=True)``) with a one-line pointer to the ``[app]``
     extra, so the launcher always does something sensible.
     """
+    # The packaged app's working directory is its install folder (Program
+    # Files), which is read-only for a per-user run. Everything persistent
+    # already lives under ~/.monteur; point project_root (the analysis version
+    # store + crash log) there too, so a windowed launch NEVER writes next to
+    # the executable. An explicit --project still wins.
+    if project_root in (".", "", None):
+        project_root = str(_app_data_root())
+
     # a staged update installs here — startup is the only safe moment to swap
     # the running executable. On a source checkout this is a no-op advisory.
     try:
