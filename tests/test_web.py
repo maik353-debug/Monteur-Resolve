@@ -3444,6 +3444,7 @@ class TestSettingsApi:
 
     def test_get_shape_on_a_fresh_machine(self, server):
         data = _get(f"{server}/api/settings")
+        data.pop("app_version")  # the running version — asserted non-empty below
         assert data == {
             "backend": "auto",
             "api_key_set": False,
@@ -3454,6 +3455,7 @@ class TestSettingsApi:
             "effective": "none",  # nothing to reach Claude with yet
             "resolve_python": "",  # no Resolve worker Python saved yet
             "resolve_python_env_set": False,
+            "update_channel": "stable",  # the safe default
         }
 
     def test_post_key_saves_and_never_leaks_it(self, server):
@@ -3509,6 +3511,19 @@ class TestSettingsApi:
             _post(f"{server}/api/settings", {"backend": "gemini"})
         assert exc_info.value.code == 400
         assert "backend" in json.loads(exc_info.value.read())["error"]
+
+    def test_update_channel_roundtrip(self, server):
+        # defaults to stable, and reports the running version
+        data = _get(f"{server}/api/settings")
+        assert data["update_channel"] == "stable"
+        assert data["app_version"]
+        data = _post(f"{server}/api/settings", {"update_channel": "dev"})
+        assert data["update_channel"] == "dev"
+
+    def test_update_channel_invalid_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/settings", {"update_channel": "nightly"})
+        assert exc_info.value.code == 400
 
     def test_forced_cli_without_executable_is_effective_none(self, server):
         data = _post(f"{server}/api/settings", {"backend": "claude-cli"})
@@ -6918,6 +6933,11 @@ class TestNativeShell:
             "function openUpdate",
             '"/api/update/check"',
             '"/api/update/install"',
+            # the Updates settings pane: version + stable/dev channel
+            'id="set-pane-updates"',
+            'data-pane="updates"',
+            'id="chan-stable"', 'id="chan-dev"',
+            "function renderUpdateSettings",
         ):
             assert needle in source, needle
         # View is page-navigation with a checkmark on the current view

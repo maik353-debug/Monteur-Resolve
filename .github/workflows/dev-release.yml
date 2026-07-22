@@ -1,0 +1,66 @@
+# Every push to main publishes an app payload to the DEV channel.
+#
+# The payload is just Python + app.html, so it builds on a plain Linux runner
+# (no per-OS matrix, no Windows). It's published as a PRERELEASE tagged
+# v0.1.<commit-count> — a monotone, strictly-increasing version. Users on the
+# dev channel (Settings → Updates) see it; stable users never do (they get
+# GitHub's "latest" non-prerelease, i.e. deliberate tags).
+#
+# The shell executable is NOT built here — it changes only when dependencies
+# change. Build and attach it manually (scripts/build_exe.py) for those rare
+# releases.
+
+name: dev-release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "monteur/**"
+      - "scripts/build_payload.py"
+      - ".github/workflows/dev-release.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # create releases + upload assets
+
+concurrency:
+  group: dev-release
+  cancel-in-progress: false
+
+jobs:
+  payload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history for the commit count
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compute a monotone dev version
+        id: ver
+        run: |
+          COUNT=$(git rev-list --count HEAD)
+          echo "version=0.1.$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Building dev version 0.1.$COUNT"
+
+      - name: Build the app payload
+        env:
+          MONTEUR_BUILD_VERSION: ${{ steps.ver.outputs.version }}
+        run: python scripts/build_payload.py
+
+      - name: Publish the dev prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: Monteur ${{ steps.ver.outputs.version }} (dev)
+          prerelease: true
+          body: |
+            Automated dev build from `main` (commit ${{ github.sha }}).
+            Install via **Settings → Updates** on the dev channel, or `monteur update --channel dev`.
+          files: |
+            dist/monteur-app-${{ steps.ver.outputs.version }}.zip
+            dist/monteur-app-${{ steps.ver.outputs.version }}.zip.sha256

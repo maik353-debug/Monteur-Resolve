@@ -176,7 +176,14 @@ Craft templates:
       fully tested; the shell/payload override was verified on a real frozen
       build). A full-executable update is the rare fallback when deps change;
       a source checkout degrades to a "git pull / pip install -U" advisory.
-      NEXT: sign the payload (the checksum guards integrity, not authenticity).
+- [x] **Continuous delivery + channels.** Every push to `main` auto-publishes a
+      payload to the **dev** channel via GitHub Actions (`0.1.<commit-count>`,
+      a prerelease, payload builds on plain Linux — no Windows runner). **stable**
+      reads GitHub's `/releases/latest`, so deliberate tags reach real users while
+      dev stays yours. The channel is a Settings → Updates toggle (default
+      stable); updates stay opt-in (a manual check, no silent auto-apply).
+      NEXT: sign the payload (the checksum guards integrity, not authenticity);
+      optional background auto-check.
 - [ ] Resolve plugin panel (Workflow Integration)
 - [ ] Licensing/pricing model (indie editors first)
 - [ ] Team features: shared version history, review links, feedback threads

@@ -1588,8 +1588,10 @@ def cmd_ui(args: argparse.Namespace) -> None:
 
 def cmd_update(args: argparse.Namespace) -> None:
     from monteur import update as update_mod
+    from monteur.settings import update_channel
 
-    info = update_mod.check()
+    channel = getattr(args, "channel", None) or update_channel()
+    info = update_mod.check(channel=channel)
     if info.error and not info.latest:
         _fail(info.error)
     if not info.available:
@@ -2256,6 +2258,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("update", help="check for and install a newer Monteur build")
     p.add_argument("--check", action="store_true",
                    help="only check — don't download anything")
+    p.add_argument("--channel", choices=["stable", "dev"], default=None,
+                   help="release channel (default: your saved setting, else stable)")
     p.set_defaults(func=cmd_update)
 
     p = sub.add_parser("mcp", help="run the MCP server for Claude Desktop/claude.ai")

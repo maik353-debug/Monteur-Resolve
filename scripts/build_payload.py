@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import zipfile
@@ -29,6 +30,14 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def _version() -> str:
+    """The build version: ``$MONTEUR_BUILD_VERSION`` (CI) or ``__version__``.
+
+    CI stamps a monotone per-push version (e.g. ``0.1.<commit-count>``) so every
+    push to the dev channel is strictly newer than the last.
+    """
+    override = os.environ.get("MONTEUR_BUILD_VERSION", "").strip().lstrip("vV")
+    if override:
+        return override
     text = (ROOT / "monteur" / "__init__.py").read_text(encoding="utf-8")
     m = re.search(r'__version__\s*=\s*"([^"]+)"', text)
     return m.group(1) if m else "0"
@@ -46,6 +55,13 @@ def main() -> int:
     shutil.copytree(
         ROOT / "monteur", stage / "monteur",
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    # stamp the version into the payload so the running app reports it
+    init = stage / "monteur" / "__init__.py"
+    init.write_text(
+        re.sub(r'__version__\s*=\s*"[^"]+"', f'__version__ = "{version}"',
+               init.read_text(encoding="utf-8")),
+        encoding="utf-8",
     )
     (stage / "payload.json").write_text(
         json.dumps({"version": version}, indent=2), encoding="utf-8"

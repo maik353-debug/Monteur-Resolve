@@ -114,6 +114,17 @@ def api_key() -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def update_channel() -> str:
+    """Which update channel to check: ``"dev"`` (every push) or ``"stable"``.
+
+    Anything unknown reads as ``"stable"`` — the safe default; only an explicit
+    ``"dev"`` opts into the every-push prereleases.
+    """
+    value = load_settings().get("update_channel", "")
+    value = value.strip().lower() if isinstance(value, str) else ""
+    return value if value == "dev" else "stable"
+
+
 def _string_setting(key: str) -> str:
     """A stripped string setting, ``""`` for missing/non-string values."""
     value = load_settings().get(key, "")

@@ -531,6 +531,7 @@ svg text.axis {
 .set-tab.on::before { transform: translateY(-50%) scaleY(1); }
 .set-panes { flex: 1; min-width: 0; padding-left: 18px; max-height: calc(100vh - 150px); overflow-y: auto; }
 .set-pane > h3 { font-size: 14px; font-weight: 650; margin-bottom: 6px; }
+.set-version { font-size: 12.5px; color: var(--ink-2); margin: 8px 0 12px; }
 .set-pane > .set-section { margin-top: 0; padding-top: 0; border-top: 0; }
 .set-status { margin: 6px 0 0; font-size: 12.5px; font-weight: 600; color: var(--ink); }
 .set-status.off { color: var(--warning); }
@@ -3072,6 +3073,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         <button class="set-tab" data-pane="ai" type="button" role="tab" aria-selected="false">AI · Claude</button>
         <button class="set-tab" data-pane="resolve" type="button" role="tab" aria-selected="false">DaVinci Resolve</button>
         <button class="set-tab" data-pane="youtube" type="button" role="tab" aria-selected="false">YouTube</button>
+        <button class="set-tab" data-pane="updates" type="button" role="tab" aria-selected="false">Updates</button>
       </nav>
       <div class="set-panes">
 
@@ -3082,6 +3084,21 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
       <div class="seg-toggle" role="group" aria-label="Colour theme">
         <button type="button" id="theme-light" aria-pressed="false">Light</button>
         <button type="button" id="theme-dark" aria-pressed="true">Dark</button>
+      </div>
+    </section>
+
+    <section class="set-pane" id="set-pane-updates" role="tabpanel" hidden>
+      <h3>Updates</h3>
+      <p class="help-small">Monteur checks GitHub for a newer build when you ask it to (Help &rarr; Check for updates&hellip;). Updates download a small app payload &mdash; not the whole program.</p>
+      <p class="set-version" id="set-version">You&rsquo;re on Monteur &mdash;.</p>
+      <label class="set-key-label" for="chan-stable">Release channel</label>
+      <div class="seg-toggle" role="group" aria-label="Release channel">
+        <button type="button" id="chan-stable" aria-pressed="true">Stable</button>
+        <button type="button" id="chan-dev" aria-pressed="false">Dev</button>
+      </div>
+      <p class="help-small" id="chan-note">Stable: deliberate releases. Dev: every push to main &mdash; newest features, rougher edges.</p>
+      <div class="set-test-row">
+        <button class="btn small" id="set-check-updates" type="button">Check for updates&hellip;</button>
       </div>
     </section>
 
@@ -11926,6 +11943,15 @@ function renderSettings(s) {
   $("set-badge-key").textContent = "API key: " + key;
   $("set-key-clear").disabled = !s.api_key_set;
   renderResolveSettings(s);
+  renderUpdateSettings(s);
+}
+
+/* the Updates settings: current version + the stable/dev channel toggle */
+function renderUpdateSettings(s) {
+  if (s.app_version) $("set-version").textContent = "You’re on Monteur " + s.app_version + ".";
+  var chan = s.update_channel === "dev" ? "dev" : "stable";
+  $("chan-stable").setAttribute("aria-pressed", chan === "stable" ? "true" : "false");
+  $("chan-dev").setAttribute("aria-pressed", chan === "dev" ? "true" : "false");
 }
 
 /* The Resolve half of the settings view: the saved worker-Python path and
@@ -11999,6 +12025,17 @@ $("settings-close").addEventListener("click", closeSettings);
 $("settings-modal").addEventListener("keydown", function (e) {
   if (e.key === "Escape") closeSettings();
 });
+
+/* Updates settings: channel toggle + a shortcut to the update check */
+[["chan-stable", "stable"], ["chan-dev", "dev"]].forEach(function (pair) {
+  $(pair[0]).addEventListener("click", function () {
+    saveSettings({ update_channel: pair[1] }).catch(function (err) {
+      toast(err && err.message ? err.message : String(err), "error");
+      if (settingsState) renderSettings(settingsState);
+    });
+  });
+});
+$("set-check-updates").addEventListener("click", function () { closeSettings(); openUpdate(); });
 
 ["set-b-auto", "set-b-api", "set-b-cli"].forEach(function (id) {
   $(id).addEventListener("change", function () {

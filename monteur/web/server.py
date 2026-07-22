@@ -3136,6 +3136,13 @@ def _run_youtube_upload_job(job: dict, payload: dict) -> None:
 # --- AI connection settings (backend choice + API key, managed in the UI) ------
 
 
+def _app_version() -> str:
+    """The version of the currently loaded monteur (payload-aware)."""
+    import monteur
+
+    return str(getattr(monteur, "__version__", "0") or "0")
+
+
 def _settings_view() -> dict:
     """The JSON view GET and POST /api/settings share.
 
@@ -3151,7 +3158,7 @@ def _settings_view() -> dict:
     for a forced backend).
     """
     from monteur import ai as ai_mod
-    from monteur.settings import ai_backend, api_key, resolve_python
+    from monteur.settings import ai_backend, api_key, resolve_python, update_channel
 
     key = api_key()
     try:
@@ -3171,6 +3178,8 @@ def _settings_view() -> dict:
         "effective": effective,
         "resolve_python": resolve_python(),
         "resolve_python_env_set": bool(os.environ.get("MONTEUR_RESOLVE_PYTHON")),
+        "update_channel": update_channel(),
+        "app_version": _app_version(),
     }
 
 
@@ -3258,11 +3267,12 @@ def _run_update_job(job: dict) -> None:
     error.
     """
     from monteur import update as update_mod
+    from monteur.settings import update_channel
 
     try:
         with _JOBS_LOCK:
             job["progress"].append({"stage": "checking"})
-        info = update_mod.check()
+        info = update_mod.check(channel=update_channel())
         if info.error and not info.latest:
             job["message"] = info.error
             job["state"] = "error"
@@ -4868,6 +4878,11 @@ class MonteurHandler(BaseHTTPRequestHandler):
                     "and let Monteur locate one",
                 )
             updates["resolve_python"] = resolve_path
+        if "update_channel" in payload:
+            chan = str(payload.get("update_channel") or "").strip().lower()
+            if chan not in ("stable", "dev"):
+                raise ApiError(400, "'update_channel' must be 'stable' or 'dev'")
+            updates["update_channel"] = chan
         if updates:
             save_settings(updates)
         self._send_json(_settings_view())
@@ -5163,8 +5178,9 @@ class MonteurHandler(BaseHTTPRequestHandler):
     def _update_check(self) -> None:
         """GET /api/update/check — is there a newer release? Never errors hard."""
         from monteur import update as update_mod
+        from monteur.settings import update_channel
 
-        self._send_json(update_mod.check().to_dict())
+        self._send_json(update_mod.check(channel=update_channel()).to_dict())
 
     def _update_install(self) -> None:
         """POST /api/update/install — download + stage the latest build.

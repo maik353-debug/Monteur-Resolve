@@ -156,6 +156,7 @@ class UpdateInfo:
     sha256_url: str = ""     # the payload's checksum sibling asset
     kind: str = "none"       # what install would do: "payload" | "exe" | "none"
     mode: str = "source"     # "frozen" (a packaged build) | "source"
+    channel: str = "stable"  # "stable" | "dev" — which release stream was checked
     error: str = ""
 
     def to_dict(self) -> dict:
@@ -174,25 +175,48 @@ def _http_get(url: str, timeout: float = HTTP_TIMEOUT) -> bytes:
         return resp.read()
 
 
+def _latest_release(getter: Fetch, repo: str, channel: str) -> dict | None:
+    """The release to compare against for a channel.
+
+    * ``stable`` → GitHub's ``/releases/latest`` (never a prerelease/draft).
+    * ``dev`` → the newest non-draft release from ``/releases`` (prereleases
+      included), since every-push builds are published as prereleases.
+    """
+    if channel == "dev":
+        raw = getter(f"https://api.github.com/repos/{repo}/releases?per_page=20")
+        data = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+        if not isinstance(data, list):
+            return None
+        for rel in data:  # GitHub returns newest first
+            if isinstance(rel, dict) and rel.get("tag_name") and not rel.get("draft"):
+                return rel
+        return None
+    raw = getter(f"https://api.github.com/repos/{repo}/releases/latest")
+    data = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+    return data if isinstance(data, dict) else None
+
+
 def check(
     current: str | None = None,
     *,
     repo: str | None = None,
     fetch: Fetch | None = None,
     system: str | None = None,
+    channel: str | None = None,
 ) -> UpdateInfo:
-    """Ask GitHub for the latest release and compare it to ``current``.
+    """Ask GitHub for the newest release on ``channel`` and compare to ``current``.
 
     Never raises: connectivity/parse failures come back as
     ``UpdateInfo(available=False, error=...)``.
     """
     cur = current or current_version()
-    info = UpdateInfo(current=cur, mode="frozen" if is_frozen() else "source")
+    chan = (channel or "stable").lower()
+    if chan != "dev":
+        chan = "stable"
+    info = UpdateInfo(current=cur, mode="frozen" if is_frozen() else "source", channel=chan)
     getter = fetch or _http_get
-    api = f"https://api.github.com/repos/{repo or release_repo()}/releases/latest"
     try:
-        raw = getter(api)
-        data = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+        data = _latest_release(getter, repo or release_repo(), chan)
     except (urllib.error.URLError, OSError) as exc:
         info.error = f"couldn't reach the update server ({exc})"
         return info

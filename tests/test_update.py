@@ -176,6 +176,45 @@ def test_check_source_installs_nothing(monkeypatch):
     assert info.kind == "none"
 
 
+# -- channels -----------------------------------------------------------------
+
+def test_stable_channel_uses_latest_endpoint():
+    seen = {}
+
+    def fetch(url):
+        seen["url"] = url
+        return _release_json("v0.2.0", with_assets=False)
+
+    info = update.check("0.1.0", repo="a/b", fetch=fetch, channel="stable")
+    assert seen["url"].endswith("/releases/latest")
+    assert info.channel == "stable"
+    assert info.latest == "v0.2.0"
+
+
+def test_dev_channel_lists_and_picks_newest_non_draft():
+    def fetch(url):
+        assert "/releases?" in url  # the list endpoint, not /latest
+        return json.dumps([
+            {"tag_name": "", "draft": True, "assets": []},
+            {"tag_name": "v0.1.99", "draft": False, "assets": []},
+            {"tag_name": "v0.1.98", "draft": False, "assets": []},
+        ]).encode("utf-8")
+
+    info = update.check("0.1.50", repo="a/b", fetch=fetch, channel="dev")
+    assert info.channel == "dev"
+    assert info.latest == "v0.1.99"
+    assert info.available is True
+
+
+def test_unknown_channel_falls_back_to_stable():
+    def fetch(url):
+        assert url.endswith("/releases/latest")
+        return _release_json("v0.2.0", with_assets=False)
+
+    info = update.check("0.1.0", repo="a/b", fetch=fetch, channel="nonsense")
+    assert info.channel == "stable"
+
+
 # -- install_payload ----------------------------------------------------------
 
 def _payload_zip(version="1.5.0"):
