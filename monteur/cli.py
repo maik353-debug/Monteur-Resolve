@@ -1573,10 +1573,15 @@ def cmd_assembly(args: argparse.Namespace) -> None:
 
 
 def cmd_ui(args: argparse.Namespace) -> None:
-    from monteur.web import serve
+    from monteur.web import serve, serve_app
 
     try:
-        serve(port=args.port, project_root=args.project, open_browser=not args.no_browser)
+        if getattr(args, "window", False):
+            # native desktop window (pywebview); falls back to the browser
+            # when pywebview isn't installed
+            serve_app(port=args.port, project_root=args.project)
+        else:
+            serve(port=args.port, project_root=args.project, open_browser=not args.no_browser)
     except OSError as exc:
         _fail(f"could not start Monteur Studio on port {args.port}: {exc}")
 
@@ -2208,6 +2213,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--project", default=".", help="project directory for version history")
     p.add_argument("--no-browser", action="store_true", help="don't open a browser")
+    p.add_argument("--window", action="store_true",
+                   help="open in a native desktop window instead of a browser "
+                        "(needs the [app] extra: pip install 'monteur[app]')")
     p.set_defaults(func=cmd_ui)
 
     p = sub.add_parser("mcp", help="run the MCP server for Claude Desktop/claude.ai")

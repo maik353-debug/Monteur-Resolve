@@ -6709,6 +6709,78 @@ class TestMovieRecents:
         server._register_movie_recent("/whatever", _Stub())  # must not raise
 
 
+class TestNativeShell:
+    """`serve_app`: Monteur Studio in a native window (pywebview), with a
+    browser fallback when pywebview isn't installed. The GUI never actually
+    opens here — webview and the server are both stubbed."""
+
+    def test_serve_app_opens_a_native_window(self, monkeypatch):
+        import types
+
+        from monteur.web import server
+
+        calls = {}
+        fake = types.ModuleType("webview")
+        fake.create_window = lambda title, url, **kw: calls.update(window=(title, url, kw))
+        fake.start = lambda: calls.update(started=True)
+        monkeypatch.setitem(sys.modules, "webview", fake)
+
+        class _Srv:
+            server_address = ("127.0.0.1", 8801)
+
+        def fake_serve(**kw):
+            # a real server would bind, fire on_bind + ready, then loop; the
+            # stub just hands back a URL so the window can open
+            kw["on_bind"](_Srv())
+            kw["ready"].set()
+
+        monkeypatch.setattr(server, "serve", fake_serve)
+        server.serve_app(port=8801, title="Monteur Studio")
+
+        assert calls.get("started") is True
+        title, url, kw = calls["window"]
+        assert title == "Monteur Studio"
+        assert url == "http://127.0.0.1:8801/"
+        assert kw.get("width") and kw.get("height")  # a real window size
+
+    def test_serve_app_falls_back_to_browser_without_pywebview(self, monkeypatch):
+        from monteur.web import server
+
+        # `import webview` -> ImportError (the [app] extra is not installed)
+        monkeypatch.setitem(sys.modules, "webview", None)
+        calls = {}
+        monkeypatch.setattr(server, "serve", lambda **kw: calls.update(kw))
+        server.serve_app(port=8802, project_root="/tmp/x")
+        # the browser path, not a window
+        assert calls.get("open_browser") is True
+        assert calls.get("port") == 8802
+        assert calls.get("project_root") == "/tmp/x"
+
+    def test_ui_window_flag_routes_to_serve_app(self, monkeypatch):
+        import argparse
+
+        from monteur import cli
+
+        seen = {}
+        monkeypatch.setattr("monteur.web.serve_app", lambda **kw: seen.update(kw, mode="window"))
+        monkeypatch.setattr("monteur.web.serve", lambda **kw: seen.update(mode="browser"))
+        cli.cmd_ui(argparse.Namespace(window=True, port=9000, project="."))
+        assert seen.get("mode") == "window"
+        assert seen.get("port") == 9000
+
+    def test_ui_without_window_flag_uses_the_browser(self, monkeypatch):
+        import argparse
+
+        from monteur import cli
+
+        seen = {}
+        monkeypatch.setattr("monteur.web.serve_app", lambda **kw: seen.update(mode="window"))
+        monkeypatch.setattr("monteur.web.serve", lambda **kw: seen.update(kw, mode="browser"))
+        cli.cmd_ui(argparse.Namespace(window=False, port=8765, project=".", no_browser=False))
+        assert seen.get("mode") == "browser"
+        assert seen.get("open_browser") is True
+
+
 class TestAutoFirstOptionsUi:
     """Static asserts: pace + transitions moved INTO the Fine-tune block,
     both defaulting to Auto — the main Options view keeps only the big

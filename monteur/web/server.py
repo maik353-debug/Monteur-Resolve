@@ -5251,6 +5251,64 @@ def serve(
         _restore_diagnostic_hooks(*prev_hooks)
 
 
+def serve_app(
+    port: int = 8765,
+    project_root: str = ".",
+    title: str = "Monteur Studio",
+    size: tuple[int, int] = (1280, 820),
+) -> None:
+    """Run Monteur Studio in a native desktop window instead of a browser.
+
+    Wraps the same local Studio in a pywebview window — its OWN window, no
+    address bar, no browser chrome (WebView2 on Windows, WebKit on macOS,
+    GTK/Qt on Linux). The HTTP server runs on a daemon thread; the window's
+    UI loop owns the main thread (pywebview requires it), so when the window
+    closes the process — and with it the daemon server — exits.
+
+    Without pywebview installed this falls back to the browser
+    (``serve(open_browser=True)``) with a one-line pointer to the ``[app]``
+    extra, so the launcher always does something sensible.
+    """
+    try:
+        import webview
+    except ImportError:
+        print(
+            "(pywebview isn't installed — opening Monteur in your browser "
+            "instead. For a native window: pip install 'monteur[app]'.)",
+            flush=True,
+        )
+        serve(port=port, project_root=project_root, open_browser=True)
+        return
+
+    ready = threading.Event()
+    holder: dict = {}
+
+    def _on_bind(server) -> None:
+        holder["url"] = f"http://127.0.0.1:{server.server_address[1]}/"
+
+    thread = threading.Thread(
+        target=serve,
+        kwargs={
+            "port": port,
+            "project_root": project_root,
+            "open_browser": False,
+            "ready": ready,
+            "on_bind": _on_bind,
+        },
+        name="monteur-server",
+        daemon=True,
+    )
+    thread.start()
+    if not ready.wait(timeout=20) or not holder.get("url"):
+        raise RuntimeError("Monteur Studio's server did not start in time")
+
+    print(f"Monteur Studio window open ({holder['url']}). Close it to stop.", flush=True)
+    webview.create_window(
+        title, holder["url"], width=size[0], height=size[1], min_size=(900, 600)
+    )
+    webview.start()  # blocks on the main thread until the window is closed
+
+
 def _open_browser_safely(url: str) -> None:
     """Open the browser without ever taking the server down with it."""
     def _open() -> None:
