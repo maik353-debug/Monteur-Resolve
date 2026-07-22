@@ -129,6 +129,20 @@ Craft templates:
       - The new Project-Manager home lists these real projects (currently it
         lists drafts as a bridge). — Maik, explicit: "auf keinen Fall Projekte
         verlieren." Backend track right after the UI pages land.
+- [ ] **Unified model (Maik):** everything is ONE always-saved project. A
+      project = a MEDIA POOL (files/folders referenced from disk, Resolve-style
+      — never imported/moved) + the DERIVED INFORMATION (sift reports, AI
+      labels, daylight/spatial caches, the plan, version stats) + a
+      regenerable proxy cache. Consequence: the project stores only knowledge,
+      not video, so the timeline/preview is a data view over small proxies →
+      performant; the one heavy cost is the one-time analysis of the pool.
+      DRAFTS DISAPPEAR (always in a saved project; migrate them). The top
+      app-tabs (Create/Movie/Series) COLLAPSE — things you do inside a project,
+      not separate apps; Home opens/creates a project and inside you move
+      between PAGES (Media Pool · Storyboard · Cut · Color · Analysis) like
+      Resolve's page bar. Build order: (1) project/media-pool backend +
+      migration, (2) Media-Pool page UX, (3) collapse the top nav, (4) the
+      multi-lane timeline on top.
 
 ## v1.0 — Product
 
