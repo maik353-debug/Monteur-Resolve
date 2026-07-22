@@ -225,6 +225,41 @@ The notes carry the arc ("story: daylight arc day -> golden -> night
 (soft)") and honest per-slot warnings when a cast slot sits against the
 flow ("slot 14: night shot inside the day block").
 
+Picture coherence (blueprint wave 3)
+-----------------------------------
+Waves 1-2 make the cut hit the SOUND; wave 3 makes the PICTURE cohere,
+grounded in Walter Murch's Rule of Six: eye-trace and shot grammar are
+LOW ranks that may be sacrificed for the higher ones (emotion / story /
+rhythm). So all three terms below are TIE-BREAKERS on the same candidate
+blend — each sized below one order step, each ZERO unless the offline
+spatial pass (:mod:`monteur.spatial`) filled the moment, and none ever
+applied to a reserved slot (drop / hook / loop) — there sync and the pin
+win outright. A pool without the spatial signal casts byte-identically.
+
+* **Eye-trace continuity (3.1).** The spatial pass estimates each shot's
+  attention point (salience centroid) at its start and end
+  (:attr:`~monteur.sift.Moment.entry_focus` / ``exit_focus``). A candidate
+  whose entry point sits near the previous shot's exit point earns up to
+  :data:`_EYE_TRACE_WEIGHT`, one that leaps across the frame loses it —
+  the eye is carried across the cut. Suspended at a phase boundary, where
+  a deliberate contrast is the accent. (This is the ON-SCREEN-POSITION
+  half of eye-trace; the motion-DIRECTION half is the pre-existing
+  ``_MOTION_WEIGHT`` continuity term above.)
+* **Shot-size grammar (3.2).** The spatial pass classifies each shot
+  wide / medium / close (:attr:`~monteur.sift.Moment.shot_size`).
+  Establish -> develop -> pay off (wide -> medium -> close) earns
+  :data:`_SHOT_GRAMMAR_WEIGHT`; two equally-sized neighbours pay
+  :data:`_SHOT_GRAMMAR_EQUAL_PENALTY` (keep changing scale) — except a
+  deliberate close->close intensification in the climax. Another contrast
+  axis alongside hot/cool and daylight, composed not collided.
+* **Visual rhyme / callback (3.3).** ONE deliberate echo: the closing
+  slot is tipped toward the moment most visually kindred to the opening
+  (:func:`_visual_kinship` over shot size + attention point, leaning on
+  daylight and motion) by :data:`_RHYME_WEIGHT`, framing the video. Sparing
+  by construction — one rhyme, one slot — and the echo is a DIFFERENT,
+  still-unused moment, so zero-repeat holds. The note reads "rhyme: the
+  closing shot echoes the opening (visual callback)".
+
 Same-clip continuity
 --------------------
 The slot grid must not chop one continuing take into jump cuts. Two
@@ -779,6 +814,39 @@ _DAYLIGHT_ARC = ("day", "golden", "night")
 # Against-the-flow warnings: at most this many per-slot notes before the
 # remainder is summarized in one line.
 _DAYLIGHT_NOTE_LIMIT = 3
+# --- Picture coherence (blueprint wave 3) ------------------------------------------
+# Murch's Rule of Six: eye-trace and shot grammar are LOW ranks that may
+# be sacrificed for the higher ones (emotion/story/rhythm). Every term
+# below is a TIE-BREAKER on the candidate blend — sized BELOW one order
+# step (_ORDER_WEIGHT / _CANDIDATE_WINDOW = 0.175), zero unless the
+# offline spatial signal (monteur.spatial) is present, and never applied
+# to a reserved slot (drop / hook / loop): there sync and the pin win
+# outright. Footage without the signal casts byte-identically.
+#
+# Eye-trace continuity (3.1): the eye is carried across a cut when the
+# outgoing shot's exit attention point sits near the incoming shot's
+# entry attention point. The term rewards a small on-screen distance and
+# mildly penalizes a jarring leap — EXCEPT at a phase boundary, where a
+# deliberate contrast is the accent (the term is suspended there).
+_EYE_TRACE_WEIGHT = 0.12
+# The full frame diagonal in 0..1 coordinates — the maximum attention
+# distance, mapped to the full -_EYE_TRACE_WEIGHT penalty.
+_EYE_TRACE_DIAG = 2.0 ** 0.5
+# Shot-size grammar (3.2): establish (wide) -> develop (medium) -> pay off
+# (close). A one-step progression earns this bonus; two equally-sized
+# neighbours pay this penalty (the montage keeps changing scale) — with
+# ONE exception, a deliberate close->close intensification in the climax.
+_SHOT_GRAMMAR_WEIGHT = 0.12
+_SHOT_GRAMMAR_EQUAL_PENALTY = 0.1
+_SHOT_ORDER = {"wide": 0, "medium": 1, "close": 2}
+# Visual rhyme / callback (3.3): a SINGLE deliberate echo — the closing
+# shot rhymes with the opening (frames the video). Kindred = similar shot
+# size + attention point (the new spatial signal), leaning on daylight and
+# motion where known. The bonus tips the LAST slot toward the moment most
+# like slot 0's; sparing by construction (one rhyme, one slot). Zero-repeat
+# holds: the rhyme is a DIFFERENT, still-unused moment, never a duplicate.
+_RHYME_WEIGHT = 0.15
+_RHYME_MIN_KINSHIP = 0.6  # below this the pair is not kindred enough to rhyme
 # Content-adaptive pacing (the slot-merge pass; see the module docstring's
 # Content-adaptive pacing section). Adjacent slots on calm music that are
 # cast with calm material merge into one longer shot, so the cut count
@@ -2537,6 +2605,93 @@ class _PoolItem:
     def daylight(self) -> str:
         return getattr(self.moment, "daylight", "")
 
+    # Spatial annotations (see monteur.spatial, blueprint wave 3). getattr
+    # keeps pre-wave-3 Moment objects working: the defaults ("" / None)
+    # mean "not analysed", which disables eye-trace, shot grammar and
+    # rhyme scoring for that moment (byte-identical to before).
+
+    @property
+    def shot_size(self) -> str:
+        return getattr(self.moment, "shot_size", "")
+
+    @property
+    def entry_focus(self) -> tuple[float, float] | None:
+        return getattr(self.moment, "entry_focus", None)
+
+    @property
+    def exit_focus(self) -> tuple[float, float] | None:
+        return getattr(self.moment, "exit_focus", None)
+
+
+def _focus_distance(
+    a: tuple[float, float] | None, b: tuple[float, float] | None
+) -> float | None:
+    """On-screen distance between two attention points, or None if unknown.
+
+    Both points are (x, y) in 0..1 frame coordinates; the result is a plain
+    Euclidean distance in 0.._EYE_TRACE_DIAG. None when either side is
+    missing (a flat frame or a pre-wave-3 moment), so eye-trace scoring
+    stays neutral instead of guessing.
+    """
+    if a is None or b is None:
+        return None
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def _shot_grammar_step(prev_size: str, cand_size: str, in_climax: bool) -> float:
+    """Grammar bonus/penalty for casting ``cand_size`` after ``prev_size``.
+
+    Establish -> develop -> pay off (wide -> medium -> close) earns
+    :data:`_SHOT_GRAMMAR_WEIGHT`; two equally-sized neighbours pay
+    :data:`_SHOT_GRAMMAR_EQUAL_PENALTY` (keep changing scale) — except a
+    deliberate close->close intensification inside the climax, which is
+    free. Any other pair (a bigger jump, or a step back to a wider shot,
+    a legitimate reset) is neutral. Zero when either size is unknown.
+    """
+    if not prev_size or not cand_size:
+        return 0.0
+    if prev_size == cand_size:
+        if cand_size == "close" and in_climax:
+            return 0.0  # deliberate close->close intensification at the peak
+        return -_SHOT_GRAMMAR_EQUAL_PENALTY
+    if _SHOT_ORDER.get(cand_size, -1) == _SHOT_ORDER.get(prev_size, -1) + 1:
+        return _SHOT_GRAMMAR_WEIGHT  # one step along the establish->pay-off arc
+    return 0.0
+
+
+def _visual_kinship(a: "_PoolItem", b: "_PoolItem") -> float:
+    """How visually kindred two cast moments are, 0..1 (for a rhyme).
+
+    Leans on the new spatial signal (shot size + attention point) with
+    daylight and motion energy as light support. Returns 0 when neither
+    moment carries a spatial signal, so a rhyme is only ever drawn between
+    moments the wave-3 pass actually saw — footage without it never rhymes
+    and casts byte-identically.
+    """
+    if not (a.shot_size or a.entry_focus or a.exit_focus):
+        return 0.0
+    if not (b.shot_size or b.entry_focus or b.exit_focus):
+        return 0.0
+    score = 0.0
+    weight = 0.0
+    if a.shot_size and b.shot_size:
+        score += 0.5 * (1.0 if a.shot_size == b.shot_size else 0.0)
+        weight += 0.5
+    dist = _focus_distance(a.entry_focus, b.entry_focus)
+    if dist is not None:
+        score += 0.3 * max(0.0, 1.0 - dist / _EYE_TRACE_DIAG)
+        weight += 0.3
+    if a.daylight and b.daylight:
+        score += 0.1 * (1.0 if a.daylight == b.daylight else 0.0)
+        weight += 0.1
+    mag_a = (math.hypot(*a.moment.entry_motion) + math.hypot(*a.moment.exit_motion)) / 2.0
+    mag_b = (math.hypot(*b.moment.entry_motion) + math.hypot(*b.moment.exit_motion)) / 2.0
+    if mag_a > _EPS or mag_b > _EPS:
+        peak = max(mag_a, mag_b)
+        score += 0.1 * (1.0 - abs(mag_a - mag_b) / peak)
+        weight += 0.1
+    return score / weight if weight > _EPS else 0.0
+
 
 def _pick_reuse(
     pool: list[_PoolItem],
@@ -2961,6 +3116,16 @@ def _fill(
     # the switch penalty still applies, there is just no arc to follow).
     daylight_active = any(it.daylight for it in pool)
     day_targets: list[str] = _daylight_targets(slots, pool) if daylight_active else []
+    # Picture coherence (blueprint wave 3): each term is a tie-breaker,
+    # live only while the offline spatial signal is present, so a pool
+    # without it casts byte-identically.
+    eye_trace_active = any(
+        it.entry_focus is not None or it.exit_focus is not None for it in pool
+    )
+    grammar_active = any(it.shot_size for it in pool)
+    rhyme_active = eye_trace_active or grammar_active
+    last_slot = len(slots) - 1
+    rhyme_note_done = False
     rewound = False
     short_at: float | None = None  # record start of the first unservable slot
     # Pool indices not yet placed, in pool order (an arrangement's picks
@@ -3122,6 +3287,19 @@ def _fill(
             prev = by_slot.get(slot_idx - 1)
             prev_exit = prev.moment.exit_motion if prev is not None else None
             prev_daylight = prev.daylight if prev is not None else ""
+            # Picture coherence (blueprint wave 3): the previous slot's
+            # spatial signal, and whether this slot opens a new arc phase
+            # (a deliberate accent boundary where the eye-trace term steps
+            # aside for a welcome contrast).
+            prev_shot_size = prev.shot_size if prev is not None else ""
+            prev_exit_focus = prev.exit_focus if prev is not None else None
+            in_climax = bool(phases) and _phase_label_at(phases, rec_start) == "climax"
+            accent_boundary = bool(
+                phases
+                and prev is not None
+                and _phase_label_at(phases, slots[slot_idx - 1][0])
+                != _phase_label_at(phases, rec_start)
+            )
             # Semantic casting: mild per-candidate adjustments (see the
             # module docstring). Bonuses (role fit, climax hero) and the
             # scene-variety penalty are kept apart so we can honestly note
@@ -3130,7 +3308,6 @@ def _fill(
             sem_penalty: dict[int, float] = {}
             if semantic:
                 wanted = _wanted_roles(slot_idx, len(slots), phases, rec_start)
-                in_climax = bool(phases) and _phase_label_at(phases, rec_start) == "climax"
                 neighbour_groups = {
                     by_slot[j].group
                     for j in (slot_idx - 1, slot_idx + 1)
@@ -3180,6 +3357,31 @@ def _fill(
                         score -= _DAYLIGHT_SWITCH_PENALTY
                     if day_targets and pool[idx].daylight == day_targets[slot_idx]:
                         score += _DAYLIGHT_BLOCK_WEIGHT
+                # Eye-trace continuity (3.1, Murch rule 4): reward a small
+                # on-screen distance between the previous shot's exit
+                # attention point and this candidate's entry point (the eye
+                # is carried across the cut); mildly penalize a leap. Never
+                # at a phase boundary, where a deliberate contrast is the
+                # accent. A tie-breaker, zero when either point is unknown.
+                if eye_trace_active and not accent_boundary:
+                    dist = _focus_distance(prev_exit_focus, pool[idx].entry_focus)
+                    if dist is not None:
+                        score += _EYE_TRACE_WEIGHT * (1.0 - 2.0 * dist / _EYE_TRACE_DIAG)
+                # Shot-size grammar (3.2): establish -> develop -> pay off;
+                # penalize two equal sizes adjacent, except a deliberate
+                # close->close intensification in the climax.
+                if grammar_active:
+                    score += _shot_grammar_step(
+                        prev_shot_size, pool[idx].shot_size, in_climax
+                    )
+                # Visual rhyme (3.3): the closing shot echoes the opening —
+                # tip the last slot toward the moment most kindred to slot
+                # 0's. One rhyme, one slot; the candidate is a different,
+                # still-unused moment, so zero-repeat holds.
+                if rhyme_active and slot_idx == last_slot and 0 in by_slot:
+                    kinship = _visual_kinship(by_slot[0], pool[idx])
+                    if kinship >= _RHYME_MIN_KINSHIP:
+                        score += _RHYME_WEIGHT * kinship
                 return score - jump_pen.get(idx, 0.0)
 
             best = max(
@@ -3190,6 +3392,20 @@ def _fill(
                 unguarded = max(enumerate(window), key=lambda pi: _blend(*pi))[1]
                 if unguarded != best:
                     same_scene_avoided += 1
+            # Visual rhyme note (3.3): report the ONE closing echo when the
+            # last slot actually landed on a moment kindred to the opening.
+            if (
+                rhyme_active
+                and not rhyme_note_done
+                and slot_idx == last_slot
+                and slot_idx != 0
+                and 0 in by_slot
+                and _visual_kinship(by_slot[0], pool[best]) >= _RHYME_MIN_KINSHIP
+            ):
+                notes.append(
+                    "rhyme: the closing shot echoes the opening (visual callback)"
+                )
+                rhyme_note_done = True
             unused.remove(best)
             item = pool[best]
         else:

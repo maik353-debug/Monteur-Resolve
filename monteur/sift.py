@@ -189,6 +189,18 @@ class Moment:
     hero: float = 0.0      # 0..1 hero-shot strength (0 = ordinary or not analyzed)
     group: str = ""        # short scene-similarity key; same group = visually the same scene
     daylight: str = ""     # "day" | "golden" | "night" | "" = not classified (monteur.daylight)
+    # Spatial signals (blueprint 3.1/3.2), filled offline by
+    # :func:`monteur.spatial.annotate_reports` — pixel statistics over the
+    # same 64x36 frames daylight reads, no API. All default to "not set"
+    # so a moment without them behaves EXACTLY as before the fields
+    # existed (the montage's eye-trace and shot-grammar terms stay zero).
+    shot_size: str = ""    # "wide" | "medium" | "close" | "" = not classified (3.2)
+    # Attention point (salience centroid) at the window's edges, (x, y) in
+    # 0..1 frame coordinates (x right, y down); None = flat/unreadable
+    # frame, no attention point. The montage reads the OUTGOING exit_focus
+    # against the INCOMING entry_focus for eye-trace continuity (3.1).
+    entry_focus: tuple[float, float] | None = None  # attention point at window start
+    exit_focus: tuple[float, float] | None = None   # attention point at window end
 
 
 @dataclass
@@ -725,6 +737,25 @@ def _annotate_daylight(reports: list[ClipReport]) -> None:
         pass
 
 
+def _annotate_spatial(reports: list[ClipReport]) -> None:
+    """Best-effort spatial pass over freshly sifted reports (in place).
+
+    The picture-coherence sibling of :func:`_annotate_daylight` (blueprint
+    wave 3): fills each moment's ``shot_size`` and entry/exit attention
+    points from the same 64x36 frames, offline and cached
+    (``.monteur-spatial.json`` next to the footage — see
+    :mod:`monteur.spatial`). Failures of ANY kind are swallowed — the
+    spatial signal is an upgrade, not a gate, and a scan must never fail
+    because of it.
+    """
+    try:
+        from monteur import spatial
+
+        spatial.annotate_reports(reports)
+    except Exception:  # noqa: BLE001 — spatial analysis must never fail a scan
+        pass
+
+
 def sift_directory(
     directory: str, progress=None, cancel: threading.Event | None = None
 ) -> list[ClipReport]:
@@ -811,6 +842,7 @@ def sift_directory(
                 raise SiftCancelled("sift cancelled")
             results.append(_analyze_one(i, p))
         _annotate_daylight(results)
+        _annotate_spatial(results)
         return results
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = []
@@ -825,4 +857,5 @@ def sift_directory(
     if _cancelled():
         raise SiftCancelled("sift cancelled")
     _annotate_daylight(results)
+    _annotate_spatial(results)
     return results

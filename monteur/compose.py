@@ -371,6 +371,8 @@ def compose_context(
                 item["group"] = m.group
             if getattr(m, "daylight", ""):
                 item["daylight"] = m.daylight
+            if getattr(m, "shot_size", ""):
+                item["shot_size"] = m.shot_size
             inventory.append(item)
 
     context = {

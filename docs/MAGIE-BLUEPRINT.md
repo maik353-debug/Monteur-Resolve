@@ -158,7 +158,13 @@ markanten Moment, O-Ton-Peak liest über dem Bett (RMS-Assertion im Fenster),
 und Drop-Cuts nachweislich UNVERSETZT. Haus-Garantien: Zero-Repeat, bit-identische
 Pins/Arrangements, "auto"/"short" byte-identisch, Fallback-Byte-Parität.
 
-## Welle 3 — Detail-Spezifikation (filmtheoretisch verbindlich; Code-Anker vor Umsetzung verifizieren)
+## Welle 3 — Detail-Spezifikation (UMGESETZT; filmtheoretisch verankert)
+Status: 3.1/3.2/3.3 umgesetzt (monteur/spatial.py: Fokuspunkt + Shot-Size, Cache
+.monteur-spatial.json wie daylight; Moment.shot_size/entry_focus/exit_focus
+only-when-set; Shot-Grammatik wide→medium→close, Eye-Trace-Tie-Breaker,
+visuelle Reime). tests/test_magie_wave3.py (27 Tests); volle Suite 1915 + 1.
+Alles Tie-Breaker — Sync/Drop/Rhythmus gewinnen; Fallback-Byte-Parität wo kein
+Bild-Signal da ist.
 
 Grundthese W3: Bis hier trifft der Schnitt den TON. Welle 3 macht das BILD kohärent —
 Walter Murchs „Rule of Six" (Emotion > Story > Rhythmus > Eye-Trace > 2D-Ebene >
