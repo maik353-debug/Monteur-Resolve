@@ -1828,7 +1828,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
 
 <header class="topbar">
   <div class="tb-left">
-    <div class="tb-brand" aria-label="Monteur Studio">
+    <div class="tb-brand pywebview-drag-region" aria-label="Monteur Studio">
       <svg class="brand-mark" viewBox="0 0 20 20" aria-hidden="true">
         <rect x="1" y="3" width="18" height="14" rx="2.5" fill="none" stroke="var(--series-1)" stroke-width="2"/>
         <path d="M5 13 l3.4 -4 l2.8 2.6 l3.6 -5" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -1848,8 +1848,8 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
     <button class="tb-back" id="tb-back" type="button" hidden>
       <span class="tb-back-chev" aria-hidden="true">&#8249;</span> Projects
     </button>
-    <span class="tb-ctx-title" id="tb-ctx-title" hidden></span>
-    <span class="tb-home-label" id="tb-home-label">Projects</span>
+    <span class="tb-ctx-title pywebview-drag-region" id="tb-ctx-title" hidden></span>
+    <span class="tb-home-label pywebview-drag-region" id="tb-home-label">Projects</span>
   </div>
   <div class="tb-right">
     <!-- Settings live in the File menu; theme lives in Settings › Appearance.
@@ -4031,22 +4031,44 @@ function openUpdate() {
     var actions = el("div", "modal-actions");
     var install = el("button", "btn", "Download & install"); install.type = "button";
     install.id = "update-install"; install.hidden = true;
+    var restart = el("button", "btn", "Restart now"); restart.type = "button";
+    restart.id = "update-restart"; restart.hidden = true;
+    var page = el("button", "btn", "Open release page"); page.type = "button";
+    page.id = "update-openpage"; page.hidden = true;
     var close = el("button", "btn ghost", "Close"); close.type = "button";
     close.addEventListener("click", function () { modal.hidden = true; });
-    actions.appendChild(install); actions.appendChild(close);
+    actions.appendChild(install); actions.appendChild(restart);
+    actions.appendChild(page); actions.appendChild(close);
     card.appendChild(actions);
     modal.appendChild(card);
     modal.addEventListener("click", function (e) { if (e.target === modal) modal.hidden = true; });
     modal.addEventListener("keydown", function (e) { if (e.key === "Escape") modal.hidden = true; });
     document.body.appendChild(modal);
     install.addEventListener("click", runUpdateInstall);
+    restart.addEventListener("click", function () { nativeWindowCall("restart"); });
+    page.addEventListener("click", function () { if (updateState) openExternal(updateState.url); });
   }
   modal.hidden = false;
   updateCheck();
 }
 function updateSetBody(html) { $("update-body").innerHTML = html; }
+function updateButtons(opts) {
+  opts = opts || {};
+  $("update-install").hidden = !opts.install;
+  $("update-restart").hidden = !opts.restart;
+  $("update-openpage").hidden = !(opts.page && updateState && updateState.url);
+}
+// open a link in the system browser — native shell via the bridge, else a tab
+function openExternal(url) {
+  if (!url) return;
+  if (window.pywebview && window.pywebview.api && window.pywebview.api.open_url) {
+    window.pywebview.api.open_url(url);
+  } else {
+    window.open(url, "_blank", "noopener");
+  }
+}
 function updateCheck() {
-  $("update-install").hidden = true;
+  updateButtons({});
   updateSetBody('<p class="help-small">Checking for updates…</p>');
   api("/api/update/check").then(function (info) {
     updateState = info;
@@ -4059,21 +4081,23 @@ function updateCheck() {
       return;
     }
     var notes = info.notes ? '<div class="update-notes">' + escapeHtml(info.notes) + "</div>" : "";
+    var extra = "";
+    if (info.mode !== "frozen") {
+      // running from source — self-install doesn't apply; guide + link out
+      extra = '<p class="help-small">You’re running from source — update with <code>git pull</code> or <code>pip install -U monteur</code>. (The one-click install is for the packaged app.)</p>';
+    } else if (!(info.payload_url || info.download_url)) {
+      extra = '<p class="help-small">No installable build for your platform is attached to this release yet.</p>';
+    }
     updateSetBody(
       "<p><strong>Monteur " + escapeHtml(info.latest) + "</strong> is available "
-      + '<span class="help-small">(you have ' + escapeHtml(info.current) + ").</span></p>" + notes
+      + '<span class="help-small">(you have ' + escapeHtml(info.current) + ").</span></p>" + notes + extra
     );
-    var btn = $("update-install");
     if (info.mode === "frozen" && (info.payload_url || info.download_url)) {
-      // a payload update is small and clean; an exe update is the rare fallback
-      btn.textContent = info.kind === "exe" ? "Download & install (full)" : "Download & install";
-      btn.hidden = false;
+      $("update-install").textContent = info.kind === "exe" ? "Download & install (full)" : "Download & install";
+      updateButtons({ install: true });
     } else {
-      // a source install (or no build yet): link out instead of downloading
-      var where = info.mode === "frozen" ? "No installable build for your platform yet." :
-        "This is a source install — update with <code>git pull</code> or <code>pip install -U monteur</code>.";
-      updateSetBody($("update-body").innerHTML + '<p class="help-small">' + where + "</p>");
-      btn.hidden = true;
+      // never a dead end: offer the release page
+      updateButtons({ page: true });
     }
   }).catch(function (err) {
     updateSetBody('<p>Couldn’t check for updates.</p><p class="help-small">' + escapeHtml(err && err.message ? err.message : String(err)) + "</p>");
@@ -4089,19 +4113,24 @@ function runUpdateInstall() {
         if (job.state === "running") { setTimeout(poll, 700); return; }
         btn.disabled = false;
         if (job.state === "error") {
+          updateButtons({});
           updateSetBody("<p>Update failed.</p><p class=\"help-small\">" + escapeHtml(job.message || "") + "</p>");
           return;
         }
         var r = job.result || {};
-        btn.hidden = true;
         updateSetBody("<p>" + escapeHtml(r.message || "Done.") + "</p>");
+        // installed + we can relaunch the native window -> offer a real restart
+        var canRestart = r.staged && window.pywebview && window.pywebview.api && window.pywebview.api.restart;
+        updateButtons({ restart: !!canRestart });
       }).catch(function (err) {
         btn.disabled = false;
+        updateButtons({});
         updateSetBody("<p>Update failed.</p><p class=\"help-small\">" + escapeHtml(err && err.message ? err.message : String(err)) + "</p>");
       });
     })();
   }).catch(function (err) {
     btn.disabled = false;
+    updateButtons({});
     updateSetBody("<p>Update failed.</p><p class=\"help-small\">" + escapeHtml(err && err.message ? err.message : String(err)) + "</p>");
   });
 }

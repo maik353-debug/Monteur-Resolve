@@ -7034,6 +7034,62 @@ class TestNativeShell:
         controls = server._WindowControls(wv)
         controls.minimize()  # swallowed
         controls.close()  # swallowed
+        controls.open_url("not a url")  # swallowed, and never opens a bad scheme
+
+    def test_restart_relaunches_then_closes(self, monkeypatch):
+        import types
+
+        from monteur.web import server
+
+        closed = {"n": 0}
+
+        class _Win:
+            def destroy(self):
+                closed["n"] += 1
+
+        wv = types.ModuleType("webview")
+        wv.windows = [_Win()]
+        popen = {}
+        monkeypatch.setattr("subprocess.Popen", lambda argv, **kw: popen.update(argv=argv))
+        server._WindowControls(wv).restart()
+        assert "argv" in popen            # a new process was launched…
+        assert closed["n"] == 1           # …and only then the window closed
+
+    def test_restart_that_cannot_relaunch_keeps_the_window(self, monkeypatch):
+        import types
+
+        from monteur.web import server
+
+        closed = {"n": 0}
+
+        class _Win:
+            def destroy(self):
+                closed["n"] += 1
+
+        wv = types.ModuleType("webview")
+        wv.windows = [_Win()]
+
+        def _boom(*a, **k):
+            raise OSError("no exec")
+
+        monkeypatch.setattr("subprocess.Popen", _boom)
+        server._WindowControls(wv).restart()
+        assert closed["n"] == 0  # relaunch failed -> user is NOT stranded
+
+    def test_open_url_only_opens_http(self, monkeypatch):
+        import types
+
+        from monteur.web import server
+
+        opened = []
+        monkeypatch.setattr("webbrowser.open", lambda u: opened.append(u))
+        wv = types.ModuleType("webview")
+        wv.windows = []
+        c = server._WindowControls(wv)
+        c.open_url("https://example.com/r")
+        c.open_url("file:///etc/passwd")  # non-http scheme -> ignored
+        c.open_url(123)                    # non-string -> ignored
+        assert opened == ["https://example.com/r"]
 
     def test_serve_app_falls_back_to_browser_without_pywebview(self, monkeypatch):
         from monteur.web import server

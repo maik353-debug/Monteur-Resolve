@@ -5462,6 +5462,32 @@ class _WindowControls:
             except Exception:  # noqa: BLE001
                 pass
 
+    def restart(self) -> None:
+        """Relaunch the app and close this window — finishes a staged update.
+
+        The new process runs the launcher again, which picks the newest payload
+        on disk (the one just installed). Best-effort: if relaunch fails we do
+        NOT close the window, so the user is never left with nothing.
+        """
+        try:
+            import subprocess
+            import sys
+
+            subprocess.Popen([sys.executable] + sys.argv[1:])  # noqa: S603 - our own app
+        except Exception:  # noqa: BLE001 — never strand the user
+            return
+        self.close()
+
+    def open_url(self, url: str) -> None:
+        """Open a link in the system browser (for the release page, etc.)."""
+        try:
+            import webbrowser
+
+            if isinstance(url, str) and url.startswith(("http://", "https://")):
+                webbrowser.open(url)
+        except Exception:  # noqa: BLE001
+            pass
+
 
 def serve_app(
     port: int = 8765,
