@@ -934,11 +934,14 @@ class TestDraftsApi:
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_app_has_the_draft_ui(self):
         html = _APP_HTML.read_text(encoding="utf-8")
-        # step 1: the "Continue where you left off" panel
-        assert 'id="cre-drafts"' in html
-        assert 'id="cre-drafts-list"' in html
-        assert "Continue where you left off" in html
-        # step 3: the Save-draft controls next to the download bar
+        # step 1's "Continue where you left off" / draft-resume panel is a
+        # draft-era relic: the Media workspace replaced it, and you open
+        # projects from Home. It must be GONE — markup and handler alike.
+        assert 'id="cre-drafts"' not in html
+        assert 'id="cre-drafts-list"' not in html
+        assert "Continue where you left off" not in html
+        assert "function renderDrafts" not in html
+        # step 3: the Save-draft controls next to the download bar still stand
         assert 'id="cre-save-draft"' in html
         assert 'id="cre-draft-name"' in html
         assert "Save draft" in html
@@ -946,6 +949,29 @@ class TestDraftsApi:
         # projects store (not /api/drafts) plus the plan -> file export
         assert "/api/projects" in html
         assert "/api/create/export" in html
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_media_page_is_a_three_panel_workspace(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        # the Footage step is now a Resolve-style 3-panel workspace
+        for needle in (
+            'class="wiz-step ws-step"',   # step 1 fills the window
+            'id="cre-explorer-list"',      # left: file explorer
+            'id="cre-explorer-crumb"',     # ...with a breadcrumb
+            'id="cre-pool-grid"',          # centre: the media pool (drop target)
+            'id="cre-pool-drop"',
+            'id="ws-video"',               # right: the mini-player
+            'id="ws-insp-path"',           # ...and the inspector (on-disk path)
+            'id="ws-status"',              # the knowledge status bar
+            '/api/browse/list',            # the Explorer's listing endpoint
+        ):
+            assert needle in html, needle
+        # the staged actions live in the toolbar
+        assert 'id="cre-scan-btn"' in html
+        assert 'id="cre-see-btn"' in html
+        # the "never moved / referenced" reassurance line is GONE (self-evident)
+        assert 'id="cre-pool-local"' not in html
+        assert "never moved or copied" not in html
 
 
 class TestProjectsApi:
@@ -1155,6 +1181,42 @@ class TestProjectPoolApi:
         pid = self._new_project(server)
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             _post(f"{server}/api/projects/{pid}/pool", {"bogus": True})
+        assert exc_info.value.code == 400
+
+
+class TestBrowseListApi:
+    """GET /api/browse/list — the Media workspace Explorer's directory listing.
+
+    Lists a folder's SUBFOLDERS and VIDEO FILES so the Explorer can navigate the
+    disk and drag clips into the pool. Deterministic, offline, soft-failing.
+    """
+
+    def test_lists_folders_and_video_files(self, server, tmp_path):
+        root = tmp_path / "rides"
+        root.mkdir()
+        (root / "RAW").mkdir()
+        (root / "Drone").mkdir()
+        (root / "clip_a.mp4").write_bytes(b"x")
+        (root / "clip_b.mov").write_bytes(b"y")
+        (root / "notes.txt").write_text("ignored — not media")
+        (root / ".hidden.mp4").write_bytes(b"z")  # dotfiles skipped
+
+        data = _get(f"{server}/api/browse/list?path={urllib.parse.quote(str(root))}")
+        assert data["path"] == str(root)
+        assert data["parent"] == str(tmp_path)
+        assert [f["name"] for f in data["folders"]] == ["Drone", "RAW"]
+        assert sorted(f["name"] for f in data["files"]) == ["clip_a.mp4", "clip_b.mov"]
+        for entry in data["folders"] + data["files"]:
+            assert Path(entry["path"]).is_absolute()
+
+    def test_empty_path_defaults_to_home(self, server):
+        data = _get(f"{server}/api/browse/list")
+        assert data["path"] == os.path.abspath(os.path.expanduser("~"))
+        assert "folders" in data and "files" in data
+
+    def test_missing_directory_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _get(f"{server}/api/browse/list?path=/no/such/dir/anywhere")
         assert exc_info.value.code == 400
 
 
@@ -6379,11 +6441,13 @@ class TestNoRebuildOnCleanReturn:
 
             # ---- reload + resume: forward/back still never rebuilds ----------
             page.reload()
-            page.click("#tab-create")
-            page.wait_for_selector("#cre-drafts", state="visible", timeout=30_000)
-            # persistence flipped to projects: the panel now lists real
-            # projects, opened via "Open project …" (was "Resume draft …")
-            page.click("#cre-drafts-list button[aria-label^='Open project']")
+            # persistence flipped to projects and the step-1 draft-resume panel
+            # is gone (the Media workspace replaced it): the reload lands on the
+            # Project-Manager Home, and the cut is reopened from its card there.
+            page.wait_for_selector(
+                "#pm-recents .pm-card", state="visible", timeout=30_000
+            )
+            page.click("#pm-recents .pm-card")
             page.wait_for_selector(
                 "#cre-sb-board .sb-card", state="visible", timeout=120_000
             )

@@ -764,6 +764,129 @@ svg text.axis {
   background: var(--row-wash); color: var(--ink-muted); box-shadow: inset 0 0 0 1px var(--border);
 }
 .pool-chip.on { background: var(--warn-wash); color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+
+/* ===== the Media workspace (Resolve-style 3-panel Footage page) =========
+   Explorer | Media Pool | Mini-Player. Fills the window, no page scroll —
+   each panel scrolls internally. Neutral NLE grey tokens, small + dense. */
+#create.ws-mode { max-width: none; padding: 12px 16px 12px; }
+#create.ws-mode .eyebrow, #create.ws-mode .wiz-saved { display: none; }
+/* the always-on trailing tools (trailer distiller) belong to a finished cut,
+   not the Footage workspace — keep them off the full-window Media page */
+#create.ws-mode #cre-distill { display: none; }
+.ws-step { padding: 0; border: 0; background: transparent; }
+.ws {
+  display: flex; flex-direction: column;
+  height: calc(100vh - 150px); min-height: 470px;
+  background: var(--bg); border: 1px solid #000; border-radius: 6px; overflow: hidden;
+}
+.ws-toolbar {
+  display: flex; align-items: center; gap: 8px; flex: none; height: 42px;
+  padding: 0 10px; background: var(--panel); border-bottom: 1px solid #000;
+}
+.ws-title { font-weight: 650; color: var(--ink); font-size: 13px; }
+.ws-sub { font-family: var(--mono); font-size: 11px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+.ws-spacer { flex: 1; }
+.ws-viewtoggle { display: flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.ws-viewtoggle span { padding: 4px 8px; color: var(--faint); cursor: pointer; font-size: 12px; line-height: 1.1; user-select: none; }
+.ws-viewtoggle span.on { background: var(--panel-2); color: var(--ink); }
+.ws-iconbtn {
+  width: 28px; height: 26px; border: 1px solid var(--line); border-radius: 5px;
+  background: var(--panel-2); color: var(--dim); display: inline-flex;
+  align-items: center; justify-content: center; cursor: pointer; font-size: 14px; line-height: 1;
+}
+.ws-iconbtn.small { width: auto; padding: 0 9px; font-size: 11px; font-weight: 600; }
+.ws-iconbtn:hover { color: var(--ink); }
+.ws-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: 250px minmax(0, 1fr) 300px; }
+@media (max-width: 1000px) { .ws-grid { grid-template-columns: 200px minmax(0, 1fr) 240px; } }
+.ws-col { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.ws-explorer { border-right: 1px solid #000; }
+.ws-playercol { border-left: 1px solid #000; }
+.ws-panelhead {
+  display: flex; align-items: center; gap: 8px; flex: none; height: 30px; padding: 0 10px;
+  background: var(--topbar); border-bottom: 1px solid #000;
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint);
+}
+/* explorer */
+.ws-crumb {
+  display: flex; align-items: center; gap: 4px; flex: none; flex-wrap: wrap;
+  padding: 6px 10px; font-family: var(--mono); font-size: 10.5px; color: var(--dim);
+  border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.ws-crumb .seg { color: var(--faint); cursor: pointer; }
+.ws-crumb .seg:hover { color: var(--ink); text-decoration: underline; }
+.ws-crumb .cur { color: var(--ink); }
+.ws-crumb .sep { color: var(--faint); }
+.ws-browselist { flex: 1; overflow: auto; padding: 4px; min-height: 0; }
+.ws-row { display: flex; align-items: center; gap: 8px; padding: 5px 7px; border-radius: 5px; cursor: pointer; }
+.ws-row:hover { background: var(--panel-2); }
+.ws-row.folder .ws-ic { color: var(--ember); }
+.ws-row .ws-ic { width: 16px; height: 16px; flex: none; color: var(--faint); }
+.ws-row .ws-th { width: 40px; height: 23px; border-radius: 3px; object-fit: cover; background: var(--row-wash); flex: none; border: 1px solid var(--line); }
+.ws-row .ws-nm { flex: 1; color: var(--dim); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-row.vid { cursor: grab; }
+.ws-row.dragging { opacity: 0.4; }
+.ws-row .ws-plus {
+  flex: none; width: 20px; height: 20px; border: 1px solid var(--line-2); border-radius: 4px;
+  background: transparent; color: var(--dim); cursor: pointer; font-size: 13px; line-height: 1;
+  display: none; align-items: center; justify-content: center;
+}
+.ws-row:hover .ws-plus { display: inline-flex; }
+.ws-row .ws-plus:hover { color: var(--ember); border-color: var(--ember); }
+.ws-drophint { flex: none; margin: 6px; padding: 7px; border: 1px dashed var(--line-2); border-radius: 6px; text-align: center; font-size: 10.5px; color: var(--faint); }
+.ws-empty-note { padding: 14px 12px; font-size: 11.5px; color: var(--faint); text-align: center; }
+/* media pool */
+.ws-poolcol { position: relative; }
+.ws-poolhead {
+  display: flex; align-items: center; gap: 10px; flex: none; min-height: 34px; padding: 5px 12px;
+  border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap;
+}
+.ws-poolhead .ws-cnt { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.ws-poolhead .ws-selc { font-family: var(--mono); font-size: 11px; color: var(--sel); }
+.ws-linkbtn { background: none; border: 0; color: var(--faint); font-size: 11px; cursor: pointer; padding: 2px 4px; }
+.ws-linkbtn:hover { color: var(--ink); }
+.ws-see-inline { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); cursor: pointer; }
+.ws-see-inline input { width: 13px; height: 13px; accent-color: var(--accent); margin: 0; }
+.ws-poolwrap { flex: 1; overflow: auto; padding: 10px; position: relative; min-height: 0; }
+.ws-poolwrap.pool-grid-view .pool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--pool-tile, 132px), 1fr)); gap: 9px; margin: 0; }
+.ws-poolwrap.pool-list-view .pool-grid { display: flex; flex-direction: column; gap: 4px; margin: 0; }
+.ws-poolwrap.pool-list-view .pool-card { flex-direction: row; align-items: center; gap: 8px; padding: 5px 8px; }
+.ws-poolwrap.pool-list-view .pool-thumb-wrap { width: 56px; flex: none; }
+.ws-poolwrap.pool-list-view .pool-thumb { margin: 0; }
+.ws-poolwrap.pool-list-view .clip-name { margin: 0; }
+.ws-poolwrap.pool-list-view .pool-badges { margin: 0 0 0 auto; }
+.ws-poolwrap.pool-grid-view .pool-card { padding: 0; overflow: hidden; }
+.ws-poolwrap.pool-grid-view .pool-thumb { margin: 0; border-radius: 0; }
+.ws-poolwrap.pool-grid-view .clip-name { padding: 5px 7px 0; font-size: 11px; }
+.ws-poolwrap.pool-grid-view .clip-meta { padding: 0 7px; }
+.ws-poolwrap.pool-grid-view .pool-badges { padding: 4px 7px 7px; margin: 0; }
+.ws-dropzone {
+  position: absolute; inset: 8px; border: 2px dashed var(--sel); border-radius: 8px;
+  background: rgba(74, 144, 226, 0.08); display: flex; align-items: center; justify-content: center;
+  color: var(--sel); font-size: 13px; font-weight: 650; pointer-events: none; z-index: 4;
+}
+.ws-poolfoot { flex: none; border-top: 1px solid var(--line); background: var(--panel); padding: 8px 12px; max-height: 240px; overflow: auto; }
+.ws-add { display: flex; gap: 6px; }
+.ws-add input { flex: 1; min-width: 0; padding: 5px 9px; border: 1px solid var(--border); border-radius: 4px; background: var(--input-bg); color: var(--ink); font-size: 11.5px; }
+/* player + inspector */
+.ws-viewer { flex: none; aspect-ratio: 16 / 9; background: #000; position: relative; display: flex; align-items: center; justify-content: center; border-bottom: 1px solid #000; }
+#ws-video { width: 100%; height: 100%; object-fit: contain; background: #000; display: block; }
+.ws-viewer-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--faint); font-size: 12px; pointer-events: none; }
+.ws-inspector { flex: 1; overflow: auto; padding: 11px; min-height: 0; }
+.ws-pfld { margin-bottom: 10px; }
+.ws-pfld label { font-family: var(--mono); font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); display: block; margin-bottom: 4px; }
+.ws-pfld .v { font-size: 12px; color: var(--ink); overflow-wrap: anywhere; }
+.ws-pfld .v.ws-path { font-family: var(--mono); font-size: 10px; color: var(--dim); }
+.ws-pchips { display: flex; gap: 4px; flex-wrap: wrap; }
+.ws-pchips .c { font-family: var(--mono); font-size: 10px; color: #7fb0d8; border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px; }
+.ws-pchips .ws-dim { color: var(--faint); }
+.ws-inspector .rank-details { margin-top: 12px; }
+/* status bar */
+.ws-statusbar {
+  display: flex; align-items: center; gap: 8px; flex: none; height: 26px; padding: 0 12px;
+  background: var(--topbar); border-top: 1px solid #000; font-size: 11px; color: var(--faint);
+}
+.ws-statusbar .mono { font-family: var(--mono); font-size: 10px; }
+
 .wiz-nav { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
 .radio-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 6px 0 14px; }
 @media (max-width: 700px) { .radio-cards { grid-template-columns: 1fr; } }
@@ -1544,89 +1667,132 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
       <nav class="wiz-bar" aria-label="Create — jump to any page"><span id="wbar-1" class="on"><b>1</b>Footage</span><span id="wbar-2"><b>2</b>Options</span><span id="wbar-3"><b>3</b>Storyboard</span><span id="wbar-4"><b>4</b>Your cut</span></nav>
       <p class="wiz-saved" id="wiz-saved"><span class="wiz-saved-dot" aria-hidden="true"></span>All saved — move between pages freely, nothing is reset.</p>
 
-      <section class="wiz-step" id="cre-step-1" aria-labelledby="cre-h1">
-        <div class="step-head">
-          <span class="step-chip" aria-hidden="true">1</span>
-          <div>
-            <h1 id="cre-h1" tabindex="-1">Your footage</h1>
-            <p class="wiz-lead">Tell Monteur where your video clips live. It watches every clip and finds the good parts — your files are never moved or changed.</p>
-          </div>
-        </div>
-        <div class="card" id="cre-drafts" hidden style="margin: 0 0 18px; padding: 14px 16px;">
-          <p class="seg-heading" style="margin-top: 0;">Continue where you left off</p>
-          <p class="help-small">Your saved drafts and the last auto-saved build. Resume brings the finished cut back — no rebuilding, downloads and revisions work right away.</p>
-          <ul class="seg-list" id="cre-drafts-list"></ul>
-          <p class="scan-note" id="cre-drafts-msg" role="status" hidden></p>
-        </div>
+      <section class="wiz-step ws-step" id="cre-step-1" aria-labelledby="cre-h1">
+        <h1 id="cre-h1" tabindex="-1" class="sr-only">Your footage</h1>
         <!-- The media pool: files/folders REFERENCED from disk (Resolve-style),
              never copied or moved. cre-folder stays as the derived scan/build
-             folder (hidden) so the sift/plan pipeline downstream is unchanged —
-             only this Footage page's UX becomes a pool. -->
+             folder (hidden) so the sift/plan pipeline downstream is unchanged. -->
         <input type="text" id="cre-folder" hidden aria-hidden="true">
-        <div class="pool-add">
-          <label class="sr-only" for="cre-pool-path">Add a file or folder path</label>
-          <input type="text" id="cre-pool-path" placeholder="Paste a file or folder path&hellip;" spellcheck="false" autocomplete="off">
-          <button class="btn" id="cre-pool-add-path" type="button">Add path</button>
-          <button class="btn ghost" id="cre-browse-folder" type="button">Add folder&hellip;</button>
-        </div>
-        <p class="hint-small">Browse to add a folder — or paste any file/folder path (macOS: right-click, hold Option, “Copy as Pathname”; Windows: Shift + right-click, “Copy as path”). Add as many as you like.</p>
-        <p class="pool-local" id="cre-pool-local"><span class="pool-lock" aria-hidden="true"></span>Local &amp; unchanged — your files are never moved or copied.</p>
-        <p class="hint-small" id="cre-pool-guide" hidden>Pick the clips you want, then <strong>Analyze selected</strong> — Monteur watches only those and finds the good parts. Click a clip to watch it first.</p>
-        <div class="clip-grid pool-grid" id="cre-pool-grid"></div>
-        <p class="pool-empty" id="cre-pool-empty">Add your footage — files stay where they are.</p>
-        <p class="scan-note" id="cre-pool-msg" role="status" hidden></p>
-        <div class="pool-actions" id="cre-pool-actions" hidden>
-          <button class="btn ghost" id="cre-pool-selall" type="button">Select all</button>
-          <span class="pool-count" id="cre-pool-count" aria-live="polite">None selected</span>
-          <button class="btn primary" id="cre-scan-btn" type="button" disabled>Analyze selected<span class="spin" aria-hidden="true"></span></button>
-          <button class="btn" id="cre-see-btn" type="button" disabled>Let Claude check selected<span class="spin" aria-hidden="true"></span></button>
-        </div>
-        <label class="see-check">
-          <input type="checkbox" id="cre-see">
-          <span>Let Claude label them too while analyzing</span>
-        </label>
-        <p class="help-small" style="max-width: 620px; margin: 0 0 14px;">Needs the anthropic package and your Anthropic API key (ANTHROPIC_API_KEY) on the machine running <code>monteur ui</code>. Claude looks at one frame per good moment (about a cent per scan) and labels what it shows. “Let Claude check selected” runs the same on just the clips you tick — usually the good ones, after analysis.</p>
-        <div id="cre-scan-panel"></div>
-        <p class="scan-note" id="cre-scan-msg" role="status" hidden></p>
-        <p class="scan-note" id="cre-proxy-status" role="status" aria-live="polite" hidden></p>
-        <p class="scan-note" id="cre-vision-msg" role="status" hidden></p>
-        <div class="clip-grid" id="cre-clips"></div>
-        <div class="vision-notes" id="cre-vision-notes" hidden></div>
-        <div class="legend" id="cre-legend" hidden>
-          <span class="key"><span class="swatch" style="background:var(--series-1)"></span>Usable</span>
-          <span class="key"><span class="swatch" style="background:var(--seg-dark)"></span>Too dark</span>
-          <span class="key"><span class="swatch" style="background:var(--seg-blurry)"></span>Blurry</span>
-          <span class="key"><span class="swatch" style="background:var(--seg-shaky)"></span>Shaky</span>
-        </div>
-        <details class="fine-tune rank-details" id="cre-find" style="margin-top: 14px;">
-          <summary>Search your footage — what did Claude see?</summary>
-          <div class="rank-body">
-            <label class="sr-only" for="cre-find-query">Search query</label>
-            <div class="path-row">
-              <input type="text" id="cre-find-query" placeholder="kurven, sonnenuntergang, hero&hellip;" spellcheck="false" autocomplete="off">
-              <button class="btn" id="cre-find-btn" type="button">Search<span class="spin" aria-hidden="true"></span></button>
+
+        <div class="ws" id="cre-ws">
+          <!-- TOOLBAR -->
+          <div class="ws-toolbar">
+            <span class="ws-title">Media Pool</span>
+            <span class="ws-sub" id="ws-proj-sub"></span>
+            <span class="ws-spacer"></span>
+            <div class="ws-viewtoggle" id="ws-viewtoggle" role="group" aria-label="Icon layout">
+              <span class="on" id="ws-view-grid" role="button" tabindex="0" title="Grid view" aria-label="Grid view">&#9638;</span>
+              <span id="ws-view-list" role="button" tabindex="0" title="List view" aria-label="List view">&#8801;</span>
             </div>
-            <p class="help-small">Searches the labels Claude wrote during a &ldquo;Let Claude watch&rdquo; scan — offline and instant, no API call. Try &ldquo;hero&rdquo; for the money shots.</p>
-            <p class="scan-note" id="cre-find-msg" role="status" hidden></p>
-            <div id="cre-find-results"></div>
+            <button class="ws-iconbtn" id="ws-size-dn" type="button" title="Smaller icons" aria-label="Smaller icons">&minus;</button>
+            <button class="ws-iconbtn" id="ws-size-up" type="button" title="Larger icons" aria-label="Larger icons">+</button>
+            <button class="btn" id="cre-scan-btn" type="button" disabled>Analyze selected<span class="spin" aria-hidden="true"></span></button>
+            <button class="btn" id="cre-see-btn" type="button" disabled>Check with Claude<span class="spin" aria-hidden="true"></span></button>
+            <button class="btn primary" id="cre-next-1" type="button" hidden>Continue to options &rarr;</button>
           </div>
-        </details>
-        <details class="fine-tune rank-details" id="cre-coverage" style="margin-top: 14px;">
-          <summary>Shot list — what's still missing?</summary>
-          <div class="rank-body">
-            <label class="sr-only" for="cre-cov-brief">What should this video become?</label>
-            <div class="path-row">
-              <input type="text" id="cre-cov-brief" placeholder="What should this video become? e.g. &ldquo;epic alps trailer, end on the summit&rdquo;" spellcheck="false" autocomplete="off">
-              <button class="btn" id="cre-cov-btn" type="button">Check my coverage<span class="spin" aria-hidden="true"></span></button>
+
+          <div class="ws-grid">
+            <!-- LEFT: FILE EXPLORER -->
+            <div class="ws-col ws-explorer">
+              <div class="ws-panelhead">Explorer<span class="ws-spacer"></span>
+                <button class="ws-iconbtn small" id="cre-browse-folder" type="button" title="Add a folder to the pool">Add folder&hellip;</button>
+              </div>
+              <div class="ws-crumb" id="cre-explorer-crumb"></div>
+              <div class="ws-browselist" id="cre-explorer-list"></div>
+              <div class="ws-drophint">Drag videos into the Media Pool &rarr;</div>
             </div>
-            <p class="help-small">Claude reads your scan and lists the shots you still need to film — before you cut anything. Style and target length come from step 2; the description here and step 2&rsquo;s &ldquo;What is this video?&rdquo; are the same text. Runs over your Claude connection (with Claude Code: no extra cost) — sharpest after &ldquo;Let Claude watch your clips&rdquo;.</p>
-            <div id="cre-cov-panel"></div>
-            <p class="scan-note" id="cre-cov-msg" role="status" hidden></p>
-            <div id="cre-cov-results"></div>
+
+            <!-- CENTRE: MEDIA POOL (drop target) -->
+            <div class="ws-col ws-poolcol">
+              <div class="ws-poolhead" id="cre-pool-actions">
+                <span class="ws-cnt" id="ws-pool-total">0 im Pool</span>
+                <span class="ws-selc" id="cre-pool-count" aria-live="polite">Keine ausgewählt</span>
+                <span class="ws-spacer"></span>
+                <button class="ws-linkbtn" id="cre-pool-selall" type="button">Alle auswählen</button>
+                <label class="ws-see-inline" title="Let Claude label the clips while analyzing"><input type="checkbox" id="cre-see"> Claude labelt mit</label>
+              </div>
+              <div class="ws-poolwrap pool-grid-view" id="cre-pool-drop">
+                <div class="clip-grid pool-grid" id="cre-pool-grid"></div>
+                <p class="pool-empty" id="cre-pool-empty">Zieh Videos aus dem Explorer hierher — deine Dateien bleiben, wo sie sind.</p>
+                <div class="ws-dropzone" id="cre-pool-dropzone" hidden>In den Media Pool ablegen</div>
+              </div>
+              <div class="ws-poolfoot">
+                <div class="ws-add">
+                  <label class="sr-only" for="cre-pool-path">Add a file or folder path</label>
+                  <input type="text" id="cre-pool-path" placeholder="Pfad einfügen&hellip;" spellcheck="false" autocomplete="off">
+                  <button class="btn small" id="cre-pool-add-path" type="button">&plus; Add</button>
+                </div>
+                <div id="cre-scan-panel"></div>
+                <p class="scan-note" id="cre-pool-msg" role="status" hidden></p>
+                <p class="scan-note" id="cre-scan-msg" role="status" hidden></p>
+                <p class="scan-note" id="cre-proxy-status" role="status" aria-live="polite" hidden></p>
+                <p class="scan-note" id="cre-vision-msg" role="status" hidden></p>
+              </div>
+            </div>
+
+            <!-- RIGHT: MINI-PLAYER + INSPECTOR -->
+            <div class="ws-col ws-playercol">
+              <div class="ws-panelhead">Player</div>
+              <div class="ws-viewer">
+                <video id="ws-video" playsinline preload="auto"></video>
+                <div class="ws-viewer-empty" id="ws-viewer-empty">Klick einen Clip, um ihn hier zu sehen</div>
+              </div>
+              <div class="ws-inspector">
+                <div class="ws-pfld"><label>Clip</label><div class="v" id="ws-insp-name">&mdash;</div></div>
+                <div class="ws-pfld"><label>Auf der Platte</label><div class="v ws-path" id="ws-insp-path">&mdash;</div></div>
+                <div class="ws-pfld"><label>Analyse</label><div class="v" id="ws-insp-analysis">Noch nicht analysiert</div></div>
+                <div class="ws-pfld"><label>Claude sieht</label><div class="ws-pchips" id="ws-insp-labels"><span class="ws-dim">&mdash;</span></div></div>
+
+                <details class="fine-tune rank-details" id="cre-find">
+                  <summary>Search your footage — what did Claude see?</summary>
+                  <div class="rank-body">
+                    <label class="sr-only" for="cre-find-query">Search query</label>
+                    <div class="path-row">
+                      <input type="text" id="cre-find-query" placeholder="kurven, sonnenuntergang, hero&hellip;" spellcheck="false" autocomplete="off">
+                      <button class="btn" id="cre-find-btn" type="button">Search<span class="spin" aria-hidden="true"></span></button>
+                    </div>
+                    <p class="help-small">Searches the labels Claude wrote during a &ldquo;Let Claude watch&rdquo; scan — offline and instant, no API call. Try &ldquo;hero&rdquo; for the money shots.</p>
+                    <p class="scan-note" id="cre-find-msg" role="status" hidden></p>
+                    <div id="cre-find-results"></div>
+                  </div>
+                </details>
+                <details class="fine-tune rank-details" id="cre-coverage">
+                  <summary>Shot list — what's still missing?</summary>
+                  <div class="rank-body">
+                    <label class="sr-only" for="cre-cov-brief">What should this video become?</label>
+                    <div class="path-row">
+                      <input type="text" id="cre-cov-brief" placeholder="What should this video become? e.g. &ldquo;epic alps trailer, end on the summit&rdquo;" spellcheck="false" autocomplete="off">
+                      <button class="btn" id="cre-cov-btn" type="button">Check my coverage<span class="spin" aria-hidden="true"></span></button>
+                    </div>
+                    <p class="help-small">Claude reads your scan and lists the shots you still need to film — before you cut anything. Style and target length come from step 2; the description here and step 2&rsquo;s &ldquo;What is this video?&rdquo; are the same text. Runs over your Claude connection (with Claude Code: no extra cost) — sharpest after &ldquo;Let Claude watch your clips&rdquo;.</p>
+                    <div id="cre-cov-panel"></div>
+                    <p class="scan-note" id="cre-cov-msg" role="status" hidden></p>
+                    <div id="cre-cov-results"></div>
+                  </div>
+                </details>
+                <details class="fine-tune rank-details" id="cre-analysis-report">
+                  <summary>Full analysis report</summary>
+                  <div class="rank-body">
+                    <p class="hint-small" id="cre-pool-guide" hidden>Pick the clips you want, then <strong>Analyze selected</strong> — Monteur watches only those and finds the good parts. Click a clip to watch it first.</p>
+                    <div class="clip-grid" id="cre-clips"></div>
+                    <div class="vision-notes" id="cre-vision-notes" hidden></div>
+                    <div class="legend" id="cre-legend" hidden>
+                      <span class="key"><span class="swatch" style="background:var(--series-1)"></span>Usable</span>
+                      <span class="key"><span class="swatch" style="background:var(--seg-dark)"></span>Too dark</span>
+                      <span class="key"><span class="swatch" style="background:var(--seg-blurry)"></span>Blurry</span>
+                      <span class="key"><span class="swatch" style="background:var(--seg-shaky)"></span>Shaky</span>
+                    </div>
+                  </div>
+                </details>
+              </div>
+            </div>
           </div>
-        </details>
-        <div class="wiz-nav">
-          <button class="btn primary" id="cre-next-1" type="button" hidden>Continue to options →</button>
+
+          <!-- STATUS BAR: only the knowledge summary -->
+          <div class="ws-statusbar">
+            <span class="ws-spacer"></span>
+            <span class="mono" id="ws-status">0 im Pool · 0 gesichtet · 0 Proxies · 0 von Claude bewertet</span>
+          </div>
         </div>
       </section>
 
@@ -4476,6 +4642,15 @@ function creShowStep(n, focusHeading) {
   [1, 2, 3, 4].forEach(function (i) {
     $("cre-step-" + i).hidden = i !== n;
   });
+  // the Footage page is a full-window NLE workspace; the rest keep the
+  // centred wizard column
+  var createEl = $("create");
+  if (createEl) createEl.classList.toggle("ws-mode", n === 1);
+  if (n === 1) {
+    if (!wsExplorer.loaded) wsExplorerLoad("");  // first visit: list the home dir
+  } else {
+    wsPause();  // never play the workspace clip off-screen
+  }
   if (n === 2) cre.optionsVisited = true;
   creUpdatePages();
   if (n !== 3) {
@@ -4528,7 +4703,10 @@ $("cre-browse-folder").addEventListener("click", function () {
   btn.disabled = true;
   api("/api/pick", { method: "POST", body: { kind: "folder" } }).then(function (data) {
     if (data && data.error) { hideBrowseButtons(); return; }
-    if (data && data.path) return poolAdd(String(data.path), "folder");
+    if (data && data.path) {
+      wsExplorerLoad(String(data.path));  // show it in the Explorer too
+      return poolAdd(String(data.path), "folder");
+    }
   }).catch(function () {
     hideBrowseButtons(); // headless — the paste-a-path input still works
   }).then(function () { btn.disabled = false; });
@@ -4538,7 +4716,7 @@ $("cre-browse-folder").addEventListener("click", function () {
    The Footage page is a bin of REFERENCED clips. The user picks a SUBSET,
    watches them, then analyzes only those, then Claude-checks only the good
    ones — control, not a blind bulk scan. The pool IS the project's
-   media_pool; media is never moved or copied. */
+   media_pool; media is only referenced. */
 
 function dirName(path) {
   var s = String(path).replace(/[\\/]+$/, "");
@@ -4591,15 +4769,14 @@ function poolSyncActions() {
   var sel = poolSelectedPaths();
   var n = sel.length;
   var count = $("cre-pool-count");
-  count.textContent = n === 0 ? "None selected"
-    : (n + " selected");
+  count.textContent = n === 0 ? "Keine ausgewählt" : (n + " ausgewählt");
   var busy = scanPanel.running();
   $("cre-scan-btn").disabled = busy || n === 0;
   $("cre-see-btn").disabled = busy || n === 0;
   $("cre-scan-btn").firstChild.textContent = n > 0 ? "Analyze selected (" + n + ")" : "Analyze selected";
-  $("cre-see-btn").firstChild.textContent = n > 0 ? "Let Claude check selected (" + n + ")" : "Let Claude check selected";
+  $("cre-see-btn").firstChild.textContent = n > 0 ? "Check with Claude (" + n + ")" : "Check with Claude";
   var allSel = n > 0 && n === (cre.poolClips || []).length;
-  $("cre-pool-selall").textContent = allSel ? "Clear selection" : "Select all";
+  $("cre-pool-selall").textContent = allSel ? "Auswahl aufheben" : "Alle auswählen";
 }
 
 function poolChip(label, on) {
@@ -4666,21 +4843,39 @@ function renderPool(data) {
     badges.appendChild(poolChip("labeled", clip.labeled));
     card.appendChild(badges);
 
-    // click the card to WATCH it (checkbox/remove stopPropagation above)
-    card.addEventListener("click", function () { openMiniPlayer(clip.path, 0, 0, clip.name); });
+    // click the card to WATCH it in the right-hand mini-player (checkbox/remove
+    // stopPropagation above)
+    card.addEventListener("click", function () { wsLoadClip(clip.path, clip.name); });
     card.addEventListener("keydown", function (e) {
       if (e.key === " ") { e.preventDefault(); poolToggle(clip.path, !cre.poolSel[clip.path]); }
-      else if (e.key === "Enter") { e.preventDefault(); openMiniPlayer(clip.path, 0, 0, clip.name); }
+      else if (e.key === "Enter") { e.preventDefault(); wsLoadClip(clip.path, clip.name); }
     });
     grid.appendChild(card);
   });
 
   var empty = cre.poolClips.length === 0;
   $("cre-pool-empty").hidden = !empty;
-  $("cre-pool-grid").hidden = empty;
-  $("cre-pool-actions").hidden = empty;
   $("cre-pool-guide").hidden = empty;
+  wsUpdateStatus();
   poolSyncActions();
+}
+
+/* the pool header count ("N im Pool") + the knowledge status bar. Both read
+   purely from the resolved pool's cheap cached flags — no probe, no decode. */
+function wsUpdateStatus() {
+  var clips = cre.poolClips || [];
+  var n = clips.length;
+  var sifted = 0, proxied = 0, labeled = 0;
+  clips.forEach(function (c) {
+    if (c.sifted) sifted++;
+    if (c.proxy_fresh) proxied++;
+    if (c.labeled) labeled++;
+  });
+  var total = $("ws-pool-total");
+  if (total) total.textContent = n + " im Pool";
+  var bar = $("ws-status");
+  if (bar) bar.textContent = n + " im Pool · " + sifted + " gesichtet · " +
+    proxied + " Proxies · " + labeled + " von Claude bewertet";
 }
 
 function poolToggle(path, on) {
@@ -4775,6 +4970,218 @@ $("cre-pool-add-path").addEventListener("click", function () {
 $("cre-pool-path").addEventListener("keydown", function (e) {
   if (e.key === "Enter") { e.preventDefault(); $("cre-pool-add-path").click(); }
 });
+
+/* ===== the Explorer (left panel) ======================================
+   Navigate the disk in-app (GET /api/browse/list): a breadcrumb + the
+   current folder's SUBFOLDERS and VIDEO FILES. Video rows are DRAGGABLE
+   into the Media Pool (also double-click / the ＋ button to reference a
+   clip; ＋ on a folder references the whole folder). */
+var wsExplorer = { path: "", loaded: false };
+
+function wsIcon(kind) {
+  var span = el("span", "ws-ic");
+  span.innerHTML = kind === "folder"
+    ? '<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16" aria-hidden="true"><path d="M3 6a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V6z"/></svg>'
+    : '<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16" aria-hidden="true"><path d="M4 5h16v14H4z"/></svg>';
+  return span;
+}
+
+function wsPathSegments(path) {
+  path = String(path || "");
+  var win = path.indexOf("\\") >= 0 && path.indexOf("/") < 0;
+  var sep = win ? "\\" : "/";
+  var raw = path.split(/[\\/]+/).filter(function (s) { return s.length; });
+  var segs = [];
+  var prefix = "";
+  raw.forEach(function (name, i) {
+    prefix = i === 0 ? (win ? name : "/" + name) : prefix + sep + name;
+    segs.push({ name: name, path: prefix });
+  });
+  if (!segs.length) segs.push({ name: path || "/", path: path });
+  return segs;
+}
+
+function wsExplorerLoad(path) {
+  return api("/api/browse/list" + (path ? ("?path=" + encodeURIComponent(path)) : ""))
+    .then(function (data) {
+      wsExplorer.path = String(data.path || "");
+      wsExplorer.loaded = true;
+      renderExplorer(data);
+    })
+    .catch(function () {
+      var list = $("cre-explorer-list");
+      if (list) {
+        clear(list);
+        list.appendChild(el("p", "ws-empty-note",
+          "Ordner nicht lesbar — Pfad einfügen oder „Add folder…“."));
+      }
+    });
+}
+
+function wsExplorerRow(file) {
+  var row = el("div", "ws-row vid");
+  row.setAttribute("draggable", "true");
+  row.title = file.path;
+  var img = el("img", "ws-th");
+  img.alt = ""; img.loading = "lazy"; img.src = thumbUrl(file.path, 96);
+  row.appendChild(img);
+  row.appendChild(el("span", "ws-nm", file.name));
+  var plus = el("button", "ws-plus", "+");
+  plus.type = "button";
+  plus.title = "Add to the pool";
+  plus.setAttribute("aria-label", "Add " + file.name + " to the pool");
+  plus.addEventListener("click", function (e) { e.stopPropagation(); poolAdd(file.path, "file"); });
+  row.appendChild(plus);
+  row.addEventListener("dragstart", function (e) {
+    row.classList.add("dragging");
+    try {
+      e.dataTransfer.setData("text/monteur-clip", file.path);
+      e.dataTransfer.setData("text/plain", file.path);
+      e.dataTransfer.effectAllowed = "copy";
+    } catch (err) { /* older browsers */ }
+  });
+  row.addEventListener("dragend", function () { row.classList.remove("dragging"); });
+  row.addEventListener("dblclick", function () { poolAdd(file.path, "file"); });
+  row.addEventListener("click", function () { wsLoadClip(file.path, file.name); });
+  return row;
+}
+
+function renderExplorer(data) {
+  var crumb = $("cre-explorer-crumb");
+  if (crumb) {
+    clear(crumb);
+    var parts = wsPathSegments(data.path || "");
+    parts.forEach(function (seg, i) {
+      if (i > 0) crumb.appendChild(el("span", "sep", "›"));
+      var last = i === parts.length - 1;
+      var s = el("span", last ? "cur" : "seg", seg.name || "/");
+      if (!last) s.addEventListener("click", function () { wsExplorerLoad(seg.path); });
+      crumb.appendChild(s);
+    });
+  }
+  var list = $("cre-explorer-list");
+  if (!list) return;
+  clear(list);
+  var folders = data.folders || [];
+  var files = data.files || [];
+  if (data.parent) {
+    var up = el("div", "ws-row folder");
+    up.appendChild(wsIcon("folder"));
+    up.appendChild(el("span", "ws-nm", ".."));
+    up.addEventListener("click", function () { wsExplorerLoad(data.parent); });
+    list.appendChild(up);
+  }
+  folders.forEach(function (f) {
+    var row = el("div", "ws-row folder");
+    row.title = f.path;
+    row.appendChild(wsIcon("folder"));
+    row.appendChild(el("span", "ws-nm", f.name));
+    var plus = el("button", "ws-plus", "+");
+    plus.type = "button";
+    plus.title = "Add this folder to the pool";
+    plus.setAttribute("aria-label", "Add folder " + f.name + " to the pool");
+    plus.addEventListener("click", function (e) { e.stopPropagation(); poolAdd(f.path, "folder"); });
+    row.appendChild(plus);
+    row.addEventListener("click", function () { wsExplorerLoad(f.path); });
+    list.appendChild(row);
+  });
+  files.forEach(function (f) { list.appendChild(wsExplorerRow(f)); });
+  if (!folders.length && !files.length && !data.parent) {
+    list.appendChild(el("p", "ws-empty-note", "Leerer Ordner."));
+  }
+}
+
+/* the Media Pool is a DROP TARGET: dropping a video from the Explorer adds a
+   REFERENCE (POST .../pool {add:{path,kind:"file"}}). */
+(function () {
+  var drop = $("cre-pool-drop");
+  var zone = $("cre-pool-dropzone");
+  if (!drop) return;
+  var depth = 0;
+  function hide() { depth = 0; if (zone) zone.hidden = true; }
+  drop.addEventListener("dragenter", function (e) { e.preventDefault(); depth++; if (zone) zone.hidden = false; });
+  drop.addEventListener("dragover", function (e) { e.preventDefault(); try { e.dataTransfer.dropEffect = "copy"; } catch (err) {} });
+  drop.addEventListener("dragleave", function () { depth--; if (depth <= 0) hide(); });
+  drop.addEventListener("drop", function (e) {
+    e.preventDefault();
+    hide();
+    var path = "";
+    try { path = e.dataTransfer.getData("text/monteur-clip") || e.dataTransfer.getData("text/plain") || ""; } catch (err) {}
+    path = String(path || "").trim();
+    if (path) poolAdd(path, "file");
+  });
+})();
+
+/* ===== the Mini-Player + Inspector (right panel) ===================== */
+function wsClipLabels(path) {
+  var out = [];
+  (cre.clips || []).forEach(function (c) {
+    if (!c || c.path !== path) return;
+    (Array.isArray(c.moments) ? c.moments : []).forEach(function (m) {
+      if (m && m.label) out.push(String(m.label));
+      (m && Array.isArray(m.tags) ? m.tags : []).forEach(function (t) { out.push(String(t)); });
+    });
+  });
+  var seen = {}, uniq = [];
+  out.forEach(function (t) { if (t && !seen[t]) { seen[t] = 1; uniq.push(t); } });
+  return uniq.slice(0, 8);
+}
+
+function wsLoadClip(path, name) {
+  path = String(path || "");
+  if (!path) return;
+  var clip = (cre.poolClips || []).filter(function (c) { return c.path === path; })[0] || { path: path, name: name };
+  var empty = $("ws-viewer-empty");
+  if (empty) empty.hidden = true;
+  var v = $("ws-video");
+  if (v) {
+    var url = mediaUrl(path);
+    if (v.dataset.url !== url) { v.dataset.url = url; v.src = url; v.load(); }
+    var p = v.play();
+    if (p && p.catch) p.catch(function () { /* autoplay veto / undecodable — fine */ });
+  }
+  $("ws-insp-name").textContent = name || clip.name || baseName(path);
+  $("ws-insp-path").textContent = path;
+  var summary;
+  if (clip.sifted && typeof clip.usable_ratio === "number") {
+    summary = Math.round((clip.usable_ratio || 0) * 100) + "% usable · " + (clip.moments || 0) + " Momente";
+  } else if (clip.sifted) {
+    summary = "Analysiert";
+  } else {
+    summary = "Noch nicht analysiert";
+  }
+  $("ws-insp-analysis").textContent = summary;
+  var host = $("ws-insp-labels");
+  clear(host);
+  var labels = wsClipLabels(path);
+  if (labels.length) labels.forEach(function (t) { host.appendChild(el("span", "c", t)); });
+  else host.appendChild(el("span", "ws-dim", clip.labeled ? "labeled" : "—"));
+}
+
+function wsPause() { var v = $("ws-video"); if (v) { try { v.pause(); } catch (e) { /* nothing loaded */ } } }
+
+/* ===== the toolbar: grid/list view + icon size ====================== */
+var wsView = { mode: "grid", tile: 132 };
+function wsApplyView() {
+  var wrap = $("cre-pool-drop");
+  if (!wrap) return;
+  wrap.classList.toggle("pool-grid-view", wsView.mode === "grid");
+  wrap.classList.toggle("pool-list-view", wsView.mode === "list");
+  wrap.style.setProperty("--pool-tile", wsView.tile + "px");
+  var g = $("ws-view-grid"), l = $("ws-view-list");
+  if (g) g.classList.toggle("on", wsView.mode === "grid");
+  if (l) l.classList.toggle("on", wsView.mode === "list");
+}
+(function () {
+  var g = $("ws-view-grid"), l = $("ws-view-list");
+  function setMode(m) { return function () { wsView.mode = m; wsApplyView(); }; }
+  function keyMode(m) { return function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); wsView.mode = m; wsApplyView(); } }; }
+  if (g) { g.addEventListener("click", setMode("grid")); g.addEventListener("keydown", keyMode("grid")); }
+  if (l) { l.addEventListener("click", setMode("list")); l.addEventListener("keydown", keyMode("list")); }
+  var dn = $("ws-size-dn"), up = $("ws-size-up");
+  if (dn) dn.addEventListener("click", function () { wsView.tile = Math.max(96, wsView.tile - 24); wsApplyView(); });
+  if (up) up.addEventListener("click", function () { wsView.tile = Math.min(220, wsView.tile + 24); wsApplyView(); });
+})();
 
 $("cre-browse-music").addEventListener("click", function () { browsePath("music", "cre-music", "cre-browse-music"); });
 $("cre-browse-musicdir").addEventListener("click", function () { browsePath("folder", "cre-music-dir", "cre-browse-musicdir"); });
@@ -5925,8 +6332,8 @@ $("cre-download").addEventListener("click", function () {
 /* ---- projects: every cut is a durable, always-saved project ----------
    The whole wizard state (footage folder -> media_pool, settings ->
    options, the FULL plan -> plan) persists to POST /api/projects/<id>;
-   step 1's "Continue where you left off" panel and the Project-Manager
-   home cards both list real projects (GET /api/projects). Opening a
+   the Project-Manager home cards list real projects (GET /api/projects)
+   and are where you open a cut. Opening a
    project restores the controls and rebuilds the result card via POST
    /api/create/export — pure plan -> file on the server, so nothing is
    ever re-planned. A cut is created (New Cut) or lazily on first save,
@@ -5964,37 +6371,6 @@ function projectPoolText(project) {
   var n = (project && project.pool_size) || 0;
   if (!n) return "No footage yet";
   return n === 1 ? "1 source in the pool" : n + " sources in the pool";
-}
-
-function renderDrafts(list) {
-  var host = $("cre-drafts-list");
-  clear(host);
-  $("cre-drafts").hidden = !list.length;
-  list.forEach(function (project) {
-    var li = el("li", "seg-item");
-    li.appendChild(el("span", "seg-take", String(project.name || "Untitled cut")));
-    if (project.has_plan) li.appendChild(el("span", "sem-pill", "Plan ready"));
-    li.appendChild(el("span", "seg-time", relTime(project.modified_at)));
-    li.appendChild(el("span", "seg-label", projectPoolText(project)));
-    var resume = el("button", "btn small", "Open");
-    resume.type = "button";
-    resume.setAttribute("aria-label", "Open project " + String(project.name || ""));
-    resume.addEventListener("click", function () { openProject(project.id, resume); });
-    li.appendChild(resume);
-    var del = el("button", "btn ghost small", "Delete");
-    del.type = "button";
-    del.setAttribute("aria-label", "Delete project " + String(project.name || ""));
-    del.addEventListener("click", function () {
-      busy(del, function () {
-        return api("/api/projects/" + encodeURIComponent(String(project.id)), { method: "DELETE" }).then(function () {
-          if (String(project.id) === String(cre.projectId)) { cre.projectId = null; cre.projectName = ""; }
-          refreshProjects();
-        });
-      });
-    });
-    li.appendChild(del);
-    host.appendChild(li);
-  });
 }
 
 function renderPmRecents(list) {
@@ -6042,8 +6418,7 @@ function renderPmRecents(list) {
 function refreshProjects() {
   api("/api/projects").then(function (data) {
     var list = (data && data.projects) || [];
-    renderDrafts(list);      // the wizard's "Continue where you left off" panel
-    renderPmRecents(list);   // ...and the Project-Manager home cards
+    renderPmRecents(list);   // the Project-Manager home cards (open a project here)
   }).catch(function () { /* the panel is a convenience — never an error state */ });
 }
 
@@ -10542,7 +10917,7 @@ $("set-yt-disconnect").addEventListener("click", function () {
 updateMainVisibility();
 refreshVersions();
 loadResolve();
-refreshProjects(); // reload-safety: offer "Continue where you left off" right away
+refreshProjects(); // reload-safety: list the real projects on Home right away
 reattachActiveJob(); // ...and reattach the UI to a scan the reload forgot but the server still runs
 
 })();

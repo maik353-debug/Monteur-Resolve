@@ -84,6 +84,8 @@ API (all JSON):
 * ``GET  /api/jobs/<id>``                                       -> the job dict
 * ``POST /api/jobs/<id>/cancel``                                -> {"ok": true}
 * ``POST /api/pick``          {"kind": "folder"|"music"|"file"} -> {"path"} | {"error"}
+* ``GET  /api/browse/list``   ?path=<dir>  -> {"path", "parent",
+  "folders": [...], "files": [...]}  (the Explorer's directory listing)
 * ``GET  /api/settings``                                        -> the settings view
 * ``POST /api/settings``      {"backend"?, "api_key"?,
   "resolve_python"?}                                            -> the view after applying
@@ -3259,6 +3261,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/create/export-video"): self._create_export_video,
             ("GET", "/api/thumb"): self._thumb,
             ("GET", "/api/media"): self._media,
+            ("GET", "/api/browse/list"): self._browse_list,
             ("POST", "/api/proxies"): self._proxies_start,
             ("POST", "/api/create/resolve"): self._create_resolve,
             ("GET", "/api/drafts"): self._drafts_list,
@@ -4557,6 +4560,60 @@ class MonteurHandler(BaseHTTPRequestHandler):
         if kind not in ("folder", "music", "file"):
             raise ApiError(400, "'kind' must be 'folder', 'music' or 'file'")
         self._send_json(_native_pick(kind))
+
+    def _browse_list(self) -> None:
+        """GET /api/browse/list?path=<dir> — an in-app directory listing.
+
+        The Explorer panel of the Media workspace: the current folder's
+        SUBFOLDERS and VIDEO FILES, so the user can navigate the disk and drag
+        clips into the pool without a native OS dialog. Deterministic and
+        offline — folders come from ``os.listdir`` (directories only), video
+        files from :func:`monteur.sift.list_media` (by extension, never a
+        probe). An empty ``path`` starts at the home directory; a missing or
+        unreadable directory is a soft 400, never a crash. Hidden entries
+        (dotfiles) are skipped. Returns ``{path, parent, folders, files}``
+        where ``parent`` is ``""`` at the filesystem root.
+        """
+        from urllib.parse import parse_qs, urlsplit
+
+        from monteur.media import MonteurMediaError
+        from monteur.sift import list_media
+
+        query = parse_qs(urlsplit(self.path).query)
+        raw = (query.get("path") or [""])[0].strip()
+        start = os.path.expanduser(raw) if raw else os.path.expanduser("~")
+        path = os.path.abspath(start)
+        if not os.path.isdir(path):
+            raise ApiError(400, f"not a directory: {raw or path}")
+        try:
+            names = sorted(os.listdir(path), key=lambda s: s.lower())
+        except OSError as exc:
+            raise ApiError(400, f"cannot read directory: {exc}")
+        folders = []
+        for name in names:
+            if name.startswith("."):
+                continue
+            full = os.path.join(path, name)
+            try:
+                if os.path.isdir(full):
+                    folders.append({"path": full, "name": name})
+            except OSError:  # noqa: PERF203 — a bad entry is skipped, not fatal
+                continue
+        try:
+            media = list_media(path)
+        except MonteurMediaError:
+            media = []
+        files = [
+            {"path": str(p), "name": p.name}
+            for p in media
+            if not p.name.startswith(".")
+        ]
+        parent = os.path.dirname(path)
+        if parent == path:  # filesystem root — no further up
+            parent = ""
+        self._send_json(
+            {"path": path, "parent": parent, "folders": folders, "files": files}
+        )
 
     # -- AI connection settings ---------------------------------------------
 
