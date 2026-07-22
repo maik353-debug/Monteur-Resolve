@@ -152,8 +152,10 @@ h1, h2, h3, p { margin: 0; }
    lets the caption sit flush in the corner. In a browser none of this shows
    and the bar is exactly the ordinary app top bar. */
 .tb-left { display: flex; align-items: center; gap: 4px; min-width: 0; }
-.tb-menu { display: none; align-items: center; margin-left: 8px; }
-:root.native-shell .tb-menu { display: flex; }
+/* the File/View/Help menu is the universal control surface — Settings and
+   everything else live here, in the browser and in the native shell alike.
+   (Only the window caption buttons below are native-shell-only.) */
+.tb-menu { display: flex; align-items: center; margin-left: 8px; }
 .menu-wrap { position: relative; }
 .menu-top {
   border: 0; background: transparent; color: var(--ink-2); cursor: default;
@@ -1768,12 +1770,8 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
     <span class="tb-home-label" id="tb-home-label">Projects</span>
   </div>
   <div class="tb-right">
-    <button class="theme-btn" id="settings-open" type="button" aria-label="Settings">
-      <svg viewBox="0 0 16 16" aria-hidden="true">
-        <circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.5"/>
-        <path d="M8 1.4 V3.6 M8 12.4 V14.6 M1.4 8 H3.6 M12.4 8 H14.6 M3.3 3.3 L4.9 4.9 M11.1 11.1 L12.7 12.7 M12.7 3.3 L11.1 4.9 M4.9 11.1 L3.3 12.7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-      </svg>
-    </button>
+    <!-- Settings live in the File menu; theme lives in Settings › Appearance.
+         Nothing floats loose on the bar. -->
     <!-- native window caption buttons (shown only in the pywebview shell) -->
     <div class="tb-caption" id="tb-caption">
       <button class="capbtn cap-min" id="cap-min" type="button" title="Minimize" aria-label="Minimize">
@@ -3708,14 +3706,12 @@ var APP_MENUS = [
     { label: "New Movie", run: function () { setView("movie"); } },
     { label: "Analyze a timeline…", run: function () { setView("pacing"); } },
     { sep: true },
-    { label: "Settings…", run: function () { var b = $("settings-open"); if (b) b.click(); } },
+    { label: "Settings…", run: function () { openSettings(false); } },
     { sep: true },
     { label: "Close window", run: function () { nativeWindowCall("close"); } }
   ] },
   { label: "View", items: [
-    { label: "Home", run: function () { setView("home"); } },
-    { sep: true },
-    { label: "Toggle light / dark", run: function () { if (window.monteurTheme) window.monteurTheme.toggle(); } }
+    { label: "Home", run: function () { setView("home"); } }
   ] },
   { label: "Help", items: [
     { label: "About Monteur", run: function () { toast("Monteur Studio — footage in, set a direction, iterate, finished video out.", ""); } }
@@ -11668,7 +11664,9 @@ function openSettings(scrollTo) {
 
 function closeSettings() {
   $("settings-modal").hidden = true;
-  $("settings-open").focus();
+  // return focus to the menu bar (Settings opens from File → Settings…)
+  var top = document.querySelector("#tb-menu .menu-top");
+  if (top) top.focus();
 }
 
 function setSettingsTab(pane) {
@@ -11688,7 +11686,6 @@ Array.prototype.forEach.call(document.querySelectorAll("#set-tabs .set-tab"), fu
   tab.addEventListener("click", function () { setSettingsTab(tab.getAttribute("data-pane")); });
 });
 
-$("settings-open").addEventListener("click", function () { openSettings(false); });
 $("settings-close").addEventListener("click", closeSettings);
 $("settings-modal").addEventListener("keydown", function (e) {
   if (e.key === "Escape") closeSettings();
