@@ -4385,6 +4385,85 @@ function renderVisionExtras(result) {
   }
 }
 
+/* reload-safety: remember the single active long job (the scan) so a browser
+   reload can reattach to it — the server keeps running either way. All access
+   is guarded: localStorage may throw in private mode, and a malformed record
+   is treated as absent. */
+var ACTIVE_JOB_KEY = "monteur:activeJob";
+function saveActiveJob(rec) {
+  try { window.localStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify(rec)); } catch (e) { /* private mode */ }
+}
+function clearActiveJob() {
+  try { window.localStorage.removeItem(ACTIVE_JOB_KEY); } catch (e) { /* private mode */ }
+}
+function loadActiveJob() {
+  try {
+    var raw = window.localStorage.getItem(ACTIVE_JOB_KEY);
+    if (!raw) return null;
+    var rec = JSON.parse(raw);
+    if (!rec || typeof rec !== "object" || !rec.jobId) return null;
+    return rec;
+  } catch (e) { return null; }
+}
+
+/* Wire the scan panel's handlers to a job id — shared by the fresh-start path
+   (scanFolder) and the reload reattach path so the handler logic lives once.
+   Every terminal state clears the stored record so a finished job never
+   reattaches again. */
+function attachScanJob(jobId) {
+  scanPanel.start(jobId, {
+    onDone: function (result) {
+      clearActiveJob();
+      setScanBusy(false);
+      cre.clips = (result && result.clips) || [];
+      renderClips();
+      renderVisionExtras(result);
+      // the scan kicked the background proxy transcodes — watch quietly
+      startProxyWatch(result && result.proxies_job);
+      // a labeled scan is what makes the composed cut sharp — suggest it
+      if (!cre.aiCutTouched) $("cre-ai-cut").checked = scanHasVision(cre.clips);
+      updateSuggestion();
+      toast("Scanned " + cre.clips.length + (cre.clips.length === 1 ? " clip." : " clips."), "success");
+      if (cre.clips.length) $("cre-next-1").focus();
+    },
+    onCancelled: function () {
+      clearActiveJob();
+      setScanBusy(false);
+      creNote("cre-scan-msg", "Scan cancelled — nothing was changed. Scan again whenever you're ready.");
+      $("cre-scan-btn").focus();
+    },
+    onError: function (message) {
+      clearActiveJob();
+      setScanBusy(false);
+      creNote("cre-scan-msg", message, true);
+      toast(message, "error");
+    }
+  });
+}
+
+/* On page load, reattach to a still-running scan the browser forgot about — so
+   progress, the heartbeat, Cancel and the eventual result all work as if the
+   user never left. No stored record → nothing happens (startup is unchanged). */
+function reattachActiveJob() {
+  var rec = loadActiveJob();
+  if (!rec || rec.kind !== "scan") return;
+  api("/api/jobs/" + rec.jobId).then(function (job) {
+    if (job.state === "running" || job.state === "done") {
+      // running: restore the footage step and re-wire the live poll.
+      // done: reattach too, so the clips appear from the finished result.
+      setView("create");
+      creShowStep(1);
+      $("cre-folder").value = rec.folder || "";
+      setScanBusy(true);
+      attachScanJob(rec.jobId);
+    } else {
+      clearActiveJob(); // cancelled / error — nothing to show, no scary note
+    }
+  }).catch(function () {
+    clearActiveJob(); // 404 (job gone, e.g. server restarted) — clear silently
+  });
+}
+
 function scanFolder() {
   if (scanPanel.running()) return;
   var folder = $("cre-folder").value.trim();
@@ -4416,31 +4495,9 @@ function scanFolder() {
   var body = { folder: folder };
   if (seeEnabled()) body.see = true;
   api("/api/create/scan", { method: "POST", body: body }).then(function (data) {
-    scanPanel.start(data.job, {
-      onDone: function (result) {
-        setScanBusy(false);
-        cre.clips = (result && result.clips) || [];
-        renderClips();
-        renderVisionExtras(result);
-        // the scan kicked the background proxy transcodes — watch quietly
-        startProxyWatch(result && result.proxies_job);
-        // a labeled scan is what makes the composed cut sharp — suggest it
-        if (!cre.aiCutTouched) $("cre-ai-cut").checked = scanHasVision(cre.clips);
-        updateSuggestion();
-        toast("Scanned " + cre.clips.length + (cre.clips.length === 1 ? " clip." : " clips."), "success");
-        if (cre.clips.length) $("cre-next-1").focus();
-      },
-      onCancelled: function () {
-        setScanBusy(false);
-        creNote("cre-scan-msg", "Scan cancelled — nothing was changed. Scan again whenever you're ready.");
-        $("cre-scan-btn").focus();
-      },
-      onError: function (message) {
-        setScanBusy(false);
-        creNote("cre-scan-msg", message, true);
-        toast(message, "error");
-      }
-    });
+    // remember this job so a browser reload can reattach to it while it runs
+    saveActiveJob({ jobId: data.job, kind: "scan", folder: folder, see: seeEnabled(), ts: Date.now() });
+    attachScanJob(data.job);
   }).catch(function (err) {
     setScanBusy(false);
     var message = err && err.message ? err.message : String(err);
@@ -9833,6 +9890,7 @@ updateMainVisibility();
 refreshVersions();
 loadResolve();
 refreshDrafts(); // reload-safety: offer "Continue where you left off" right away
+reattachActiveJob(); // ...and reattach the UI to a scan the reload forgot but the server still runs
 
 })();
 </script>
