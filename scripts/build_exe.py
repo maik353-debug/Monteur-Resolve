@@ -75,6 +75,16 @@ def main() -> int:
     suffix = ".exe" if sys.platform.startswith("win") else ""
     final = dist / f"Monteur-{_version()}-{_platform_tag()}{suffix}"
     shutil.copy2(built, final)
+
+    # sign the shell if a cert is configured (no-op otherwise)
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import sign
+
+        sign.sign_file(final)
+    except Exception as exc:  # noqa: BLE001 - signing is optional, never fatal here
+        print(f"(signing skipped: {exc})")
+
     print(f"\nDone → {final}")
     print("Ship this single file — the target machine needs no Python.")
     return 0

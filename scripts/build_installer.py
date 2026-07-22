@@ -55,6 +55,16 @@ def main() -> int:
         return result.returncode
 
     out = ROOT / "dist" / f"Monteur-Setup-{version}.exe"
+
+    # sign the installer if a cert is configured (no-op otherwise)
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import sign
+
+        sign.sign_file(out)
+    except Exception as exc:  # noqa: BLE001 - signing is optional, never fatal
+        print(f"(signing skipped: {exc})")
+
     print(f"\nDone → {out}")
     print("Ship this installer. It never touches %USERPROFILE%\\.monteur.")
     return 0

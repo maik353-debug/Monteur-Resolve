@@ -114,10 +114,46 @@ entirely outside the install folder. Consequences:
   to `~/.monteur/studio`, never into its read-only install folder — so a
   per-user or Program Files install both work.
 
+## Icon
+
+The app icon is generated from the brand mark:
+
+```bash
+pip install pillow            # in the [build] extra
+python scripts/make_icon.py   # -> packaging/monteur.ico (+ monteur.png)
+```
+
+`monteur.ico` is committed, and the PyInstaller spec embeds it automatically
+when present, so the exe and its shortcuts carry the icon. Re-run the script
+only if the mark changes.
+
+## Code-signing (SmartScreen trust)
+
+Unsigned, Windows SmartScreen shows "Unknown publisher" on first run. Signing is
+opt-in and wired into both build scripts (a clean no-op when no cert is set):
+
+```bash
+# either a PFX file…
+set MONTEUR_SIGN_PFX=C:\path\to\cert.pfx
+set MONTEUR_SIGN_PASS=…
+# …or a thumbprint already in the Windows cert store
+set MONTEUR_SIGN_SHA1=<thumbprint>
+
+python scripts/build_exe.py         # signs the shell
+python scripts/build_installer.py   # signs the installer
+# or sign a file directly:  python scripts/sign.py dist\Monteur-Setup-0.1.0.exe
+```
+
+`scripts/sign.py` calls the Windows SDK's `signtool` (SHA-256 + an RFC-3161
+timestamp so signatures outlive the cert). Get a certificate from a CA
+(Sectigo/DigiCert): an **OV** cert works but earns SmartScreen reputation
+slowly; an **EV** cert is trusted immediately. This is the one step that needs
+your own secret — everything else builds unsigned without it.
+
 ## Notes
 
 - The `[app]` extra (pywebview) must be present in the build environment.
 - On Windows, pywebview uses WebView2 (bundled with modern Edge — nothing extra
   on the target). macOS/Linux use WebKit / GTK·Qt; the same spec covers them.
-- The checksum guards integrity, not authenticity. Code-signing the shell +
-  installer (so Windows SmartScreen trusts them) is the next hardening step.
+- The payload checksum guards integrity, not authenticity — code-signing (above)
+  is what proves the publisher.

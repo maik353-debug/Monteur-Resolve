@@ -168,8 +168,12 @@ Craft templates:
       proxies/history live in `~/.monteur`, outside the install folder, so
       install/update/uninstall never touch them, and the windowed app writes
       its working files to `~/.monteur/studio`, never its read-only install
-      dir. NEXT: code-sign the shell + installer (SmartScreen trust); an app
-      icon; macOS `.dmg` / Linux `.AppImage`. See `docs/PACKAGING.md`.
+      dir. An app icon is generated from the brand mark
+      (`scripts/make_icon.py` → `packaging/monteur.ico`, embedded by the spec),
+      and code-signing is wired into both build scripts (`scripts/sign.py`,
+      opt-in via a cert env var, a no-op otherwise). NEXT: an actual signing
+      cert (OV/EV for SmartScreen trust); macOS `.dmg` / Linux `.AppImage`.
+      See `docs/PACKAGING.md`.
 - [x] **In-app updates (payload split, Electron-style).** The app is split
       into a rarely-changing **shell** (the ~70 MB executable) and a small
       **payload** (`monteur` + `app.html`, ~650 KB). Help → Check for updates…
