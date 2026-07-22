@@ -5708,6 +5708,29 @@ class TestProUiStatic:
             assert look in source, look
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_series_in_create_markup_and_wiring(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            # the "How many videos?" control in Options + the Short picker
+            'id="cre-series-row"',
+            'id="series-1"',
+            'id="series-2"',
+            'id="cre-series-strip"',
+            "function setSeriesCount",
+            "function startSeriesBuild",
+            "function loadSeriesShort",
+            "function renderSeriesStrip",
+            # a series posts to its own endpoint; the single build branches
+            "/api/create/series",
+            "startSeriesBuild(andThen); return;",
+            "body.series = cre.seriesCount",
+            # the whole set persists in the project options
+            "options.series_shorts = cre.series.shorts",
+            "series_active",
+        ):
+            assert needle in source, needle
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_inspector_markup_and_wiring(self):
         source = _APP_HTML.read_text(encoding="utf-8")
         for needle in (
@@ -6474,11 +6497,14 @@ class TestNoRebuildOnCleanReturn:
         html = _APP_HTML.read_text(encoding="utf-8")
         assert "cre.buildFp = buildFingerprintOf(body);" in html  # build done
         assert "cre.buildFp = buildFingerprint();" in html        # draft resume
-        # exactly four assignments: build start (null), build success,
-        # resume, and the footage-changed reset — revise/apply/adjust/swap
-        # never touch it, so a revision can't be rebuilt away by navigation
-        assert html.count("cre.buildFp =") == 4
-        assert html.count("cre.buildFp = null") == 2
+        # six assignments: the single build's start (null) + success, the
+        # series build's start (null) + success, resume, and the
+        # footage-changed reset — revise/apply/adjust/swap never touch it, so
+        # a revision can't be rebuilt away by navigation
+        assert html.count("cre.buildFp =") == 6
+        assert html.count("cre.buildFp = null") == 3
+        # both build paths store the SAME fingerprint shape on success
+        assert html.count("cre.buildFp = buildFingerprintOf(body);") == 2
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_rebuild_button_is_still_the_manual_override(self):

@@ -545,6 +545,26 @@ svg text.axis {
 .cg-val { font-family: var(--mono); font-size: 11px; color: var(--ink-muted); text-align: right; }
 #cg-reset { margin-top: 12px; align-self: flex-start; }
 @media (max-width: 640px) { .color-grid { grid-template-columns: 1fr; } }
+/* the Series strip: pick which Short you're editing (each is a full cut) */
+.series-strip {
+  display: flex; align-items: stretch; flex-wrap: wrap; gap: 8px;
+  margin: 14px 0 4px; padding: 10px; border: 1px solid var(--border);
+  border-radius: 5px; background: var(--surface-2);
+}
+.series-strip-label {
+  align-self: center; font-family: var(--mono); font-size: 10.5px;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-muted);
+  margin-right: 4px;
+}
+.series-chip {
+  display: flex; flex-direction: column; gap: 2px; text-align: left;
+  padding: 6px 12px; border: 1px solid var(--border); border-radius: 5px;
+  background: var(--surface); color: var(--ink); cursor: pointer;
+}
+.series-chip:hover, .series-chip:focus-visible { border-color: var(--axis); }
+.series-chip.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.series-chip b { font-size: 12.5px; font-weight: 650; }
+.series-chip-sub { font-family: var(--mono); font-size: 10px; color: var(--ink-muted); }
 /* the project meta line under the working-draft title (style · length ·
    aspect · N clips → N cuts) — the clean NLE header */
 .proj-head { margin-bottom: 4px; }
@@ -2048,6 +2068,14 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           <button type="button" id="plat-custom" aria-pressed="true">Custom</button>
         </div>
         <p class="help-small" id="cre-platform-info" aria-live="polite">Your own mix &mdash; shape, length and style stay exactly as you set them below.</p>
+        <h3 class="fgroup-title">How many videos?</h3>
+        <div class="seg-toggle" role="group" aria-label="How many videos" id="cre-series-row">
+          <button type="button" id="series-1" aria-pressed="true">One cut</button>
+          <button type="button" id="series-2" aria-pressed="false">2 Shorts</button>
+          <button type="button" id="series-3" aria-pressed="false">3</button>
+          <button type="button" id="series-4" aria-pressed="false">4</button>
+        </div>
+        <p class="help-small" id="cre-series-info" aria-live="polite">One cut from your footage. Pick 2&ndash;4 to turn a single tour into that many distinct vertical Shorts &mdash; no moment repeats across the set.</p>
         <div class="wiz-cols">
           <div>
             <h3 class="fgroup-title">Soundtrack</h3>
@@ -2224,6 +2252,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         <div id="cre-build-panel"></div>
         <p class="scan-note" id="cre-build-msg" role="status" hidden></p>
         <div id="cre-result" hidden>
+          <div class="series-strip" id="cre-series-strip" hidden></div>
           <div class="proj-head">
             <h2 class="seg-heading" id="cre-result-title" tabindex="-1" style="margin: 14px 0 0;">Your working draft</h2>
             <p class="proj-meta" id="cre-proj-meta" hidden></p>
@@ -4597,6 +4626,8 @@ var cre = {
   projectId: null,        // the real project this cut persists to (null = not created yet)
   projectName: "",        // the current project's name (kept in sync with the store)
   grade: { brightness: 0, contrast: 0, saturation: 0, warmth: 0, look: "" }, // the colour grade (step 4)
+  seriesCount: 1,         // how many videos: 1 = a single cut, >1 = a Series of Shorts
+  series: null,           // the built series {shorts:[...], active} when seriesCount > 1
   buildFp: null,          // fingerprint of the options the working draft was BUILT with
                           // (set on build success / draft resume; null = no clean draft)
   aiCutTouched: false,    // has the user decided about "Claude composes the cut"?
@@ -6536,6 +6567,8 @@ function creBuildBody() {
   // the "What are you making?" chip: the server re-resolves the preset
   // (canvas forced, length capped, style unless explicitly overridden)
   if (cre.platform && cre.platform !== "custom") body.platform = cre.platform;
+  // a Series of N Shorts (only sent when chosen; the single build ignores it)
+  if ((cre.seriesCount || 1) > 1) body.series = cre.seriesCount;
   if (seeEnabled()) body.see = true;
   var music = $("cre-music").value.trim();
   if (cre.audio !== "original" && music) body.music = music;
@@ -6668,6 +6701,7 @@ function renderCreResult(data) {
   $("cre-export-result").hidden = true;
   prepareExportRow();
   $("cre-result").hidden = false;
+  renderSeriesStrip(); // shows the Short picker when a series is active
   // the harvest step (4: Your cut) is reachable once a draft exists
   $("cre-next-3").disabled = false;
   $("cre-next-3b").disabled = false;
@@ -6675,6 +6709,9 @@ function renderCreResult(data) {
 
 function startBuild(andThen) {
   if (buildPanel.running()) return;
+  // a series of Shorts takes its own path (N plans, not one)
+  if ((cre.seriesCount || 1) > 1) { startSeriesBuild(andThen); return; }
+  cre.series = null; // a single build clears any prior series
   var body = creBuildBody();
   if (!body.folder) { toast("Add your footage folder in step 1 first."); creShowStep(1, true); return; }
   if (cre.audio !== "original" && !body.music) { toast("Add the path to your song in step 2 first."); creShowStep(2, true); return; }
@@ -6736,6 +6773,123 @@ function startBuild(andThen) {
   });
 }
 $("cre-build-btn").addEventListener("click", function () { startBuild(null); });
+
+/* ================= Series: one tour -> several Shorts =================
+   When "Number of videos" is >1 the build posts to /api/create/series and
+   comes back with N full plans (each a zero-repeat Short). cre.series holds
+   the set + which one is active; loadSeriesShort feeds the active plan into
+   the exact single-cut pipeline (storyboard, colour, export), so a Short is
+   edited like any other cut. The whole set persists in the project. */
+function setSeriesCount(n) {
+  cre.seriesCount = n;
+  [1, 2, 3, 4].forEach(function (k) {
+    var b = $("series-" + k);
+    if (b) b.setAttribute("aria-pressed", String(k === n));
+  });
+  var info = $("cre-series-info");
+  if (info) info.textContent = n > 1
+    ? n + " distinct vertical Shorts from one tour — no moment repeats across the set. Each Short is edited (and graded, exported) on its own below."
+    : "One cut from your footage. Pick 2–4 to turn a single tour into that many distinct vertical Shorts — no moment repeats across the set.";
+}
+[1, 2, 3, 4].forEach(function (k) {
+  var b = $("series-" + k);
+  if (b) b.addEventListener("click", function () { setSeriesCount(k); });
+});
+
+function seriesResultForShort(short) {
+  var pj = (short && short.plan_json) || {};
+  return {
+    plan_json: pj,
+    plan: {
+      duration: pj.duration || 0,
+      cuts: (pj.entries || []).length,
+      tempo: pj.tempo || 0,
+      notes: pj.notes || [],
+      entries: pj.entries || []
+    }
+  };
+}
+function loadSeriesShort(i, focus) {
+  var s = cre.series;
+  if (!s || !s.shorts || !s.shorts[i]) return;
+  s.active = i;
+  var result = seriesResultForShort(s.shorts[i]);
+  rev.planJson = result.plan_json;
+  rev.pins = [];
+  rev.lastBody = null;
+  cre.result = { data: result, format: cre.format, body: (cre.result && cre.result.body) || creBuildBody(), kind: "series" };
+  resetDirectorNotes();
+  resetPreview();
+  renderStoryboard();
+  renderCreResult(result);
+  renderSeriesStrip();
+  saveProject();
+  if (focus) $("cre-result-title").focus();
+}
+function renderSeriesStrip() {
+  var strip = $("cre-series-strip");
+  if (!strip) return;
+  clear(strip);
+  var s = cre.series;
+  if (!s || !s.shorts || s.shorts.length < 2) { strip.hidden = true; return; }
+  strip.hidden = false;
+  strip.appendChild(el("span", "series-strip-label", s.shorts.length + " Shorts · zero repeats"));
+  s.shorts.forEach(function (short, i) {
+    var seed = short.seed || {};
+    var label = String(seed.label || "").trim() || baseName(seed.clip_path || "");
+    var btn = el("button", "series-chip" + (i === s.active ? " on" : ""));
+    btn.type = "button";
+    btn.appendChild(el("b", null, "Short " + (i + 1)));
+    btn.appendChild(el("span", "series-chip-sub", label + " · " + fmtClock(short.duration || 0)));
+    btn.setAttribute("aria-pressed", String(i === s.active));
+    btn.addEventListener("click", function () { loadSeriesShort(i, true); });
+    strip.appendChild(btn);
+  });
+}
+function startSeriesBuild(andThen) {
+  if (buildPanel.running()) return;
+  var body = creBuildBody();
+  if (!body.folder) { toast("Add your footage folder in step 1 first."); creShowStep(creStepIndex("footage"), true); return; }
+  rememberFps(body.fps);
+  $("cre-build-msg").hidden = true;
+  $("cre-result").hidden = true;
+  cre.buildFp = null;
+  setBuildBusy(true);
+  api("/api/create/series", { method: "POST", body: body }).then(function (data) {
+    buildPanel.start(data.job, {
+      onDone: function (result) {
+        setBuildBusy(false);
+        cre.buildFp = buildFingerprintOf(body);
+        cre.series = { shorts: (result && result.shorts) || [], active: 0 };
+        cre.result = { data: null, format: body.format, body: body, kind: "series" };
+        creUpdatePages();
+        if (!cre.series.shorts.length) {
+          creNote("cre-build-msg", "No series could be built from this footage — try a single cut, or add more distinct moments.", true);
+          return;
+        }
+        loadSeriesShort(0, true);
+        if (result && result.vision_error) {
+          creNote("cre-build-msg", "Claude couldn't watch the clips: " + String(result.vision_error) + " The Shorts still built without labels.");
+        }
+        if (andThen) andThen(result);
+      },
+      onCancelled: function () {
+        setBuildBusy(false);
+        creNote("cre-build-msg", "Series build cancelled — nothing was written.");
+      },
+      onError: function (message) {
+        setBuildBusy(false);
+        creNote("cre-build-msg", message, true);
+        toast(message, "error");
+      }
+    });
+  }).catch(function (err) {
+    setBuildBusy(false);
+    var message = err && err.message ? err.message : String(err);
+    creNote("cre-build-msg", message, true);
+    toast(message, "error");
+  });
+}
 
 function setCreFormat(fmt) {
   cre.format = fmt;
@@ -6906,6 +7060,7 @@ function newProject() {
   cre.poolSel = {};
   renderPool({ clips: [], entries: [] });
   restoreGrade(null);         // a fresh project starts on a neutral grade
+  cre.series = null; setSeriesCount(1); // ...and as a single cut, not a series
   creResetRevise();       // clear any plan/storyboard left from the previous cut
   creUpdatePages();
   cre.projectId = null;
@@ -6948,6 +7103,13 @@ function projectManifestFromState() {
   if (tempo) options.tempo = tempo;
   if (dnotes.review) options.review = dnotes.review;
   if (!gradeIsNeutral(cre.grade) || cre.grade.look) options.grade = gradeToDict(cre.grade);
+  // a Series persists its whole set of Shorts + which one is active, so the
+  // project reopens with every Short intact (not just the active cut)
+  if (cre.series && cre.series.shorts && cre.series.shorts.length > 1) {
+    options.series_count = cre.seriesCount;
+    options.series_shorts = cre.series.shorts;
+    options.series_active = cre.series.active || 0;
+  }
   var pool = (cre.pool || []).map(function (e) {
     return { path: e.path, kind: e.kind === "folder" ? "folder" : "file" };
   });
@@ -7119,10 +7281,13 @@ function projectToDraftShape(project) {
     if (pool[i].kind === "folder") { folder = String(pool[i].path); break; }
     if (!folder) folder = String(pool[i].path); // fall back to the first entry
   }
+  var RESUME_ONLY = { music: 1, pins: 1, tempo: 1, review: 1, grade: 1,
+    series_count: 1, series_shorts: 1, series_active: 1 };
   var settings = {};
   Object.keys(options).forEach(function (k) {
-    if (k !== "music" && k !== "pins" && k !== "tempo" && k !== "review" && k !== "grade") settings[k] = options[k];
+    if (!RESUME_ONLY[k]) settings[k] = options[k];
   });
+  var seriesShorts = Array.isArray(options.series_shorts) ? options.series_shorts : null;
   return {
     id: project.id,
     name: project.name || "",
@@ -7133,7 +7298,10 @@ function projectToDraftShape(project) {
     pins: Array.isArray(options.pins) ? options.pins : [],
     tempo: options.tempo || 0,
     review: options.review || null,
-    grade: (options.grade && typeof options.grade === "object") ? options.grade : null
+    grade: (options.grade && typeof options.grade === "object") ? options.grade : null,
+    seriesCount: options.series_count || (seriesShorts ? seriesShorts.length : 1),
+    series: (seriesShorts && seriesShorts.length > 1)
+      ? { shorts: seriesShorts, active: options.series_active || 0 } : null
   };
 }
 
@@ -7158,6 +7326,8 @@ function openProject(id, btn) {
       cre.projectName = draft.name || "New cut";
       restoreWizardFromDraft(draft);
       restoreGrade(draft.grade); // the saved Look & colour grade
+      cre.seriesCount = draft.seriesCount || 1; setSeriesCount(cre.seriesCount);
+      cre.series = draft.series || null; // the saved Series of Shorts (if any)
       // the media pool comes from the manifest (multi-entry); fetch it fresh so
       // the cards carry per-clip status, then feed the downstream scan folder
       cre.pool = (project.media_pool || []).map(function (e) {
@@ -7548,6 +7718,7 @@ function creResetRevise() {
   $("cre-strip").hidden = true;
   $("cre-tl-frame").hidden = true;
   $("cre-tl-bar").hidden = true;
+  var seriesStrip = $("cre-series-strip"); if (seriesStrip) { clear(seriesStrip); seriesStrip.hidden = true; }
   clear($("cre-sb-board"));
   $("cre-storyboard").hidden = true;
   $("cre-sb-story").hidden = true;
