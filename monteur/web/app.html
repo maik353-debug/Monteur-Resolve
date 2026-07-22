@@ -7035,11 +7035,26 @@ function renderPmRecents(list) {
     card.appendChild(thumb);
     var meta = el("div", "pm-card-meta");
     meta.appendChild(el("h3", null, String(project.name || "Untitled cut")));
-    var bits = [relTime(project.modified_at), projectPoolText(project)];
-    if (project.has_plan) bits.push("Plan ready");
+    var bits;
+    if (ptype === "movie") {
+      bits = [relTime(project.modified_at), "Movie project"];
+    } else {
+      bits = [relTime(project.modified_at), projectPoolText(project)];
+      if (project.has_plan) bits.push("Plan ready");
+    }
     meta.appendChild(el("p", null, bits.filter(Boolean).join(" · ")));
     card.appendChild(meta);
-    card.addEventListener("click", function () { setView("create"); openProject(project.id, card); });
+    // route by tool: a Movie pointer reopens the film in the Movie view by
+    // its folder path; a Cut opens in Create
+    if (ptype === "movie") {
+      card.addEventListener("click", function () {
+        if (!project.movie_path) { toast("This movie's folder path is missing — open it from the Movie page."); setView("movie"); return; }
+        setView("movie");
+        busy(card, function () { return movOpenPath(project.movie_path); });
+      });
+    } else {
+      card.addEventListener("click", function () { setView("create"); openProject(project.id, card); });
+    }
     host.appendChild(card);
   });
   applyPmFilter(); // respect the active type filter on every re-render
@@ -11282,6 +11297,23 @@ function movOpenProjectData(dir, data) {
   movRenderScenes();
 }
 
+/* open a movie project by folder path — shared by the Open button and the
+   Home recents (a movie recents card reopens the film by its stored path) */
+function movOpenPath(dir) {
+  $("mov-open-dir").value = dir;
+  $("mov-open-msg").hidden = true;
+  return api("/api/movie/load", {
+    method: "POST", body: { project_dir: dir }
+  }).then(function (data) {
+    movOpenProjectData(dir, data);
+    toast("Opened “" + (data.project.title || "Untitled") + "” — " +
+      data.project.scenes.length + " scenes.", "success");
+  }).catch(function (err) {
+    var message = err && err.message ? err.message : String(err);
+    creNote("mov-open-msg", message, true);
+    throw err; // busy() shows the toast
+  });
+}
 $("mov-open-btn").addEventListener("click", function () {
   var dir = $("mov-open-dir").value.trim();
   if (!dir) {
@@ -11289,20 +11321,7 @@ $("mov-open-btn").addEventListener("click", function () {
     $("mov-open-dir").focus();
     return;
   }
-  $("mov-open-msg").hidden = true;
-  busy($("mov-open-btn"), function () {
-    return api("/api/movie/load", {
-      method: "POST", body: { project_dir: dir }
-    }).then(function (data) {
-      movOpenProjectData(dir, data);
-      toast("Opened “" + (data.project.title || "Untitled") + "” — " +
-        data.project.scenes.length + " scenes.", "success");
-    }).catch(function (err) {
-      var message = err && err.message ? err.message : String(err);
-      creNote("mov-open-msg", message, true);
-      throw err; // busy() shows the toast
-    });
-  });
+  busy($("mov-open-btn"), function () { return movOpenPath(dir); });
 });
 $("mov-open-dir").addEventListener("keydown", function (e) {
   if (e.key === "Enter") { e.preventDefault(); $("mov-open-btn").click(); }

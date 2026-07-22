@@ -6671,6 +6671,44 @@ def _step2_html(html):
     return html.split('id="cre-step-2"', 1)[1].split('id="cre-step-3"', 1)[0]
 
 
+class TestMovieRecents:
+    """A Movie project indexes itself as a lightweight recents pointer."""
+
+    def test_register_indexes_a_movie_pointer(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MONTEUR_PROJECTS_PATH", str(tmp_path / "projects"))
+        from monteur import projects
+        from monteur.web import server
+
+        class _Stub:
+            title = "Nebel"
+
+        mdir = str(tmp_path / "films" / "nebel")
+        server._register_movie_recent(mdir, _Stub())
+        listed = projects.list_projects()
+        assert len(listed) == 1
+        entry = listed[0]
+        assert entry["type"] == "movie"
+        assert entry["name"] == "Nebel"
+        assert entry["movie_path"] == os.path.abspath(mdir)
+        assert entry["id"].startswith("mv")
+        # reopening the SAME folder updates the one entry, never duplicates
+        server._register_movie_recent(mdir, _Stub())
+        assert len(projects.list_projects()) == 1
+        # a different film is a separate pointer
+        server._register_movie_recent(str(tmp_path / "films" / "other"), _Stub())
+        assert len(projects.list_projects()) == 2
+
+    def test_register_never_raises(self, monkeypatch):
+        # best-effort: a bad projects root must not break the movie endpoint
+        from monteur.web import server
+
+        class _Stub:
+            title = "X"
+
+        monkeypatch.setattr(server.os.path, "abspath", lambda p: (_ for _ in ()).throw(OSError("boom")))
+        server._register_movie_recent("/whatever", _Stub())  # must not raise
+
+
 class TestAutoFirstOptionsUi:
     """Static asserts: pace + transitions moved INTO the Fine-tune block,
     both defaulting to Auto — the main Options view keeps only the big

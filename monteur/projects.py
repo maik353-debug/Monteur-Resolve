@@ -335,17 +335,20 @@ def list_projects() -> list[dict]:
         project = load_project(bundle.name)
         if project is None:
             continue
-        summaries.append(
-            {
-                "id": project.id,
-                "name": project.name,
-                "created_at": project.created_at,
-                "modified_at": project.modified_at,
-                "pool_size": len(project.media_pool),
-                "has_plan": project.has_plan,
-                "type": project.type or "cut",
-            }
-        )
+        summary = {
+            "id": project.id,
+            "name": project.name,
+            "created_at": project.created_at,
+            "modified_at": project.modified_at,
+            "pool_size": len(project.media_pool),
+            "has_plan": project.has_plan,
+            "type": project.type or "cut",
+        }
+        # a Movie pointer reopens by folder path (the movie lives in its own
+        # bundle on disk, not here) — carry it so the recents card can route
+        if project.type == "movie" and project.options.get("movie_path"):
+            summary["movie_path"] = str(project.options.get("movie_path"))
+        summaries.append(summary)
     summaries.sort(key=lambda s: str(s.get("modified_at") or ""), reverse=True)
     return summaries
 

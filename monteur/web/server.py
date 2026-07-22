@@ -2727,6 +2727,39 @@ def _movie_module():
     return importlib.import_module("monteur.movie")
 
 
+def _register_movie_recent(project_dir: str, project) -> None:
+    """Index a Movie project in the recents store as a lightweight pointer
+    (type "movie", the film's title + its folder path), so it shows on the
+    Home next to cuts and under the Movie filter. The movie folder is never
+    copied — the pointer just reopens it by path. A stable id (hashed path)
+    means reopening the same movie updates one entry, not a duplicate.
+    Best-effort: any failure here must never break the movie endpoint.
+    """
+    try:
+        import hashlib
+
+        from monteur import projects
+
+        abspath = os.path.abspath(os.path.expanduser(str(project_dir)))
+        if not abspath:
+            return
+        pid = "mv" + hashlib.sha1(abspath.encode("utf-8")).hexdigest()[:14]
+        name = str(getattr(project, "title", "") or os.path.basename(abspath) or "Movie")
+        existing = projects.load_project(pid)
+        if existing is not None:
+            existing.name = name
+            existing.type = "movie"
+            existing.options["movie_path"] = abspath
+            projects.save_project(existing)  # bumps modified_at
+        else:
+            projects.create_project(
+                name, type="movie", project_id=pid,
+                options={"movie_path": abspath},
+            )
+    except Exception:  # noqa: BLE001 — a recents pointer is never load-bearing
+        pass
+
+
 def _movie_payload(movie, project) -> dict:
     """The response body every movie endpoint shares: project + progress
     + the deterministic shoot plan (:func:`monteur.movie.shoot_plan` —
@@ -2758,6 +2791,7 @@ def _run_movie_job(job: dict, payload: dict) -> None:
             payload.get("brief", ""), genre=payload.get("genre", "")
         )
         paths = movie.save_project(project, payload.get("project_dir", ""))
+        _register_movie_recent(payload.get("project_dir", ""), project)  # index on the Home
         result = _movie_payload(movie, project)
         result["paths"] = [str(p) for p in paths]
         job["result"] = result
@@ -4586,6 +4620,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             project = movie.load_project(project_dir)
         except (FileNotFoundError, ValueError, OSError) as exc:
             raise ApiError(400, str(exc))
+        _register_movie_recent(project_dir, project)  # index it on the Home
         self._send_json(_movie_payload(movie, project))
 
     def _movie_new(self) -> None:
