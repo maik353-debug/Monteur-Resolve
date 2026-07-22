@@ -6742,6 +6742,61 @@ class TestNativeShell:
         assert title == "Monteur Studio"
         assert url == "http://127.0.0.1:8801/"
         assert kw.get("width") and kw.get("height")  # a real window size
+        # frameless: app.html draws its own Fluent title bar + drives the
+        # window through the js_api bridge
+        assert kw.get("frameless") is True
+        assert isinstance(kw.get("js_api"), server._WindowControls)
+
+    def test_window_controls_bridge_drives_the_window(self):
+        import types
+
+        from monteur.web import server
+
+        recorder = []
+
+        class _Win:
+            def minimize(self):
+                recorder.append("minimize")
+
+            def maximize(self):
+                recorder.append("maximize")
+
+            def restore(self):
+                recorder.append("restore")
+
+            def destroy(self):
+                recorder.append("destroy")
+
+        wv = types.ModuleType("webview")
+        wv.windows = [_Win()]
+        controls = server._WindowControls(wv)
+        controls.minimize()
+        controls.toggle_maximize()  # -> maximize
+        controls.toggle_maximize()  # -> restore
+        controls.close()
+        assert recorder == ["minimize", "maximize", "restore", "destroy"]
+
+    def test_window_controls_never_raise(self):
+        import types
+
+        from monteur.web import server
+
+        # no windows yet, and a window whose methods explode: still no crash
+        wv = types.ModuleType("webview")
+        wv.windows = []
+        server._WindowControls(wv).minimize()  # no window -> no-op
+
+        class _Bad:
+            def minimize(self):
+                raise RuntimeError("boom")
+
+            def destroy(self):
+                raise RuntimeError("boom")
+
+        wv.windows = [_Bad()]
+        controls = server._WindowControls(wv)
+        controls.minimize()  # swallowed
+        controls.close()  # swallowed
 
     def test_serve_app_falls_back_to_browser_without_pywebview(self, monkeypatch):
         from monteur.web import server

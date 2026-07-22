@@ -5251,6 +5251,58 @@ def serve(
         _restore_diagnostic_hooks(*prev_hooks)
 
 
+class _WindowControls:
+    """The JS bridge for a frameless window's custom title bar.
+
+    Exposed to the page as ``window.pywebview.api`` — the caption buttons in
+    app.html call ``minimize()`` / ``toggle_maximize()`` / ``close()``. Every
+    call resolves the live pywebview window and swallows any error, so a
+    platform quirk in one control can never wedge the whole window. Takes the
+    ``webview`` module so it is unit-testable with a stub.
+    """
+
+    def __init__(self, webview_module) -> None:
+        self._wv = webview_module
+        self._maximized = False
+
+    def _window(self):
+        windows = getattr(self._wv, "windows", None) or []
+        return windows[0] if windows else None
+
+    def minimize(self) -> None:
+        win = self._window()
+        if win is not None:
+            try:
+                win.minimize()
+            except Exception:  # noqa: BLE001 — a caption button must never crash
+                pass
+
+    def toggle_maximize(self) -> None:
+        win = self._window()
+        if win is None:
+            return
+        try:
+            if self._maximized:
+                restore = getattr(win, "restore", None)
+                if restore:
+                    restore()
+            else:
+                maximize = getattr(win, "maximize", None)
+                if maximize:
+                    maximize()
+            self._maximized = not self._maximized
+        except Exception:  # noqa: BLE001
+            pass
+
+    def close(self) -> None:
+        win = self._window()
+        if win is not None:
+            try:
+                win.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def serve_app(
     port: int = 8765,
     project_root: str = ".",
@@ -5303,8 +5355,17 @@ def serve_app(
         raise RuntimeError("Monteur Studio's server did not start in time")
 
     print(f"Monteur Studio window open ({holder['url']}). Close it to stop.", flush=True)
+    # frameless: app.html draws its own Fluent title bar (drag region + caption
+    # buttons) and drives min/maximize/close through this js_api bridge
     webview.create_window(
-        title, holder["url"], width=size[0], height=size[1], min_size=(900, 600)
+        title,
+        holder["url"],
+        width=size[0],
+        height=size[1],
+        min_size=(900, 600),
+        frameless=True,
+        easy_drag=False,  # the title bar's -webkit-app-region owns dragging
+        js_api=_WindowControls(webview),
     )
     webview.start()  # blocks on the main thread until the window is closed
 
