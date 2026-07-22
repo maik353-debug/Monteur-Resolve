@@ -95,6 +95,7 @@
   --phase-build: #c9d7ee;
   --phase-climax: #eed7ba;
   --phase-outro: #dbcfe8;
+  --clip: #6f8ba1; --clip-2: #7f97ad; --music: #6ba97c; --sfx: #9b7fb8; --title: #b6b6be;
   --btn-bg: var(--accent);
   --btn-ink: #ffffff;
   --veil: rgba(233, 233, 236, 0.85);
@@ -1063,10 +1064,11 @@ svg text.axis {
 }
 .exact-preview { margin-top: 10px; }
 
-/* the timeline strip doubles as the playout scrubber */
+/* the timeline strip doubles as the playout scrubber; the playhead spans
+   every lane (top:0/bottom:0 = the whole stacked track area) */
 .tl-playhead {
-  position: absolute; top: 0; height: 64px; width: 2px; margin-left: -1px;
-  background: var(--accent); pointer-events: none; z-index: 3;
+  position: absolute; top: 16px; bottom: 0; width: 2px; margin-left: -1px;
+  background: var(--accent); pointer-events: none; z-index: 4;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
 }
 
@@ -1200,24 +1202,64 @@ input.sb-dip-input {
   font-size: 9.5px; line-height: 1.3; text-align: center;
 }
 
-/* timeline strip: proportional clip blocks over a beat/energy lane.
-   Block WIDTH = duration share, background = story-arc phase; black
-   notches are the smash-to-black dips; the canvas lane underneath draws
-   the song's energy, downbeat ticks, cut hairlines and the drop marker. */
-.tl-strip { margin: 10px 0 4px; position: relative; touch-action: none; }
+/* ===== multi-lane timeline (Resolve idiom) ==========================
+   A fixed-width track-header gutter (V1 / TITLE / A1 / A2) beside the time
+   axis. #cre-strip stays the PURE time axis at full width, so the scrubber
+   and playhead math (client-x across its rect) is unchanged; the lanes
+   stack inside it and the gutter's rows are height-matched to align.
+   Top lane V1 = the cut (block width = duration share, colour = story
+   phase, black notches = smash-to-black dips). Below it a title lane
+   (markers on the dips), the A1 music lane (the canvas: energy curve,
+   downbeat ticks, cut hairlines, the drop) and an A2 SFX lane (planned
+   sound cues). A ruler on top carries the time ticks. */
+.tl-frame { display: flex; align-items: stretch; margin: 12px 0 5px; }
+.tl-gutter {
+  flex: 0 0 60px; display: flex; flex-direction: column;
+  border: 1px solid var(--border); border-right: 0; border-radius: 3px 0 0 3px;
+  overflow: hidden; background: var(--surface-2);
+}
+.tlg {
+  display: flex; align-items: center; gap: 4px; padding: 0 7px;
+  font-size: 9px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--ink-muted);
+  border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden;
+}
+.tlg:last-child { border-bottom: 0; }
+.tlg-ruler { height: 16px; }
+.tlg-v1 { height: 34px; color: var(--ink-2); }
+.tlg-title { height: 18px; }
+.tlg-a1 { height: 30px; color: var(--ink-2); }
+.tlg-a2 { height: 18px; }
+.tlg i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.tlg .sw-clip { background: var(--clip); }
+.tlg .sw-title { background: var(--title); }
+.tlg .sw-music { background: var(--music); }
+.tlg .sw-sfx { background: var(--sfx); }
+
+.tl-strip { flex: 1 1 auto; min-width: 0; position: relative; touch-action: none; }
+.tl-ruler {
+  position: relative; height: 16px; overflow: hidden;
+  border: 1px solid var(--border); border-radius: 0 3px 0 0;
+  background: var(--surface-2);
+}
+.tl-tick { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--grid); }
+.tl-tick > span {
+  position: absolute; top: 3px; left: 3px; font-family: var(--mono);
+  font-size: 8.5px; line-height: 1; color: var(--ink-muted); white-space: nowrap;
+}
 .tl-blocks {
   display: flex; align-items: stretch; height: 34px;
-  border: 1px solid var(--border); border-radius: 3px 3px 0 0;
+  border: 1px solid var(--border); border-top: 0;
   overflow: hidden; background: var(--input-bg);
 }
 .tl-block {
   position: relative; flex: 0 0 auto; min-width: 3px;
   border: 0; border-left: 1px solid var(--page); padding: 0; margin: 0;
-  cursor: pointer; background: var(--phase-none); border-radius: 0;
+  cursor: pointer; background: var(--clip); border-radius: 0;
 }
 .tl-block:first-child { border-left: 0; }
 .tl-block:hover, .tl-block:focus-visible { filter: brightness(1.22); }
-.tl-block.sel { box-shadow: inset 0 0 0 2px var(--accent); filter: none; }
+.tl-block.sel { box-shadow: inset 0 0 0 2px var(--accent); filter: none; z-index: 2; }
 .tl-block.ph-opening, .tl-legend i.ph-opening { background: var(--phase-opening); }
 .tl-block.ph-build, .tl-legend i.ph-build { background: var(--phase-build); }
 .tl-block.ph-climax, .tl-legend i.ph-climax { background: var(--phase-climax); }
@@ -1228,13 +1270,32 @@ input.sb-dip-input {
   border-radius: 50%; background: var(--warning);
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45); pointer-events: none;
 }
+/* the A1 music canvas */
 .tl-lane {
   display: block; width: 100%; height: 30px;
-  border: 1px solid var(--border); border-top: 0; border-radius: 0 0 3px 3px;
-  background: var(--input-bg);
+  border: 1px solid var(--border); border-top: 0; background: var(--input-bg);
+}
+/* the title + SFX marker lanes: absolute markers over a plain track */
+.tl-mlane {
+  position: relative; height: 18px; overflow: hidden;
+  border: 1px solid var(--border); border-top: 0; background: var(--input-bg);
+}
+.tl-mlane.tl-sfxlane { border-radius: 0 0 3px 0; }
+.tl-titlemark {
+  position: absolute; top: 2px; bottom: 2px; min-width: 44px; max-width: 40%;
+  display: flex; align-items: center; padding: 0 5px; overflow: hidden;
+  background: var(--title); border-radius: 2px;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.28);
+  font-size: 9px; line-height: 1; color: #ececed;
+  white-space: nowrap; text-overflow: ellipsis;
+}
+.tl-sfxmark {
+  position: absolute; top: 3px; bottom: 3px; min-width: 6px;
+  background: var(--sfx); border-radius: 2px; opacity: 0.92;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.28);
 }
 .tl-legend {
-  display: flex; flex-wrap: wrap; gap: 12px; margin: 5px 0 0;
+  display: flex; flex-wrap: wrap; gap: 12px; margin: 6px 0 0;
   font-size: 10px; font-weight: 650; letter-spacing: 0.06em;
   text-transform: uppercase; color: var(--ink-muted);
 }
@@ -2048,12 +2109,24 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           </div>
           <div class="kit-block" id="cre-storyboard" hidden>
             <p class="seg-heading">Timeline &amp; storyboard</p>
-            <div class="tl-strip" id="cre-strip" hidden>
-              <div class="tl-blocks" id="cre-strip-blocks"></div>
-              <canvas class="tl-lane" id="cre-strip-lane" height="30" aria-hidden="true"></canvas>
-              <div class="tl-playhead" id="cre-strip-playhead" aria-hidden="true" hidden></div>
-              <p class="tl-legend" id="cre-strip-legend" hidden></p>
+            <div class="tl-frame" id="cre-tl-frame" hidden>
+              <div class="tl-gutter" aria-hidden="true">
+                <div class="tlg tlg-ruler"></div>
+                <div class="tlg tlg-v1"><i class="sw-clip"></i>V1</div>
+                <div class="tlg tlg-title"><i class="sw-title"></i>Title</div>
+                <div class="tlg tlg-a1"><i class="sw-music"></i>A1</div>
+                <div class="tlg tlg-a2"><i class="sw-sfx"></i>A2</div>
+              </div>
+              <div class="tl-strip" id="cre-strip" hidden>
+                <div class="tl-ruler" id="cre-strip-ruler" aria-hidden="true"></div>
+                <div class="tl-blocks" id="cre-strip-blocks"></div>
+                <div class="tl-mlane tl-titlelane" id="cre-strip-titles" aria-hidden="true"></div>
+                <canvas class="tl-lane" id="cre-strip-lane" height="30" aria-hidden="true"></canvas>
+                <div class="tl-mlane tl-sfxlane" id="cre-strip-sfx" aria-hidden="true"></div>
+                <div class="tl-playhead" id="cre-strip-playhead" aria-hidden="true" hidden></div>
+              </div>
             </div>
+            <p class="tl-legend" id="cre-strip-legend" hidden></p>
             <div class="sb-board" id="cre-sb-board"></div>
             <p class="help-small">One card per shot in record order, grouped by act; the black cards are dips to black &mdash; click their text to edit the title. Click a shot &mdash; in the strip above or on its card &mdash; to open the inspector: swap its source, change its boundary, pin it. Pinned shots survive every revision exactly where they are.</p>
           </div>
@@ -7103,7 +7176,11 @@ function creResetRevise() {
   rev.lastBody = null;
   closeInspector();
   clear($("cre-strip-blocks"));
+  clear($("cre-strip-ruler"));
+  clear($("cre-strip-titles"));
+  clear($("cre-strip-sfx"));
   $("cre-strip").hidden = true;
+  $("cre-tl-frame").hidden = true;
   clear($("cre-sb-board"));
   $("cre-storyboard").hidden = true;
   $("cre-sb-story").hidden = true;
@@ -8117,7 +8194,11 @@ window.monteurPlayout = {
   pause: poPause,
   rebuild: poRebuild,
   plan: function () { return rev.planJson; },
-  entries: function () { return planSortedEntries(); }
+  entries: function () { return planSortedEntries(); },
+  // test seams for the multi-lane timeline: set a plan and (re)draw the
+  // strip without a full scan/build round-trip
+  setPlan: function (p) { rev.planJson = p; },
+  renderStrip: renderTimelineStrip
 };
 
 function startRevise(body, andThen) {
@@ -8465,14 +8546,16 @@ function cssVar(name) {
 
 function renderTimelineStrip() {
   var host = $("cre-strip");
+  var frame = $("cre-tl-frame");
   var blocks = $("cre-strip-blocks");
   clear(blocks);
   var plan = rev.planJson || {};
   var entries = planSortedEntries();
   var duration = plan.duration ||
     (entries.length ? entries[entries.length - 1].record_end || 0 : 0);
-  if (!entries.length || !duration) { host.hidden = true; return; }
+  if (!entries.length || !duration) { host.hidden = true; frame.hidden = true; return; }
   host.hidden = false;
+  frame.hidden = false;
   var dips = ((plan.dips || []).slice()).sort(function (a, b) {
     return (a[0] || 0) - (b[0] || 0);
   });
@@ -8520,8 +8603,74 @@ function renderTimelineStrip() {
     legend.appendChild(chip);
   });
   legend.hidden = seen.length === 0;
+  renderStripRuler(duration);
+  renderTitleLane(duration, dips, plan.title_texts || []);
+  renderSfxLane(duration, plan.sfx || []);
   drawStripLane();
   applyFindingBadges();
+}
+
+/* the ruler: evenly spaced time ticks with mono labels. Interval scales so
+   the strip carries ~6-10 marks whatever the cut's length. */
+function stripRulerStep(duration) {
+  if (duration <= 20) return 2;
+  if (duration <= 60) return 5;
+  if (duration <= 180) return 15;
+  if (duration <= 600) return 30;
+  return 60;
+}
+function renderStripRuler(duration) {
+  var ruler = $("cre-strip-ruler");
+  clear(ruler);
+  if (!duration) return;
+  var step = stripRulerStep(duration);
+  for (var t = 0; t < duration - 0.001; t += step) {
+    var tick = el("div", "tl-tick");
+    tick.style.left = (100 * t / duration) + "%";
+    tick.appendChild(el("span", null, fmtClock(t)));
+    ruler.appendChild(tick);
+  }
+}
+
+/* the Title lane: one marker per smash-to-black dip, placed at its record
+   time and carrying the composed act title (empty dips read "black"). */
+function renderTitleLane(duration, dips, titles) {
+  var lane = $("cre-strip-titles");
+  clear(lane);
+  if (!duration) return;
+  dips.forEach(function (dip, i) {
+    var start = dip[0] || 0;
+    var length = dip[1] || 0;
+    var mark = el("div", "tl-titlemark");
+    mark.style.left = (100 * start / duration) + "%";
+    mark.style.width = Math.max(0, 100 * length / duration) + "%";
+    var text = String((titles && titles[i]) || "").trim();
+    mark.textContent = text || "black";
+    mark.title = (text ? "Title: “" + text + "”" : "Dip to black") +
+      " · " + fmt1(length) + "s";
+    lane.appendChild(mark);
+  });
+}
+
+/* the A2 SFX lane: one marker per planned sound cue, coloured as the SFX
+   track, positioned at its time with the suggested length; the tooltip
+   carries the kind, the ready-to-paste library query and the why-note. */
+function renderSfxLane(duration, cues) {
+  var lane = $("cre-strip-sfx");
+  clear(lane);
+  if (!duration) return;
+  cues.forEach(function (cue) {
+    var time = cue.time || 0;
+    var length = cue.duration || 0;
+    var mark = el("div", "tl-sfxmark");
+    mark.style.left = (100 * time / duration) + "%";
+    mark.style.width = Math.max(0, 100 * length / duration) + "%";
+    var kind = String(cue.kind || "sfx");
+    var query = String(cue.query || "");
+    var note = String(cue.note || "");
+    mark.title = kind + (query ? " — " + query : "") + (note ? " · " + note : "");
+    lane.appendChild(mark);
+  });
 }
 
 /* the beat/energy lane: canvas, redrawn on resize and theme switch */
@@ -8542,12 +8691,14 @@ function drawStripLane() {
   ctx.clearRect(0, 0, cssWidth, laneHeight);
   function x(t) { return t / duration * cssWidth; }
   var accent = cssVar("--accent");
-  // energy area fill (plan.music_energy: 2 samples per second)
+  var music = cssVar("--music") || accent;
+  // energy area fill (plan.music_energy: 2 samples per second), in the A1
+  // music colour so the lane reads as the music track (the drop stays ember)
   var energy = plan.music_energy || [];
   if (energy.length > 1) {
     var rate = 2;
-    ctx.globalAlpha = 0.2;
-    ctx.fillStyle = accent;
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = music;
     ctx.beginPath();
     ctx.moveTo(0, laneHeight);
     energy.forEach(function (v, i) {
@@ -8556,8 +8707,8 @@ function drawStripLane() {
     ctx.lineTo(x((energy.length - 1) / rate), laneHeight);
     ctx.closePath();
     ctx.fill();
-    ctx.globalAlpha = 0.7;
-    ctx.strokeStyle = accent;
+    ctx.globalAlpha = 0.75;
+    ctx.strokeStyle = music;
     ctx.lineWidth = 1;
     ctx.beginPath();
     energy.forEach(function (v, i) {
@@ -8568,6 +8719,15 @@ function drawStripLane() {
     ctx.stroke();
     ctx.globalAlpha = 1;
   }
+  // planned silences: darker mute bands where the bed drops out
+  (plan.music_gaps || []).forEach(function (gap) {
+    var x0 = x(gap[0] || 0);
+    var x1 = x(gap[1] || 0);
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = cssVar("--input-bg") || "#000";
+    ctx.fillRect(x0, 0, Math.max(1, x1 - x0), laneHeight);
+    ctx.globalAlpha = 1;
+  });
   // cut positions as hairlines
   ctx.strokeStyle = cssVar("--axis");
   ctx.lineWidth = 1;

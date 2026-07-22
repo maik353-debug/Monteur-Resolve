@@ -5536,10 +5536,28 @@ class TestProUiStatic:
             # theme-aware redraw: CSS variables + data-theme observer
             "function cssVar",
             'attributeFilter: ["data-theme"]',
+            # multi-lane (Resolve idiom): track-header gutter + ruler + the
+            # Title and A2 SFX lanes, each fed from the plan
+            'id="cre-tl-frame"',
+            'class="tl-gutter"',
+            'id="cre-strip-ruler"',
+            'id="cre-strip-titles"',
+            'id="cre-strip-sfx"',
+            "function renderStripRuler",
+            "function renderTitleLane",
+            "function renderSfxLane",
+            "plan.title_texts",
+            "plan.sfx",
+            "plan.music_gaps",
+            "tl-titlemark",
+            "tl-sfxmark",
         ):
             assert needle in source, needle
         # phase colors exist in BOTH themes
         assert source.count("--phase-climax:") == 2
+        # the lane colour tokens are defined in BOTH themes
+        for token in ("--music:", "--sfx:", "--title:", "--clip:"):
+            assert source.count(token) == 2, token
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_inspector_markup_and_wiring(self):
@@ -6072,6 +6090,9 @@ class TestPlayoutAcceptance:
             assert page.evaluate(po + ".playing") is False
 
             # ---- scrub: click mid-strip -> the readout jumps ---------------
+            # the multi-lane strip sits low on the page; bring it fully into
+            # view so the coordinate click lands on the track, not off-screen
+            page.locator("#cre-strip").scroll_into_view_if_needed()
             box = page.locator("#cre-strip").bounding_box()
             page.mouse.click(box["x"] + box["width"] / 2, box["y"] + 8)
             t_mid = page.evaluate(po + ".t")
