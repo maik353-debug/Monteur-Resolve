@@ -127,10 +127,21 @@ starting there is reserved for the unused moment with the highest
 "short" style pins ONE cut the same way — on the best in-range drop,
 which is exactly the drop :func:`monteur.music.best_energy_window` placed
 inside the window with its 15% lead-in (co-designed, blueprint 1.5).
-Secondary-drop forced cuts in arc styles stay out (wave 2: they need
-their own phase-hold clearing). In all cases the drop slot is a HOLD
-(see Rhythm above): a pinned climax opens on a 2-4 beat held shot, and
-"auto"/"short" clear grid cuts inside ~2 beats after the forced cut.
+In a climax-bearing arc style the strongest SECONDARY drops (all in-range
+drops except the climax pin) now force their own hard cut too (blueprint
+2.1, :func:`_secondary_drops`): gated by a fraction of the climax drop's
+weight (:data:`_SECONDARY_DROP_WEIGHT_FRACTION`) and kept
+:data:`_SECONDARY_DROP_MIN_BEATS` beats clear of the climax and of each
+other, capped at :data:`_SECONDARY_DROP_MAX`. The climax pin and its 1.5
+arc-squeeze floors are untouched (the pin casts through the highlight
+phase, not the drop-slot reservation). A secondary drop landing inside a
+running phase-hold (the opening or a long climax hold) does not shred it:
+the hold runs UP TO the drop, cuts hard on it, and the phase pattern
+re-seats after — grid cuts inside ~2 beats after the drop are cleared and
+:func:`_absorb_slivers` drops any short remainder before it. In all cases
+the drop slot is a HOLD (see Rhythm above): a pinned climax opens on a
+2-4 beat held shot, and "auto"/"short"/the secondary drops clear grid
+cuts inside ~2 beats after the forced cut.
 
 Loop seam (blueprint 1.5, "short" style): a windowed short chooses its
 song-window END on a phrase boundary (:func:`_loop_seam_start` — the wrap
@@ -479,8 +490,9 @@ reads what the plan already knows:
 * a **riser** ENDING exactly on every act change (label changes only —
   the trailer's split build ramps inside one act and gets no riser),
   ``duration = min(2 s, prior phase / 2)``,
-* an **impact** ON the climax start and ON every drop-forced cut in
-  "auto",
+* an **impact** ON the climax start and ON every drop-forced cut —
+  "auto"'s every-drop cuts, "short"'s pin, and (blueprint 2.1) the arc
+  styles' secondary-drop cuts,
 * a **sub-drop** under every smash-to-black dip (a title slot wants a
   boom),
 * **whooshes** (0.6 s, centered on the cut) on up to 3 of the fastest
@@ -553,6 +565,7 @@ from monteur.music import (
     MusicSection,
     best_drop,
     best_energy_window,
+    drop_weight,
     intro_profile,
 )
 from monteur.sift import USABLE, ClipReport, Moment
@@ -616,6 +629,25 @@ _LEAD_MIN_SLOT = 0.25
 # the no-repeats truncation's straddle trim. Pinned drops beat the floor
 # (a sliver next to two protected boundaries stays, honestly).
 _MIN_SLOT_SECONDS = 0.3
+# J/L cuts (blueprint 2.3): at a chosen quiet scene transition the
+# original-sound edit point is decoupled from the picture cut by this small,
+# fps-aware lead/lag (~5 frames at 25 fps; quantized to whole frames per the
+# ``cut_lead_for`` spirit). A J-cut brings the NEXT shot's audio in early,
+# an L-cut lets the PREVIOUS shot's audio ring past — never at a
+# peak-on-beat/drop cut, a music-gap edge, a placed-SFX cut or a climax
+# boundary (see :func:`jl_audio_edits`).
+_JL_LEAD_SECONDS = 0.2
+# A boundary counts as "on" a drop / gap / SFX / cut position when it sits
+# within this many seconds of it — one frame of slop at the coarsest rates.
+_JL_ON_CUT_TOL = 0.05
+# Never leave either side of a J/L seam a solo-audio sliver: both the
+# shortened and the extended shot keep at least this much of their own,
+# un-overlapped original sound.
+_JL_MIN_SOLO = 0.4
+# J/L is a spice, not a rule: at most this many boundaries per montage are
+# decoupled, the highest-CONTRAST ones first (a real hot<->cool phrase
+# change beats a flat continuity seam), and never two in a row.
+_JL_MAX_CUTS = 4
 # Loop seam (blueprint 1.5, "short" style): the LAST slot's casting earns a
 # motion-continuity bonus for handing its EXIT motion back to the hook's
 # ENTRY motion — the visual half of the loop seam. Sized like the fill's
@@ -662,6 +694,24 @@ CANVASES: dict[str, tuple[int, int]] = {
 }
 # Drop alignment only when the drop falls inside this share of the montage.
 _DROP_ALIGN_MARGIN = 0.05
+# Secondary-drop forced cuts in arc styles (blueprint 2.1). In an arc style
+# only the CLIMAX pins the best drop; the other in-range drops are the
+# "secondary" drops. The strongest of them (up to _SECONDARY_DROP_MAX) force
+# a hard cut EXACTLY on the drop — but only when they musically carry and
+# sit far enough from the climax and from each other:
+#   * weight gate: a secondary must weigh at least this FRACTION of the
+#     climax drop's own weight (:func:`monteur.music.drop_weight`) — a
+#     softer drop than the payoff would cut for no reason. A section-less
+#     song weighs every drop 0.0, so nothing qualifies and the plan is
+#     byte-identical (the fraction of 0 is 0, and weight must be > 0).
+_SECONDARY_DROP_WEIGHT_FRACTION = 0.5
+#   * spacing gate: a secondary must be at least this many BEATS from the
+#     climax pin and from every already-accepted secondary — two hard drop
+#     cuts on top of each other shred the hold instead of hitting twice.
+_SECONDARY_DROP_MIN_BEATS = 8
+#   * count cap: at most this many secondary drops force a cut, strongest
+#     first — a trailer has one payoff and maybe one pre-drop, not five.
+_SECONDARY_DROP_MAX = 2
 # Candidate window (K): unconsumed pool items considered per slot.
 _CANDIDATE_WINDOW = 4
 # Blend weights for near-tie breaking among the candidate window.
@@ -1132,6 +1182,16 @@ class MontageEntry:
     media_start: float = 0.0  # seconds: the file's embedded start timecode (0 if none)
     clip_duration: float = 0.0  # seconds: the source file's real duration (0 if unknown)
     label: str = ""  # one-line vision label of the chosen moment ("" if unseen)
+    # J/L cut audio offsets (blueprint 2.3): the ORIGINAL-sound edit point,
+    # decoupled from the picture cut at a chosen scene transition.
+    # ``audio_lead`` > 0 (J-cut) = this shot's own audio starts that many
+    # seconds BEFORE its picture cut (anticipation); ``audio_lag`` > 0
+    # (L-cut) = this shot's own audio rings that many seconds PAST its
+    # picture-out (continuity). Both overlap the neighbour's picture and
+    # need matching source handles. Serialized only when set (the ``file``
+    # pattern), so plans without J/L cuts keep their exact bytes.
+    audio_lead: float = 0.0
+    audio_lag: float = 0.0
 
 
 @dataclass
@@ -1948,6 +2008,49 @@ def _build_style_grid(
     if downbeat_cuts:
         notes.append(f"{downbeat_cuts} cuts on downbeats")
     return cuts, phases, notes
+
+
+def _secondary_drops(
+    music: MusicAnalysis,
+    in_range: list[float],
+    climax_drop: float,
+    beat_s: float,
+) -> list[float]:
+    """Secondary drops that earn a forced cut (blueprint 2.1).
+
+    ``in_range`` are the in-range drops (already filtered to 5-95% of the
+    montage); ``climax_drop`` is the one the climax pinned. Returns the
+    subset of the OTHER in-range drops that force a hard cut on themselves,
+    sorted by time — the strongest by :func:`monteur.music.drop_weight`,
+    gated by :data:`_SECONDARY_DROP_WEIGHT_FRACTION` of the climax drop's
+    weight, kept :data:`_SECONDARY_DROP_MIN_BEATS` beats clear of the
+    climax and of each other, capped at :data:`_SECONDARY_DROP_MAX`. A
+    section-less song weighs every drop 0.0, so nothing qualifies and the
+    grid is byte-identical to before this feature.
+    """
+    climax_weight = drop_weight(music, climax_drop)
+    if climax_weight <= _EPS:
+        return []
+    threshold = _SECONDARY_DROP_WEIGHT_FRACTION * climax_weight
+    min_gap = _SECONDARY_DROP_MIN_BEATS * max(beat_s, _EPS)
+    # Candidates: OTHER in-range drops that clear the climax and carry
+    # enough weight, strongest first (ties earliest, mirroring best_drop).
+    cands = sorted(
+        (
+            d
+            for d in in_range
+            if abs(d - climax_drop) >= min_gap - _EPS
+            and drop_weight(music, d) >= threshold - _EPS
+        ),
+        key=lambda d: (-drop_weight(music, d), d),
+    )
+    chosen: list[float] = []
+    for d in cands:
+        if len(chosen) >= _SECONDARY_DROP_MAX:
+            break
+        if all(abs(d - c) >= min_gap - _EPS for c in chosen):
+            chosen.append(d)
+    return sorted(chosen)
 
 
 def _build_pseudo_grid(
@@ -4636,6 +4739,64 @@ def plan_montage(
                     f"short: cut pinned on the drop at {pin:.1f}s; "
                     "strongest moment assigned"
                 )
+        elif phases:
+            # Secondary-drop forced cuts (blueprint 2.1): a climax-bearing
+            # arc style pins ONLY the climax on the best drop; the strongest
+            # SECONDARY drops now force their own hard cut too. The climax
+            # pin (and its 1.5 arc-squeeze floors) is untouched — it is not
+            # in ``drop_starts`` and casts through the highlight phase, not
+            # the drop-slot reservation. Each secondary is a HOLD like the
+            # climax: the phase-hold it lands in runs UP TO the drop, cuts
+            # hard on it, then re-seats — grid cuts inside ~2 beats after
+            # the drop are cleared (below), and _absorb_slivers drops any
+            # short remainder before it, so a running opening/climax hold is
+            # cleared cleanly instead of shredded into slivers.
+            climax_start = next(
+                (s for s, _e, lab in phases if lab == "climax"), None
+            )
+            in_range = [
+                d
+                for d in sorted(grid_music.drops)
+                if _DROP_ALIGN_MARGIN * length <= d <= (1 - _DROP_ALIGN_MARGIN) * length
+            ]
+            # Only when the climax actually pinned an in-range drop: that is
+            # the well-defined state 2.1 describes, and it keeps styles whose
+            # climax could not pin (drop out of range, climax at an edge)
+            # byte-identical.
+            if (
+                climax_start is not None
+                and in_range
+                and any(abs(climax_start - d) <= _EPS for d in in_range)
+            ):
+                beat_s = 60.0 / grid_music.tempo if grid_music.tempo > 0 else _PSEUDO_BEAT
+                secondaries = _secondary_drops(
+                    grid_music, in_range, climax_start, beat_s
+                )
+                for d in secondaries:
+                    if not any(abs(c - d) <= _EPS for c in cuts):
+                        bisect.insort(cuts, d)
+                    drop_starts.append(d)
+                    grid_notes.append(
+                        f"secondary drop at {d:.1f}s forces a cut; "
+                        "strongest unused moment assigned"
+                    )
+                if drop_starts:
+                    # Phase-hold clearing: the drop slot is a 2-beat HOLD, so
+                    # grid cuts inside ~2 beats after each secondary drop are
+                    # cleared (the montage end, the climax pin and other drop
+                    # cuts always survive). The climax start is NOT a
+                    # drop_start, so its own hold and arc-squeeze floors are
+                    # left exactly as the grid built them.
+                    hold = 2 * _pulse_interval(grid_music)
+                    cuts = [
+                        c
+                        for c in cuts
+                        if c >= length - _EPS
+                        or any(abs(c - d) <= _EPS for d in drop_starts)
+                        or not any(
+                            d + _EPS < c < d + hold - _EPS for d in drop_starts
+                        )
+                    ]
     else:
         cuts, grid_notes = _build_grid(grid_music, length, auto_steps)
         # Auto style: every in-range drop forces a cut exactly on the drop;
@@ -5227,7 +5388,9 @@ def _plan_sfx(
         )
 
     # 3. Impacts: ON the climax start (arc styles; when a drop pinned the
-    #    climax this IS the drop) and ON every drop-forced cut in "auto".
+    #    climax this IS the drop) and ON every drop-forced cut — "auto"'s
+    #    every-drop cuts, "short"'s pin, and the arc styles' secondary-drop
+    #    cuts (blueprint 2.1; all carried in ``drop_starts``).
     climax_start = next((s for s, _, lab in phases if lab == "climax"), None)
     if climax_start is not None and _EPS < climax_start < duration - _EPS:
         essential.append(
@@ -5537,12 +5700,174 @@ def _prune_music_gaps(
     plan.music_gaps = [(lo, hi) for lo, hi in plan.music_gaps if keep(lo, hi)]
 
 
+def _jl_beat_seconds(plan: MontagePlan) -> float:
+    """A beat-length estimate for J/L tolerances (from the plan alone).
+
+    ``beat_marks`` are downbeats (~4 beats apart); their median spacing / 4
+    is the beat. With fewer than two marks fall back to a musical default.
+    """
+    marks = sorted(t for t in plan.beat_marks)
+    gaps = sorted(b - a for a, b in zip(marks, marks[1:]) if b - a > _EPS)
+    if gaps:
+        return gaps[len(gaps) // 2] / _BEATS_PER_BAR
+    return _PSEUDO_BEAT
+
+
+def jl_audio_edits(
+    plan: MontagePlan, fps: float = 25.0
+) -> tuple[dict[int, tuple[float, float]], list[str]]:
+    """Decide the J/L cut audio offsets for a plan (blueprint 2.3).
+
+    Returns ``({entry_index: (lead, lag)}, notes)`` — deterministic, from
+    the plan's OWN data (entries, phases, drop_marks, music_gaps, placed
+    SFX), so it survives a save/load round-trip. ``lead`` on an entry
+    (J-cut) brings its own audio in that many seconds early; ``lag``
+    (L-cut) rings it that many seconds past its picture-out. An entry that
+    already carries a non-zero ``audio_lead``/``audio_lag`` (a hand-
+    authored or revised plan) is respected verbatim and its boundary is
+    never recomputed — "hand-built plans without J/L stay byte-identical",
+    and hand-built plans WITH J/L keep exactly what they set.
+
+    A boundary between shot *i* and *i+1* earns a J or an L cut ONLY where
+    it serves and never breaks a promise:
+
+    * the picture cut is a HARD cut between DIFFERENT clips (a dissolve, a
+      same-clip continuation or a black-dip gap is left alone);
+    * it is not on a drop (``drop_marks``) — a drop-forced cut stays synced;
+    * it is not on a music-gap edge (the deliberate silence is sacred);
+    * no placed SFX/impact element sits on the cut;
+    * neither side is a ``climax`` phase — the peak-on-beat coincidences
+      live there, and sync is sacred (a conservative, plan-only proxy for
+      "never at a peak-on-beat cut").
+
+    Direction reads the arc energy (:data:`_PHASE_ENERGY`): a hot→cool
+    handover L-cuts (the hot tail rings into the calm), a cool→hot one
+    J-cuts (the coming energy anticipated); an even/quiet continuity
+    defaults to a gentle L-cut. The lead/lag is the small, fps-quantized
+    :data:`_JL_LEAD_SECONDS`, clamped so each shot keeps
+    :data:`_JL_MIN_SOLO` of un-overlapped audio and so the overlap has the
+    source handles it needs (the incoming shot's head for a J, the
+    outgoing shot's tail for an L; an unknown ``clip_duration`` blocks the
+    L-cut honestly). Empty result = no decoupling, byte-identical exports.
+    """
+    edits: dict[int, tuple[float, float]] = {}
+    notes: list[str] = []
+    entries = plan.entries
+    # Respect any hand-authored offsets verbatim (and mark their boundaries
+    # as spoken-for so the auto pass never doubles them).
+    handled: set[int] = set()
+    for i, e in enumerate(entries):
+        if e.audio_lead > _EPS or e.audio_lag > _EPS:
+            edits[i] = (max(0.0, e.audio_lead), max(0.0, e.audio_lag))
+            handled.add(i)
+            if e.audio_lead > _EPS:
+                handled.add(i - 1)
+            if e.audio_lag > _EPS:
+                handled.add(i + 1)
+    if len(entries) < 2:
+        return edits, notes
+
+    beat_s = _jl_beat_seconds(plan)
+    frame = 1.0 / fps if fps > 0 else 0.0
+    base = _JL_LEAD_SECONDS
+    if frame > 0:  # fps-aware: quantize to whole frames (cut_lead_for spirit)
+        base = max(frame, round(_JL_LEAD_SECONDS / frame) * frame)
+
+    def on_any(t: float, marks) -> bool:
+        return any(abs(t - float(m)) <= _JL_ON_CUT_TOL + _EPS for m in marks)
+
+    gap_edges = [g for pair in plan.music_gaps for g in pair]
+    sfx_times = [c.time for c in plan.sfx if getattr(c, "file", "")]
+    # Pass 1: collect every eligible boundary with its direction, the
+    # concrete lead/lag it could take, and its energy contrast (the
+    # selection key — a real hot<->cool change earns the cut before a flat
+    # continuity seam).
+    cands: list[tuple[float, int, int, str, float]] = []  # (-contrast, i, ...)
+    for i in range(len(entries) - 1):
+        if i in handled or (i + 1) in handled:
+            continue
+        prev, nxt = entries[i], entries[i + 1]
+        cut = prev.record_end
+        if abs(nxt.record_start - cut) > _JL_ON_CUT_TOL:
+            continue  # a gap (black dip) sits between them — not a cut
+        if nxt.transition > _EPS:
+            continue  # a dissolve, not a hard cut
+        if prev.clip_path == nxt.clip_path:
+            continue  # a continuing take — no scene transition to decouple
+        if on_any(cut, plan.drop_marks) or on_any(cut, gap_edges):
+            continue  # sync / silence edges are sacred
+        if on_any(cut, sfx_times):
+            continue  # a placed SFX/impact owns this cut
+        lab_out = _phase_label_at(plan.phases, prev.record_start)
+        lab_in = _phase_label_at(plan.phases, nxt.record_start)
+        if lab_out == "climax" or lab_in == "climax":
+            continue  # peaks live in the climax; leave the sync alone
+        prev_len = prev.record_end - prev.record_start
+        next_len = nxt.record_end - nxt.record_start
+        room = min(prev_len, next_len) - _JL_MIN_SOLO
+        if room <= _EPS:
+            continue  # too tight to decouple without a solo-audio sliver
+        amount = min(base, room)
+        e_out = _PHASE_ENERGY.get(lab_out or "", 0.5)
+        e_in = _PHASE_ENERGY.get(lab_in or "", 0.5)
+        if e_in > e_out + _EPS:
+            # cool -> hot: J-cut, the next shot's audio anticipates. Needs
+            # the incoming shot's head handles (file-relative source before
+            # its in-point).
+            lead = min(amount, max(0.0, nxt.source_start))
+            if lead <= _EPS:
+                continue
+            cands.append((-(e_in - e_out), i, i + 1, "J", lead))
+        else:
+            # hot -> cool or even: L-cut, the previous shot's audio rings
+            # past. Needs the outgoing shot's tail handles; an unknown clip
+            # duration blocks it honestly (no invented material).
+            if prev.clip_duration <= _EPS:
+                continue
+            lag = min(amount, max(0.0, prev.clip_duration - prev.source_end))
+            if lag <= _EPS:
+                continue
+            cands.append((-(e_out - e_in), i, i, "L", lag))
+    # Pass 2: J/L is a spice — take the highest-contrast boundaries first
+    # (ties earliest), cap at _JL_MAX_CUTS, and never two seams in a row.
+    cands.sort(key=lambda c: (c[0], c[1]))
+    used_boundaries: set[int] = set()
+    n_j = n_l = 0
+    for _key, i, target, kind, amount in cands:
+        if n_j + n_l >= _JL_MAX_CUTS:
+            break
+        if (i - 1) in used_boundaries or (i + 1) in used_boundaries:
+            continue  # keep decoupled seams apart
+        if kind == "J":
+            existing = edits.get(target, (0.0, 0.0))
+            edits[target] = (amount, existing[1])
+            n_j += 1
+        else:
+            existing = edits.get(target, (0.0, 0.0))
+            edits[target] = (existing[0], amount)
+            n_l += 1
+        used_boundaries.add(i)
+    if n_j or n_l:
+        bits = []
+        if n_j:
+            bits.append(f"{n_j} J-cut{'s' if n_j != 1 else ''}")
+        if n_l:
+            bits.append(f"{n_l} L-cut{'s' if n_l != 1 else ''}")
+        notes.append(
+            "J/L cuts: " + " + ".join(bits)
+            + f" — original sound decoupled {base:.02f}s from the picture "
+            "at quiet transitions (music bed and grid unmoved)"
+        )
+    return edits, notes
+
+
 def montage_to_timeline(
     plan: MontagePlan,
     fps: float,
     name: str = "Monteur Montage",
     audio: str = "music",
     canvas: str = "hd",
+    jl_cuts: bool = False,
 ) -> Timeline:
     """Render a MontagePlan as a Timeline (footage on V1, sound per ``audio``).
 
@@ -5606,6 +5931,15 @@ def montage_to_timeline(
     along as ``media_duration_seconds`` for the writers, exactly like
     entries do. The Green marker stays (it documents the intent); cues
     without a file stay marker-only.
+
+    ``jl_cuts`` (blueprint 2.3, default False = byte-identical) decouples
+    the ORIGINAL-audio edit from the picture cut at chosen quiet
+    transitions (mix/original modes only): the own-audio clip's record and
+    source edges shift by :func:`jl_audio_edits`' small fps-quantized
+    lead/lag so it OVERLAPS the neighbour's picture (FCPXML writes it as a
+    connected clip Resolve round-trips natively). A plan already carrying
+    hand-authored ``audio_lead``/``audio_lag`` applies them even with
+    ``jl_cuts=False``. The music bed and the picture grid never move.
     """
     if audio not in _AUDIO_MODES:
         valid = ", ".join(_AUDIO_MODES)
@@ -5633,7 +5967,19 @@ def montage_to_timeline(
             plan.notes.append(hint)
     timeline = Timeline(name=name, fps=fps, width=width, height=height)
     own_audio_track = {"mix": "A2", "original": "A1"}.get(audio)
-    for entry in plan.entries:
+    # J/L cuts (blueprint 2.3): decouple the original-audio edit from the
+    # picture cut at chosen transitions. Applied only when asked (or when
+    # the plan already carries hand-authored offsets) so default timelines
+    # keep the audio clip's record/source ranges identical to the video's.
+    jl_edits: dict[int, tuple[float, float]] = {}
+    if own_audio_track and (
+        jl_cuts or any(e.audio_lead or e.audio_lag for e in plan.entries)
+    ):
+        jl_edits, jl_notes = jl_audio_edits(plan, fps)
+        for note in jl_notes:
+            if note not in plan.notes:
+                plan.notes.append(note)
+    for e_index, entry in enumerate(plan.entries):
         stem = PurePath(entry.clip_path).stem
         rec_in = seconds_to_frames(entry.record_start, fps)
         rec_out = seconds_to_frames(entry.record_end, fps)
@@ -5675,16 +6021,31 @@ def montage_to_timeline(
         if own_audio_track:
             # The entry's own sound (DJI Mic engine audio etc.): same source
             # range and source_name as the video entry, on A2 ("mix") or A1
-            # ("original").
+            # ("original"). A J/L cut (blueprint 2.3) shifts THIS audio
+            # clip's edges off the picture cut: a J-cut (lead) pulls the
+            # head earlier (source + record), an L-cut (lag) pushes the tail
+            # later — the clip then overlaps the neighbour's picture and
+            # FCPXML writes it as a connected clip (Resolve round-trips it).
+            lead, lag = jl_edits.get(e_index, (0.0, 0.0))
+            a_rec_in, a_rec_out = rec_in, rec_out
+            a_src_in, a_src_out = src_in, src_out
+            if lead > _EPS:
+                lead_f = seconds_to_frames(lead, fps)
+                a_rec_in -= lead_f
+                a_src_in -= lead_f
+            if lag > _EPS:
+                lag_f = seconds_to_frames(lag, fps)
+                a_rec_out += lag_f
+                a_src_out += lag_f
             timeline.clips.append(
                 Clip(
                     name=stem,
                     track=own_audio_track,
                     kind=AUDIO,
-                    source_in=src_in,
-                    source_out=src_out,
-                    record_in=rec_in,
-                    record_out=rec_out,
+                    source_in=a_src_in,
+                    source_out=a_src_out,
+                    record_in=a_rec_in,
+                    record_out=a_rec_out,
                     source_name=stem,
                     source_file=entry.clip_path,
                     metadata={
@@ -5880,7 +6241,17 @@ def plan_to_dict(plan: MontagePlan) -> dict:
         "song_duration": plan.song_duration,
         "fade_in": plan.fade_in,
         "fade_out": plan.fade_out,
-        "entries": [asdict(entry) for entry in plan.entries],
+        "entries": [
+            {
+                key: value
+                for key, value in asdict(entry).items()
+                # Only-when-set fields (J/L audio offsets, blueprint 2.3):
+                # plans without decoupled audio edits serialize exactly as
+                # before the fields existed, and old readers keep loading them.
+                if not (key in ("audio_lead", "audio_lag") and not value)
+            }
+            for entry in plan.entries
+        ],
         "notes": list(plan.notes),
         "dips": [[start, length] for start, length in plan.dips],
         "sfx": [

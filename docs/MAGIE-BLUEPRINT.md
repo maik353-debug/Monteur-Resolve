@@ -88,7 +88,10 @@ Integrated Loudness −14 LUFS ±1 LU im Export; Flinch-Test PLUS Mute-Test
 - W4: Render→Watch→Refine-Selbstschleife (das System schaut sein eigenes Preview und
   iteriert bis zur Abnahme-Metrik), lernende Präferenzen aus Nutzer-Korrekturen.
 
-## Welle 2 — Detail-Spezifikation (verbindlich; verankert im Post-Welle-1-Code)
+## Welle 2 — Detail-Spezifikation (UMGESETZT; verankert im Post-Welle-1-Code)
+Status: 2.1/2.2/2.3 umgesetzt und getestet (tests/test_magie_wave2.py, 12 Tests;
+volle Suite 1888 passed + 1 skipped). Sekundär-Drops feuern nur bei echtem
+musikalischem Gewicht — bestehende Arc-Fixtures unverändert (test_social grün).
 
 ### 2.1 Sekundär-Drop-Zwangs-Cuts (Arc-Styles) mit Phasen-Hold-Clearing
 Anker: montage.py Zeile ~124–133 (Doc), Drop-Pin ~1813–1826, `_drop_hold` (1458).

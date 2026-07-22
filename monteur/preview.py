@@ -71,6 +71,7 @@ import re
 from monteur.media import MonteurMediaError, find_ffmpeg, probe
 from monteur.montage import (
     MontagePlan,
+    jl_audio_edits,
     music_bed_gaps,
     music_window_bounds,
     plan_pulse,
@@ -162,10 +163,14 @@ _LOUDNORM_LRA = 11.0
 # multiply per sample, so gates (x0) and ducks (x0.5) compose without any
 # stream splitting, and a duck inside a gap simply multiplies into the
 # mute. Fixed, documented depths, deterministic by construction.
-# W2 seam (O-Ton pops): the same envelope machinery can LIFT the original
-# bed over the song for a marked original-sound moment — the window
-# builders below are the seam; wave 2 only adds a positive-gain window
-# source on the original chain.
+# W2 seam (O-Ton pops, blueprint 2.2): the SAME envelope machinery LIFTS
+# the original bed over the song for a marked original-sound moment — the
+# other side of the 1.4 ducking coin. Under a prominent O-Ton window the
+# MUSIC ducks (1.4, already here); in the SAME window the ORIGINAL now
+# lifts (:func:`oton_lift_windows`, applied on the original chain in
+# render_export mix mode). Trapezoid + floor > 1, one linear chain — the
+# lift is a duck with a gain above 1. Export only, mix only: the preview
+# stays lean exactly as it skips the 1.4 ducking (a pop is a deliverable).
 _DUCK_ACCENT_DB = -6.0  # impact / sub-drop (braam): the hit owns its window
 _DUCK_RISER_DB = -4.0  # riser: a gentler shelf — it must READ above the bed
 _DUCK_OTON_DB = -4.0  # mix mode: prominent original sound gets room
@@ -175,6 +180,13 @@ _DUCK_SHELF_FADE = 0.25  # riser/O-Ton edges: a shelf eases, it does not dip
 # Mix mode: a bed part whose mean level stands this many dB above the
 # median of all sounding parts is a "prominent" original-sound moment.
 _DUCK_OTON_STANDOUT_DB = 6.0
+# O-Ton pop (blueprint 2.2): the documented LIFT applied to the original
+# chain over each prominent window — the mirror of _DUCK_OTON_DB. Honest
+# headroom: after the lift AND the MIX_ORIGINAL_LEVEL attenuation the
+# original's measured true peak must not break _LIFT_OTON_TP_CEIL (−1
+# dBTP); the boost is clamped per window and the plan says when it clamped.
+_LIFT_OTON_DB = 3.5
+_LIFT_OTON_TP_CEIL = -1.0
 # Dissolves shorter than this are rounding noise, not transitions.
 _MIN_TRANSITION = 0.01
 # Font candidates for drawtext, probed in order (Linux, macOS, Windows).
@@ -408,6 +420,57 @@ def ducking_windows(
             windows.append((lo, hi, 10 ** (_DUCK_OTON_DB / 20.0), _DUCK_SHELF_FADE))
     windows.sort(key=lambda w: (w[0], w[1]))
     return windows
+
+
+def oton_lift_windows(
+    prominent: list[tuple[float, float, float]],
+    duration: float,
+) -> tuple[list[tuple[float, float, float, float]], list[str]]:
+    """O-Ton pop LIFT windows on the original chain (blueprint 2.2).
+
+    The mirror of :func:`ducking_windows`' prominent-original shelf: under
+    each measured prominent window the music ducks (−4 dB, 1.4) and the
+    ORIGINAL now lifts (:data:`_LIFT_OTON_DB`, +3.5 dB). ``prominent`` is
+    ``(start, end, true_peak_dB)`` per window — the peak measured via
+    ``volumedetect``'s ``max_volume`` during the bed extraction.
+
+    Honest headroom: after the lift and the :data:`MIX_ORIGINAL_LEVEL`
+    attenuation the original's true peak must not break
+    :data:`_LIFT_OTON_TP_CEIL` (−1 dBTP). The boost is clamped per window
+    to whatever headroom remains (never negative — a window with no room
+    just does not lift), and a note names each clamp. Returns
+    ``(windows, notes)`` as LINEAR floor gains (``10^(dB/20)`` > 1),
+    the same tuple shape :func:`_duck_filters` consumes. Empty input =
+    the untouched old original chain, byte-identical.
+    """
+    windows: list[tuple[float, float, float, float]] = []
+    notes: list[str] = []
+    duration = max(0.0, duration)
+    mix_db = 20.0 * math.log10(MIX_ORIGINAL_LEVEL) if MIX_ORIGINAL_LEVEL > 0 else 0.0
+    for lo, hi, peak_db in prominent or []:
+        lo = max(0.0, float(lo))
+        hi = min(duration, float(hi))
+        if hi - lo <= _MIN_GAP:
+            continue
+        # Headroom for the lift: the original part's true peak, dropped by
+        # the mix attenuation, may rise to at most the −1 dBTP ceiling.
+        headroom = _LIFT_OTON_TP_CEIL - (float(peak_db) + mix_db)
+        boost = _LIFT_OTON_DB
+        if boost > headroom + 1e-9:
+            boost = max(0.0, headroom)
+            if boost <= 1e-9:
+                notes.append(
+                    f"O-Ton pop at {lo:.1f}s: no headroom under -1 dBTP — "
+                    "left at bed level (would have clipped)"
+                )
+                continue
+            notes.append(
+                f"O-Ton pop at {lo:.1f}s: lift clamped to {boost:+.1f} dB "
+                "to hold -1 dBTP (the moment is already hot)"
+            )
+        windows.append((lo, hi, 10 ** (boost / 20.0), _DUCK_SHELF_FADE))
+    windows.sort(key=lambda w: (w[0], w[1]))
+    return windows, notes
 
 
 def _duck_filters(windows: list[tuple[float, float, float, float]]) -> list[str]:
@@ -832,6 +895,8 @@ def _export_audio_graph(
     music_len: float = 0.0,
     music_gaps: list[tuple[float, float]] | None = None,
     duck_windows: list[tuple[float, float, float, float]] | None = None,
+    lift_windows: list[tuple[float, float, float, float]] | None = None,
+    jl_overlaps: list[tuple[str, float, float, float, float, float, float]] | None = None,
     loudnorm: str | None = None,
 ) -> str:
     """The filter_complex audio chain, ending in the output label ``[a]``.
@@ -876,10 +941,15 @@ def _export_audio_graph(
     chained right after the gap gates — same trapezoid machinery, a
     floor instead of a mute, one linear chain (see
     :func:`_bed_envelope_filters` for the composition rules). Only the
-    song ducks; the SFX/original streams pass untouched. W2 seam
-    (O-Ton pops): lifting a marked original moment ABOVE the bed is the
-    same envelope on the original chain with a gain above 1 — the
-    machinery is here, wave 2 adds the window source.
+    song ducks; the SFX/original streams pass untouched.
+
+    ``lift_windows`` (keyword-only, None/empty = untouched old graph, mix
+    mode only) is the O-Ton pop (blueprint 2.2): the SAME trapezoid
+    envelope with a floor ABOVE 1 (:func:`oton_lift_windows`,
+    :func:`_duck_filters` reused verbatim — a lift is a duck with gain > 1)
+    chained onto the ORIGINAL stream right after its
+    :data:`MIX_ORIGINAL_LEVEL` gain, so a prominent original moment reads
+    over the (already ducking) song. Music and SFX streams pass untouched.
 
     ``loudnorm`` (keyword-only) overrides the loudness tail: None keeps
     the classic single-pass :data:`_EXPORT_LOUDNORM` string
@@ -910,14 +980,22 @@ def _export_audio_graph(
         base = f"[{bed_label}]"
     else:  # mix
         parts.append(f"[{music_label}]volume={MIX_MUSIC_LEVEL:g}[xm]")
-        parts.append(f"[{bed_label}]volume={MIX_ORIGINAL_LEVEL:g}[xo]")
+        # O-Ton pop (blueprint 2.2): the lift rides the original chain right
+        # after its mix gain — a floor-above-1 envelope, the same machinery
+        # the song ducks with. Empty windows = the untouched old chain.
+        lift = _duck_filters(list(lift_windows or []))
+        orig_chain = f"volume={MIX_ORIGINAL_LEVEL:g}"
+        if lift:
+            orig_chain += "," + ",".join(lift)
+        parts.append(f"[{bed_label}]{orig_chain}[xo]")
         parts.append(
             "[xm][xo]amix=inputs=2:duration=first:dropout_transition=0"
             ":normalize=0[xbed]"
         )
         base = "[xbed]"
+    labels = ""
+    n_extra = 0
     if sfx:
-        labels = ""
         for k, spec in enumerate(sfx):
             label, start, trim = spec[0], spec[1], spec[2]
             offset = float(spec[3]) if len(spec) > 3 else 0.0
@@ -932,8 +1010,32 @@ def _export_audio_graph(
                 f"aformat=channel_layouts=stereo,adelay={ms}|{ms}[xs{k}]"
             )
             labels += f"[xs{k}]"
+            n_extra += 1
+    # J/L overlaps (blueprint 2.3): a J-cut's anticipating head / an L-cut's
+    # ringing tail is the ENTRY's own original sound, trimmed to the overlap
+    # window, level-matched to the bed, micro-faded at its outer edge (the
+    # crossfade seam) and mixed on top — the picture grid never moves.
+    for k, spec in enumerate(jl_overlaps or []):
+        label, start, trim, offset, fin, fout, level = spec
+        ms = max(0, int(round(start * 1000)))
+        chain = [
+            f"atrim={offset:.3f}:{offset + trim:.3f}",
+            f"aresample={_AUDIO_RATE}",
+            "aformat=channel_layouts=stereo",
+        ]
+        if level != 1.0:
+            chain.append(f"volume={level:g}")
+        if fin > 0:
+            chain.append(f"afade=t=in:st=0:d={fin:.3f}")
+        if fout > 0:
+            chain.append(f"afade=t=out:st={max(0.0, trim - fout):.3f}:d={fout:.3f}")
+        chain.append(f"adelay={ms}|{ms}")
+        parts.append(f"[{label}]{','.join(chain)}[xj{k}]")
+        labels += f"[xj{k}]"
+        n_extra += 1
+    if n_extra:
         parts.append(
-            f"{base}{labels}amix=inputs={1 + len(sfx)}:duration=first"
+            f"{base}{labels}amix=inputs={1 + n_extra}:duration=first"
             ":dropout_transition=0:normalize=0[xfx]"
         )
         base = "[xfx]"
@@ -950,11 +1052,28 @@ def _export_audio_graph(
 
 
 _MEAN_VOLUME_RE = re.compile(r"mean_volume:\s*(-?[\d.]+)\s*dB")
+_MAX_VOLUME_RE = re.compile(r"max_volume:\s*(-?[\d.]+)\s*dB")
 
 
 def _parse_mean_volume(stderr: str) -> float | None:
     """volumedetect's ``mean_volume`` (dB) from captured stderr, or None."""
     match = _MEAN_VOLUME_RE.search(stderr)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _parse_max_volume(stderr: str) -> float | None:
+    """volumedetect's ``max_volume`` (dB, the true peak) from stderr, or None.
+
+    The O-Ton pop's honest-headroom clamp (blueprint 2.2) reads this: a
+    part whose peak already sits near 0 dB gets a smaller lift so the
+    boosted original still holds −1 dBTP.
+    """
+    match = _MAX_VOLUME_RE.search(stderr)
     if not match:
         return None
     try:
@@ -1063,6 +1182,7 @@ def render_export(
     quality: str = "high",
     progress=None,
     size: tuple[int, int] | None = None,
+    jl_cuts: bool = False,
 ) -> dict:
     """Render ``plan`` to a finished, upload-ready MP4 — no Resolve.
 
@@ -1127,8 +1247,27 @@ def render_export(
       same inputs). Implemented as multiplying volume envelopes chained
       onto the same linear gate architecture as the music gaps
       (:func:`_bed_envelope_filters`); the preview skips ducking along
-      with the SFX it deliberately does not mix. W2's O-Ton pops will
-      ride this exact machinery (a lift window on the original chain).
+      with the SFX it deliberately does not mix.
+    * **O-Ton pops** (blueprint 2.2, ``"mix"`` export only) — the mirror of
+      the duck: over each prominent original-sound window the ORIGINAL
+      chain LIFTS by :data:`_LIFT_OTON_DB` (+3.5 dB) while the music ducks
+      under it, so the marked moment reads over the song. Same trapezoid
+      envelope with a floor above 1 (:func:`oton_lift_windows` +
+      :func:`_duck_filters`), applied right after the original's mix gain.
+      Honest headroom: the lift is clamped per window (using the part's
+      ``volumedetect`` ``max_volume``) so the boosted original holds
+      −1 dBTP, and a note names any clamp. The preview skips it exactly as
+      it skips the 1.4 duck — a pop is a deliverable.
+    * **J/L cuts** (blueprint 2.3, ``jl_cuts=True``, own-audio modes only)
+      — at chosen quiet transitions the ORIGINAL-sound edit is decoupled
+      from the picture cut (:func:`monteur.montage.jl_audio_edits`): a
+      J-cut brings the next shot's audio in early, an L-cut lets the
+      previous shot's audio ring past. Each is the entry's own clip audio,
+      trimmed to the lead/lag window, level-matched to the bed and
+      micro-faded at its outer edge (the crossfade seam), mixed on top of
+      the bed. Never at a drop / music-gap / placed-SFX / climax boundary;
+      the music bed and the picture grid never move. Default off =
+      byte-identical.
     * **Loudness** (blueprint 1.4) — TRUE two-pass ``loudnorm`` at
       YouTube's target (-14 LUFS, -1 dBTP, LRA 11): a first audio-only
       pass renders the finished chain into a null muxer and measures it
@@ -1287,6 +1426,7 @@ def render_export(
         # under (blueprint 1.4) — measured, not guessed, deterministic
         # for the same inputs.
         part_levels: list[tuple[int, float]] = []  # (segment index, mean dB)
+        part_peaks: dict[int, float] = {}  # segment index -> max dB (true peak)
         if own_audio:
             bed_parts: list[str] = []
             for i, (kind, length, entry) in enumerate(segments):
@@ -1309,6 +1449,9 @@ def render_export(
                         level = _parse_mean_volume(stderr)
                         if level is not None:
                             part_levels.append((i, level))
+                        peak = _parse_max_volume(stderr)
+                        if peak is not None:
+                            part_peaks[i] = peak
                     else:
                         _run_ffmpeg(extract, label)
                 else:
@@ -1396,6 +1539,10 @@ def render_export(
         # that actually SOUND (the placed cues above) and, in mix mode,
         # under the measured prominent original-sound parts.
         prominent: list[tuple[float, float]] = []
+        # O-Ton pop (blueprint 2.2): the SAME prominent windows that duck
+        # the music now LIFT the original, each carrying its measured true
+        # peak so the lift can be clamped honestly under -1 dBTP.
+        prominent_peaks: list[tuple[float, float, float]] = []
         if audio == "mix" and len(part_levels) >= 2:
             vals = sorted(level for _i, level in part_levels)
             mid = len(vals) // 2
@@ -1406,11 +1553,73 @@ def render_export(
                 if level >= median + _DUCK_OTON_STANDOUT_DB - 1e-9:
                     _kind, _length, entry = segments[i]
                     prominent.append((entry.record_start, entry.record_end))
+                    # Fall back to the mean when the peak was unreadable —
+                    # a conservative (louder) clamp, never a hotter lift.
+                    peak_db = part_peaks.get(i, level)
+                    prominent_peaks.append(
+                        (entry.record_start, entry.record_end, peak_db)
+                    )
         ducks = (
             ducking_windows(placed_cues, plan.duration, prominent=prominent)
             if audio in ("music", "mix")
             else []
         )
+        # O-Ton pop lift (blueprint 2.2): export-only, mix-only, on the
+        # ORIGINAL chain — the other side of the 1.4 duck. Empty in every
+        # other mode, so those graphs stay byte-identical.
+        lifts: list[tuple[float, float, float, float]] = []
+        if audio == "mix":
+            lifts, lift_notes = oton_lift_windows(prominent_peaks, plan.duration)
+            notes.extend(lift_notes)
+            if lifts:
+                notes.append(
+                    f"O-Ton pops: lifted the original +{_LIFT_OTON_DB:g} dB over "
+                    f"{len(lifts)} prominent moment"
+                    f"{'s' if len(lifts) != 1 else ''} (the music ducks under them)"
+                )
+
+        # J/L cuts (blueprint 2.3): the ORIGINAL-sound edit decoupled from
+        # the picture cut. Each overlap is the ENTRY's own clip audio,
+        # trimmed to the lead/lag window and micro-faded at its outer edge
+        # (the crossfade seam), placed on top of the bed so it rings past /
+        # anticipates the picture cut. Music bed and grid untouched;
+        # export-only, own-audio modes only, opt-in (or hand-authored).
+        jl_files: list[str] = []
+        # (start, trim, offset, fade_in, fade_out, level)
+        jl_data: list[tuple[float, float, float, float, float, float]] = []
+        if own_audio and (
+            jl_cuts or any(e.audio_lead or e.audio_lag for e in plan.entries)
+        ):
+            jl_edits, jl_notes = jl_audio_edits(plan, fps)
+            notes.extend(jl_notes)
+            level = MIX_ORIGINAL_LEVEL if audio == "mix" else 1.0
+            for idx, (lead, lag) in sorted(jl_edits.items()):
+                entry = plan.entries[idx]
+                if not (Path(entry.clip_path).is_file() and _has_audio(entry.clip_path)):
+                    continue
+                if lead > _MIN_GAP:
+                    # J-cut: the incoming shot's HEAD, anticipating — plays
+                    # the clip's own material just before its in-point,
+                    # starting `lead` before the picture cut. Fade IN at its
+                    # head (rises from silence); full into the cut where it
+                    # meets the shot's own bed audio.
+                    offset = max(0.0, entry.source_start - lead)
+                    start = max(0.0, entry.record_start - lead)
+                    trim = min(lead, max(0.0, plan.duration - start))
+                    if trim > _MIN_GAP:
+                        jl_files.append(str(entry.clip_path))
+                        jl_data.append((start, trim, offset, _GAP_FADE, 0.0, level))
+                if lag > _MIN_GAP:
+                    # L-cut: the outgoing shot's TAIL, ringing — plays the
+                    # clip's own material just after its out-point, from the
+                    # picture cut onward. Full from the cut (continuous with
+                    # the bed) and fades OUT at its tail.
+                    offset = max(0.0, entry.source_end)
+                    start = max(0.0, entry.record_end)
+                    trim = min(lag, max(0.0, plan.duration - start))
+                    if trim > _MIN_GAP:
+                        jl_files.append(str(entry.clip_path))
+                        jl_data.append((start, trim, offset, 0.0, _GAP_FADE, level))
 
         audio_inputs = list(music_args or [])
         if bed_path is not None:
@@ -1433,6 +1642,10 @@ def render_export(
             for start, trim, offset in sfx_data:
                 specs.append((f"{i2}:a", start, trim, offset))
                 i2 += 1
+            jl_specs = []
+            for start, trim, offset, fin, fout, level in jl_data:
+                jl_specs.append((f"{i2}:a", start, trim, offset, fin, fout, level))
+                i2 += 1
             return _export_audio_graph(
                 audio, m_label, b_label, specs,
                 fade_in, fade_out, plan.duration,
@@ -1440,10 +1653,14 @@ def render_export(
                 music_len=(m_end - m_in) if windowed else 0.0,
                 music_gaps=music_bed_gaps(plan),
                 duck_windows=ducks,
+                lift_windows=lifts,
+                jl_overlaps=jl_specs,
                 loudnorm=loudnorm_arg,
             )
 
         for f in sfx_files:
+            audio_inputs += ["-i", f]
+        for f in jl_files:
             audio_inputs += ["-i", f]
 
         # -- loudness pass 1 (blueprint 1.4): render the finished audio
