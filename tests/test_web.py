@@ -5569,6 +5569,11 @@ class TestProUiStatic:
             "plan.music_gaps",
             "tl-titlemark",
             "tl-sfxmark",
+            # the Grade adjustment layer over V1
+            'id="cre-strip-grade"',
+            "class=\"tlg tlg-grade\"",
+            "function renderGradeLane",
+            "tl-grademark",
             # clip/SFX labels + the silence gap label
             "tl-block-lbl",
             "function renderStripRuler",
@@ -5592,7 +5597,7 @@ class TestProUiStatic:
         # phase colors exist in BOTH themes
         assert source.count("--phase-climax:") == 2
         # the lane colour tokens are defined in BOTH themes
-        for token in ("--music:", "--sfx:", "--title:", "--clip:"):
+        for token in ("--music:", "--sfx:", "--title:", "--clip:", "--grade:"):
             assert source.count(token) == 2, token
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")

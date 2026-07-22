@@ -59,7 +59,7 @@
   --faint: #6a6a72;
   --ember: #ff9a3c;
   --sel: #4a90e2;
-  --clip: #3a5568; --clip-2: #40607a; --music: #3d7a4e; --sfx: #6a4b86; --title: #4a4a52;
+  --clip: #3a5568; --clip-2: #40607a; --music: #3d7a4e; --sfx: #6a4b86; --title: #4a4a52; --grade: #3f6b74;
 }
 :root[data-theme="light"] {
   color-scheme: light;
@@ -95,7 +95,7 @@
   --phase-build: #c9d7ee;
   --phase-climax: #eed7ba;
   --phase-outro: #dbcfe8;
-  --clip: #6f8ba1; --clip-2: #7f97ad; --music: #6ba97c; --sfx: #9b7fb8; --title: #b6b6be;
+  --clip: #6f8ba1; --clip-2: #7f97ad; --music: #6ba97c; --sfx: #9b7fb8; --title: #b6b6be; --grade: #6ea6ad;
   --btn-bg: var(--accent);
   --btn-ink: #ffffff;
   --veil: rgba(233, 233, 236, 0.85);
@@ -1326,6 +1326,7 @@ input.sb-dip-input {
 }
 .tlg:last-child { border-bottom: 0; }
 .tlg-ruler { height: 16px; }
+.tlg-grade { height: 20px; }
 .tlg-v1 { height: 34px; color: var(--ink-2); }
 .tlg-title { height: 18px; }
 .tlg-a1 { height: 30px; color: var(--ink-2); }
@@ -1335,6 +1336,7 @@ input.sb-dip-input {
 .tlg .sw-title { background: var(--title); }
 .tlg .sw-music { background: var(--music); }
 .tlg .sw-sfx { background: var(--sfx); }
+.tlg .sw-grade { background: var(--grade); }
 
 .tl-strip { flex: 1 1 auto; min-width: 0; position: relative; touch-action: none; }
 .tl-ruler {
@@ -1391,6 +1393,23 @@ input.sb-dip-input {
   border: 1px solid var(--border); border-top: 0; background: var(--input-bg);
 }
 .tl-mlane.tl-sfxlane { border-radius: 0 0 3px 0; }
+/* the Grade adjustment layer: one bar spanning the whole cut, above V1 —
+   a single non-destructive grade over every clip (Monteur-only, never
+   sent to Resolve). Empty + dim when the grade is neutral. */
+.tl-gradelane { height: 20px; }
+.tl-grademark {
+  position: absolute; top: 2px; bottom: 2px; left: 2px; right: 2px;
+  display: flex; align-items: center; gap: 6px; padding: 0 8px; overflow: hidden;
+  border-radius: 2px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+  background: var(--grade);
+  font-size: 9.5px; font-weight: 600; letter-spacing: 0.03em;
+  color: #eef4f5; white-space: nowrap;
+}
+.tl-grademark.is-neutral {
+  background: transparent; box-shadow: inset 0 0 0 1px var(--border);
+  color: var(--faint); font-weight: 500;
+}
+.tl-grademark .tl-grade-dim { color: rgba(255, 255, 255, 0.7); font-weight: 500; }
 .tl-titlemark {
   position: absolute; top: 2px; bottom: 2px; min-width: 44px; max-width: 40%;
   display: flex; align-items: center; padding: 0 5px; overflow: hidden;
@@ -2242,6 +2261,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             <div class="tl-frame" id="cre-tl-frame" hidden>
               <div class="tl-gutter" aria-hidden="true">
                 <div class="tlg tlg-ruler"></div>
+                <div class="tlg tlg-grade"><i class="sw-grade"></i>Grade</div>
                 <div class="tlg tlg-v1"><i class="sw-clip"></i>V1</div>
                 <div class="tlg tlg-title"><i class="sw-title"></i>Title</div>
                 <div class="tlg tlg-a1"><i class="sw-music"></i>A1</div>
@@ -2249,6 +2269,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
               </div>
               <div class="tl-strip" id="cre-strip" hidden>
                 <div class="tl-ruler" id="cre-strip-ruler" aria-hidden="true"></div>
+                <div class="tl-mlane tl-gradelane" id="cre-strip-grade" aria-hidden="true"></div>
                 <div class="tl-blocks" id="cre-strip-blocks"></div>
                 <div class="tl-mlane tl-titlelane" id="cre-strip-titles" aria-hidden="true"></div>
                 <canvas class="tl-lane" id="cre-strip-lane" height="30" aria-hidden="true"></canvas>
@@ -7376,6 +7397,7 @@ function creResetRevise() {
   closeInspector();
   clear($("cre-strip-blocks"));
   clear($("cre-strip-ruler"));
+  clear($("cre-strip-grade"));
   clear($("cre-strip-titles"));
   clear($("cre-strip-sfx"));
   $("cre-strip").hidden = true;
@@ -8860,10 +8882,41 @@ function renderTimelineStrip() {
   });
   legend.hidden = seen.length === 0;
   renderStripRuler(duration);
+  renderGradeLane();
   renderTitleLane(duration, dips, plan.title_texts || []);
   renderSfxLane(duration, plan.sfx || []);
   drawStripLane();
   applyFindingBadges();
+}
+
+/* the Grade adjustment layer: one bar over the whole cut showing the
+   current look — a single non-destructive grade over every clip (baked
+   only into Monteur's own export, never sent to Resolve). */
+function renderGradeLane() {
+  var lane = $("cre-strip-grade");
+  if (!lane) return;
+  clear(lane);
+  var g = cre.grade || { brightness: 0, contrast: 0, saturation: 0, warmth: 0, look: "" };
+  var mark = el("div", "tl-grademark");
+  if (gradeIsNeutral(g) && !g.look) {
+    mark.classList.add("is-neutral");
+    mark.textContent = "Grade — none";
+    mark.title = "No grade — the adjustment layer over all clips is neutral. Set a look in Your cut · Look & colour.";
+  } else {
+    var name = (g.look && g.look !== "custom")
+      ? g.look.charAt(0).toUpperCase() + g.look.slice(1)
+      : "Custom grade";
+    mark.textContent = name;
+    var parts = [];
+    [["Brightness", "brightness"], ["Contrast", "contrast"],
+     ["Colour", "saturation"], ["Warmth", "warmth"]].forEach(function (p) {
+      var v = Math.round((g[p[1]] || 0) * 100);
+      if (v) parts.push(p[0] + " " + (v > 0 ? "+" : "") + v);
+    });
+    mark.title = "Grade layer over all clips" + (parts.length ? " — " + parts.join(", ") : "") +
+      ". Non-destructive; baked into Monteur's export, not the Resolve build.";
+  }
+  lane.appendChild(mark);
 }
 
 /* the ruler: evenly spaced time ticks with mono labels. Interval scales so
@@ -9657,6 +9710,7 @@ function applyGradePreview() {
   Array.prototype.forEach.call($("cre-look-chips").children, function (chip) {
     chip.setAttribute("aria-pressed", String(chip.dataset.look === g.look));
   });
+  renderGradeLane(); // keep the timeline's Grade layer in sync with the controls
 }
 function setGradeLook(name) {
   var base = COLOR_LOOKS[name] || COLOR_LOOKS.neutral;
