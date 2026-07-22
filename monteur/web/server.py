@@ -51,6 +51,12 @@ API (all JSON):
 * ``GET  /api/drafts/<id>``                                     -> the full draft
 * ``POST /api/drafts``    the draft record                      -> the stored record
 * ``DELETE /api/drafts/<id>``                                   -> {"deleted": bool}
+* ``GET  /api/projects``                                        -> {"projects": [...]}
+* ``POST /api/projects`` {"name", "options"?, "media"?,
+    "plan"?, "notes"?}                                          -> the manifest
+* ``GET  /api/projects/<id>``                                   -> the full manifest
+* ``POST /api/projects/<id>`` manifest fields to update         -> the manifest
+* ``DELETE /api/projects/<id>``                                 -> {"deleted": bool}
 * ``POST /api/create/resolve`` {"plan_json", "fps"?, "name"?,
   "canvas"?, "audio"?}                                          -> {"job": id}
 * ``POST /api/resolve/render`` {"timeline"?, "target_dir",
@@ -319,6 +325,19 @@ every SUCCESSFUL build, revise and direct-apply job writes the single
 payload, plus the fresh ``plan_json``) — best-effort by contract: an
 autosave failure never fails the job. That slot is why a reload can always
 offer "Continue where you left off" for the last good cut.
+
+The ``/api/projects`` endpoints are the first-class project store
+(:mod:`monteur.projects`, ``$MONTEUR_PROJECTS_PATH`` or
+``~/.monteur/projects/``): each project is a FOLDER bundle
+(``<root>/<id>/project.json`` + ``versions/`` / ``exports/``) that
+references its media pool by absolute path — media is NEVER copied or moved.
+GET the light list (id/name/timestamps/pool size/has-plan); GET runs
+:func:`monteur.projects.migrate_drafts` first (idempotent, lossless) so
+existing drafts show up as projects without ever touching ``drafts.json``.
+POST ``{"name", "options"?, "media"?, "plan"?, "notes"?}`` creates one; GET
+``/<id>`` loads the full manifest (404 when unknown); POST ``/<id>`` updates
+the given manifest fields and bumps ``modified_at``; DELETE ``/<id>`` removes
+the bundle (``{"deleted": bool}``) and NEVER the referenced media.
 
 ``/api/create/resolve`` builds the current cut as a real timeline in the
 OPEN DaVinci Resolve project (a ``"resolve-build"`` job) — no file, no
@@ -2908,6 +2927,8 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/create/resolve"): self._create_resolve,
             ("GET", "/api/drafts"): self._drafts_list,
             ("POST", "/api/drafts"): self._drafts_save,
+            ("GET", "/api/projects"): self._projects_list,
+            ("POST", "/api/projects"): self._projects_create,
             ("GET", "/api/preferences"): self._preferences_get,
             ("POST", "/api/preferences/reset"): self._preferences_reset,
             ("POST", "/api/preferences/signal"): self._preferences_signal,
@@ -2951,6 +2972,15 @@ class MonteurHandler(BaseHTTPRequestHandler):
                     return lambda: self._drafts_get(draft_id)
                 if method == "DELETE":
                     return lambda: self._drafts_delete(draft_id)
+        if path.startswith("/api/projects/"):
+            project_id = path[len("/api/projects/"):]
+            if project_id and "/" not in project_id:
+                if method == "GET":
+                    return lambda: self._projects_get(project_id)
+                if method == "POST":
+                    return lambda: self._projects_update(project_id)
+                if method == "DELETE":
+                    return lambda: self._projects_delete(project_id)
         if path.startswith("/api/jobs/"):
             parts = path[len("/api/jobs/"):].split("/")
             if len(parts) == 1 and parts[0] and method == "GET":
@@ -3839,6 +3869,70 @@ class MonteurHandler(BaseHTTPRequestHandler):
         from monteur import drafts
 
         self._send_json({"deleted": drafts.delete_draft(draft_id)})
+
+    # -- projects (first-class Cut projects — monteur.projects) -------------
+
+    def _projects_list(self) -> None:
+        # migrate_drafts is idempotent and lossless (drafts.json is only
+        # read) — running it on every list means existing drafts surface as
+        # projects without a separate migration step, and re-runs add nothing.
+        from monteur import projects
+
+        projects.migrate_drafts()
+        self._send_json({"projects": projects.list_projects()})
+
+    def _projects_create(self) -> None:
+        from monteur import projects
+
+        payload = self._read_json()
+        project = projects.create_project(
+            payload.get("name") or "",
+            options=payload.get("options") if isinstance(payload.get("options"), dict) else None,
+            media_pool=payload.get("media") if isinstance(payload.get("media"), list) else None,
+            plan=payload.get("plan") if isinstance(payload.get("plan"), dict) else None,
+            notes=payload.get("notes") if isinstance(payload.get("notes"), list) else None,
+        )
+        self._send_json(projects.project_to_dict(project))
+
+    def _projects_get(self, project_id: str) -> None:
+        from monteur import projects
+
+        project = projects.load_project(project_id)
+        if project is None:
+            raise ApiError(404, f"unknown project {project_id!r}")
+        self._send_json(projects.project_to_dict(project))
+
+    def _projects_update(self, project_id: str) -> None:
+        from monteur import projects
+
+        project = projects.load_project(project_id)
+        if project is None:
+            raise ApiError(404, f"unknown project {project_id!r}")
+        payload = self._read_json()
+        if isinstance(payload.get("name"), str) and payload["name"].strip():
+            project.name = payload["name"].strip()
+        if isinstance(payload.get("options"), dict):
+            project.options = dict(payload["options"])
+        if isinstance(payload.get("media_pool"), list):
+            project.media_pool = [
+                projects._normalize_pool_entry(entry)
+                for entry in payload["media_pool"]
+                if isinstance(entry, dict) and entry.get("path")
+            ]
+        if "plan" in payload:
+            plan = payload["plan"]
+            project.plan = plan if isinstance(plan, dict) and plan else None
+        if isinstance(payload.get("exports"), list):
+            project.exports = [e for e in payload["exports"] if isinstance(e, dict)]
+        if isinstance(payload.get("notes"), list):
+            project.notes = [str(n) for n in payload["notes"]]
+        projects.save_project(project)
+        self._send_json(projects.project_to_dict(project))
+
+    def _projects_delete(self, project_id: str) -> None:
+        from monteur import projects
+
+        self._send_json({"deleted": projects.delete_project(project_id)})
 
     def _learn_signal(self, family: str, context: str, direction: str) -> None:
         """Record a correction signal, best-effort (learning never blocks an edit)."""

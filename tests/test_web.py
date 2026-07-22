@@ -60,6 +60,12 @@ def _isolated_settings(tmp_path, monkeypatch, _proxy_cache_dir):
     monkeypatch.setenv(
         "MONTEUR_DRAFTS_PATH", str(tmp_path / "web-drafts.json")
     )
+    # First-class projects (blueprint: unified project model): the server
+    # lists/creates/migrates projects under this root — tests must never
+    # touch (or depend on) the developer's real ~/.monteur/projects.
+    monkeypatch.setenv(
+        "MONTEUR_PROJECTS_PATH", str(tmp_path / "web-projects")
+    )
     # Learned preferences (blueprint 4.3): the server folds them into every
     # build and records correction signals on /api/plan/adjust — tests must
     # never touch (or depend on) the developer's real preferences.json.
@@ -939,6 +945,88 @@ class TestDraftsApi:
         # the client speaks both new endpoints
         assert "/api/drafts" in html
         assert "/api/create/export" in html
+
+
+class TestProjectsApi:
+    """The /api/projects endpoints — first-class Cut projects."""
+
+    def test_list_starts_empty(self, server):
+        assert _get(f"{server}/api/projects") == {"projects": []}
+
+    def test_create_get_update_delete_lifecycle(self, server):
+        created = _post(
+            f"{server}/api/projects",
+            {"name": "My cut", "options": {"style": "travel"}},
+        )
+        assert created["monteur_project"] == 1
+        assert created["id"] and created["name"] == "My cut"
+        assert created["options"] == {"style": "travel"}
+        assert "plan" not in created  # only-when-set
+
+        pid = created["id"]
+        listed = _get(f"{server}/api/projects")["projects"]
+        assert [p["id"] for p in listed] == [pid]
+        assert listed[0]["pool_size"] == 0
+        assert listed[0]["has_plan"] is False
+
+        full = _get(f"{server}/api/projects/{pid}")
+        assert full["id"] == pid
+
+        updated = _post(
+            f"{server}/api/projects/{pid}",
+            {"name": "renamed", "plan": _tiny_plan_json(),
+             "media_pool": [{"path": "/footage/trip", "kind": "folder"}]},
+        )
+        assert updated["name"] == "renamed"
+        assert updated["plan"] == _tiny_plan_json()
+        assert updated["media_pool"][0]["path"] == "/footage/trip"
+
+        relisted = _get(f"{server}/api/projects")["projects"]
+        assert relisted[0]["has_plan"] is True
+        assert relisted[0]["pool_size"] == 1
+
+        assert _delete(f"{server}/api/projects/{pid}") == {"deleted": True}
+        assert _get(f"{server}/api/projects") == {"projects": []}
+
+    def test_get_unknown_is_404(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _get(f"{server}/api/projects/nope")
+        assert exc_info.value.code == 404
+
+    def test_update_unknown_is_404(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/projects/nope", {"name": "x"})
+        assert exc_info.value.code == 404
+
+    def test_delete_unknown_reports_false(self, server):
+        assert _delete(f"{server}/api/projects/nope") == {"deleted": False}
+
+    def test_list_migrates_existing_drafts(self, server):
+        # A draft saved through the drafts endpoint surfaces as a project on
+        # the next GET /api/projects (lazy, idempotent migration).
+        draft = _post(
+            f"{server}/api/drafts",
+            {
+                "name": "trip wip",
+                "folder": "/footage/trip",
+                "music": "/music/song.mp3",
+                "settings": {"style": "travel"},
+                "plan_json": _tiny_plan_json(),
+            },
+        )
+        first = _get(f"{server}/api/projects")["projects"]
+        assert len(first) == 1
+        assert first[0]["name"] == "trip wip"
+        assert first[0]["has_plan"] is True
+        pid = first[0]["id"]
+
+        full = _get(f"{server}/api/projects/{pid}")
+        assert full["migrated_from_draft"] == draft["id"]
+        assert full["plan"] == _tiny_plan_json()
+
+        # Idempotent: a second list adds no duplicate.
+        again = _get(f"{server}/api/projects")["projects"]
+        assert [p["id"] for p in again] == [pid]
 
 
 class TestCreateExportApi:
