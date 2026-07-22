@@ -1138,10 +1138,14 @@ class TestDraftsApi:
         assert 'id="cre-drafts-list"' not in html
         assert "Continue where you left off" not in html
         assert "function renderDrafts" not in html
-        # step 3: the Save-draft controls next to the download bar still stand
+        # step 3: the save controls next to the download bar still stand.
+        # "draft" is retired at the surface — a cut is an always-saved project,
+        # so the labels read "Save cut" / "Cut name" (ids stay for internal use)
         assert 'id="cre-save-draft"' in html
         assert 'id="cre-draft-name"' in html
-        assert "Save draft" in html
+        assert "Save cut" in html
+        assert "Cut name" in html
+        assert "Save draft" not in html and ">Draft name" not in html
         # persistence flipped to first-class projects: the client speaks the
         # projects store (not /api/drafts) plus the plan -> file export
         assert "/api/projects" in html
