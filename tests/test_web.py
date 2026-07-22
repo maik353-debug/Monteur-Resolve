@@ -6776,6 +6776,27 @@ class TestNativeShell:
         controls.close()
         assert recorder == ["minimize", "maximize", "restore", "destroy"]
 
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_one_bar_with_menu_and_caption(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        # the separate title bar is gone — everything lives in the ONE top bar
+        assert 'class="titlebar"' not in source
+        assert 'id="titlebar"' not in source
+        for needle in (
+            'id="tb-menu"',        # the File/View/Help menu bar
+            'id="tb-caption"',     # the caption buttons, in the top bar
+            'id="cap-min"', 'id="cap-max"', 'id="cap-close"',
+            "var APP_MENUS",
+            "function renderAppMenus",
+            "function nativeWindowCall",
+            "native-shell",        # the class the shell adds on pywebviewready
+            "-webkit-app-region: drag",   # the drag region
+            "app-region: no-drag",        # interactive bits don't drag
+        ):
+            assert needle in source, needle
+        # the menu carries real actions (File has New Cut + Close window)
+        assert '"New Cut"' in source and '"Close window"' in source
+
     def test_window_controls_never_raise(self):
         import types
 

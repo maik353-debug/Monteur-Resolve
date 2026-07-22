@@ -145,31 +145,46 @@ h1, h2, h3, p { margin: 0; }
 
 .app { flex: 1; min-height: 0; display: flex; }
 
-/* ---------- native window title bar (Fluent, frameless shell) -----------
-   Shown only in the pywebview window (JS reveals it on `pywebviewready`).
-   The drag strip owns window dragging (-webkit-app-region), the caption
-   buttons don't; they drive minimize/maximize/close through the js_api
-   bridge. A mica-ish translucent surface over the app. */
-.titlebar {
-  flex: none; display: none; align-items: stretch; height: 34px;
-  background: color-mix(in srgb, var(--topbar) 78%, transparent);
-  -webkit-backdrop-filter: saturate(155%) blur(20px);
-  backdrop-filter: saturate(155%) blur(20px);
-  border-bottom: 1px solid var(--border); user-select: none;
+/* ---------- native window chrome: menu + caption in the ONE top bar ------
+   The pywebview shell is frameless, so the app's top bar doubles as the
+   Windows-11 title bar. JS adds `.native-shell` on `pywebviewready`, which
+   turns the bar into a drag region, reveals the menu + caption buttons and
+   lets the caption sit flush in the corner. In a browser none of this shows
+   and the bar is exactly the ordinary app top bar. */
+.tb-left { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.tb-menu { display: none; align-items: center; margin-left: 8px; }
+:root.native-shell .tb-menu { display: flex; }
+.menu-wrap { position: relative; }
+.menu-top {
+  border: 0; background: transparent; color: var(--ink-2); cursor: default;
+  font-size: 12.5px; padding: 4px 9px; border-radius: 4px; white-space: nowrap;
 }
-:root.native-shell .titlebar { display: flex; }
-.tbar-drag {
-  flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px;
-  padding: 0 12px; -webkit-app-region: drag; app-region: drag;
+.menu-top:hover, .menu-top.open { background: var(--surface-2); color: var(--ink); }
+.menu-pop {
+  position: absolute; top: calc(100% + 3px); left: 0; z-index: 300; min-width: 210px;
+  padding: 5px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); box-shadow: 0 14px 36px rgba(0, 0, 0, 0.45);
+  -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
 }
-.tbar-mark { width: 15px; height: 15px; flex: none; display: block; }
-.tbar-name {
-  font-size: 12px; font-weight: 600; letter-spacing: 0.01em;
-  color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+.menu-item {
+  display: flex; width: 100%; align-items: center; justify-content: space-between;
+  gap: 18px; text-align: left; border: 0; background: transparent; color: var(--ink);
+  cursor: default; font-size: 12.5px; padding: 6px 10px; border-radius: 5px; white-space: nowrap;
 }
-.tbar-caption { display: flex; -webkit-app-region: no-drag; app-region: no-drag; }
+.menu-item:hover, .menu-item:focus-visible { background: var(--accent); color: #fff; outline: none; }
+.menu-item .mi-key { font-family: var(--mono); font-size: 10.5px; color: var(--ink-muted); }
+.menu-item:hover .mi-key { color: rgba(255, 255, 255, 0.75); }
+.menu-sep { height: 1px; margin: 5px 6px; background: var(--border); }
+
+.tb-caption { display: none; align-items: stretch; margin-left: 8px; }
+:root.native-shell .tb-caption { display: flex; }
+:root.native-shell .topbar { padding-right: 0; -webkit-app-region: drag; app-region: drag; }
+:root.native-shell .topbar button,
+:root.native-shell .topbar .menu-top,
+:root.native-shell .topbar input,
+:root.native-shell .topbar select { -webkit-app-region: no-drag; app-region: no-drag; }
 .capbtn {
-  width: 46px; height: 34px; display: grid; place-items: center;
+  width: 44px; height: 42px; display: grid; place-items: center;
   border: 0; background: transparent; color: var(--ink-2); cursor: default;
   transition: background 0.12s, color 0.12s;
 }
@@ -1712,35 +1727,18 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
 </head>
 <body>
 
-<div class="titlebar" id="titlebar" role="presentation">
-  <div class="tbar-drag">
-    <svg class="tbar-mark" viewBox="0 0 20 20" aria-hidden="true">
-      <rect x="1" y="3" width="18" height="14" rx="2.5" fill="none" stroke="var(--series-1)" stroke-width="2"/>
-      <path d="M5 13 l3.4 -4 l2.8 2.6 l3.6 -5" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
-    <span class="tbar-name">Monteur Studio</span>
-  </div>
-  <div class="tbar-caption">
-    <button class="capbtn cap-min" id="cap-min" type="button" title="Minimize" aria-label="Minimize">
-      <svg viewBox="0 0 11 11" aria-hidden="true"><path d="M0 5.5 H11" stroke="currentColor" stroke-width="1"/></svg>
-    </button>
-    <button class="capbtn cap-max" id="cap-max" type="button" title="Maximize" aria-label="Maximize">
-      <svg viewBox="0 0 11 11" aria-hidden="true"><rect x="0.5" y="0.5" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1"/></svg>
-    </button>
-    <button class="capbtn cap-close" id="cap-close" type="button" title="Close" aria-label="Close">
-      <svg viewBox="0 0 11 11" aria-hidden="true"><path d="M0.5 0.5 L10.5 10.5 M10.5 0.5 L0.5 10.5" stroke="currentColor" stroke-width="1"/></svg>
-    </button>
-  </div>
-</div>
-
 <header class="topbar">
-  <div class="tb-brand" aria-label="Monteur Studio">
-    <svg class="brand-mark" viewBox="0 0 20 20" aria-hidden="true">
-      <rect x="1" y="3" width="18" height="14" rx="2.5" fill="none" stroke="var(--series-1)" stroke-width="2"/>
-      <path d="M5 13 l3.4 -4 l2.8 2.6 l3.6 -5" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
-    <span class="wordmark">Monteur</span>
-    <span class="wordmark-sub">Studio</span>
+  <div class="tb-left">
+    <div class="tb-brand" aria-label="Monteur Studio">
+      <svg class="brand-mark" viewBox="0 0 20 20" aria-hidden="true">
+        <rect x="1" y="3" width="18" height="14" rx="2.5" fill="none" stroke="var(--series-1)" stroke-width="2"/>
+        <path d="M5 13 l3.4 -4 l2.8 2.6 l3.6 -5" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="wordmark">Monteur</span>
+      <span class="wordmark-sub">Studio</span>
+    </div>
+    <!-- native window menu bar (shown only in the pywebview shell) -->
+    <nav class="tb-menu" id="tb-menu" aria-label="Application menu"></nav>
   </div>
   <!-- Context-aware center: on Home just a quiet "Projects" label; inside any
        working view a "‹ Projects" back-to-hub control + the view's context
@@ -1767,6 +1765,18 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         <path d="M8 2.5 a5.5 5.5 0 0 1 0 11 Z" fill="currentColor"/>
       </svg>
     </button>
+    <!-- native window caption buttons (shown only in the pywebview shell) -->
+    <div class="tb-caption" id="tb-caption">
+      <button class="capbtn cap-min" id="cap-min" type="button" title="Minimize" aria-label="Minimize">
+        <svg viewBox="0 0 11 11" aria-hidden="true"><path d="M0 5.5 H11" stroke="currentColor" stroke-width="1"/></svg>
+      </button>
+      <button class="capbtn cap-max" id="cap-max" type="button" title="Maximize" aria-label="Maximize">
+        <svg viewBox="0 0 11 11" aria-hidden="true"><rect x="0.5" y="0.5" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1"/></svg>
+      </button>
+      <button class="capbtn cap-close" id="cap-close" type="button" title="Close" aria-label="Close">
+        <svg viewBox="0 0 11 11" aria-hidden="true"><path d="M0.5 0.5 L10.5 10.5 M10.5 0.5 L0.5 10.5" stroke="currentColor" stroke-width="1"/></svg>
+      </button>
+    </div>
   </div>
 </header>
 
@@ -3646,6 +3656,85 @@ $("asm-back").addEventListener("click", function () { setView("movie"); });
   if (window.pywebview && window.pywebview.api) activate();
   else window.addEventListener("pywebviewready", activate);
 })();
+
+/* the native window's menu bar (File / View / Help) — built once, shown only
+   in the shell (CSS gates .tb-menu on .native-shell). Every item runs a real
+   action; add one to APP_MENUS and it appears. */
+function nativeWindowCall(name) {
+  var api = window.pywebview && window.pywebview.api;
+  try { if (api && api[name]) api[name](); } catch (e) { /* never crash the UI */ }
+}
+var APP_MENUS = [
+  { label: "File", items: [
+    { label: "New Cut", run: function () { newProject(); } },
+    { label: "New Movie", run: function () { setView("movie"); } },
+    { label: "Analyze a timeline…", run: function () { setView("pacing"); } },
+    { sep: true },
+    { label: "Settings…", run: function () { var b = $("settings-open"); if (b) b.click(); } },
+    { sep: true },
+    { label: "Close window", run: function () { nativeWindowCall("close"); } }
+  ] },
+  { label: "View", items: [
+    { label: "Home", run: function () { setView("home"); } },
+    { sep: true },
+    { label: "Toggle light / dark", run: function () { var t = $("theme-toggle"); if (t) t.click(); } }
+  ] },
+  { label: "Help", items: [
+    { label: "About Monteur", run: function () { toast("Monteur Studio — footage in, set a direction, iterate, finished video out.", ""); } }
+  ] }
+];
+var menuState = { open: null };
+function closeMenus() {
+  if (!menuState.open) return;
+  var pop = menuState.open.querySelector(".menu-pop"); if (pop) pop.remove();
+  var top = menuState.open.querySelector(".menu-top");
+  if (top) { top.classList.remove("open"); top.setAttribute("aria-expanded", "false"); }
+  menuState.open = null;
+}
+function openMenu(wrap, menu, top) {
+  closeMenus();
+  var pop = el("div", "menu-pop");
+  pop.setAttribute("role", "menu");
+  menu.items.forEach(function (item) {
+    if (item.sep) { pop.appendChild(el("div", "menu-sep")); return; }
+    var mi = el("button", "menu-item");
+    mi.type = "button";
+    mi.setAttribute("role", "menuitem");
+    mi.appendChild(el("span", null, item.label));
+    mi.addEventListener("click", function (e) {
+      e.stopPropagation(); closeMenus();
+      try { item.run(); } catch (err) { /* an action must not break the menu */ }
+    });
+    pop.appendChild(mi);
+  });
+  wrap.appendChild(pop);
+  top.classList.add("open"); top.setAttribute("aria-expanded", "true");
+  menuState.open = wrap;
+}
+function renderAppMenus() {
+  var host = $("tb-menu");
+  if (!host || host.children.length) return;
+  APP_MENUS.forEach(function (menu) {
+    var wrap = el("div", "menu-wrap");
+    var top = el("button", "menu-top", menu.label);
+    top.type = "button";
+    top.setAttribute("aria-haspopup", "true");
+    top.setAttribute("aria-expanded", "false");
+    top.addEventListener("click", function (e) {
+      e.stopPropagation();
+      if (menuState.open === wrap) closeMenus(); else openMenu(wrap, menu, top);
+    });
+    // once a menu is open, hovering a sibling switches to it (native feel)
+    top.addEventListener("mouseenter", function () {
+      if (menuState.open && menuState.open !== wrap) openMenu(wrap, menu, top);
+    });
+    wrap.appendChild(top);
+    host.appendChild(wrap);
+  });
+}
+document.addEventListener("click", function () { closeMenus(); });
+document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeMenus(); });
+renderAppMenus();
 
 /* recent-projects type filter (All / Create / Movie / Analysis) — cards
    carry a data-type, the chips toggle which types are shown */
