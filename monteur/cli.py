@@ -839,6 +839,24 @@ def cmd_create(args: argparse.Namespace) -> None:
                 pace=args.pace, transitions=args.transitions, sfx=args.sfx,
                 arrangement=arrangement,
             )
+        elif getattr(args, "refine", False):
+            # Render -> watch -> refine (blueprint 4.2): plan, self-critique
+            # against the Waves 1-3 acceptance metrics, and turn the right
+            # knob until they pass (or the budget runs out) — opt-in, the
+            # one-shot plan_montage stays the default. Deterministic; offline.
+            from monteur.refine import refine_plan
+
+            plan, history = refine_plan(
+                reports, music, order=args.order, max_duration=args.max_duration,
+                style=args.style, allow_repeats=args.allow_repeats,
+                cut_lead=args.cut_lead, pace=args.pace,
+                transitions=args.transitions, sfx=args.sfx,
+                arrangement=arrangement,
+            )
+            print(f"Refine: {len(history)} pass(es) watched")
+            for note in plan.notes:
+                if note.startswith("refine:"):
+                    print(f"  {note}")
         else:
             plan = plan_montage(
                 reports, music, order=args.order, max_duration=args.max_duration,
@@ -1652,6 +1670,14 @@ def build_parser() -> argparse.ArgumentParser:
              "Claude Code costs nothing extra; falls back to the heuristic "
              "cut with a note when Claude is unreachable; sharpest with "
              "--see)",
+    )
+    p.add_argument(
+        "--refine", action="store_true",
+        help="render -> watch -> refine (blueprint 4.2): plan the cut, "
+             "self-critique it against the acceptance metrics (peak-on-beat "
+             "coincidence, silence honesty, no slivers, shot grammar) and "
+             "turn the right knob until they pass — opt-in, deterministic "
+             "and offline; the plain one-shot cut is the default",
     )
     p.add_argument(
         "--arrangement", default="", metavar="FILE.json",

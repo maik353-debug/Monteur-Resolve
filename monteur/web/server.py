@@ -1419,6 +1419,17 @@ def _plan_from_payload(job: dict, payload: dict):
         # engine's own ValueError -> a clear job error). Absent = the
         # engine's "deliberate" default.
         plan_kwargs["music_flow"] = str(payload["music_flow"])
+    # Learned preferences (blueprint 4.3): fold the abstract signals the
+    # user's earlier corrections established into THIS plan as small casting
+    # tie-breakers. An empty store returns None, so a fresh user's cut is
+    # byte-identical to today. Opt-out with {"learn": false} (the CLI kit /
+    # deterministic-fixture callers set it to keep byte-parity explicit).
+    if payload.get("learn", True):
+        from monteur import preferences
+
+        bias = preferences.casting_bias()
+        if bias is not None:
+            plan_kwargs["casting_bias"] = bias
     if payload.get("ai_cut"):
         # Claude composes the cut (monteur.compose): the engine still builds
         # the exact grid plan_montage would, then ONE Claude completion casts
@@ -2892,6 +2903,9 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/create/resolve"): self._create_resolve,
             ("GET", "/api/drafts"): self._drafts_list,
             ("POST", "/api/drafts"): self._drafts_save,
+            ("GET", "/api/preferences"): self._preferences_get,
+            ("POST", "/api/preferences/reset"): self._preferences_reset,
+            ("POST", "/api/preferences/signal"): self._preferences_signal,
             ("POST", "/api/find"): self._find,
             ("POST", "/api/coverage"): self._coverage,
             ("POST", "/api/movie/load"): self._movie_load,
@@ -3484,6 +3498,16 @@ class MonteurHandler(BaseHTTPRequestHandler):
         # The engine's own validation (bad slot, slot 0, too-short smash,
         # unremovable dip) raises ValueError -> the dispatcher's 400.
         adjusted = adjust_entry_boundary(plan, slot, transition)
+        # Learn from the correction (blueprint 4.3): a change TO a hard cut
+        # is the abstract "fewer dissolves" signal; a change to a dissolve
+        # the opposite. Record only when the direction actually changed the
+        # boundary (the old entry carried a dissolve iff transition > 0).
+        if 0 <= slot < len(plan.entries):
+            was_dissolve = plan.entries[slot].transition > 1e-6
+            if transition == "cut" and was_dissolve:
+                self._learn_signal("transition", "*", "cut")
+            elif transition == "dissolve" and not was_dissolve:
+                self._learn_signal("transition", "*", "dissolve")
         self._send_json(_plan_export_result(adjusted, payload))
 
     def _plan_adjust_title(self, payload: dict) -> None:
@@ -3810,6 +3834,50 @@ class MonteurHandler(BaseHTTPRequestHandler):
         from monteur import drafts
 
         self._send_json({"deleted": drafts.delete_draft(draft_id)})
+
+    def _learn_signal(self, family: str, context: str, direction: str) -> None:
+        """Record a correction signal, best-effort (learning never blocks an edit)."""
+        try:
+            from monteur import preferences
+
+            preferences.record_signal(family, context, direction)
+        except Exception:  # pragma: no cover - learning is never a gate
+            pass
+
+    def _preferences_get(self) -> None:
+        """GET /api/preferences — the inspectable "what Monteur learned" panel."""
+        from monteur import preferences
+
+        self._send_json(preferences.inspect())
+
+    def _preferences_reset(self) -> None:
+        """POST /api/preferences/reset — forget everything Monteur learned."""
+        from monteur import preferences
+
+        self._send_json({"reset": preferences.reset()})
+
+    def _preferences_signal(self) -> None:
+        """POST /api/preferences/signal {family, context, direction}.
+
+        The Studio's hook for a committed correction whose direction only
+        the board knows (e.g. a swap to a closer shot: ``{"shot_size",
+        "climax", "close"}``). Records the ABSTRACT signal — never the
+        literal clip — and returns the refreshed inspection view. One
+        signal tips nothing; only a REPEATED signal folds into the next
+        plan (blueprint 4.3).
+        """
+        from monteur import preferences
+
+        payload = self._read_json()
+        try:
+            preferences.record_signal(
+                str(payload.get("family") or ""),
+                str(payload.get("context") or "*"),
+                str(payload.get("direction") or ""),
+            )
+        except ValueError as exc:  # missing family/direction
+            raise ApiError(400, str(exc))
+        self._send_json(preferences.inspect())
 
     def _find(self) -> None:
         """Search the vision cache — instant and offline, so no job."""

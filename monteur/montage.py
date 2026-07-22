@@ -847,6 +847,14 @@ _SHOT_ORDER = {"wide": 0, "medium": 1, "close": 2}
 # holds: the rhyme is a DIFFERENT, still-unused moment, never a duplicate.
 _RHYME_WEIGHT = 0.15
 _RHYME_MIN_KINSHIP = 0.6  # below this the pair is not kindred enough to rhyme
+# Learned-preference casting bias (blueprint 4.3): a small additive term
+# for a candidate whose shot size matches a preference the user's
+# corrections established for this slot's phase. Sized well BELOW one order
+# step (_ORDER_WEIGHT / _CANDIDATE_WINDOW = 0.175) and below the group
+# penalty — a tie-breaker only, never overriding sync, the drop, the
+# rhythm order, or zero-repeat. Empty preferences ⇒ zero bonus ⇒
+# byte-identical to today.
+_PREF_SHOT_WEIGHT = 0.08
 # Content-adaptive pacing (the slot-merge pass; see the module docstring's
 # Content-adaptive pacing section). Adjacent slots on calm music that are
 # cast with calm material merge into one longer shot, so the cut count
@@ -1260,6 +1268,21 @@ class MontageEntry:
     # pattern), so plans without J/L cuts keep their exact bytes.
     audio_lead: float = 0.0
     audio_lag: float = 0.0
+    # Self-critique support (blueprint 4.1): the chosen moment's sifted
+    # ``peak_time`` (:attr:`monteur.sift.Moment.peak_time`), in this clip's
+    # own file coordinates — the same axis as ``source_start``. -1.0 means
+    # "no peak signal / not a peak-cast slot". :func:`monteur.critique.critique`
+    # maps it into record time (``record_start + (peak_source - source_start)``)
+    # to score peak-on-beat coincidence WITHOUT a video re-decode. Held in
+    # memory only: it is EXCLUDED from :func:`plan_to_dict` so the default
+    # plan serialization stays byte-identical (a round-tripped plan simply
+    # loses the signal — the refine loop critiques fresh in-memory plans).
+    peak_source: float = -1.0
+    # Self-critique support (blueprint 4.1/3.2): the cast moment's shot-size
+    # class ("wide"/"medium"/"close", "" = unknown), so critique can score
+    # shot-grammar violations (equal-size neighbours) from the plan alone.
+    # In-memory only, EXCLUDED from :func:`plan_to_dict` (byte parity).
+    shot_size: str = ""
 
 
 @dataclass
@@ -1288,6 +1311,57 @@ class SfxCue:
     # Serialized only when set (the ``file`` pattern), so plans without
     # offsets keep their exact bytes and old readers keep loading them.
     source_offset: float = 0.0
+
+
+@dataclass(frozen=True)
+class CastingBias:
+    """The Wave-4 casting/ordering adjustments for one plan (blueprint 4.2/4.3).
+
+    A single, small, deterministic bundle the engine folds in as
+    TIE-BREAKERS — never over sync, the drop, the rhythm order or
+    zero-repeat. Two sources produce one:
+
+    * **Learned preferences** (4.3, :func:`monteur.preferences.casting_bias`):
+      the abstract directions a user's corrections established — e.g.
+      "close-ups at the climax" becomes a ``shot_size`` entry biasing close
+      candidates in the climax phase, "fewer dissolves" sets
+      ``fewer_dissolves``.
+    * **The refine loop** (4.2, :func:`refine_plan`): when the critique
+      reports shot-grammar violations it raises ``grammar_scale`` to push
+      the ordering harder toward changing shot sizes.
+
+    A NEUTRAL bias (``shot_size`` empty, ``fewer_dissolves`` false,
+    ``grammar_scale`` 1.0) is byte-identical to passing none — the empty
+    store / no-refine guarantee. Frozen and hashable so the refine loop can
+    key its search on it.
+    """
+
+    #: (phase label or "*", shot size, additive weight) — the bonus a
+    #: candidate of that shot size earns in that phase.
+    shot_size: tuple[tuple[str, str, float], ...] = ()
+    #: Suppress the weakest (plain gentle-passage) dissolves — a learned
+    #: "fewer dissolves" preference. Scene/daylight dissolves are kept.
+    fewer_dissolves: bool = False
+    #: Multiplier on the shot-grammar ordering term (refine's grammar knob).
+    grammar_scale: float = 1.0
+
+    def is_neutral(self) -> bool:
+        """True when the bias changes nothing (byte-parity fast path)."""
+        return (
+            not self.shot_size
+            and not self.fewer_dissolves
+            and abs(self.grammar_scale - 1.0) <= _EPS
+        )
+
+    def size_bonus(self, phase: str | None, cand_size: str) -> float:
+        """Additive casting bonus for ``cand_size`` in ``phase`` (0 when none)."""
+        if not cand_size or not self.shot_size:
+            return 0.0
+        total = 0.0
+        for p, size, weight in self.shot_size:
+            if size == cand_size and (p == "*" or p == phase):
+                total += weight
+        return total
 
 
 # --- grid -------------------------------------------------------------------
@@ -2990,6 +3064,7 @@ def _fill(
     allow_repeats: bool = True,
     slot_contexts: list[str] | None = None,
     cut_lead: float = 0.0,
+    casting_bias: "CastingBias | None" = None,
 ) -> tuple[list[MontageEntry], list[str], float | None]:
     """Assign pool moments to slots.
 
@@ -3294,6 +3369,11 @@ def _fill(
             prev_shot_size = prev.shot_size if prev is not None else ""
             prev_exit_focus = prev.exit_focus if prev is not None else None
             in_climax = bool(phases) and _phase_label_at(phases, rec_start) == "climax"
+            # Learned-preference casting bias (blueprint 4.3): the slot's
+            # phase label steers a shot-size preference to the phase it was
+            # learned for ("close-ups at the climax"). None (no phases) still
+            # matches a "*" preference.
+            bias_phase = _phase_label_at(phases, rec_start) if phases else None
             accent_boundary = bool(
                 phases
                 and prev is not None
@@ -3371,9 +3451,16 @@ def _fill(
                 # penalize two equal sizes adjacent, except a deliberate
                 # close->close intensification in the climax.
                 if grammar_active:
-                    score += _shot_grammar_step(
+                    grammar_scale = casting_bias.grammar_scale if casting_bias else 1.0
+                    score += grammar_scale * _shot_grammar_step(
                         prev_shot_size, pool[idx].shot_size, in_climax
                     )
+                # Learned-preference casting bias (blueprint 4.3): a small
+                # tie-breaker toward the shot size the user's corrections
+                # favour in this phase. Zero for an empty/neutral store, so
+                # the default plan is byte-identical.
+                if casting_bias is not None:
+                    score += casting_bias.size_bonus(bias_phase, pool[idx].shot_size)
                 # Visual rhyme (3.3): the closing shot echoes the opening —
                 # tip the last slot toward the moment most kindred to slot
                 # 0's. One rhyme, one slot; the candidate is a different,
@@ -3492,6 +3579,11 @@ def _fill(
                 media_start=item.media_start,
                 clip_duration=item.clip_duration,
                 label=item.label,
+                # Blueprint 4.1: carry the chosen moment's peak (in file
+                # coordinates) so critique can score peak-on-beat from the
+                # plan alone. In-memory only (not serialized).
+                peak_source=getattr(moment, "peak_time", -1.0),
+                shot_size=item.shot_size,
             )
         )
     if aimed_slots:
@@ -4639,6 +4731,7 @@ def plan_montage(
     music_window: tuple[float, float] | list[float] | None = None,
     music_flow: str = "deliberate",
     fps: float | None = None,
+    casting_bias: "CastingBias | None" = None,
 ) -> MontagePlan:
     """Distribute the best moments across the song, in a cutting style.
 
@@ -4757,6 +4850,15 @@ def plan_montage(
     the full rules and the accidental-silence guard. ``"continuous"``
     plans zero gaps and is byte-identical to plans from before the field
     existed. Unknown values raise ValueError listing both.
+
+    ``casting_bias`` (keyword-only, default None) folds the Wave-4 casting
+    tie-breakers into the cut: learned user preferences
+    (:func:`monteur.preferences.casting_bias`) and the refine loop's
+    grammar knob, bundled as a :class:`CastingBias`. Applied ONLY as small
+    tie-breakers below one order step — never over sync, the drop, the
+    rhythm order or zero-repeat. ``None`` (and a neutral bias) is
+    byte-identical to before, so the default one-shot plan is unchanged
+    (the empty-store / no-refine guarantee).
     """
     if style not in STYLES:
         valid = ", ".join(sorted(STYLES))
@@ -5173,6 +5275,9 @@ def plan_montage(
         hook_loop=bool(phases) and phases[0][2] == "hook",
         allow_repeats=allow_repeats,
         cut_lead=cut_lead,
+        # Learned preferences / refine tweaks (blueprint 4.3/4.2): folded in
+        # as tie-breakers. None (the default) is byte-identical to before.
+        casting_bias=casting_bias if casting_bias and not casting_bias.is_neutral() else None,
     )
     entries = arr_entries + entries
     entries.sort(key=lambda e: e.record_start)
@@ -5303,6 +5408,7 @@ def plan_montage(
     _plan_finishing(
         plan, entries, grid_music, chosen, phases, transitions,
         entry_semantics=entry_semantics,
+        casting_bias=casting_bias if casting_bias and not casting_bias.is_neutral() else None,
     )
     if arr_entries:
         _arrangement_boundaries(plan, entries, arr_items, len(arr_entries))
@@ -5333,6 +5439,7 @@ def _plan_finishing(
     phases: list[tuple[float, float, str]],
     transitions: str = "auto",
     entry_semantics: list[tuple[str, str]] | None = None,
+    casting_bias: "CastingBias | None" = None,
 ) -> None:
     """Set the plan's fades, dissolves and smash-to-black dips (in place).
 
@@ -5428,6 +5535,18 @@ def _plan_finishing(
                     if prev_group and group:
                         reason = "scene"
             else:
+                want = False
+            # Learned "fewer dissolves" preference (blueprint 4.3): drop the
+            # WEAKEST dissolves — the plain gentle-passage ones with no scene
+            # or daylight reason — to a hard cut. Meaningful scene/daylight
+            # dissolves are kept; the peak already cuts hard. A tie-breaker,
+            # never touching the explicit "dissolves"/"cuts" overrides.
+            if (
+                want
+                and reason == ""
+                and casting_bias is not None
+                and casting_bias.fewer_dissolves
+            ):
                 want = False
         if want:
             # Beat-quantized dissolve length (blueprint 1.7): the classic
@@ -6465,6 +6584,10 @@ def plan_to_dict(plan: MontagePlan) -> dict:
                 # plans without decoupled audio edits serialize exactly as
                 # before the fields existed, and old readers keep loading them.
                 if not (key in ("audio_lead", "audio_lag") and not value)
+                # peak_source / shot_size (blueprint 4.1) are in-memory
+                # critique aids, NEVER serialized — the default plan stays
+                # byte-identical.
+                and key not in ("peak_source", "shot_size")
             }
             for entry in plan.entries
         ],

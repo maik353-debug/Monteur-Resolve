@@ -1735,7 +1735,7 @@ def render_export(
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     info = probe(out_path)
-    return {
+    result = {
         "path": str(out_path),
         "duration": info.duration,
         "width": w,
@@ -1743,3 +1743,12 @@ def render_export(
         "seconds": time.monotonic() - started,
         "notes": notes,
     }
+    # Self-critique support (blueprint 4.1): expose the two-pass loudnorm's
+    # measured integrated loudness (pass 1's ``input_i``, in LUFS) so the
+    # refine loop can score the export against the -14 LUFS target WITHOUT
+    # a second measuring pass. Only present when the measurement succeeded
+    # (a failed/degraded single-pass finish omits it — honestly absent, not
+    # a guessed value).
+    if measured is not None:
+        result["measured_lufs"] = measured["input_i"]
+    return result

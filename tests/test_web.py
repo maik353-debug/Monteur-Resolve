@@ -60,6 +60,12 @@ def _isolated_settings(tmp_path, monkeypatch, _proxy_cache_dir):
     monkeypatch.setenv(
         "MONTEUR_DRAFTS_PATH", str(tmp_path / "web-drafts.json")
     )
+    # Learned preferences (blueprint 4.3): the server folds them into every
+    # build and records correction signals on /api/plan/adjust — tests must
+    # never touch (or depend on) the developer's real preferences.json.
+    monkeypatch.setenv(
+        "MONTEUR_PREFERENCES_PATH", str(tmp_path / "web-preferences.json")
+    )
     monkeypatch.setenv("MONTEUR_PROXIES_PATH", str(_proxy_cache_dir))
 
 
@@ -594,6 +600,55 @@ class TestArrangeApi:
         )
         full = _get(f"{server}/api/drafts/{stored['id']}")
         assert full["settings"]["arrangement"] == arrangement
+
+
+class TestPreferences:
+    """The learned-preference endpoints (blueprint 4.3). The store is
+    isolated by the autouse _isolated_settings fixture (MONTEUR_PREFERENCES_PATH)."""
+
+    def test_empty_store_inspects_clean(self, server):
+        assert _get(f"{server}/api/preferences") == {"signals": [], "active": 0}
+
+    def test_signal_record_inspect_and_reset(self, server):
+        # One signal is inactive; a repeat activates it.
+        _post(f"{server}/api/preferences/signal",
+              {"family": "shot_size", "context": "climax", "direction": "close"})
+        one = _post(f"{server}/api/preferences/signal",
+                    {"family": "shot_size", "context": "climax", "direction": "close"})
+        assert one["active"] == 1
+        assert one["signals"][0]["count"] == 2
+        assert _post(f"{server}/api/preferences/reset", {}) == {"reset": True}
+        assert _get(f"{server}/api/preferences")["active"] == 0
+
+    def test_signal_requires_family_and_direction(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(f"{server}/api/preferences/signal", {"family": "shot_size"})
+        assert exc.value.code == 400
+
+    def test_adjust_to_hard_cut_learns_fewer_dissolves(self, server):
+        # A /api/plan/adjust that turns a dissolving boundary into a hard cut
+        # records the abstract "fewer dissolves" signal (twice -> active).
+        def _adjust():
+            plan = {"monteur_plan": 1, "music_path": "/m.wav", "duration": 4.0,
+                    "entries": [
+                        {"clip_path": "/a.mp4", "source_start": 0.0, "source_end": 2.0,
+                         "record_start": 0.0, "record_end": 2.0, "score": 1.0},
+                        {"clip_path": "/b.mp4", "source_start": 0.0, "source_end": 2.0,
+                         "record_start": 2.0, "record_end": 4.0, "score": 1.0,
+                         "transition": 0.5}],
+                    "notes": [], "dips": [], "sfx": []}
+            try:
+                _post(f"{server}/api/plan/adjust",
+                      {"plan_json": plan, "slot": 1, "transition": "cut"})
+            except urllib.error.HTTPError:
+                pass  # the render may fail without real media; the signal is recorded first
+        _adjust()
+        _adjust()
+        view = _get(f"{server}/api/preferences")
+        assert any(
+            s["family"] == "transition" and s["direction"] == "cut" and s["active"]
+            for s in view["signals"]
+        )
 
 
 def _step3_html(html):

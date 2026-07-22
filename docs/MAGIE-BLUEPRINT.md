@@ -209,7 +209,14 @@ messbar weniger gleichgroße Nachbar-Paare, Etablier-Shot vorn. Reime: erkannt u
 gesetzt, Zero-Repeat unverletzt. Haus-Garantien wie immer; Bild-Scoring als
 Tie-Breaker, nie über Sync/Drop/Rhythmus.
 
-## Welle 4 — Detail-Spezifikation (verbindlich; verankert im Post-W3-Code)
+## Welle 4 — Detail-Spezifikation (UMGESETZT; verankert im Post-W3-Code)
+Status: 4.1/4.2/4.3 umgesetzt (monteur/critique.py Scorecard, monteur/refine.py
+opt-in-Schleife, monteur/preferences.py ~/.monteur/preferences.json). tests/
+test_magie_wave4.py (19 Tests) + test_web (+4); volle Suite 1938 + 1, NULL
+Fixtures angefasst (Byte-Parität hielt). refine: schwacher Plan Koinzidenz
+0%→80%; Präferenz-Signal kippt Klimax medium→close; Default byte-identisch,
+alle Wave-4-Terme Tie-Breaker unter einem Order-Schritt. Damit ist die
+Magie-Blueprint (Wellen 1–4) vollständig.
 
 Grundthese W4: Bis hier baut Monteur EINEN Schnitt und hofft, dass er sitzt. W4
 schließt die Schleife — das System bewertet seinen eigenen Schnitt gegen die
