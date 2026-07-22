@@ -68,6 +68,7 @@ import json
 import math
 import re
 
+from monteur import reframe as _reframe
 from monteur.media import MonteurMediaError, find_ffmpeg, probe
 from monteur.montage import (
     MontagePlan,
@@ -239,6 +240,50 @@ def _run_ffmpeg_capture(args: list[str], label: str) -> str:
 def _even(n: float) -> int:
     """Nearest even int at/below ``n``, minimum 2 (codecs need even sizes)."""
     return max(2, int(n) // 2 * 2)
+
+
+def _reframe_cover(
+    entry,
+    base_cover: str,
+    w: int,
+    h: int,
+    fps: float,
+    dims: dict[str, tuple[int, int]],
+) -> str:
+    """The cover filter for one clip entry, reframed toward its focus point.
+
+    Auto-reframe 9:16 (:mod:`monteur.reframe`): when the entry carries a
+    ``reframe_focus`` (the cast moment's attention point, set in memory by
+    the planner), shift the centre crop so that point stays framed instead of
+    sliced off. Returns ``base_cover`` UNCHANGED — byte-for-byte — whenever
+    there is nothing to reframe: no focus signal, a plan loaded from disk
+    (the field does not serialize), a source whose dimensions cannot be read,
+    or a focus that already resolves to the centre (same-aspect footage, or a
+    focus centred in the cropped dimension). ``dims`` caches probed source
+    sizes across segments so a repeated clip is measured once.
+    """
+    focus = getattr(entry, "reframe_focus", None)
+    if focus is None:
+        return base_cover
+    path = str(entry.clip_path)
+    size = dims.get(path)
+    if size is None:
+        try:
+            info = probe(path)
+            size = (info.width, info.height)
+        except Exception:  # noqa: BLE001 — an unreadable size just center-crops
+            size = (0, 0)
+        dims[path] = size
+    src_w, src_h = size
+    if src_w <= 0 or src_h <= 0:
+        return base_cover
+    if _reframe.is_centered(src_w, src_h, w, h, focus):
+        return base_cover  # no shift → keep the byte-identical centre crop
+    x, y = _reframe.crop_offset(src_w, src_h, w, h, focus)
+    return (
+        f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+        f"crop={w}:{h}:{round(x)}:{round(y)},setsar=1,fps={fps:g}"
+    )
 
 
 def extract_thumbnail(
@@ -1374,6 +1419,9 @@ def render_export(
         "-pix_fmt", "yuv420p",
     ]
     silence = f"anullsrc=r={_AUDIO_RATE}:cl=stereo"
+    # Auto-reframe 9:16 caches each clip's probed source size (shift is a pure
+    # function of source dims x canvas dims x focus; nothing else touched).
+    reframe_dims: dict[str, tuple[int, int]] = {}
 
     tmpdir = tempfile.mkdtemp(prefix="monteur-export-")
     try:
@@ -1386,11 +1434,12 @@ def render_export(
             seg = str(Path(tmpdir) / f"seg_{i:04d}.mp4")
             if kind == "clip":
                 name = Path(entry.clip_path).name
+                seg_cover = _reframe_cover(entry, cover, w, h, fps, reframe_dims)
                 _run_ffmpeg(
                     [
                         "-ss", f"{max(0.0, entry.source_start):.3f}",
                         "-t", f"{seg_len:.3f}", "-i", str(entry.clip_path),
-                        "-map", "0:v:0", "-vf", cover, *seg_encode, "-an", seg,
+                        "-map", "0:v:0", "-vf", seg_cover, *seg_encode, "-an", seg,
                     ],
                     f"encoding export segment {i + 1}/{len(segments)} ({name})",
                 )

@@ -594,6 +594,7 @@ import math
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import PurePath
 
+from monteur import reframe as _reframe
 from monteur.model import AUDIO, VIDEO, Clip, Marker, Timeline, seconds_to_frames
 from monteur.music import (
     MusicAnalysis,
@@ -1283,6 +1284,16 @@ class MontageEntry:
     # shot-grammar violations (equal-size neighbours) from the plan alone.
     # In-memory only, EXCLUDED from :func:`plan_to_dict` (byte parity).
     shot_size: str = ""
+    # Auto-reframe 9:16 (blueprint wave 3, spatial eye-trace): the cast
+    # moment's attention point ``(x, y)`` in 0..1 source coordinates, averaged
+    # from the moment's entry/exit focus. The export/Resolve renderers shift
+    # the crop window so this point stays centred when 16:9 footage is cropped
+    # to a vertical/cine canvas (:mod:`monteur.reframe`), instead of a dumb
+    # centre-crop. ``None`` = no focus signal → the exact centre crop as
+    # before. In-memory only, EXCLUDED from :func:`plan_to_dict` (byte parity):
+    # a round-tripped plan simply loses the signal and center-crops, and the
+    # reframe is a pure function of the plan geometry recomputed at render time.
+    reframe_focus: tuple[float, float] | None = None
 
 
 @dataclass
@@ -3584,6 +3595,13 @@ def _fill(
                 # plan alone. In-memory only (not serialized).
                 peak_source=getattr(moment, "peak_time", -1.0),
                 shot_size=item.shot_size,
+                # Auto-reframe 9:16: carry the cast moment's attention point
+                # (averaged entry/exit focus) so the vertical/cine export can
+                # keep the subject framed instead of centre-cropping. In-memory
+                # only (not serialized), like peak_source/shot_size above.
+                reframe_focus=_reframe.average_focus(
+                    item.entry_focus, item.exit_focus
+                ),
             )
         )
     if aimed_slots:
@@ -6585,9 +6603,10 @@ def plan_to_dict(plan: MontagePlan) -> dict:
                 # before the fields existed, and old readers keep loading them.
                 if not (key in ("audio_lead", "audio_lag") and not value)
                 # peak_source / shot_size (blueprint 4.1) are in-memory
-                # critique aids, NEVER serialized — the default plan stays
-                # byte-identical.
-                and key not in ("peak_source", "shot_size")
+                # critique aids, and reframe_focus (auto-reframe 9:16) is an
+                # in-memory render aid — NEVER serialized, so the default plan
+                # stays byte-identical.
+                and key not in ("peak_source", "shot_size", "reframe_focus")
             }
             for entry in plan.entries
         ],

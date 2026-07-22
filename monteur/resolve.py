@@ -2778,6 +2778,15 @@ class ResolveBridge:
         # UHD timeline) must FILL the frame, never sit small in the middle
         # or behind bars. Cinemascope keeps "scale full frame with crop";
         # everything else fills (aspect preserved, overflow cropped).
+        # Auto-reframe 9:16 FOLLOW-UP (deferred): the ffmpeg export
+        # (:func:`monteur.preview.render_export`) shifts this crop toward each
+        # shot's attention point (:mod:`monteur.reframe`,
+        # ``MontageEntry.reframe_focus``) so an off-centre subject survives the
+        # 9:16 / cine crop. The Resolve equivalent is a per-clip Pan offset
+        # alongside this Scaling call, but it needs a reliable timeline-item ->
+        # plan-entry mapping and Resolve's Pan pixel/sign semantics verified
+        # against a live DaVinci build — neither is safe to land blind, so
+        # Resolve reframe is intentionally left as centre-crop for now.
         mode = 1 if canvas.startswith("cine") else 3
         failed, total = _set_clip_scaling(timeline, mode)
         if failed:
