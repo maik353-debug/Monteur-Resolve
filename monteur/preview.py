@@ -69,6 +69,7 @@ import math
 import re
 
 from monteur import reframe as _reframe
+from monteur.color import Grade, grade_to_ffmpeg
 from monteur.media import (
     MediaCancelled,
     MonteurMediaError,
@@ -922,6 +923,7 @@ def _export_video_graph(
     fade_in: float,
     fade_out: float,
     duration: float,
+    grade: str = "",
 ) -> str:
     """The filter_complex video chain over the export's segment inputs.
 
@@ -957,6 +959,11 @@ def _export_video_graph(
             acc += lengths[i]
         cur = out
     tail: list[str] = []
+    # the colour grade rides on the assembled cut, BEFORE the fades — so the
+    # fades still resolve to true black instead of grading the black itself.
+    # Empty (a neutral grade) leaves the chain byte-identical to before.
+    if grade:
+        tail.append(grade)
     if fade_in > 0:
         tail.append(f"fade=t=in:st=0:d={fade_in:.3f}")
     if fade_out > 0:
@@ -1268,6 +1275,7 @@ def render_export(
     progress=None,
     size: tuple[int, int] | None = None,
     jl_cuts: bool = False,
+    grade: Grade | None = None,
     cancel=None,
 ) -> dict:
     """Render ``plan`` to a finished, upload-ready MP4 — no Resolve.
@@ -1811,7 +1819,10 @@ def render_export(
             final += ["-i", seg]
         final += audio_inputs
         graph = (
-            _export_video_graph(lengths, trans, fade_in, fade_out, plan.duration)
+            _export_video_graph(
+                lengths, trans, fade_in, fade_out, plan.duration,
+                grade=grade_to_ffmpeg(grade) if grade else "",
+            )
             + ";"
             + _audio_graph(len(paths), loudnorm_final)
         )
