@@ -137,6 +137,99 @@ def test_check_mode_reflects_frozen(monkeypatch):
     assert info.mode == "frozen"
 
 
+# -- payload-aware check ------------------------------------------------------
+
+def _release_with_payload(tag="v1.5.0"):
+    payload = {
+        "tag_name": tag,
+        "body": "notes",
+        "html_url": "https://x",
+        "assets": [
+            {"name": "monteur-app-1.5.0.zip", "browser_download_url": "https://x/app.zip"},
+            {"name": "monteur-app-1.5.0.zip.sha256", "browser_download_url": "https://x/app.zip.sha256"},
+            {"name": "Monteur-1.5.0.exe", "browser_download_url": "https://x/win.exe"},
+        ],
+    }
+    return json.dumps(payload).encode("utf-8")
+
+
+def test_check_frozen_prefers_payload(monkeypatch):
+    monkeypatch.setattr(update, "is_frozen", lambda: True)
+    info = update.check("1.0.0", fetch=lambda url: _release_with_payload(), system="win32")
+    assert info.kind == "payload"
+    assert info.payload_url == "https://x/app.zip"
+    assert info.payload_name == "monteur-app-1.5.0.zip"
+    assert info.sha256_url == "https://x/app.zip.sha256"
+
+
+def test_check_frozen_falls_back_to_exe(monkeypatch):
+    monkeypatch.setattr(update, "is_frozen", lambda: True)
+    # a release with only an exe (deps changed -> full shell update)
+    info = update.check("1.0.0", fetch=lambda url: _release_json(), system="win32")
+    assert info.kind == "exe"
+    assert info.download_url == "https://x/win.exe"
+
+
+def test_check_source_installs_nothing(monkeypatch):
+    monkeypatch.setattr(update, "is_frozen", lambda: False)
+    info = update.check("1.0.0", fetch=lambda url: _release_with_payload(), system="win32")
+    assert info.kind == "none"
+
+
+# -- install_payload ----------------------------------------------------------
+
+def _payload_zip(version="1.5.0"):
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("payload.json", json.dumps({"version": version}))
+        zf.writestr("monteur/__init__.py", f'__version__ = "{version}"\n')
+    return buf.getvalue()
+
+
+def test_install_payload_verifies_and_extracts(tmp_path, monkeypatch):
+    import hashlib
+
+    monkeypatch.setenv("MONTEUR_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    blob = _payload_zip("1.5.0")
+    digest = hashlib.sha256(blob).hexdigest()
+
+    def fetch(url):
+        if url.endswith(".sha256"):
+            return (digest + "  monteur-app-1.5.0.zip\n").encode("utf-8")
+        return blob
+
+    info = update.UpdateInfo(
+        current="1.0.0", latest="v1.5.0", available=True, kind="payload",
+        payload_url="https://x/app.zip", payload_name="monteur-app-1.5.0.zip",
+        sha256_url="https://x/app.zip.sha256", mode="frozen",
+    )
+    version = update.install_payload(info, fetch=fetch)
+    assert version == "1.5.0"
+    from monteur import payload as payload_mod
+    installed = dict(payload_mod.installed_payloads())
+    assert "1.5.0" in installed
+
+
+def test_install_payload_rejects_bad_checksum(tmp_path, monkeypatch):
+    monkeypatch.setenv("MONTEUR_SETTINGS_PATH", str(tmp_path / "settings.json"))
+
+    def fetch(url):
+        if url.endswith(".sha256"):
+            return b"deadbeef  monteur-app-1.5.0.zip\n"
+        return _payload_zip("1.5.0")
+
+    info = update.UpdateInfo(
+        current="1.0.0", latest="v1.5.0", kind="payload",
+        payload_url="https://x/app.zip", payload_name="monteur-app-1.5.0.zip",
+        sha256_url="https://x/app.zip.sha256", mode="frozen",
+    )
+    with pytest.raises(ValueError, match="checksum"):
+        update.install_payload(info, fetch=fetch)
+
+
 # -- download + staging -------------------------------------------------------
 
 def test_download_stages_and_marks_pending(tmp_path, monkeypatch):

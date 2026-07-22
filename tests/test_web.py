@@ -136,11 +136,35 @@ class TestUpdateApi:
         assert data["available"] is False
         assert data["error"] == "offline"
 
-    def test_install_stages_download(self, server, tmp_path, monkeypatch):
+    def test_install_payload(self, server, monkeypatch):
         from monteur import update
 
         info = update.UpdateInfo(
-            current="0.1.0", latest="v0.2.0", available=True,
+            current="0.1.0", latest="v0.2.0", available=True, kind="payload",
+            payload_url="https://x/app.zip", payload_name="monteur-app-0.2.0.zip",
+            mode="frozen",
+        )
+        monkeypatch.setattr(update, "check", lambda *a, **k: info)
+        seen = {}
+
+        def fake_install_payload(inf, **kw):
+            seen["called"] = True
+            return "0.2.0"
+
+        monkeypatch.setattr(update, "install_payload", fake_install_payload)
+        started = _post(f"{server}/api/update/install", {})
+        job = _wait_for_job(server, started["job"])
+        assert job["state"] == "done"
+        assert job["result"]["staged"] is True
+        assert job["result"]["latest"] == "0.2.0"
+        assert "Restart" in job["result"]["message"]
+        assert seen.get("called") is True
+
+    def test_install_exe_fallback(self, server, tmp_path, monkeypatch):
+        from monteur import update
+
+        info = update.UpdateInfo(
+            current="0.1.0", latest="v0.2.0", available=True, kind="exe",
             download_url="https://x/win.exe", asset_name="Monteur-0.2.0.exe",
             mode="frozen",
         )

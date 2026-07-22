@@ -1608,14 +1608,17 @@ def cmd_update(args: argparse.Namespace) -> None:
             "'pip install -U monteur'."
         )
         return
-    if not info.download_url:
-        print("This release has no downloadable build for your platform yet.")
+    if info.kind == "payload":
+        print(f"Downloading {info.payload_name}…")
+        version = update_mod.install_payload(info)
+        print(f"Installed Monteur {version}. Restart Monteur to use it.")
         return
-    print(f"Downloading {info.asset_name}…")
-    update_mod.download(info)
-    print(
-        f"Downloaded Monteur {info.latest}. Restart Monteur to finish installing."
-    )
+    if info.kind == "exe" and info.download_url:
+        print(f"Downloading {info.asset_name}…")
+        update_mod.download(info)
+        print(f"Downloaded Monteur {info.latest}. Restart Monteur to finish installing.")
+        return
+    print("This release has no installable build for your platform yet.")
 
 
 def cmd_mcp(args: argparse.Namespace) -> None:

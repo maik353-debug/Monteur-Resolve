@@ -165,11 +165,18 @@ Craft templates:
       window opens via WebView2 on Windows. Verified end to end (the frozen
       binary serves the Studio + API). NEXT: code-signing + a real installer
       (MSI/DMG), and an app icon. See `docs/PACKAGING.md`.
-- [x] **In-app updates.** Help → Check for updates… (and `monteur update`):
-      checks the GitHub Releases API, shows the notes, downloads the platform
-      asset into `~/.monteur/updates/` and swaps it in on the next launch
-      (`monteur/update.py` — stdlib, network injected + fully tested; a source
-      checkout degrades to a "git pull / pip install -U" advisory).
+- [x] **In-app updates (payload split, Electron-style).** The app is split
+      into a rarely-changing **shell** (the ~70 MB executable) and a small
+      **payload** (`monteur` + `app.html`, ~650 KB). Help → Check for updates…
+      (and `monteur update`) checks the GitHub Releases API, shows the notes,
+      downloads only the payload zip, verifies its `.sha256`, and unpacks it
+      into `~/.monteur/payloads/<version>/`. The launcher runs the newest
+      payload on disk at the next start — no executable swap, KB not MB
+      (`monteur/payload.py` + `monteur/update.py`, stdlib, network injected +
+      fully tested; the shell/payload override was verified on a real frozen
+      build). A full-executable update is the rare fallback when deps change;
+      a source checkout degrades to a "git pull / pip install -U" advisory.
+      NEXT: sign the payload (the checksum guards integrity, not authenticity).
 - [ ] Resolve plugin panel (Workflow Integration)
 - [ ] Licensing/pricing model (indie editors first)
 - [ ] Team features: shared version history, review links, feedback threads

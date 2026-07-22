@@ -149,8 +149,12 @@ class UpdateInfo:
     available: bool = False
     notes: str = ""
     url: str = ""            # the human release page
-    download_url: str = ""   # the platform asset, if any
+    download_url: str = ""   # the platform executable asset (shell update), if any
     asset_name: str = ""
+    payload_url: str = ""    # the small app-payload zip (the usual update)
+    payload_name: str = ""
+    sha256_url: str = ""     # the payload's checksum sibling asset
+    kind: str = "none"       # what install would do: "payload" | "exe" | "none"
     mode: str = "source"     # "frozen" (a packaged build) | "source"
     error: str = ""
 
@@ -205,12 +209,50 @@ def check(
     info.notes = str(data.get("body") or "").strip()
     info.url = str(data.get("html_url") or "").strip()
     assets = data.get("assets") if isinstance(data.get("assets"), list) else []
-    asset = asset_for_platform(assets, system=system)
-    if asset:
-        info.download_url = str(asset.get("browser_download_url") or "")
-        info.asset_name = str(asset.get("name") or "")
+
+    # the app-payload zip (the small, usual update) + its checksum sibling
+    payload = payload_asset(assets)
+    if payload:
+        info.payload_url = str(payload.get("browser_download_url") or "")
+        info.payload_name = str(payload.get("name") or "")
+        sums = _sha_sibling(assets, info.payload_name)
+        if sums:
+            info.sha256_url = str(sums.get("browser_download_url") or "")
+
+    # the platform executable (a rarer, full shell update)
+    exe = asset_for_platform(assets, system=system)
+    if exe:
+        info.download_url = str(exe.get("browser_download_url") or "")
+        info.asset_name = str(exe.get("name") or "")
+
+    # frozen builds update by payload when one exists (no exe swap needed);
+    # otherwise fall back to a full executable; source runs install nothing
+    if info.mode == "frozen" and info.payload_url:
+        info.kind = "payload"
+    elif info.mode == "frozen" and info.download_url:
+        info.kind = "exe"
+    else:
+        info.kind = "none"
+
     info.available = is_newer(info.latest, cur)
     return info
+
+
+def payload_asset(assets: list[dict]) -> dict | None:
+    """The app-payload zip in a release's assets (``monteur-app-*.zip``)."""
+    for asset in assets:
+        name = str(asset.get("name") or "").lower()
+        if name.startswith("monteur-app") and name.endswith(".zip"):
+            return asset
+    return None
+
+
+def _sha_sibling(assets: list[dict], payload_name: str) -> dict | None:
+    want = (payload_name + ".sha256").lower()
+    for asset in assets:
+        if str(asset.get("name") or "").lower() == want:
+            return asset
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +293,31 @@ def clear_pending() -> None:
         _pending_path().unlink()
     except OSError:
         pass
+
+
+def install_payload(info: UpdateInfo, *, fetch: Fetch | None = None) -> str:
+    """Download, verify and unpack the app payload. Returns the version.
+
+    The new payload lands in ``~/.monteur/payloads/<version>/``; the launcher
+    picks the newest at the next start — nothing is swapped now. If the release
+    ships a ``.sha256`` sibling the download is verified against it and a
+    mismatch raises (a truncated/tampered payload is never installed).
+    """
+    from monteur import payload as payload_mod
+
+    if not info.payload_url:
+        raise ValueError("this release has no app payload to install")
+    getter = fetch or _http_get
+    blob = getter(info.payload_url)
+    blob = blob if isinstance(blob, (bytes, bytearray)) else bytes(blob)
+    if info.sha256_url:
+        raw = getter(info.sha256_url)
+        text = (raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)).strip()
+        expected = text.split()[0] if text else ""
+        if not payload_mod.verify_sha256(blob, expected):
+            raise ValueError("the downloaded update failed its checksum — not installed")
+    version, _root = payload_mod.extract_payload(bytes(blob))
+    return version
 
 
 def download(

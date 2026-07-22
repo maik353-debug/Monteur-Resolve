@@ -50,7 +50,14 @@ def main() -> int:
         )
         return 1
 
-    print(f"Building Monteur {_version()} for {_platform_tag()}…")
+    # emit the distributable payload zip + checksum too (upload both, plus this
+    # exe, to the GitHub Release)
+    print("Building the app payload…")
+    payload = subprocess.run([sys.executable, str(ROOT / "scripts" / "build_payload.py")], cwd=str(ROOT))
+    if payload.returncode != 0:
+        return payload.returncode
+
+    print(f"Building Monteur {_version()} shell for {_platform_tag()}…")
     result = subprocess.run(
         [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", str(SPEC)],
         cwd=str(ROOT),

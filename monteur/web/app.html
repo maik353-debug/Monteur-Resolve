@@ -4035,11 +4035,13 @@ function updateCheck() {
       + '<span class="help-small">(you have ' + escapeHtml(info.current) + ").</span></p>" + notes
     );
     var btn = $("update-install");
-    if (info.mode === "frozen" && info.download_url) {
-      btn.textContent = "Download & install"; btn.hidden = false;
+    if (info.mode === "frozen" && (info.payload_url || info.download_url)) {
+      // a payload update is small and clean; an exe update is the rare fallback
+      btn.textContent = info.kind === "exe" ? "Download & install (full)" : "Download & install";
+      btn.hidden = false;
     } else {
       // a source install (or no build yet): link out instead of downloading
-      var where = info.mode === "frozen" ? "No downloadable build for your platform yet." :
+      var where = info.mode === "frozen" ? "No installable build for your platform yet." :
         "This is a source install — update with <code>git pull</code> or <code>pip install -U monteur</code>.";
       updateSetBody($("update-body").innerHTML + '<p class="help-small">' + where + "</p>");
       btn.hidden = true;

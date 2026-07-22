@@ -3282,19 +3282,32 @@ def _run_update_job(job: dict) -> None:
             }
             job["state"] = "done"
             return
-        if not info.download_url:
-            job["result"] = {"available": True, "staged": False, "latest": info.latest,
-                             "message": "This release has no downloadable build for your platform yet.",
-                             "url": info.url}
+        if info.kind == "payload":
+            # the usual, small update — download + verify + unpack the app
+            # payload; the launcher runs it on the next start (no exe swap)
+            with _JOBS_LOCK:
+                job["progress"].append({"stage": "downloading", "name": info.payload_name})
+            version = update_mod.install_payload(info)
+            job["result"] = {
+                "available": True, "staged": True, "current": info.current, "latest": version,
+                "message": f"Monteur {version} installed. Restart Monteur to use it.",
+            }
             job["state"] = "done"
             return
-        with _JOBS_LOCK:
-            job["progress"].append({"stage": "downloading", "name": info.asset_name})
-        update_mod.download(info)
-        job["result"] = {
-            "available": True, "staged": True, "current": info.current, "latest": info.latest,
-            "message": f"Monteur {info.latest} downloaded. Restart Monteur to finish installing.",
-        }
+        if info.kind == "exe" and info.download_url:
+            # a full shell update (deps changed): stage the executable, swap at start
+            with _JOBS_LOCK:
+                job["progress"].append({"stage": "downloading", "name": info.asset_name})
+            update_mod.download(info)
+            job["result"] = {
+                "available": True, "staged": True, "current": info.current, "latest": info.latest,
+                "message": f"Monteur {info.latest} downloaded. Restart Monteur to finish installing.",
+            }
+            job["state"] = "done"
+            return
+        job["result"] = {"available": True, "staged": False, "latest": info.latest,
+                         "message": "This release has no installable build for your platform yet.",
+                         "url": info.url}
         job["state"] = "done"
     except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
         job["message"] = f"could not install the update: {exc}"
