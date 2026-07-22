@@ -498,6 +498,14 @@ svg text.axis {
   background: var(--surface-2); border: 1px solid var(--border);
   border-radius: 4px; padding: 2px 7px; white-space: nowrap;
 }
+/* Help → Check for updates sheet */
+.update-body { margin: 12px 0 4px; font-size: 13px; display: flex; flex-direction: column; gap: 8px; }
+.update-body p { margin: 0; }
+.update-body code { font-family: var(--mono); font-size: 11.5px; background: var(--surface-2); border-radius: 3px; padding: 1px 5px; }
+.update-notes {
+  max-height: 240px; overflow-y: auto; white-space: pre-wrap; font-size: 12px; color: var(--ink-2);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px;
+}
 
 /* ---------- settings modal (AI — Claude connection) --------------------- */
 .settings-card { width: min(760px, 100%); max-height: calc(100vh - 40px); }
@@ -3777,6 +3785,7 @@ var MENU = {
   movie: function () { setView("movie"); },
   settings: function () { openSettings(false); },
   shortcuts: function () { openShortcuts(); },
+  checkUpdates: function () { openUpdate(); },
   about: function () { toast("Monteur Studio — footage in, set a direction, iterate, finished video out.", ""); },
   closeWindow: function () { nativeWindowCall("close"); }
 };
@@ -3820,6 +3829,8 @@ var APP_MENUS = [
   ] },
   { label: "Help", items: [
     { label: "Keyboard shortcuts", key: "Ctrl+/", run: MENU.shortcuts },
+    { sep: true },
+    { label: "Check for updates…", run: MENU.checkUpdates },
     { label: "About Monteur", run: MENU.about }
   ] }
 ];
@@ -3969,6 +3980,101 @@ function openShortcuts() {
   }
   modal.hidden = false;
 }
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+/* Help → Check for updates…: an acrylic dialog that checks GitHub Releases,
+   shows the notes, and (on a packaged build) downloads + stages the new
+   version — the swap finishes on the next launch. */
+function openUpdate() {
+  var modal = $("update-modal");
+  if (!modal) {
+    modal = el("div", "modal"); modal.id = "update-modal"; modal.hidden = true;
+    var card = el("div", "modal-card"); card.setAttribute("role", "dialog");
+    card.setAttribute("aria-modal", "true"); card.setAttribute("aria-label", "Software updates");
+    card.appendChild(el("h2", null, "Software updates"));
+    var body = el("div", "update-body"); body.id = "update-body";
+    card.appendChild(body);
+    var actions = el("div", "modal-actions");
+    var install = el("button", "btn", "Download & install"); install.type = "button";
+    install.id = "update-install"; install.hidden = true;
+    var close = el("button", "btn ghost", "Close"); close.type = "button";
+    close.addEventListener("click", function () { modal.hidden = true; });
+    actions.appendChild(install); actions.appendChild(close);
+    card.appendChild(actions);
+    modal.appendChild(card);
+    modal.addEventListener("click", function (e) { if (e.target === modal) modal.hidden = true; });
+    modal.addEventListener("keydown", function (e) { if (e.key === "Escape") modal.hidden = true; });
+    document.body.appendChild(modal);
+    install.addEventListener("click", runUpdateInstall);
+  }
+  modal.hidden = false;
+  updateCheck();
+}
+function updateSetBody(html) { $("update-body").innerHTML = html; }
+function updateCheck() {
+  $("update-install").hidden = true;
+  updateSetBody('<p class="help-small">Checking for updates…</p>');
+  api("/api/update/check").then(function (info) {
+    updateState = info;
+    if (info.error && !info.latest) {
+      updateSetBody('<p>Couldn’t check for updates.</p><p class="help-small">' + escapeHtml(info.error) + "</p>");
+      return;
+    }
+    if (!info.available) {
+      updateSetBody("<p>You’re up to date.</p><p class=\"help-small\">Monteur " + escapeHtml(info.current) + " is the latest version.</p>");
+      return;
+    }
+    var notes = info.notes ? '<div class="update-notes">' + escapeHtml(info.notes) + "</div>" : "";
+    updateSetBody(
+      "<p><strong>Monteur " + escapeHtml(info.latest) + "</strong> is available "
+      + '<span class="help-small">(you have ' + escapeHtml(info.current) + ").</span></p>" + notes
+    );
+    var btn = $("update-install");
+    if (info.mode === "frozen" && info.download_url) {
+      btn.textContent = "Download & install"; btn.hidden = false;
+    } else {
+      // a source install (or no build yet): link out instead of downloading
+      var where = info.mode === "frozen" ? "No downloadable build for your platform yet." :
+        "This is a source install — update with <code>git pull</code> or <code>pip install -U monteur</code>.";
+      updateSetBody($("update-body").innerHTML + '<p class="help-small">' + where + "</p>");
+      btn.hidden = true;
+    }
+  }).catch(function (err) {
+    updateSetBody('<p>Couldn’t check for updates.</p><p class="help-small">' + escapeHtml(err && err.message ? err.message : String(err)) + "</p>");
+  });
+}
+function runUpdateInstall() {
+  var btn = $("update-install");
+  btn.disabled = true;
+  updateSetBody('<p class="help-small">Downloading the update…</p>');
+  api("/api/update/install", { method: "POST", body: {} }).then(function (data) {
+    (function poll() {
+      api("/api/jobs/" + data.job).then(function (job) {
+        if (job.state === "running") { setTimeout(poll, 700); return; }
+        btn.disabled = false;
+        if (job.state === "error") {
+          updateSetBody("<p>Update failed.</p><p class=\"help-small\">" + escapeHtml(job.message || "") + "</p>");
+          return;
+        }
+        var r = job.result || {};
+        btn.hidden = true;
+        updateSetBody("<p>" + escapeHtml(r.message || "Done.") + "</p>");
+      }).catch(function (err) {
+        btn.disabled = false;
+        updateSetBody("<p>Update failed.</p><p class=\"help-small\">" + escapeHtml(err && err.message ? err.message : String(err)) + "</p>");
+      });
+    })();
+  }).catch(function (err) {
+    btn.disabled = false;
+    updateSetBody("<p>Update failed.</p><p class=\"help-small\">" + escapeHtml(err && err.message ? err.message : String(err)) + "</p>");
+  });
+}
+var updateState = null;
 
 /* recent-projects type filter (All / Create / Movie / Analysis) — cards
    carry a data-type, the chips toggle which types are shown */

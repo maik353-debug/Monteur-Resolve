@@ -1586,6 +1586,38 @@ def cmd_ui(args: argparse.Namespace) -> None:
         _fail(f"could not start Monteur Studio on port {args.port}: {exc}")
 
 
+def cmd_update(args: argparse.Namespace) -> None:
+    from monteur import update as update_mod
+
+    info = update_mod.check()
+    if info.error and not info.latest:
+        _fail(info.error)
+    if not info.available:
+        print(f"Monteur {info.current} is the latest version.")
+        return
+    print(f"A newer version is available: {info.latest} (you have {info.current}).")
+    if info.url:
+        print(f"  {info.url}")
+    if info.notes:
+        print("\n" + info.notes.strip() + "\n")
+    if getattr(args, "check", False):
+        return
+    if info.mode != "frozen":
+        print(
+            "This is a source install — update with 'git pull' or "
+            "'pip install -U monteur'."
+        )
+        return
+    if not info.download_url:
+        print("This release has no downloadable build for your platform yet.")
+        return
+    print(f"Downloading {info.asset_name}…")
+    update_mod.download(info)
+    print(
+        f"Downloaded Monteur {info.latest}. Restart Monteur to finish installing."
+    )
+
+
 def cmd_mcp(args: argparse.Namespace) -> None:
     try:
         from monteur import mcp_server
@@ -2217,6 +2249,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="open in a native desktop window instead of a browser "
                         "(needs the [app] extra: pip install 'monteur[app]')")
     p.set_defaults(func=cmd_ui)
+
+    p = sub.add_parser("update", help="check for and install a newer Monteur build")
+    p.add_argument("--check", action="store_true",
+                   help="only check — don't download anything")
+    p.set_defaults(func=cmd_update)
 
     p = sub.add_parser("mcp", help="run the MCP server for Claude Desktop/claude.ai")
     p.set_defaults(func=cmd_mcp)

@@ -110,6 +110,80 @@ def _edl_payload(**extra):
     }
 
 
+class TestUpdateApi:
+    """The in-app updater endpoints (network always monkeypatched away)."""
+
+    def test_check_reports_available(self, server, monkeypatch):
+        from monteur import update
+
+        info = update.UpdateInfo(
+            current="0.1.0", latest="v0.2.0", available=True,
+            notes="Shiny.", url="https://x", download_url="https://x/win.exe",
+            asset_name="Monteur-0.2.0.exe", mode="frozen",
+        )
+        monkeypatch.setattr(update, "check", lambda *a, **k: info)
+        data = _get(f"{server}/api/update/check")
+        assert data["available"] is True
+        assert data["latest"] == "v0.2.0"
+        assert data["asset_name"] == "Monteur-0.2.0.exe"
+
+    def test_check_soft_error_is_200(self, server, monkeypatch):
+        from monteur import update
+
+        info = update.UpdateInfo(current="0.1.0", error="offline")
+        monkeypatch.setattr(update, "check", lambda *a, **k: info)
+        data = _get(f"{server}/api/update/check")
+        assert data["available"] is False
+        assert data["error"] == "offline"
+
+    def test_install_stages_download(self, server, tmp_path, monkeypatch):
+        from monteur import update
+
+        info = update.UpdateInfo(
+            current="0.1.0", latest="v0.2.0", available=True,
+            download_url="https://x/win.exe", asset_name="Monteur-0.2.0.exe",
+            mode="frozen",
+        )
+        monkeypatch.setattr(update, "check", lambda *a, **k: info)
+        seen = {}
+
+        def fake_download(inf, **kw):
+            seen["called"] = True
+            return tmp_path / "Monteur-0.2.0.exe"
+
+        monkeypatch.setattr(update, "download", fake_download)
+        started = _post(f"{server}/api/update/install", {})
+        job = _wait_for_job(server, started["job"])
+        assert job["state"] == "done"
+        assert job["result"]["staged"] is True
+        assert "Restart" in job["result"]["message"]
+        assert seen.get("called") is True
+
+    def test_install_source_checkout_advises(self, server, monkeypatch):
+        from monteur import update
+
+        info = update.UpdateInfo(
+            current="0.1.0", latest="v0.2.0", available=True, mode="source",
+            url="https://x",
+        )
+        monkeypatch.setattr(update, "check", lambda *a, **k: info)
+        started = _post(f"{server}/api/update/install", {})
+        job = _wait_for_job(server, started["job"])
+        assert job["state"] == "done"
+        assert job["result"]["staged"] is False
+        assert "source install" in job["result"]["message"]
+
+    def test_install_up_to_date(self, server, monkeypatch):
+        from monteur import update
+
+        info = update.UpdateInfo(current="0.2.0", latest="v0.2.0", available=False)
+        monkeypatch.setattr(update, "check", lambda *a, **k: info)
+        started = _post(f"{server}/api/update/install", {})
+        job = _wait_for_job(server, started["job"])
+        assert job["state"] == "done"
+        assert job["result"]["available"] is False
+
+
 class TestApi:
     def test_analyze_edl(self, server):
         data = _post(f"{server}/api/analyze", _edl_payload())
@@ -6815,6 +6889,11 @@ class TestNativeShell:
             "recentSubmenu",
             "nativeOnly",            # Close window only in the native shell
             "mi-key", "mi-check", "mi-arrow",
+            # Help → Check for updates… drives the updater UI
+            "Check for updates",
+            "function openUpdate",
+            '"/api/update/check"',
+            '"/api/update/install"',
         ):
             assert needle in source, needle
         # View is page-navigation with a checkmark on the current view

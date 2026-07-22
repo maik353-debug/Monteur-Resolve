@@ -158,7 +158,18 @@ Craft templates:
       surfaces, native controls), and package it (below). Tauri stays the
       richer-native alternative if we ever want fully native chrome. — Maik,
       explicit.
-- [ ] Package Studio as a desktop app (installers, no Python required)
+- [~] **Package Studio as a desktop app (no Python required).** DONE: a
+      PyInstaller build (`python scripts/build_exe.py`, spec in
+      `packaging/`, `[build]` extra) produces one self-contained executable
+      that wraps `serve_app` — `app.html` is bundled next to `server.py`, the
+      window opens via WebView2 on Windows. Verified end to end (the frozen
+      binary serves the Studio + API). NEXT: code-signing + a real installer
+      (MSI/DMG), and an app icon. See `docs/PACKAGING.md`.
+- [x] **In-app updates.** Help → Check for updates… (and `monteur update`):
+      checks the GitHub Releases API, shows the notes, downloads the platform
+      asset into `~/.monteur/updates/` and swaps it in on the next launch
+      (`monteur/update.py` — stdlib, network injected + fully tested; a source
+      checkout degrades to a "git pull / pip install -U" advisory).
 - [ ] Resolve plugin panel (Workflow Integration)
 - [ ] Licensing/pricing model (indie editors first)
 - [ ] Team features: shared version history, review links, feedback threads

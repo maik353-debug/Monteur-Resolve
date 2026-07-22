@@ -3248,6 +3248,59 @@ def _run_ai_test_job(job: dict) -> None:
         job["state"] = "error"
 
 
+def _run_update_job(job: dict) -> None:
+    """Daemon-thread body for POST /api/update/install.
+
+    Checks for the newest release, downloads the platform build into the
+    staging dir and marks it pending. The actual swap is deferred to the next
+    launch (``update.apply_pending``). A source checkout, or a release with no
+    downloadable build, finishes the job with a clear message instead of an
+    error.
+    """
+    from monteur import update as update_mod
+
+    try:
+        with _JOBS_LOCK:
+            job["progress"].append({"stage": "checking"})
+        info = update_mod.check()
+        if info.error and not info.latest:
+            job["message"] = info.error
+            job["state"] = "error"
+            return
+        if not info.available:
+            job["result"] = {"available": False, "message": "You're already on the latest version.",
+                             "current": info.current, "latest": info.latest}
+            job["state"] = "done"
+            return
+        if info.mode != "frozen":
+            # a dev/source run: nothing to install, point them at the right path
+            job["result"] = {
+                "available": True, "staged": False, "current": info.current, "latest": info.latest,
+                "message": "Update available — this is a source install, so update with "
+                           "'git pull' or 'pip install -U monteur'.",
+                "url": info.url,
+            }
+            job["state"] = "done"
+            return
+        if not info.download_url:
+            job["result"] = {"available": True, "staged": False, "latest": info.latest,
+                             "message": "This release has no downloadable build for your platform yet.",
+                             "url": info.url}
+            job["state"] = "done"
+            return
+        with _JOBS_LOCK:
+            job["progress"].append({"stage": "downloading", "name": info.asset_name})
+        update_mod.download(info)
+        job["result"] = {
+            "available": True, "staged": True, "current": info.current, "latest": info.latest,
+            "message": f"Monteur {info.latest} downloaded. Restart Monteur to finish installing.",
+        }
+        job["state"] = "done"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"could not install the update: {exc}"
+        job["state"] = "error"
+
+
 _AUDIO_FILETYPES = [
     ("Audio files", "*.wav *.mp3 *.m4a *.aac *.flac *.ogg *.aiff *.aif *.wma"),
     ("All files", "*.*"),
@@ -3414,6 +3467,8 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/youtube/disconnect"): self._youtube_disconnect,
             ("POST", "/api/youtube/upload"): self._youtube_upload,
             ("POST", "/api/youtube/prefill"): self._youtube_prefill,
+            ("GET", "/api/update/check"): self._update_check,
+            ("POST", "/api/update/install"): self._update_install,
         }
         if (method, path) in routes:
             return routes[(method, path)]
@@ -5090,6 +5145,31 @@ class MonteurHandler(BaseHTTPRequestHandler):
             }
         )
 
+    # -- in-app updates (monteur.update) --------------------------------------
+
+    def _update_check(self) -> None:
+        """GET /api/update/check — is there a newer release? Never errors hard."""
+        from monteur import update as update_mod
+
+        self._send_json(update_mod.check().to_dict())
+
+    def _update_install(self) -> None:
+        """POST /api/update/install — download + stage the latest build.
+
+        Runs in a job (the download can be large); the swap itself happens at
+        the next launch via ``update.apply_pending`` (a process can't overwrite
+        its own running executable). A source checkout has nothing to install
+        and says so.
+        """
+        job = _new_job("update")
+        threading.Thread(
+            target=_run_update_job,
+            args=(job,),
+            name=f"monteur-update-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
     def _resolve_status(self) -> None:
         # Isolated in a child process: Resolve's native module can hard-crash
         # (access violation) under an incompatible Python, and that would take
@@ -5321,6 +5401,21 @@ def serve_app(
     (``serve(open_browser=True)``) with a one-line pointer to the ``[app]``
     extra, so the launcher always does something sensible.
     """
+    # a staged update installs here — startup is the only safe moment to swap
+    # the running executable. On a source checkout this is a no-op advisory.
+    try:
+        from monteur import update as _update
+
+        applied = _update.apply_pending()
+        if applied and applied.applied and applied.relaunch:
+            import subprocess
+
+            print(applied.message, flush=True)
+            subprocess.Popen(applied.relaunch)  # noqa: S603 - our own exe
+            return
+    except Exception:  # noqa: BLE001 - an update must never block startup
+        pass
+
     try:
         import webview
     except ImportError:

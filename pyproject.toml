@@ -23,6 +23,7 @@ ai = ["anthropic>=0.40"]
 media = ["numpy>=1.24", "imageio-ffmpeg>=0.4.9"]
 mcp = ["mcp>=1.2"]
 app = ["pywebview>=5.0"]
+build = ["pyinstaller>=6"]
 dev = ["pytest>=8"]
 
 [project.scripts]
