@@ -195,6 +195,29 @@ def _strip_fences(text: str) -> str:
     return stripped
 
 
+def _closed_schema(schema):
+    """A copy of ``schema`` with ``additionalProperties: false`` on every
+    object node (nested and top-level).
+
+    The structured-output API requires object schemas to close themselves
+    explicitly; a single missed nested object 400s the whole request. Closing
+    centrally here means every schema (compose/vision/director/coverage/movie
+    and any future one) is safe without each having to remember. Types given
+    as a list (e.g. ``["object", "null"]``) count as objects too. The input
+    is never mutated — the module-level SCHEMA constants stay as authored.
+    """
+    if isinstance(schema, dict):
+        out = {k: _closed_schema(v) for k, v in schema.items()}
+        t = schema.get("type")
+        is_object = t == "object" or (isinstance(t, list) and "object" in t)
+        if is_object and "additionalProperties" not in out:
+            out["additionalProperties"] = False
+        return out
+    if isinstance(schema, list):
+        return [_closed_schema(v) for v in schema]
+    return schema
+
+
 def _complete_api(
     prompt: str,
     *,
@@ -213,7 +236,12 @@ def _complete_api(
                 max_tokens=max_tokens,
                 system=system,
                 thinking={"type": "adaptive"},
-                output_config={"format": {"type": "json_schema", "schema": json_schema}},
+                output_config={
+                    "format": {
+                        "type": "json_schema",
+                        "schema": _closed_schema(json_schema),
+                    }
+                },
                 messages=[{"role": "user", "content": prompt}],
             )
         else:

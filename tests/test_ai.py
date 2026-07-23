@@ -428,6 +428,41 @@ def test_api_json_schema_uses_structured_output(api_backend):
     }
 
 
+def test_api_closes_open_object_schemas_on_the_wire(api_backend):
+    # the structured-output API rejects an object schema that does not set
+    # additionalProperties:false — the backend must close every object node
+    # (nested and list-typed) before sending, without mutating the caller's.
+    schema = {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {"type": "object", "properties": {"a": {"type": "string"}}},
+            },
+            "opt": {"type": ["object", "null"], "properties": {"b": {"type": "number"}}},
+        },
+    }
+    fake = api_backend(_FakeMessage('{"ok": true}'))
+    complete("prompt", system="sys", json_schema=schema)
+    (kwargs,) = fake.create_calls
+    sent = kwargs["output_config"]["format"]["schema"]
+    assert sent["additionalProperties"] is False
+    assert sent["properties"]["items"]["items"]["additionalProperties"] is False
+    assert sent["properties"]["opt"]["additionalProperties"] is False
+    # the caller's schema is left exactly as authored
+    assert "additionalProperties" not in schema
+    assert "additionalProperties" not in schema["properties"]["items"]["items"]
+
+
+def test_closed_schema_is_idempotent_and_non_mutating():
+    from monteur.ai import _closed_schema
+
+    already = {"type": "object", "properties": {}, "additionalProperties": False}
+    assert _closed_schema(already) == already
+    scalar = {"type": "string"}
+    assert _closed_schema(scalar) == scalar  # non-objects untouched
+
+
 def test_api_refusal_raises(api_backend):
     api_backend(_FakeMessage("", stop_reason="refusal"))
     with pytest.raises(MonteurAIError, match="declined"):
