@@ -6384,6 +6384,9 @@ class TestProUiStatic:
             "function deleteShot",
             "function moveShot",
             "function applyPlanSurgery",
+            # the timeline title lane is editable now (re-homed from the board)
+            "function editTitleMark",
+            "editTitleMark(mark, lane, i, text)",
             # the endpoints the inspector rides on
             "/api/clipinfo",
             "/api/alternatives",
