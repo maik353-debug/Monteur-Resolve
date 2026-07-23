@@ -6377,6 +6377,13 @@ class TestProUiStatic:
             'data-trans="smash"',
             'id="cre-insp-alts-btn"',
             'id="cre-insp-alts"',
+            # structural timeline edits from the inspector
+            'id="cre-insp-delete"',
+            'id="cre-insp-move-left"',
+            'id="cre-insp-move-right"',
+            "function deleteShot",
+            "function moveShot",
+            "function applyPlanSurgery",
             # the endpoints the inspector rides on
             "/api/clipinfo",
             "/api/alternatives",

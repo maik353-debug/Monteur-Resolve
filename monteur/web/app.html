@@ -2925,6 +2925,9 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           <div id="cre-insp-issues"></div>
           <div class="insp-actions">
             <button class="pin-btn" id="cre-insp-pin" type="button" aria-pressed="false">Pin</button>
+            <button class="btn ghost small" id="cre-insp-move-left" type="button" title="Move this shot earlier" aria-label="Move shot earlier">◀ Move</button>
+            <button class="btn ghost small" id="cre-insp-move-right" type="button" title="Move this shot later" aria-label="Move shot later">Move ▶</button>
+            <button class="btn ghost small insp-del" id="cre-insp-delete" type="button" title="Remove this shot from the cut" aria-label="Delete shot">Delete</button>
           </div>
           <div class="insp-block">
             <p class="seg-heading">Transition into this shot</p>
@@ -10795,6 +10798,71 @@ function applyTransition(trans) {
     renderInspTransitions(i);
   });
 }
+
+/* structural timeline edits from the inspector (delete / move) — the same
+   /api/plan/adjust surgery the boundary control rides on, persisted into the
+   project, then the strip + storyboard re-render and the selection follows the
+   edited shot. */
+function applyPlanSurgery(extra, doneMsg, nextSlot) {
+  if (insp.slot === null || !rev.planJson) return;
+  if (buildPanel.running() || revisePanel.running() || directPanel.running()) return;
+  var built = (cre.result && cre.result.body) || {};
+  var body = {
+    plan_json: rev.planJson,
+    project: cre.projectId || undefined,  // persist the edit into the timeline
+    fps: built.fps || fpsFrom($("cre-fps")), format: cre.format
+  };
+  if (built.audio) body.audio = built.audio;
+  if (built.canvas) body.canvas = built.canvas;
+  Object.keys(extra).forEach(function (k) { body[k] = extra[k]; });
+  $("cre-insp-msg").hidden = true;
+  api("/api/plan/adjust", { method: "POST", body: body }).then(function (result) {
+    var prevTempo = (cre.result && cre.result.data && cre.result.data.plan &&
+      cre.result.data.plan.tempo) || 0;
+    if (prevTempo && result.plan && !result.plan.tempo) result.plan.tempo = prevTempo;
+    rev.planJson = (result && result.plan_json) || rev.planJson;
+    var exportBody = { plan_json: rev.planJson, fps: body.fps, format: body.format };
+    if (body.audio) exportBody.audio = body.audio;
+    if (body.canvas) exportBody.canvas = body.canvas;
+    cre.result = {
+      data: result, format: body.format,
+      body: (cre.result && cre.result.body) || null,
+      kind: "export", exportBody: exportBody
+    };
+    $("cre-resolve-msg").hidden = true;
+    $("cre-resolve-result").hidden = true;
+    renderCreResult(result);
+    renderStoryboard(); // re-renders the strip + board
+    resetPreview();     // the previewed plan is gone — the cut changed
+    var count = ((rev.planJson || {}).entries || []).length;
+    if (count && typeof nextSlot === "number") selectSlot(Math.max(0, Math.min(nextSlot, count - 1)));
+    else closeInspector();
+    toast(doneMsg, "success");
+  }).catch(function (err) {
+    creNote("cre-insp-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+
+function deleteShot() {
+  if (insp.slot === null || !rev.planJson) return;
+  var count = ((rev.planJson || {}).entries || []).length;
+  if (count <= 1) { creNote("cre-insp-msg", "Can't delete the last shot — a cut needs at least one.", true); return; }
+  var i = insp.slot;
+  applyPlanSurgery({ "delete": i }, "Shot " + (i + 1) + " removed.", i);
+}
+
+function moveShot(dir) {
+  if (insp.slot === null || !rev.planJson) return;
+  var i = insp.slot;
+  var count = ((rev.planJson || {}).entries || []).length;
+  var to = i + dir;
+  if (to < 0 || to >= count) return;
+  applyPlanSurgery({ move: i, to: to }, "Shot moved to position " + (to + 1) + ".", to);
+}
+
+$("cre-insp-delete").addEventListener("click", deleteShot);
+$("cre-insp-move-left").addEventListener("click", function () { moveShot(-1); });
+$("cre-insp-move-right").addEventListener("click", function () { moveShot(1); });
 Array.prototype.forEach.call($("cre-insp-trans").querySelectorAll("button"), function (btn) {
   btn.addEventListener("click", function () { applyTransition(String(btn.dataset.trans)); });
 });
@@ -10893,6 +10961,10 @@ function renderInspector() {
   var entry = entries[i];
   var plan = rev.planJson || {};
   $("cre-insp-title").textContent = "Shot " + (i + 1) + " of " + entries.length;
+  // structural-edit buttons: can't move past the ends, can't delete the last shot
+  $("cre-insp-move-left").disabled = i <= 0;
+  $("cre-insp-move-right").disabled = i >= entries.length - 1;
+  $("cre-insp-delete").disabled = entries.length <= 1;
   var thumb = $("cre-insp-thumb");
   thumb.src = sbThumbUrl(entry);
   thumb.alt = "Shot " + (i + 1) + " — " + baseName(entry.clip_path);
