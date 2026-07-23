@@ -1249,6 +1249,24 @@ svg text.axis {
 .ws-statusbar .mono { font-family: var(--mono); font-size: 10px; }
 
 .wiz-nav { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+/* Clips review step: a card per analyzed clip with Claude's read + a note box */
+.clips-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; margin: 4px 0 8px; }
+.clip-card { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.clip-card .cc-head { display: flex; align-items: baseline; gap: 8px; }
+.clip-card .cc-name { font-weight: 650; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clip-card .cc-dur { font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-left: auto; flex: none; }
+.clip-card .cc-label { font-size: 12px; color: var(--ink-2); }
+.clip-card .cc-label.none { color: var(--faint); font-style: italic; }
+.clip-card .cc-meta { display: flex; flex-wrap: wrap; gap: 5px; }
+.clip-card .cc-chip { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.04em; text-transform: uppercase; padding: 2px 6px; border-radius: 999px; background: var(--panel-2); color: var(--dim); }
+.clip-card .cc-chip.role { color: var(--accent); }
+.clip-card .cc-chip.hero { color: var(--ember); }
+.clip-card .cc-tags { font-size: 11px; color: var(--faint); overflow-wrap: anywhere; }
+.clip-card .cc-note { width: 100%; min-height: 46px; resize: vertical; padding: 6px 8px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--surface); color: var(--ink); font: inherit; font-size: 12px; }
+.clip-card .cc-note:focus { border-color: var(--accent); outline: none; }
+.clip-card .cc-note-lbl { font-size: 10.5px; color: var(--faint); }
+.clip-card.has-note { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.clips-empty { padding: 24px 12px; color: var(--faint); font-size: 12.5px; text-align: center; }
 .radio-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 6px 0 14px; }
 @media (max-width: 700px) { .radio-cards { grid-template-columns: 1fr; } }
 .radio-cards.stack { grid-template-columns: 1fr; gap: 6px; margin-bottom: 6px; }
@@ -2356,9 +2374,25 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         </div>
       </section>
 
-      <section class="wiz-step" id="cre-step-2" hidden aria-labelledby="cre-h2">
+      <section class="wiz-step" id="cre-step-clips" hidden aria-labelledby="cre-hclips">
         <div class="step-head">
           <span class="step-chip" aria-hidden="true">2</span>
+          <div>
+            <h1 id="cre-hclips" tabindex="-1">Your clips</h1>
+            <p class="wiz-lead">Every analyzed clip and what Claude saw in it. Add your own note on any clip &mdash; what it is, how you want it used &mdash; and Claude weighs it above its own labels when it composes the cut.</p>
+          </div>
+        </div>
+        <p class="scan-note" id="cre-clips-msg" role="status" hidden></p>
+        <div class="clips-grid" id="cre-clips-grid"></div>
+        <div class="wiz-nav">
+          <button class="btn ghost" id="cre-back-clips" type="button">&larr; Back</button>
+          <button class="btn primary" id="cre-next-clips" type="button">Continue to options &rarr;</button>
+        </div>
+      </section>
+
+      <section class="wiz-step" id="cre-step-2" hidden aria-labelledby="cre-h2">
+        <div class="step-head">
+          <span class="step-chip" aria-hidden="true">3</span>
           <div>
             <h1 id="cre-h2" tabindex="-1">Music &amp; options</h1>
             <p class="wiz-lead">Pick the song your cut should follow and how the finished cut should feel. Monteur reads the song&rsquo;s beat and places every cut on the rhythm.</p>
@@ -2539,7 +2573,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
 
       <section class="wiz-step" id="cre-step-3" hidden aria-labelledby="cre-h3">
         <div class="step-head">
-          <span class="step-chip" aria-hidden="true">3</span>
+          <span class="step-chip" aria-hidden="true">4</span>
           <div>
             <h1 id="cre-h3" tabindex="-1">Storyboard</h1>
             <p class="wiz-lead">Your working draft: the story Claude found, the matching clips, the timeline. Reorder, swap, retitle and revise here &mdash; every cut stays on the beat. When it feels right, continue to Your cut.</p>
@@ -2711,7 +2745,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
       <!-- COLOR page: the grade on its own page (Edit -> Color -> Deliver) -->
       <section class="wiz-step" id="cre-step-4" hidden aria-labelledby="cre-h4">
         <div class="step-head">
-          <span class="step-chip" aria-hidden="true">4</span>
+          <span class="step-chip" aria-hidden="true">5</span>
           <div>
             <h1 id="cre-h4" tabindex="-1">Look &amp; color</h1>
             <p class="wiz-lead">Grade the whole cut on one adjustment layer &mdash; pick a look, then fine-tune. Non-destructive and local; it bakes into Monteur&rsquo;s own export, never the Resolve build.</p>
@@ -2756,7 +2790,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
       <!-- YOUR CUT (harvest / deliver) page -->
       <section class="wiz-step" id="cre-step-5" hidden aria-labelledby="cre-h5">
         <div class="step-head">
-          <span class="step-chip" aria-hidden="true">5</span>
+          <span class="step-chip" aria-hidden="true">6</span>
           <div>
             <h1 id="cre-h5" tabindex="-1">Your cut</h1>
             <p class="wiz-lead">Send the finished cut out &mdash; a live Resolve timeline, an exported video, or a timeline file. Change the cut in Storyboard; the look lives in Color.</p>
@@ -5964,6 +5998,7 @@ function creNote(id, message, isError) {
 var WIZ_STEPS = [
   {
     key: "footage", label: "Footage", heading: "Your footage",
+    sec: "cre-step-1", head: "cre-h1",
     done: function () { return !!(cre.clips && cre.clips.length); },
     stopLoops: function () {
       if (scanPanel.running()) { scanPanel.stop(); setScanBusy(false); }
@@ -5971,7 +6006,13 @@ var WIZ_STEPS = [
     }
   },
   {
+    key: "clips", label: "Clips", heading: "Your clips",
+    sec: "cre-step-clips", head: "cre-hclips",
+    done: function () { return !!(cre.clips && cre.clips.length); }
+  },
+  {
     key: "options", label: "Options", heading: "Music & options",
+    sec: "cre-step-2", head: "cre-h2",
     done: function () { return !!cre.optionsVisited; },
     stopLoops: function () {
       if (rankPanel.running()) { rankPanel.stop(); setRankBusy(false); }
@@ -5979,6 +6020,7 @@ var WIZ_STEPS = [
   },
   {
     key: "storyboard", label: "Storyboard", heading: "Storyboard",
+    sec: "cre-step-3", head: "cre-h3",
     done: function () { return !!(cre.result && rev.planJson); },
     stopLoops: function () {
       if (buildPanel.running()) { buildPanel.stop(); setBuildBusy(false); }
@@ -5989,10 +6031,12 @@ var WIZ_STEPS = [
   },
   {
     key: "color", label: "Color", heading: "Look & color",
+    sec: "cre-step-4", head: "cre-h4",
     done: function () { return !gradeIsNeutral(cre.grade) || !!cre.grade.look; }
   },
   {
     key: "cut", label: "Your cut", heading: "Your cut",
+    sec: "cre-step-5", head: "cre-h5",
     done: function () { return false; },
     stopLoops: function () {
       if (kitPanel.running()) { kitPanel.stop(); setKitBusy(false); }
@@ -6034,7 +6078,7 @@ function creShowStep(n, focusHeading) {
   $("wiz-progress").textContent =
     "Step " + n + " of " + WIZ_STEPS.length + " — " + step.heading;
   WIZ_STEPS.forEach(function (s, idx) {
-    var sec = $("cre-step-" + (idx + 1));
+    var sec = $(s.sec);  // key-based section id, so a step can sit anywhere
     if (sec) sec.hidden = (idx + 1) !== n;
   });
   // the Footage page is a full-window NLE workspace; the rest keep the
@@ -6061,7 +6105,8 @@ function creShowStep(n, focusHeading) {
   }
   if (step.key === "options") syncContinueHint(); // fresh look at "would this click rebuild?"
   if (step.key === "color") applyGradePreview(); // reflect the grade on the controls
-  if (focusHeading) $("cre-h" + n).focus();
+  if (step.key === "clips") renderClipsReview(); // the analyzed clips + Claude's notes
+  if (focusHeading && $(step.head)) $(step.head).focus();
 }
 
 /* ---- native file/folder picker (with silent headless fallback) ---- */
@@ -7493,7 +7538,78 @@ function creValidateStep2() {
     nav.appendChild(span);
   });
 })();
-$("cre-next-1").addEventListener("click", function () { saveProject(); creShowStep(creStepIndex("options"), true); });
+$("cre-next-1").addEventListener("click", function () { saveProject(); creShowStep(creStepIndex("clips"), true); });
+
+/* ===== Clips review step: the analyzed clips + Claude's read + your note ===
+   Fetches the project's stored analysis (GET /api/projects/<id>/clips), one
+   card per clip. Your note (saved on blur to /clip-note) feeds the composer,
+   weighted above the machine labels. Works on a re-opened project because it
+   reads the PROJECT store, not a live scan result. */
+function clipReviewCard(c) {
+  var card = el("div", "clip-card");
+  if (c.note) card.classList.add("has-note");
+  var head = el("div", "cc-head");
+  head.appendChild(el("span", "cc-name", c.name || "clip"));
+  if (c.duration) head.appendChild(el("span", "cc-dur", fmt1(c.duration) + "s"));
+  card.appendChild(head);
+  var labelText = c.label || (c.labeled ? "—" : "Not Claude-checked yet — “Let Claude check” on Footage");
+  card.appendChild(el("div", "cc-label" + (c.label ? "" : " none"), labelText));
+  var meta = el("div", "cc-meta");
+  if (c.daylight) meta.appendChild(el("span", "cc-chip", c.daylight));
+  if (c.shot_size) meta.appendChild(el("span", "cc-chip", c.shot_size));
+  (c.roles || []).slice(0, 2).forEach(function (r) { meta.appendChild(el("span", "cc-chip role", r)); });
+  if ((c.hero || 0) >= 0.6) meta.appendChild(el("span", "cc-chip hero", "hero " + Number(c.hero).toFixed(1)));
+  meta.appendChild(el("span", "cc-chip", (c.moments || 0) + " moment" + (c.moments === 1 ? "" : "s")));
+  card.appendChild(meta);
+  if (c.tags && c.tags.length) card.appendChild(el("div", "cc-tags", c.tags.join(" · ")));
+  card.appendChild(el("div", "cc-note-lbl", "Your note (Claude reads this when composing):"));
+  var ta = document.createElement("textarea");
+  ta.className = "cc-note";
+  ta.value = c.note || "";
+  ta.maxLength = 500;
+  ta.placeholder = "e.g. this is the hero shot — open on it; skip the wobble at the end";
+  ta.addEventListener("blur", function () { saveClipNote(c.path, ta.value.trim(), card); });
+  card.appendChild(ta);
+  return card;
+}
+
+function renderClipsReview() {
+  var grid = $("cre-clips-grid");
+  if (!grid) return;
+  $("cre-clips-msg").hidden = true;
+  if (!cre.projectId) {
+    clear(grid);
+    grid.appendChild(el("div", "clips-empty",
+      "No project yet — add footage on the Footage page and analyze it first."));
+    return;
+  }
+  api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/clips")
+    .then(function (data) {
+      clear(grid);
+      var clips = (data && data.clips) || [];
+      if (!clips.length) {
+        grid.appendChild(el("div", "clips-empty",
+          "No analyzed clips yet — go back to Footage, add clips to the pool "
+          + "and analyze them (Let Claude check for the richest notes)."));
+        return;
+      }
+      clips.forEach(function (c) { grid.appendChild(clipReviewCard(c)); });
+    })
+    .catch(function (err) {
+      creNote("cre-clips-msg", err && err.message ? err.message : String(err), true);
+    });
+}
+
+function saveClipNote(path, note, card) {
+  if (!cre.projectId || !path) return;
+  api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/clip-note",
+    { method: "POST", body: { path: path, note: note } })
+    .then(function () { if (card) card.classList.toggle("has-note", !!note); })
+    .catch(function () { /* best-effort — the note re-saves on the next blur */ });
+}
+
+$("cre-back-clips").addEventListener("click", function () { creShowStep(creStepIndex("footage"), true); });
+$("cre-next-clips").addEventListener("click", function () { saveProject(); creShowStep(creStepIndex("options"), true); });
 // any option edit in step 2 may flip the continue button's rebuild hint —
 // chips bubble "click", text fields "input", selects/checkboxes "change"
 ["click", "input", "change"].forEach(function (kind) {
@@ -7913,9 +8029,9 @@ function renderCreResult(data) {
 function startBuild(andThen) {
   if (buildPanel.running()) return;
   var body = creBuildBody();
-  if (!body.folder) { toast("Add your footage folder in step 1 first."); creShowStep(1, true); return; }
-  if (cre.audio !== "original" && !body.music) { toast("Add the path to your song in step 2 first."); creShowStep(2, true); return; }
-  if (cre.audio === "original" && !body.max_duration) { toast("Without music Monteur needs a target length — set it in step 2."); creShowStep(2, true); return; }
+  if (!body.folder) { toast("Add your footage folder on the Footage page first."); creShowStep(creStepIndex("footage"), true); return; }
+  if (cre.audio !== "original" && !body.music) { toast("Add the path to your song on the Options page first."); creShowStep(creStepIndex("options"), true); return; }
+  if (cre.audio === "original" && !body.max_duration) { toast("Without music Monteur needs a target length — set it on the Options page."); creShowStep(creStepIndex("options"), true); return; }
   rememberFps(body.fps);
   $("cre-build-msg").hidden = true;
   $("cre-result").hidden = true;
@@ -8827,7 +8943,7 @@ function openProject(id, btn) {
         resetPreview(); // the restored plan renders fresh — the button is back
         if (draft.review) renderDirectorReview(draft.review);
         renderCreResult(result);
-        creShowStep(3, false);
+        creShowStep(creStepIndex("storyboard"), false);
         $("cre-result-title").focus();
         toast("Project opened — your cut is back, downloads and revisions included.", "success");
       });

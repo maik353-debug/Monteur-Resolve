@@ -234,6 +234,7 @@ class ClipReport:
     notes: list[str] = field(default_factory=list)
     media_start: float = 0.0  # seconds: the file's embedded start timecode (0 if none)
     scene_cuts: list[float] = field(default_factory=list)  # hard-cut times inside the clip
+    user_note: str = ""  # the editor's own note for this clip (fed to the composer)
 
 
 def _percentile(values: list[float], q: float) -> float:
@@ -1079,6 +1080,7 @@ def report_from_dict(d: dict) -> ClipReport:
         notes=[str(n) for n in (d.get("notes") or [])],
         media_start=float(d.get("media_start", 0.0)),
         scene_cuts=[float(c) for c in (d.get("scene_cuts") or [])],
+        user_note=str(d.get("user_note", "")),
     )
 
 

@@ -1899,6 +1899,14 @@ def _plan_from_payload(job: dict, payload: dict):
                 "clips (and Claude-check them), then build the storyboard. The "
                 "storyboard is built from your analyzed clips, not a fresh scan."
             )
+        # the editor's own per-clip notes (Clips review step) ride onto the
+        # reports so the composer reads them (keyed by path, survives re-sift)
+        notes_by_path = project.clip_notes or {}
+        if notes_by_path:
+            for report in reports:
+                note = notes_by_path.get(os.path.abspath(report.path))
+                if note:
+                    report.user_note = str(note)
         with _JOBS_LOCK:
             job["progress"].append(
                 {"stage": "cache", "name": f"using {len(reports)} analyzed clips"}
@@ -3930,6 +3938,14 @@ class MonteurHandler(BaseHTTPRequestHandler):
                 pid = rest[: -len("/see")]
                 if pid and "/" not in pid:
                     return lambda: self._project_see(pid)
+            elif rest.endswith("/clips") and method == "GET":
+                pid = rest[: -len("/clips")]
+                if pid and "/" not in pid:
+                    return lambda: self._project_clips(pid)
+            elif rest.endswith("/clip-note") and method == "POST":
+                pid = rest[: -len("/clip-note")]
+                if pid and "/" not in pid:
+                    return lambda: self._project_clip_note(pid)
             elif rest.endswith("/series/save") and method == "POST":
                 pid = rest[: -len("/series/save")]
                 if pid and "/" not in pid:
@@ -5205,6 +5221,89 @@ class MonteurHandler(BaseHTTPRequestHandler):
             daemon=True,
         ).start()
         self._send_json({"job": job["id"]})
+
+    def _project_clips(self, project_id: str) -> None:
+        """GET /api/projects/<id>/clips — the analyzed clips + Claude's notes.
+
+        One entry per analyzed clip: an aggregate of what Claude saw across its
+        moments (best label, tags, roles, hero peak, dominant daylight /
+        shot size), the moment count and usable share, plus the editor's own
+        note (from the Clips review step). Reads the PROJECT's stored analysis
+        (``projects.load_reports``), so it works on a re-opened project without
+        a fresh scan."""
+        from collections import Counter
+
+        from monteur import projects
+
+        project = projects.load_project(project_id)
+        if project is None:
+            raise ApiError(404, f"unknown project {project_id!r}")
+        reports = projects.load_reports(project)
+        notes = project.clip_notes or {}
+        clips = []
+        for report in reports:
+            moments = sorted(report.moments, key=lambda m: -m.score)
+            best = moments[0] if moments else None
+            tag_counts: Counter = Counter()
+            roles: Counter = Counter()
+            days: Counter = Counter()
+            sizes: Counter = Counter()
+            hero = 0.0
+            for m in report.moments:
+                tag_counts.update(t for t in (m.tags or []) if t)
+                if m.role:
+                    roles[m.role] += 1
+                if m.daylight:
+                    days[m.daylight] += 1
+                if m.shot_size:
+                    sizes[m.shot_size] += 1
+                hero = max(hero, float(m.hero or 0.0))
+
+            def _top(counter):
+                return counter.most_common(1)[0][0] if counter else ""
+
+            clips.append({
+                "path": report.path,
+                "name": os.path.basename(report.path),
+                "duration": round(float(report.duration), 2),
+                "usable_ratio": round(float(report.usable_ratio), 3),
+                "moments": len(report.moments),
+                "labeled": _report_is_labeled(report),
+                "label": (best.label if best else "") or "",
+                "tags": [t for t, _ in tag_counts.most_common(8)],
+                "roles": [r for r, _ in roles.most_common()],
+                "hero": round(hero, 2),
+                "daylight": _top(days),
+                "shot_size": _top(sizes),
+                "note": str(notes.get(os.path.abspath(report.path), "")),
+            })
+        self._send_json({"clips": clips})
+
+    def _project_clip_note(self, project_id: str) -> None:
+        """POST /api/projects/<id>/clip-note {path, note} — set an editor note.
+
+        Stores the editor's own note for one clip (keyed by absolute path in
+        ``project.clip_notes``), so it survives re-analysis and rides into the
+        composer's dossier. An empty note clears the entry."""
+        from monteur import projects
+
+        project = projects.load_project(project_id)
+        if project is None:
+            raise ApiError(404, f"unknown project {project_id!r}")
+        payload = self._read_json()
+        path = str(payload.get("path") or "").strip()
+        if not path:
+            raise ApiError(400, "missing 'path' (the clip to annotate)")
+        note = str(payload.get("note") or "").strip()
+        key = os.path.abspath(path)
+        notes = dict(project.clip_notes or {})
+        if note:
+            notes[key] = note
+        else:
+            notes.pop(key, None)
+        project.clip_notes = notes
+        projects.save_project(project)
+        self._send_json({"ok": True, "path": key, "note": note})
 
     def _project_series(self, project_id: str) -> None:
         """POST /api/projects/<id>/series {series:N, canvas?} — long form -> Shorts.

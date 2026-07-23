@@ -117,6 +117,11 @@ class Project:
     plan: dict | None = None
     exports: list[dict] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: Editor's own per-clip notes, keyed by absolute clip path. Shown in the
+    #: Clips review step and fed to the composer (Claude reads the note as
+    #: the editor's instruction for that shot). Survives re-analysis because
+    #: it is keyed by path, not by the sift report's mtime key.
+    clip_notes: dict = field(default_factory=dict)
     #: Lightweight index of saved cuts — each ``{"id","created_at","label",
     #: "shots","duration"}``. The full plan snapshot lives in
     #: ``versions/<id>.json``, so listing history never reads every plan.
@@ -168,6 +173,8 @@ def project_to_dict(project: Project) -> dict:
         data["plan"] = project.plan
     if project.versions:  # only-when-non-empty keeps historyless manifests unchanged
         data["versions"] = [dict(v) for v in project.versions]
+    if project.clip_notes:  # only-when-non-empty: noteless manifests stay unchanged
+        data["clip_notes"] = {str(k): str(v) for k, v in project.clip_notes.items()}
     if project.migrated_from_draft:
         data["migrated_from_draft"] = project.migrated_from_draft
     # only-when-not-default, so existing "cut" manifests stay byte-identical
@@ -217,6 +224,10 @@ def project_from_dict(data: dict) -> Project:
         versions=[dict(v) for v in (data.get("versions") or []) if isinstance(v, dict) and v.get("id")],
         migrated_from_draft=str(data.get("migrated_from_draft") or ""),
         type=str(data.get("type") or "cut"),
+        clip_notes={
+            str(k): str(v)
+            for k, v in (data.get("clip_notes") or {}).items()
+        } if isinstance(data.get("clip_notes"), dict) else {},
     )
 
 

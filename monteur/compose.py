@@ -375,6 +375,15 @@ def compose_context(
                 item["shot_size"] = m.shot_size
             inventory.append(item)
 
+    # The editor's own per-clip notes (from the Clips review step) — Claude's
+    # strongest steer: what THIS shot is and how to use it, in the editor's
+    # words. Keyed by clip name so it lines up with the inventory items.
+    clip_notes = {
+        Path(report.path).name: report.user_note.strip()
+        for report in reports
+        if getattr(report, "user_note", "").strip()
+    }
+
     context = {
         "style": chosen.key,
         "duration": _r(plan.duration),
@@ -383,6 +392,8 @@ def compose_context(
         "inventory": inventory,
         "vision": _has_vision(reports),
     }
+    if clip_notes:
+        context["clip_notes"] = clip_notes
     if not allow_repeats:
         context["reuse_forbidden"] = True
     if music is not None:
@@ -434,6 +445,14 @@ def _build_prompt(context: dict, style: str, brief: str) -> str:
             "brief may justify another order (a night teaser as a cold "
             "open is a legitimate choice). If you depart from the natural "
             "arc, say why in `why`."
+        )
+    if context.get("clip_notes"):
+        parts.append(
+            "THE EDITOR'S CLIP NOTES: `clip_notes` maps a clip name to the "
+            "editor's own note about that shot — what it is, how they want it "
+            "used, what to avoid. This is direct intent from the person whose "
+            "film this is: weight it ABOVE the machine labels when casting "
+            "those clips, and honour it in the story you tell."
         )
     if any(slot.get("locked") for slot in context.get("slots") or []):
         parts.append(

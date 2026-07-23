@@ -1434,7 +1434,32 @@ class TestWizardStepsUi:
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_resume_lands_in_the_storyboard(self):
         html = _APP_HTML.read_text(encoding="utf-8")
-        assert "creShowStep(3, false);" in html
+        # key-based now (a step can be inserted without renumbering)
+        assert 'creShowStep(creStepIndex("storyboard"), false);' in html
+
+    def test_clips_review_step_between_footage_and_options(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        # a "clips" step sits between footage and options, key-based so the
+        # existing section ids never had to renumber
+        f = html.index('key: "footage"')
+        c = html.index('key: "clips"')
+        o = html.index('key: "options"')
+        assert f < c < o
+        # the step-section mapping is key-based (sec/head), not positional
+        assert 'sec: "cre-step-clips"' in html
+        assert "var sec = $(s.sec);" in html
+        assert "$(step.head).focus()" in html
+        # the section + its render + note-save are wired
+        for needle in (
+            'id="cre-step-clips"',
+            'id="cre-clips-grid"',
+            "function renderClipsReview",
+            "function clipReviewCard",
+            "function saveClipNote",
+            "/clip-note",
+            'creShowStep(creStepIndex("clips"), true)',  # footage Continue -> clips
+        ):
+            assert needle in html, needle
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_build_payload_and_drafts_carry_the_arrangement(self):
@@ -2388,6 +2413,76 @@ class TestIncrementalAnalysis:
         assert saved and saved[0].moments
         assert saved[0].moments[0].daylight == "night"
         assert saved[0].moments[0].shot_size == "wide"
+
+
+class TestClipsReviewApi:
+    """GET /clips + POST /clip-note: the Clips review step and its notes."""
+
+    def _seed(self, tmp_path):
+        from monteur import projects
+        from monteur.sift import ClipReport, ClipSegment, Moment
+
+        clip = str(tmp_path / "ride.mp4")
+        open(clip, "wb").write(b"x")
+        project = projects.create_project(
+            "clips", media_pool=[{"path": clip, "kind": "file"}]
+        )
+        projects.save_reports(project, [ClipReport(
+            path=clip, duration=42.0,
+            segments=[ClipSegment(0.0, 4.0, "usable", 0.9)],
+            moments=[
+                Moment(1.0, 2.0, 0.9, label="overtake in a curve",
+                       tags=["curve", "road"], role="climax", hero=0.8,
+                       daylight="day", shot_size="wide"),
+                Moment(5.0, 6.0, 0.6, label="tunnel", tags=["tunnel"],
+                       role="build", daylight="day"),
+            ],
+            usable_ratio=0.7,
+        )])
+        return project, clip
+
+    def test_clips_returns_aggregated_annotations(self, server, tmp_path):
+        project, clip = self._seed(tmp_path)
+        data = _get(f"{server}/api/projects/{project.id}/clips")
+        assert len(data["clips"]) == 1
+        c = data["clips"][0]
+        assert c["name"] == "ride.mp4"
+        assert c["label"] == "overtake in a curve"  # the best moment's label
+        assert "curve" in c["tags"] and "tunnel" in c["tags"]
+        assert set(c["roles"]) == {"climax", "build"}
+        assert c["hero"] == 0.8
+        assert c["daylight"] == "day"
+        assert c["shot_size"] == "wide"
+        assert c["moments"] == 2
+        assert c["note"] == ""  # none yet
+
+    def test_clip_note_persists_and_shows_up(self, server, tmp_path):
+        from monteur import projects
+
+        project, clip = self._seed(tmp_path)
+        r = _post(f"{server}/api/projects/{project.id}/clip-note",
+                  {"path": clip, "note": "open the film on this shot"})
+        assert r["ok"] is True and r["note"] == "open the film on this shot"
+        # persisted in the project manifest, keyed by absolute path
+        reloaded = projects.load_project(project.id)
+        assert reloaded.clip_notes[os.path.abspath(clip)] == "open the film on this shot"
+        # ...and surfaced by GET /clips
+        data = _get(f"{server}/api/projects/{project.id}/clips")
+        assert data["clips"][0]["note"] == "open the film on this shot"
+        # an empty note clears it
+        _post(f"{server}/api/projects/{project.id}/clip-note", {"path": clip, "note": ""})
+        assert os.path.abspath(clip) not in projects.load_project(project.id).clip_notes
+
+    def test_clip_note_needs_a_path(self, server, tmp_path):
+        project, _ = self._seed(tmp_path)
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(f"{server}/api/projects/{project.id}/clip-note", {"note": "x"})
+        assert exc.value.code == 400
+
+    def test_clips_unknown_project_is_404(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(f"{server}/api/projects/nope/clips")
+        assert exc.value.code == 404
 
 
 class TestVisionApi:
@@ -7218,6 +7313,7 @@ class TestPlayoutAcceptance:
 
             # ---- step 2 -> 3: build the draft ------------------------------
             page.click("#cre-next-1")
+            page.click("#cre-next-clips")  # footage -> clips -> options
             page.click("#audio-original")  # no song: fast + deterministic
             page.fill("#cre-maxlen", "12")
             page.click("#cre-next-2")  # entering the storyboard builds
@@ -7404,6 +7500,7 @@ class TestPlayoutAcceptance:
             _pool_scan(page, self.DEMO)
             page.wait_for_selector("#cre-next-1", state="visible", timeout=120_000)
             page.click("#cre-next-1")
+            page.click("#cre-next-clips")  # footage -> clips -> options
             page.fill("#cre-music", f"{self.DEMO}/song.wav")
             page.fill("#cre-maxlen", "12")
             page.click("#cre-next-2")
@@ -7571,6 +7668,7 @@ class TestNoRebuildOnCleanReturn:
             # WITH music: the revise autosave keeps the music path, so the
             # reload+resume leg below restores a resumable, valid wizard
             page.click("#cre-next-1")
+            page.click("#cre-next-clips")  # footage -> clips -> options
             page.fill("#cre-music", f"{self.DEMO}/song.wav")
             page.fill("#cre-maxlen", "12")
             page.click("#cre-next-2")
@@ -8106,6 +8204,7 @@ class TestPlayoutMusicFreeRun:
 
             # ---- step 2: slim options; pace + transitions in Fine-tune -------
             page.click("#cre-next-1")
+            page.click("#cre-next-clips")  # footage -> clips -> options
             assert page.is_hidden("#pace-auto")   # tucked away until opened
             assert page.is_hidden("#trans-auto")
             page.locator("#cre-finetune").scroll_into_view_if_needed()

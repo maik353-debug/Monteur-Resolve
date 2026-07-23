@@ -550,6 +550,29 @@ def test_dossier_carries_daylight_and_prompt_states_the_law(monkeypatch):
     assert "say why in `why`" in prompt
 
 
+def test_editor_clip_notes_reach_the_dossier_and_prompt(monkeypatch):
+    calls: list[dict] = []
+    monkeypatch.setattr(ai, "complete", fake_complete(empty_reply(), calls))
+    reports = make_reports()
+    reports[0].user_note = "this is the hero shot — open the film on it"
+    compose_montage(reports, make_music(), cut_lead=0.0)
+    prompt = calls[0]["prompt"]
+    # the note rides into the dossier keyed by clip name, and the prompt tells
+    # Claude to weight it above the machine labels
+    assert "clip_notes" in prompt
+    assert "this is the hero shot" in prompt
+    assert "THE EDITOR'S CLIP NOTES" in prompt
+
+
+def test_compose_context_omits_clip_notes_when_none(monkeypatch):
+    from monteur.compose import compose_context
+
+    reports = make_reports()
+    plan = plan_montage(reports, make_music(), cut_lead=0.0)
+    context = compose_context(plan, reports, make_music())
+    assert "clip_notes" not in context  # only-when-present
+
+
 def test_prompt_has_no_daylight_lines_without_classes(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(ai, "complete", fake_complete(empty_reply(), calls))
