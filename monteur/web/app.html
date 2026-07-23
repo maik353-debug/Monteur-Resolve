@@ -2680,6 +2680,25 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         <section class="tiles" id="cre-final-tiles" aria-label="Cut summary" style="margin: 14px 0 4px;"></section>
         <p class="sb-story" id="cre-final-story" hidden></p>
 
+        <div class="resolve-send" id="cre-shorts-card" hidden>
+          <p class="seg-heading" style="margin-top: 0;">Make Shorts</p>
+          <p class="help-small">Turn this finished cut into vertical 9:16 Shorts. Monteur pulls the strongest self-contained beats your edit already used, reframes each so the subject stays in frame, and saves every Short as its own project you can refine and export.</p>
+          <div class="seg-toggle" role="group" aria-label="How many Shorts" id="cre-shorts-count" style="margin: 10px 0;">
+            <button type="button" data-n="2" aria-pressed="true">2 Shorts</button>
+            <button type="button" data-n="3" aria-pressed="false">3</button>
+            <button type="button" data-n="4" aria-pressed="false">4</button>
+          </div>
+          <button class="btn primary" id="cre-shorts-btn" type="button">Make Shorts<span class="spin" aria-hidden="true"></span></button>
+          <p class="scan-note" id="cre-shorts-msg" role="status" hidden></p>
+          <div id="cre-shorts-result" hidden>
+            <p class="help-small" id="cre-shorts-lead" style="margin: 12px 0 8px;"></p>
+            <div class="series-strip" id="cre-shorts-list" style="flex-wrap: wrap;"></div>
+            <div class="export-bar" style="margin-top: 12px;">
+              <button class="btn" id="cre-shorts-save" type="button">Save all as projects<span class="spin" aria-hidden="true"></span></button>
+            </div>
+          </div>
+        </div>
+
         <div class="resolve-send">
             <button class="btn primary" id="cre-resolve-btn" type="button">Build in DaVinci Resolve<span class="spin" aria-hidden="true"></span></button>
             <p class="help-small">Builds this cut as a live timeline in your open Resolve project — no file, cuts at their true positions with act titles, canvas and cine crop. Dissolves and the black fade in/out come from the downloaded file below (Resolve scripting can’t create those).</p>
@@ -7540,6 +7559,14 @@ function renderCreResult(data) {
   prepareExportRow();
   $("cre-result").hidden = false;
   $("cre-history").hidden = !cre.projectId; // saved cuts have a restorable history
+  // "Make Shorts" — offered on a SAVED single cut (a folder-series is already
+  // Shorts; a Short shouldn't spawn Shorts). A fresh result clears old ones.
+  var shortsCard = $("cre-shorts-card");
+  if (shortsCard) {
+    var canShorts = !!cre.projectId && !cre.series;
+    shortsCard.hidden = !canShorts;
+    hideShortsResult();
+  }
   renderSeriesStrip(); // shows the Short picker when a series is active
   // the harvest step (4: Your cut) is reachable once a draft exists
   $("cre-next-3").disabled = false;
@@ -7730,6 +7757,101 @@ function startSeriesBuild(andThen) {
     toast(message, "error");
   });
 }
+
+/* ===== Make Shorts: a finished long-form cut -> vertical Shorts =====
+   Posts to the project's OWN series endpoint, which extracts Shorts from the
+   beats THIS cut already used (reusing its persisted sift — no re-scan), then
+   lets you save each Short as its own project to refine and export. Reuses the
+   identical shorts result shape the folder Series returns. */
+var creShorts = { count: 2, built: [] };
+
+function hideShortsResult() {
+  var result = $("cre-shorts-result");
+  if (result) result.hidden = true;
+  var msg = $("cre-shorts-msg");
+  if (msg) msg.hidden = true;
+  creShorts.built = [];
+}
+
+Array.prototype.forEach.call(document.querySelectorAll("#cre-shorts-count button"), function (btn) {
+  btn.addEventListener("click", function () {
+    creShorts.count = parseInt(btn.dataset.n, 10) || 2;
+    Array.prototype.forEach.call(document.querySelectorAll("#cre-shorts-count button"), function (other) {
+      other.setAttribute("aria-pressed", String(other === btn));
+    });
+  });
+});
+
+function renderShortsList(result) {
+  var shorts = (result && result.shorts) || [];
+  creShorts.built = shorts;
+  var lead = $("cre-shorts-lead");
+  var origin = result && result.from_edit
+    ? "pulled from the beats your edit used"
+    : "pulled from your footage's strongest moments";
+  lead.textContent = shorts.length + " vertical Short" + (shorts.length === 1 ? "" : "s")
+    + " · " + origin + " · zero repeats across the set. Save them as projects to refine and export each on its own.";
+  var list = $("cre-shorts-list");
+  clear(list);
+  shorts.forEach(function (short, i) {
+    var seed = short.seed || {};
+    var label = String(seed.label || "").trim() || baseName(seed.clip_path || "");
+    var chip = el("div", "series-chip");
+    chip.appendChild(el("b", null, "Short " + (i + 1)));
+    chip.appendChild(el("span", "series-chip-sub", label + " · " + fmtClock(short.duration || 0) + " · " + (short.cuts || 0) + " cuts"));
+    list.appendChild(chip);
+  });
+  $("cre-shorts-result").hidden = shorts.length === 0;
+  if (!shorts.length) creNote("cre-shorts-msg", "No Shorts could be made — this cut needs a few distinct strong moments.", true);
+}
+
+function pollShortsJob(jobId) {
+  return new Promise(function (resolve) {
+    function tick() {
+      api("/api/jobs/" + encodeURIComponent(String(jobId))).then(function (job) {
+        if (job.state === "done") { renderShortsList(job.result || {}); resolve(); }
+        else if (job.state === "error" || job.state === "cancelled") {
+          creNote("cre-shorts-msg", job.message || "Couldn't make Shorts.", true); resolve();
+        } else { window.setTimeout(tick, 500); }
+      }).catch(function (err) {
+        creNote("cre-shorts-msg", err && err.message ? err.message : String(err), true); resolve();
+      });
+    }
+    tick();
+  });
+}
+
+function startProjectShorts() {
+  if (!cre.projectId) { toast("Save this cut first — Shorts come from a saved project."); return; }
+  $("cre-shorts-msg").hidden = true;
+  hideShortsResult();
+  return busy($("cre-shorts-btn"), function () {
+    return api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/series",
+               { method: "POST", body: { series: creShorts.count, canvas: "vertical-uhd" } })
+      .then(function (data) { return pollShortsJob(data.job); });
+  });
+}
+
+$("cre-shorts-btn").addEventListener("click", startProjectShorts);
+
+// test seam (like window.monteurScanAnim): render a shorts result directly
+window.monteurShorts = { render: renderShortsList, state: function () { return creShorts; } };
+
+$("cre-shorts-save").addEventListener("click", function () {
+  if (!cre.projectId || !creShorts.built.length) return;
+  busy($("cre-shorts-save"), function () {
+    var payload = { shorts: creShorts.built.map(function (short, i) {
+      return { plan_json: short.plan_json, label: "Short " + (i + 1) };
+    }) };
+    return api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/series/save",
+               { method: "POST", body: payload })
+      .then(function (data) {
+        var n = (data.created || []).length;
+        toast("Saved " + n + " Short" + (n === 1 ? "" : "s") + " as project" + (n === 1 ? "" : "s") + ".", "success");
+        refreshProjects(); // they show up in Home recents right away
+      });
+  });
+});
 
 function setCreFormat(fmt) {
   cre.format = fmt;
