@@ -1487,15 +1487,20 @@ class TestWizardStepsUi:
         assert 'sec: "cre-step-clips"' in html
         assert "var sec = $(s.sec);" in html
         assert "$(step.head).focus()" in html
-        # the section + its render + note-save are wired
+        # the review is MOMENT-grained now: a card per moment (thumbnail at the
+        # moment's frame + Claude's per-moment read + a per-moment note)
         for needle in (
             'id="cre-step-clips"',
             'id="cre-clips-grid"',
             "function renderClipsReview",
-            "function clipReviewCard",
-            "function saveClipNote",
-            "/clip-note",
-            # the Clips page renders when the tab bar navigates onto it
+            "function momentCard",
+            "function clipMomentsGroup",
+            "function saveMomentNote",
+            "/moment-note",
+            # each moment card shows the frame at that moment's start
+            '"&t=" + encodeURIComponent(String(m.start',
+            # the tab is labelled Moments, and renders on navigation
+            'label: "Moments"',
             'if (step.key === "clips") renderClipsReview();',
         ):
             assert needle in html, needle
@@ -2455,7 +2460,7 @@ class TestIncrementalAnalysis:
 
 
 class TestClipsReviewApi:
-    """GET /clips + POST /clip-note: the Clips review step and its notes."""
+    """GET /clips + POST /moment-note: the Moments review step and its notes."""
 
     def _seed(self, tmp_path):
         from monteur import projects
@@ -2480,43 +2485,66 @@ class TestClipsReviewApi:
         )])
         return project, clip
 
-    def test_clips_returns_aggregated_annotations(self, server, tmp_path):
+    def test_clips_returns_per_moment_annotations(self, server, tmp_path):
+        # the review is MOMENT-grained: each clip carries its moments, and each
+        # moment carries what Claude saw in THAT stretch (not a clip aggregate)
         project, clip = self._seed(tmp_path)
         data = _get(f"{server}/api/projects/{project.id}/clips")
         assert len(data["clips"]) == 1
         c = data["clips"][0]
         assert c["name"] == "ride.mp4"
-        assert c["label"] == "overtake in a curve"  # the best moment's label
-        assert "curve" in c["tags"] and "tunnel" in c["tags"]
-        assert set(c["roles"]) == {"climax", "build"}
-        assert c["hero"] == 0.8
-        assert c["daylight"] == "day"
-        assert c["shot_size"] == "wide"
-        assert c["moments"] == 2
-        assert c["note"] == ""  # none yet
+        moments = c["moments"]
+        assert isinstance(moments, list) and len(moments) == 2
+        first = moments[0]  # returned in start order
+        assert first["start"] == 1.0 and first["end"] == 2.0
+        assert first["label"] == "overtake in a curve"
+        assert first["tags"] == ["curve", "road"]
+        assert first["role"] == "climax"
+        assert first["hero"] == 0.8
+        assert first["daylight"] == "day"
+        assert first["shot_size"] == "wide"
+        assert first["note"] == ""  # none yet
+        assert moments[1]["label"] == "tunnel" and moments[1]["role"] == "build"
 
-    def test_clip_note_persists_and_shows_up(self, server, tmp_path):
+    def test_moment_note_persists_and_shows_up(self, server, tmp_path):
+        from monteur import projects
+
+        project, clip = self._seed(tmp_path)
+        r = _post(f"{server}/api/projects/{project.id}/moment-note",
+                  {"path": clip, "start": 1.0, "note": "THE hero shot — open on it"})
+        assert r["ok"] is True and r["note"] == "THE hero shot — open on it"
+        # persisted in the manifest, keyed by clip path + start
+        reloaded = projects.load_project(project.id)
+        key = f"{os.path.abspath(clip)}|1.00"
+        assert reloaded.moment_notes[key] == "THE hero shot — open on it"
+        # ...and surfaced on the RIGHT moment by GET /clips
+        data = _get(f"{server}/api/projects/{project.id}/clips")
+        moments = data["clips"][0]["moments"]
+        assert moments[0]["note"] == "THE hero shot — open on it"
+        assert moments[1]["note"] == ""  # the other moment is untouched
+        # an empty note clears it
+        _post(f"{server}/api/projects/{project.id}/moment-note",
+              {"path": clip, "start": 1.0, "note": ""})
+        assert key not in projects.load_project(project.id).moment_notes
+
+    def test_moment_note_needs_a_path_and_start(self, server, tmp_path):
+        project, clip = self._seed(tmp_path)
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(f"{server}/api/projects/{project.id}/moment-note", {"start": 1.0})
+        assert exc.value.code == 400
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(f"{server}/api/projects/{project.id}/moment-note", {"path": clip})
+        assert exc.value.code == 400
+
+    def test_clip_note_still_persists(self, server, tmp_path):
+        # the clip-level note endpoint stays (still feeds the composer per clip)
         from monteur import projects
 
         project, clip = self._seed(tmp_path)
         r = _post(f"{server}/api/projects/{project.id}/clip-note",
-                  {"path": clip, "note": "open the film on this shot"})
-        assert r["ok"] is True and r["note"] == "open the film on this shot"
-        # persisted in the project manifest, keyed by absolute path
-        reloaded = projects.load_project(project.id)
-        assert reloaded.clip_notes[os.path.abspath(clip)] == "open the film on this shot"
-        # ...and surfaced by GET /clips
-        data = _get(f"{server}/api/projects/{project.id}/clips")
-        assert data["clips"][0]["note"] == "open the film on this shot"
-        # an empty note clears it
-        _post(f"{server}/api/projects/{project.id}/clip-note", {"path": clip, "note": ""})
-        assert os.path.abspath(clip) not in projects.load_project(project.id).clip_notes
-
-    def test_clip_note_needs_a_path(self, server, tmp_path):
-        project, _ = self._seed(tmp_path)
-        with pytest.raises(urllib.error.HTTPError) as exc:
-            _post(f"{server}/api/projects/{project.id}/clip-note", {"note": "x"})
-        assert exc.value.code == 400
+                  {"path": clip, "note": "keep it wide"})
+        assert r["ok"] is True
+        assert projects.load_project(project.id).clip_notes[os.path.abspath(clip)] == "keep it wide"
 
     def test_clips_unknown_project_is_404(self, server):
         with pytest.raises(urllib.error.HTTPError) as exc:

@@ -222,6 +222,12 @@ class Moment:
     # that works without the vision API: dedupes the vision selection and
     # keeps near-duplicate takes from sitting back to back. 0 = not hashed.
     phash: int = 0
+    # The editor's own note for THIS moment (from the Moments review step) —
+    # what this stretch is and how to use it, in the editor's words. Transient:
+    # it lives in the project store (``project.moment_notes``, keyed by clip +
+    # start) and is applied onto the moment before the composer reads it, so it
+    # survives a re-sift and never bloats the cached report.
+    user_note: str = ""
 
 
 @dataclass
@@ -1060,6 +1066,7 @@ def _moment_from_dict(m: dict) -> Moment:
         entry_focus=_tuple2_or_none(m.get("entry_focus")),
         exit_focus=_tuple2_or_none(m.get("exit_focus")),
         phash=int(m.get("phash", 0) or 0),
+        user_note=str(m.get("user_note", "")),
     )
 
 

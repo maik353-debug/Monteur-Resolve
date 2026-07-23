@@ -1327,6 +1327,19 @@ svg text.axis {
 .clip-card .cc-note-lbl { font-size: 10.5px; color: var(--faint); }
 .clip-card.has-note { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 .clips-empty { padding: 24px 12px; color: var(--faint); font-size: 12.5px; text-align: center; }
+/* Moments review: one group per clip, a card per moment (thumbnail + read + note) */
+.moment-group { margin: 0 0 18px; }
+.moment-group .mg-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.moment-group .mg-head .cc-name { font-weight: 650; font-size: 13px; }
+.moment-group .mg-count { font-size: 11px; color: var(--faint); }
+.moment-group .mg-unlabeled { margin-left: auto; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--warning); }
+.moments-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.moment-card { padding: 0; overflow: hidden; gap: 0; }
+.moment-card .mc-thumb { position: relative; aspect-ratio: 16 / 9; background: var(--panel-2); overflow: hidden; }
+.moment-card .mc-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.moment-card .mc-time { position: absolute; left: 6px; bottom: 6px; font-family: var(--mono); font-size: 10px; padding: 2px 6px; border-radius: 999px; background: rgba(20, 20, 24, 0.72); color: #fff; }
+.moment-card .mc-body { display: flex; flex-direction: column; gap: 7px; padding: 10px 11px; }
+.moment-card.has-note { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 .radio-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 6px 0 14px; }
 @media (max-width: 700px) { .radio-cards { grid-template-columns: 1fr; } }
 .radio-cards.stack { grid-template-columns: 1fr; gap: 6px; margin-bottom: 6px; }
@@ -2498,8 +2511,8 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         <div class="step-head">
           <span class="step-chip" aria-hidden="true">2</span>
           <div>
-            <h1 id="cre-hclips" tabindex="-1">Your clips</h1>
-            <p class="wiz-lead">Every analyzed clip and what Claude saw in it. Add your own note on any clip &mdash; what it is, how you want it used &mdash; and Claude weighs it above its own labels when it composes the cut.</p>
+            <h1 id="cre-hclips" tabindex="-1">Your moments</h1>
+            <p class="wiz-lead">The moments Monteur pulled from your footage &mdash; the stretches that actually land in the cut &mdash; grouped by clip, each with the frame Claude saw and what it read there. Add your own note on any moment: what it is, how you want it used, what to skip. Claude weighs your note above its own labels when it composes the cut.</p>
           </div>
         </div>
         <p class="scan-note" id="cre-clips-msg" role="status" hidden></p>
@@ -6080,7 +6093,7 @@ var WIZ_STEPS = [
     }
   },
   {
-    key: "clips", label: "Clips", heading: "Your clips",
+    key: "clips", label: "Moments", heading: "Your moments",
     sec: "cre-step-clips", head: "cre-hclips",
     done: function () { return !!(cre.clips && cre.clips.length); }
   },
@@ -7642,37 +7655,65 @@ function creNavTo(n) {
   creShowStep(n, true);
 }
 
-/* ===== Clips review step: the analyzed clips + Claude's read + your note ===
-   Fetches the project's stored analysis (GET /api/projects/<id>/clips), one
-   card per clip. Your note (saved on blur to /clip-note) feeds the composer,
-   weighted above the machine labels. Works on a re-opened project because it
-   reads the PROJECT store, not a live scan result. */
-function clipReviewCard(c) {
-  var card = el("div", "clip-card");
-  if (c.note) card.classList.add("has-note");
-  var head = el("div", "cc-head");
-  head.appendChild(el("span", "cc-name", c.name || "clip"));
-  if (c.duration) head.appendChild(el("span", "cc-dur", fmt1(c.duration) + "s"));
-  card.appendChild(head);
-  var labelText = c.label || (c.labeled ? "—" : "Not Claude-checked yet — “Let Claude check” on Footage");
-  card.appendChild(el("div", "cc-label" + (c.label ? "" : " none"), labelText));
+/* ===== Moments review step: the MOMENTS the sift pulls, + Claude's read =====
+   These are the stretches that actually land in the cut. Fetches the project's
+   stored analysis (GET /api/projects/<id>/clips) — grouped by clip, but the
+   card IS the moment: its own thumbnail (the frame at its start), what Claude
+   saw in THAT stretch, and your per-moment note (saved on blur to
+   /moment-note), which the composer reads weighted above the machine labels.
+   Works on a re-opened project because it reads the PROJECT store. */
+function momentCard(clipPath, m) {
+  var card = el("div", "clip-card moment-card");
+  if (m.note) card.classList.add("has-note");
+  var thumb = el("div", "mc-thumb");
+  var img = document.createElement("img");
+  img.loading = "lazy";
+  img.alt = "";
+  img.src = thumbUrl(clipPath, 240) + "&t=" + encodeURIComponent(String(m.start || 0));
+  thumb.appendChild(img);
+  thumb.appendChild(el("span", "mc-time", fmt1(m.start) + "–" + fmt1(m.end) + "s"));
+  card.appendChild(thumb);
+  var body = el("div", "mc-body");
+  var labelText = m.label || (m.role || m.tags && m.tags.length
+    ? "—" : "Not Claude-checked yet — “Let Claude check” on Footage");
+  body.appendChild(el("div", "cc-label" + (m.label ? "" : " none"), labelText));
   var meta = el("div", "cc-meta");
-  if (c.daylight) meta.appendChild(el("span", "cc-chip", c.daylight));
-  if (c.shot_size) meta.appendChild(el("span", "cc-chip", c.shot_size));
-  (c.roles || []).slice(0, 2).forEach(function (r) { meta.appendChild(el("span", "cc-chip role", r)); });
-  if ((c.hero || 0) >= 0.6) meta.appendChild(el("span", "cc-chip hero", "hero " + Number(c.hero).toFixed(1)));
-  meta.appendChild(el("span", "cc-chip", (c.moments || 0) + " moment" + (c.moments === 1 ? "" : "s")));
-  card.appendChild(meta);
-  if (c.tags && c.tags.length) card.appendChild(el("div", "cc-tags", c.tags.join(" · ")));
-  card.appendChild(el("div", "cc-note-lbl", "Your note (Claude reads this when composing):"));
+  if (m.role) meta.appendChild(el("span", "cc-chip role", m.role));
+  if ((m.hero || 0) >= 0.6) meta.appendChild(el("span", "cc-chip hero", "hero " + Number(m.hero).toFixed(1)));
+  if (m.daylight) meta.appendChild(el("span", "cc-chip", m.daylight));
+  if (m.shot_size) meta.appendChild(el("span", "cc-chip", m.shot_size));
+  if (meta.children.length) body.appendChild(meta);
+  if (m.tags && m.tags.length) body.appendChild(el("div", "cc-tags", m.tags.join(" · ")));
+  body.appendChild(el("div", "cc-note-lbl", "Your note on this moment (Claude reads it when composing):"));
   var ta = document.createElement("textarea");
   ta.className = "cc-note";
-  ta.value = c.note || "";
+  ta.value = m.note || "";
   ta.maxLength = 500;
-  ta.placeholder = "e.g. this is the hero shot — open on it; skip the wobble at the end";
-  ta.addEventListener("blur", function () { saveClipNote(c.path, ta.value.trim(), card); });
-  card.appendChild(ta);
+  ta.placeholder = "e.g. this is THE hero shot — open on it; or: skip, too shaky";
+  ta.addEventListener("blur", function () { saveMomentNote(clipPath, m.start, ta.value.trim(), card); });
+  body.appendChild(ta);
+  card.appendChild(body);
   return card;
+}
+
+function clipMomentsGroup(c) {
+  var group = el("div", "moment-group");
+  var head = el("div", "mg-head");
+  head.appendChild(el("span", "cc-name", c.name || "clip"));
+  var n = (c.moments || []).length;
+  head.appendChild(el("span", "mg-count",
+    n + " moment" + (n === 1 ? "" : "s")
+    + (c.duration ? " · " + fmt1(c.duration) + "s clip" : "")));
+  if (!c.labeled) head.appendChild(el("span", "mg-unlabeled", "not Claude-checked"));
+  group.appendChild(head);
+  var grid = el("div", "moments-grid");
+  if (!n) {
+    grid.appendChild(el("div", "clips-empty", "No usable moments in this clip."));
+  } else {
+    (c.moments || []).forEach(function (m) { grid.appendChild(momentCard(c.path, m)); });
+  }
+  group.appendChild(grid);
+  return group;
 }
 
 function renderClipsReview() {
@@ -7695,17 +7736,17 @@ function renderClipsReview() {
           + "and analyze them (Let Claude check for the richest notes)."));
         return;
       }
-      clips.forEach(function (c) { grid.appendChild(clipReviewCard(c)); });
+      clips.forEach(function (c) { grid.appendChild(clipMomentsGroup(c)); });
     })
     .catch(function (err) {
       creNote("cre-clips-msg", err && err.message ? err.message : String(err), true);
     });
 }
 
-function saveClipNote(path, note, card) {
+function saveMomentNote(path, start, note, card) {
   if (!cre.projectId || !path) return;
-  api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/clip-note",
-    { method: "POST", body: { path: path, note: note } })
+  api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/moment-note",
+    { method: "POST", body: { path: path, start: start, note: note } })
     .then(function () { if (card) card.classList.toggle("has-note", !!note); })
     .catch(function () { /* best-effort — the note re-saves on the next blur */ });
 }

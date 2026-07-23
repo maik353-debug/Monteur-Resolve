@@ -799,6 +799,17 @@ def _preview_dir() -> str:
         return _PREVIEW_DIR
 
 
+def _moment_key(path: str, start: float) -> str:
+    """Stable key for one moment's editor note: ``<abs clip path>|<start>``.
+
+    The start is rounded to 0.01s so the same moment always maps to the same
+    key across a re-open (the sift is deterministic from the same media). Used
+    by the Moments review store (``project.moment_notes``): written by
+    ``/moment-note``, read by ``/clips`` and the build's note application.
+    """
+    return f"{os.path.abspath(path)}|{round(float(start), 2):.2f}"
+
+
 def _thumb_cache_path(clip: str, time_s: float, width: int) -> str:
     """Cache file for one (path, mtime, t, w) thumbnail request.
 
@@ -1907,6 +1918,16 @@ def _plan_from_payload(job: dict, payload: dict):
                 note = notes_by_path.get(os.path.abspath(report.path))
                 if note:
                     report.user_note = str(note)
+        # ...and the finer per-MOMENT notes (Moments review step) ride onto the
+        # individual moments (keyed by path + start), so the composer reads the
+        # editor's instruction for each stretch that lands in the cut
+        moment_notes = project.moment_notes or {}
+        if moment_notes:
+            for report in reports:
+                for m in report.moments:
+                    note = moment_notes.get(_moment_key(report.path, m.start))
+                    if note:
+                        m.user_note = str(note)
         with _JOBS_LOCK:
             job["progress"].append(
                 {"stage": "cache", "name": f"using {len(reports)} analyzed clips"}
@@ -3963,6 +3984,10 @@ class MonteurHandler(BaseHTTPRequestHandler):
                 pid = rest[: -len("/clip-note")]
                 if pid and "/" not in pid:
                     return lambda: self._project_clip_note(pid)
+            elif rest.endswith("/moment-note") and method == "POST":
+                pid = rest[: -len("/moment-note")]
+                if pid and "/" not in pid:
+                    return lambda: self._project_moment_note(pid)
             elif rest.endswith("/series/save") and method == "POST":
                 pid = rest[: -len("/series/save")]
                 if pid and "/" not in pid:
@@ -5240,59 +5265,45 @@ class MonteurHandler(BaseHTTPRequestHandler):
         self._send_json({"job": job["id"]})
 
     def _project_clips(self, project_id: str) -> None:
-        """GET /api/projects/<id>/clips — the analyzed clips + Claude's notes.
+        """GET /api/projects/<id>/clips — the analyzed MOMENTS, grouped by clip.
 
-        One entry per analyzed clip: an aggregate of what Claude saw across its
-        moments (best label, tags, roles, hero peak, dominant daylight /
-        shot size), the moment count and usable share, plus the editor's own
-        note (from the Clips review step). Reads the PROJECT's stored analysis
-        (``projects.load_reports``), so it works on a re-opened project without
-        a fresh scan."""
-        from collections import Counter
-
+        The moments are the stretches the sift pulls out — the ones that
+        actually land in the cut — so this is what the review step shows. Each
+        clip carries its list of moments, and each moment carries what Claude
+        saw in THAT stretch (label, tags, role, hero, daylight, shot size), its
+        time span, and the editor's own per-moment note. Reads the PROJECT's
+        stored analysis (``projects.load_reports``), so it works on a re-opened
+        project without a fresh scan."""
         from monteur import projects
 
         project = projects.load_project(project_id)
         if project is None:
             raise ApiError(404, f"unknown project {project_id!r}")
         reports = projects.load_reports(project)
-        notes = project.clip_notes or {}
+        notes = project.moment_notes or {}
         clips = []
         for report in reports:
-            moments = sorted(report.moments, key=lambda m: -m.score)
-            best = moments[0] if moments else None
-            tag_counts: Counter = Counter()
-            roles: Counter = Counter()
-            days: Counter = Counter()
-            sizes: Counter = Counter()
-            hero = 0.0
-            for m in report.moments:
-                tag_counts.update(t for t in (m.tags or []) if t)
-                if m.role:
-                    roles[m.role] += 1
-                if m.daylight:
-                    days[m.daylight] += 1
-                if m.shot_size:
-                    sizes[m.shot_size] += 1
-                hero = max(hero, float(m.hero or 0.0))
-
-            def _top(counter):
-                return counter.most_common(1)[0][0] if counter else ""
-
+            moments = []
+            for m in sorted(report.moments, key=lambda m: m.start):
+                moments.append({
+                    "start": round(float(m.start), 2),
+                    "end": round(float(m.end), 2),
+                    "score": round(float(m.score or 0.0), 3),
+                    "label": str(m.label or ""),
+                    "tags": [str(t) for t in (m.tags or []) if t],
+                    "role": str(m.role or ""),
+                    "hero": round(float(m.hero or 0.0), 2),
+                    "daylight": str(m.daylight or ""),
+                    "shot_size": str(m.shot_size or ""),
+                    "note": str(notes.get(_moment_key(report.path, m.start), "")),
+                })
             clips.append({
                 "path": report.path,
                 "name": os.path.basename(report.path),
                 "duration": round(float(report.duration), 2),
                 "usable_ratio": round(float(report.usable_ratio), 3),
-                "moments": len(report.moments),
                 "labeled": _report_is_labeled(report),
-                "label": (best.label if best else "") or "",
-                "tags": [t for t, _ in tag_counts.most_common(8)],
-                "roles": [r for r, _ in roles.most_common()],
-                "hero": round(hero, 2),
-                "daylight": _top(days),
-                "shot_size": _top(sizes),
-                "note": str(notes.get(os.path.abspath(report.path), "")),
+                "moments": moments,
             })
         self._send_json({"clips": clips})
 
@@ -5321,6 +5332,38 @@ class MonteurHandler(BaseHTTPRequestHandler):
         project.clip_notes = notes
         projects.save_project(project)
         self._send_json({"ok": True, "path": key, "note": note})
+
+    def _project_moment_note(self, project_id: str) -> None:
+        """POST /api/projects/<id>/moment-note {path, start, note} — annotate one moment.
+
+        Stores the editor's own note for one moment (keyed by clip path + start
+        in ``project.moment_notes``), so it survives re-analysis and rides onto
+        that exact moment in the composer's dossier. An empty note clears it."""
+        from monteur import projects
+
+        project = projects.load_project(project_id)
+        if project is None:
+            raise ApiError(404, f"unknown project {project_id!r}")
+        payload = self._read_json()
+        path = str(payload.get("path") or "").strip()
+        if not path:
+            raise ApiError(400, "missing 'path' (the clip the moment is in)")
+        if payload.get("start") is None:
+            raise ApiError(400, "missing 'start' (the moment's start time)")
+        try:
+            start = float(payload.get("start"))
+        except (TypeError, ValueError):
+            raise ApiError(400, "'start' must be a number (the moment's start time)")
+        note = str(payload.get("note") or "").strip()
+        key = _moment_key(path, start)
+        notes = dict(project.moment_notes or {})
+        if note:
+            notes[key] = note
+        else:
+            notes.pop(key, None)
+        project.moment_notes = notes
+        projects.save_project(project)
+        self._send_json({"ok": True, "key": key, "note": note})
 
     def _project_series(self, project_id: str) -> None:
         """POST /api/projects/<id>/series {series:N, canvas?} — long form -> Shorts.

@@ -592,6 +592,33 @@ def test_compose_context_omits_clip_notes_when_none(monkeypatch):
     assert "clip_notes" not in context  # only-when-present
 
 
+def test_editor_moment_notes_reach_the_matching_inventory_item_and_prompt(monkeypatch):
+    calls: list[dict] = []
+    monkeypatch.setattr(ai, "complete", fake_complete(empty_reply(), calls))
+    reports = make_reports()
+    # a note on ONE moment — the finest steer there is
+    target = reports[0].moments[0]
+    target.user_note = "open on this — THE hero beat"
+    compose_montage(reports, make_music(), cut_lead=0.0)
+    prompt = calls[0]["prompt"]
+    context = json.loads(prompt[prompt.index("{") : prompt.rindex("}") + 1])
+    noted = [i for i in context["inventory"] if i.get("note")]
+    assert len(noted) == 1  # only the annotated moment carries a note
+    assert noted[0]["note"] == "open on this — THE hero beat"
+    assert noted[0]["start"] == round(target.start, 2)  # on the RIGHT moment
+    # ...and the prompt tells Claude to weight it above every machine label
+    assert "THE EDITOR'S MOMENT NOTES" in prompt
+
+
+def test_compose_context_omits_moment_note_when_none():
+    from monteur.compose import compose_context
+
+    reports = make_reports()
+    plan = plan_montage(reports, make_music(), cut_lead=0.0)
+    context = compose_context(plan, reports, make_music())
+    assert not any("note" in i for i in context["inventory"])  # only-when-present
+
+
 def test_prompt_has_no_daylight_lines_without_classes(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(ai, "complete", fake_complete(empty_reply(), calls))

@@ -373,6 +373,10 @@ def compose_context(
                 item["daylight"] = m.daylight
             if getattr(m, "shot_size", ""):
                 item["shot_size"] = m.shot_size
+            # The editor's own note for THIS moment (Moments review step) — the
+            # strongest steer, in the editor's words, for this exact stretch.
+            if getattr(m, "user_note", "").strip():
+                item["note"] = m.user_note.strip()
             inventory.append(item)
 
     # The editor's own per-clip notes (from the Clips review step) — Claude's
@@ -453,6 +457,15 @@ def _build_prompt(context: dict, style: str, brief: str) -> str:
             "used, what to avoid. This is direct intent from the person whose "
             "film this is: weight it ABOVE the machine labels when casting "
             "those clips, and honour it in the story you tell."
+        )
+    if any(item.get("note") for item in context.get("inventory") or []):
+        parts.append(
+            "THE EDITOR'S MOMENT NOTES: an inventory moment may carry a `note` "
+            "— the editor's own words about THAT exact stretch (what it is, how "
+            "to use it, what to avoid). This is the strongest, most specific "
+            "steer there is: weight it ABOVE every machine label for that "
+            "moment, favour casting the moment where its note asks, and honour "
+            "it in the story you tell."
         )
     if any(slot.get("locked") for slot in context.get("slots") or []):
         parts.append(

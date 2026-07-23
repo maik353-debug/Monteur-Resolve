@@ -122,6 +122,13 @@ class Project:
     #: the editor's instruction for that shot). Survives re-analysis because
     #: it is keyed by path, not by the sift report's mtime key.
     clip_notes: dict = field(default_factory=dict)
+    #: Editor's own per-MOMENT notes, keyed by ``"<abs clip path>|<start>"``
+    #: (start rounded to 0.01s). This is the finer-grained sibling of
+    #: ``clip_notes``: the Moments review step annotates the individual
+    #: stretches the sift extracts — the ones that actually land in the cut —
+    #: and the composer reads each note as the editor's instruction for that
+    #: exact moment. Survives re-analysis because it is keyed by path + time.
+    moment_notes: dict = field(default_factory=dict)
     #: Lightweight index of saved cuts — each ``{"id","created_at","label",
     #: "shots","duration"}``. The full plan snapshot lives in
     #: ``versions/<id>.json``, so listing history never reads every plan.
@@ -175,6 +182,8 @@ def project_to_dict(project: Project) -> dict:
         data["versions"] = [dict(v) for v in project.versions]
     if project.clip_notes:  # only-when-non-empty: noteless manifests stay unchanged
         data["clip_notes"] = {str(k): str(v) for k, v in project.clip_notes.items()}
+    if project.moment_notes:  # only-when-non-empty: keeps noteless manifests unchanged
+        data["moment_notes"] = {str(k): str(v) for k, v in project.moment_notes.items()}
     if project.migrated_from_draft:
         data["migrated_from_draft"] = project.migrated_from_draft
     # only-when-not-default, so existing "cut" manifests stay byte-identical
@@ -228,6 +237,10 @@ def project_from_dict(data: dict) -> Project:
             str(k): str(v)
             for k, v in (data.get("clip_notes") or {}).items()
         } if isinstance(data.get("clip_notes"), dict) else {},
+        moment_notes={
+            str(k): str(v)
+            for k, v in (data.get("moment_notes") or {}).items()
+        } if isinstance(data.get("moment_notes"), dict) else {},
     )
 
 
