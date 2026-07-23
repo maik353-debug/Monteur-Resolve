@@ -1537,26 +1537,43 @@ class TestProjectPoolApi:
         got = _get(f"{server}/api/projects/{pid}/pool")
         assert [c["name"] for c in got["clips"]] == ["one.mp4"]
 
-    def test_labeled_flag_reads_the_vision_cache(self, server, tmp_path):
-        from monteur.vision import CACHE_FILENAME
+    def test_status_reflects_this_projects_analysis(self, server, tmp_path):
+        # Pool status comes from THIS project's stored analysis — not a sidecar
+        # some other project left next to the footage. sift-only -> "Analyzed"
+        # but not "Claude-checked"; a vision-annotated report -> both.
+        from monteur import projects
+        from monteur.sift import ClipReport, ClipSegment, Moment
 
         footage = tmp_path / "labeled"
         footage.mkdir()
         clip = footage / "hero.mp4"
         clip.write_bytes(b"x")
-        # a .monteur-vision.json next to the footage marks the clip labeled;
-        # the key discipline is "<abspath>|<mtime>|<window>|<model>"
-        (footage / CACHE_FILENAME).write_text(
-            json.dumps(
-                {f"{clip.resolve()}|123.0|0.00-1.00|m": {"label": "a summit"}}
-            )
-        )
         pid = self._new_project(server)
+        # fresh footage, nothing analyzed in THIS project yet -> not analyzed
         pool = _post(
             f"{server}/api/projects/{pid}/pool",
             {"add": {"path": str(footage), "kind": "folder"}},
         )
-        assert pool["clips"][0]["labeled"] is True
+        assert pool["clips"][0]["sifted"] is False
+        assert pool["clips"][0]["labeled"] is False
+
+        project = projects.load_project(pid)
+        base = dict(
+            path=str(clip), duration=5.0,
+            segments=[ClipSegment(0.0, 2.0, "usable", 0.9)],
+            usable_ratio=0.8, media_start=0.0,
+        )
+        # a sift-only report -> analyzed, but Claude hasn't seen it
+        projects.save_reports(project, [ClipReport(moments=[Moment(0.0, 2.0, 0.9)], **base)])
+        got = _get(f"{server}/api/projects/{pid}/pool")
+        assert got["clips"][0]["sifted"] is True
+        assert got["clips"][0]["labeled"] is False
+
+        # a Claude-checked report carries a role/hero -> labeled
+        projects.save_reports(project, [ClipReport(
+            moments=[Moment(0.0, 2.0, 0.9, role="opener", hero=0.8)], **base)])
+        checked = _get(f"{server}/api/projects/{pid}/pool")
+        assert checked["clips"][0]["labeled"] is True
 
     def test_add_then_remove_never_touches_the_media_file(self, server, tmp_path):
         # The whole promise of the pool: referencing local footage moves and
@@ -2048,6 +2065,44 @@ class TestStoryboardFromProject:
         reopened = projects.load_project(project.id)
         stored = projects.load_reports(reopened)
         assert {r.path for r in stored} == set(clips)
+
+
+class TestIncrementalAnalysis:
+    """Analyze saves each clip into the project the moment it finishes, so a
+    cancel partway keeps every clip analyzed so far (not all-or-nothing)."""
+
+    def test_cancel_keeps_the_clips_already_analyzed(self, tmp_path, monkeypatch):
+        import threading
+
+        import monteur.sift as sift_mod
+        from monteur import projects
+        from monteur.sift import ClipReport, ClipSegment, SiftCancelled
+        from monteur.web import server as srv
+
+        clips = [str(tmp_path / f"c{i}.mp4") for i in range(3)]
+        for c in clips:
+            open(c, "wb").write(b"x")
+        project = projects.create_project(
+            "inc", media_pool=[{"path": c, "kind": "file"} for c in clips]
+        )
+
+        def fake_analyze(path, cancel=None):
+            if path == clips[2]:
+                raise SiftCancelled()  # cancel strikes before the 3rd finishes
+            return ClipReport(
+                path=path, duration=5.0,
+                segments=[ClipSegment(0.0, 2.0, "usable", 0.9)],
+                moments=[], usable_ratio=0.8, media_start=0.0,
+            )
+        monkeypatch.setattr(sift_mod, "analyze_clip", fake_analyze)
+
+        job = {"progress": [], "cancel": threading.Event()}
+        with pytest.raises(SiftCancelled):
+            srv._analyze_selected(job, clips, project.id)
+
+        # the first two were persisted BEFORE the cancel — not lost
+        saved = {r.path for r in projects.load_reports(projects.load_project(project.id))}
+        assert saved == {clips[0], clips[1]}
 
 
 class TestVisionApi:

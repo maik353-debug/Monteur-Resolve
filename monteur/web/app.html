@@ -6764,13 +6764,15 @@ function attachScanJob(jobId) {
     onCancelled: function () {
       clearActiveJob();
       setScanBusy(false);
-      creNote("cre-scan-msg", "Analysis cancelled — nothing was changed. Your files are untouched.");
+      loadPool(); // clips analyzed before the cancel are kept — show them green
+      creNote("cre-scan-msg", "Analysis cancelled — the clips already analyzed are kept. Your files are untouched.");
       poolSyncActions();
       $("cre-scan-btn").focus();
     },
     onError: function (message) {
       clearActiveJob();
       setScanBusy(false);
+      loadPool(); // anything analyzed before the error is kept
       creNote("cre-scan-msg", message, true);
       poolSyncActions();
       toast(message, "error");

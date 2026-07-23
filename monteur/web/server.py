@@ -1172,29 +1172,47 @@ def _vision_labeled_paths(folder: str) -> set[str]:
     return labeled
 
 
+def _report_is_labeled(report) -> bool:
+    """True when a clip's report carries Claude/vision annotations.
+
+    A plain sift never sets a moment's ``role`` or ``hero`` — those come only
+    from the vision pass (monteur.vision). So a report with any moment carrying
+    a role or a positive hero score has been Claude-checked.
+    """
+    for moment in getattr(report, "moments", None) or []:
+        if str(getattr(moment, "role", "") or "").strip():
+            return True
+        try:
+            if float(getattr(moment, "hero", 0.0) or 0.0) > 0.0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def _resolve_pool(project) -> dict:
     """Expand a project's ``media_pool`` into ``{clips, entries}`` with status.
 
     Each folder entry becomes its member clips (:func:`list_media`); a file
-    entry is itself. Every clip carries CHEAP, CACHED status flags read from
-    the machinery we already keep: ``sifted`` (a fresh per-clip report exists,
-    from the staged "analyze selected" pass or a full scan — carrying its
-    ``usable_ratio``/``duration``), ``proxy_fresh``
-    (:func:`monteur.proxies.fresh_proxy`), ``labeled`` (in the folder's
-    ``.monteur-vision.json``). Nothing here opens or decodes a clip.
+    entry is itself. Every clip carries CHEAP status flags: ``sifted`` (THIS
+    project's analysis store holds a report for the clip — carrying its
+    ``usable_ratio``/``duration``), ``labeled`` (that report was Claude-checked,
+    :func:`_report_is_labeled`), and ``proxy_fresh``
+    (:func:`monteur.proxies.fresh_proxy`). Status is per-PROJECT — a sidecar
+    another project left next to the footage never greens a fresh pool. Nothing
+    here opens or decodes a clip.
     """
+    from monteur import projects
     from monteur import proxies as proxies_mod
     from monteur.sift import list_media
 
-    labeled_by_dir: dict[str, set[str]] = {}
-
-    def labeled_for(directory: str) -> set[str]:
-        key = os.path.abspath(directory)
-        cached = labeled_by_dir.get(key)
-        if cached is None:
-            cached = _vision_labeled_paths(key)
-            labeled_by_dir[key] = cached
-        return cached
+    # Status reflects THIS PROJECT's stored analysis — not a sidecar that some
+    # other project left next to the footage. So freshly-pooled footage reads
+    # "Not analyzed" until you analyze it in this project, and it greens up
+    # incrementally as each clip lands in the project's analysis store.
+    proj_reports = {
+        os.path.abspath(r.path): r for r in projects.load_reports(project)
+    }
 
     clips: list[dict] = []
     entries: list[dict] = []
@@ -1219,7 +1237,7 @@ def _resolve_pool(project) -> dict:
             if ab in seen:
                 continue  # a clip referenced twice (folder + file) shows once
             seen.add(ab)
-            report = _cached_clip_report(ab)
+            report = proj_reports.get(ab)
             clip = {
                 "path": ab,
                 "name": os.path.basename(ab),
@@ -1227,7 +1245,10 @@ def _resolve_pool(project) -> dict:
                 "thumb": True,
                 "sifted": report is not None,
                 "proxy_fresh": proxies_mod.fresh_proxy(ab) is not None,
-                "labeled": ab in labeled_for(os.path.dirname(ab)),
+                # "Claude-checked" only when THIS project's stored report carries
+                # vision annotations (role/hero come from the Claude pass, never
+                # from a plain sift).
+                "labeled": report is not None and _report_is_labeled(report),
             }
             if report is not None:
                 clip["usable_ratio"] = report.usable_ratio
@@ -1553,14 +1574,19 @@ def _start_clip_proxies_job(clips: list) -> dict:
     return job
 
 
-def _analyze_selected(job: dict, clips: list) -> list:
+def _analyze_selected(job: dict, clips: list, project_id: str = "") -> list:
     """Sift each of ``clips`` (a chosen subset), with per-clip job progress.
 
     Reuses :func:`monteur.sift.analyze_clip` — the SAME engine a folder scan
     runs, one clip at a time — so the staged "analyze selected" is honest sift
     data. Cancellation is threaded into every ffmpeg call; a set flag raises
     out (SiftCancelled / MediaCancelled) and the caller marks the job
-    cancelled. Reports are remembered in the per-clip cache."""
+    cancelled.
+
+    Each clip's report is remembered AND stored in the project the moment it
+    finishes — INCREMENTALLY — so cancelling partway keeps every clip analyzed
+    so far (and the pool greens up one clip at a time), instead of an all-or-
+    nothing write at the end."""
     from monteur.sift import analyze_clip
 
     reports = []
@@ -1573,6 +1599,8 @@ def _analyze_selected(job: dict, clips: list) -> list:
             )
         report = analyze_clip(str(path), cancel=job["cancel"])
         reports.append(report)
+        _remember_clip_reports([report])          # sidecar + memory, per clip
+        _save_project_analysis(project_id, [report])  # project store, incremental
         with _JOBS_LOCK:
             job["progress"].append(
                 {
@@ -1583,7 +1611,6 @@ def _analyze_selected(job: dict, clips: list) -> list:
                     "usable_ratio": report.usable_ratio,
                 }
             )
-    _remember_clip_reports(reports)
     return reports
 
 
@@ -1619,7 +1646,7 @@ def _run_analyze_job(job: dict, clips: list, see: bool = False, project_id: str 
     from monteur.sift import SiftCancelled
 
     try:
-        reports = _analyze_selected(job, clips)
+        reports = _analyze_selected(job, clips, project_id)
         result: dict = {}
         if see and reports:
             notes, error = _apply_vision(job, reports)
