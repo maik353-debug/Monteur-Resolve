@@ -880,6 +880,24 @@ svg text.axis {
 }
 /* free-navigation page bar — every page is always clickable (Resolve pages);
    the ✓ tick is STATUS only and never gates the jump. */
+/* Resolve-style page bar: a flat footer of equal, centred pages */
+.page-bar {
+  flex: none; height: 38px; display: flex; justify-content: center; align-items: stretch;
+  background: var(--topbar); border-top: 1px solid var(--border);
+}
+.page-tabs { display: flex; align-items: stretch; }
+.page-tabs span {
+  display: flex; align-items: center; padding: 0 22px; cursor: pointer;
+  font-size: 12px; font-weight: 600; color: var(--ink-muted); white-space: nowrap;
+  border-right: 1px solid var(--border); user-select: none;
+  transition: color 0.12s, background 0.12s;
+}
+.page-tabs span:first-child { border-left: 1px solid var(--border); }
+.page-tabs span:hover, .page-tabs span:focus-visible { color: var(--ink); background: var(--surface-2); outline: none; }
+.page-tabs span.on { color: var(--accent); background: var(--surface); box-shadow: inset 0 2px 0 var(--accent); }
+.page-tabs span b { display: none; }            /* Resolve pages have no numbers */
+.page-tabs span.done::after { content: none; }  /* ...and no checkmarks */
+
 .wiz-bar {
   display: flex; gap: 1px; margin-bottom: 6px;
   background: var(--border); border: 1px solid var(--border); border-radius: 3px;
@@ -2093,8 +2111,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
 
     <section id="create" hidden>
       <p class="eyebrow">Create a first cut</p>
-      <p class="wiz-progress" id="wiz-progress">Step 1 of 5 — Your footage</p>
-      <nav class="wiz-bar" id="wiz-bar" aria-label="Create — jump to any page"></nav>
+      <p class="wiz-progress" id="wiz-progress" hidden>Step 1 of 5 — Your footage</p>
       <p class="wiz-saved" id="wiz-saved"><span class="wiz-saved-dot" aria-hidden="true"></span>All saved — move between pages freely, nothing is reset.</p>
 
       <section class="wiz-step ws-step" id="cre-step-1" aria-labelledby="cre-h1">
@@ -3084,6 +3101,13 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
   </main>
 </div>
 
+<!-- Resolve-style page bar: flat, equal pages along the bottom. Shown only in
+     Create (its pages); jump freely between them. Rendered by renderWizBar into
+     #wiz-bar; visibility follows the view. -->
+<footer class="page-bar" id="page-bar" hidden>
+  <nav class="page-tabs" id="wiz-bar" aria-label="Pages — jump to any"></nav>
+</footer>
+
 <input type="file" id="file-input" accept=".edl,.fcpxml,.xml" multiple hidden>
 <input type="file" id="compare-input" accept=".edl,.fcpxml,.xml" hidden>
 <input type="file" id="script-input" accept=".fountain,.txt" hidden>
@@ -3795,6 +3819,9 @@ function updateMainVisibility() {
   // the version history + Resolve panel are analysis chrome — only in Pacing,
   // so Home and the Create wizard stay uncluttered.
   $("app-sidebar").hidden = !pacing;
+  // the Resolve-style page bar belongs to Create (its pages) — hidden elsewhere
+  var pb = $("page-bar");
+  if (pb) pb.hidden = v !== "create";
 }
 /* "‹ Projects" — return to the hub from any working view. setView already
    stops the create/movie poll loops, exactly as the old tab switch did. */
