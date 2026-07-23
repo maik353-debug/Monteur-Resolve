@@ -79,15 +79,21 @@ class FoundShot:
 def _parse_key(key: str) -> tuple[str, float, float, float] | None:
     """Split a vision cache key into (abspath, mtime, start, end).
 
-    The key format is ``abspath|mtime|start-end|model`` (2 decimals on the
-    window, see :func:`monteur.vision._moment_key`). ``rsplit`` keeps a ``|``
+    The current key format is ``abspath|mtime|start-end|model|<n>f`` — the
+    trailing frame-count field (see :func:`monteur.vision._moment_key`)
+    namespaces the multi-frame reading. Older caches used the 4-field
+    ``abspath|mtime|start-end|model``; both are read. ``rsplit`` keeps a ``|``
     inside the path harmless. Returns None for anything unparseable — an
     unknown key must never abort the search.
     """
-    parts = key.rsplit("|", 3)
-    if len(parts) != 4:
-        return None
-    abspath, mtime_text, window, _model = parts
+    parts = key.rsplit("|", 4)
+    if len(parts) == 5 and re.fullmatch(r"\d+f", parts[4]):
+        abspath, mtime_text, window, _model, _frames = parts
+    else:
+        parts = key.rsplit("|", 3)
+        if len(parts) != 4:
+            return None
+        abspath, mtime_text, window, _model = parts
     start_text, sep, end_text = window.partition("-")
     if not sep:
         return None

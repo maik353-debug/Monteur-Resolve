@@ -2,7 +2,7 @@
 
 The search reads only the vision cache sidecar (.monteur-vision.json), so
 these tests build synthetic caches in vision.py's exact key/value format:
-key = ``abspath|mtime|start-end (2dp)|model``, value = a
+key = ``abspath|mtime|start-end (2dp)|model|<n>f``, value = a
 label/tags/role/hero/group dict. Dummy clip files back the keys so the
 staleness check (missing file, changed mtime) can be exercised for real.
 """
@@ -17,7 +17,7 @@ import pytest
 
 from monteur import find
 from monteur.find import FoundShot, load_annotations, search_footage
-from monteur.vision import CACHE_FILENAME, _moment_key
+from monteur.vision import CACHE_FILENAME, _FRAMES_PER_MOMENT, _moment_key
 
 MODEL = "claude-test-model"
 
@@ -40,7 +40,7 @@ def _put(folder: Path, cache: dict, name: str, start: float, end: float, value: 
         clip.write_bytes(b"not really a video")
     key = (
         f"{os.path.abspath(clip)}|{mtime if mtime is not None else os.path.getmtime(clip)}"
-        f"|{start:.2f}-{end:.2f}|{MODEL}"
+        f"|{start:.2f}-{end:.2f}|{MODEL}|{_FRAMES_PER_MOMENT}f"
     )
     cache[key] = value
     return key
@@ -63,6 +63,7 @@ def test_key_format_matches_vision_exactly(tmp_path):
     real_key = _moment_key(str(clip), MODEL, moment)
     assert real_key == (
         f"{os.path.abspath(clip)}|{os.path.getmtime(clip)}|1.23-5.68|{MODEL}"
+        f"|{_FRAMES_PER_MOMENT}f"
     )
     # ...and find.py's parser inverts it exactly.
     assert find._parse_key(real_key) == (
