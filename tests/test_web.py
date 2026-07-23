@@ -6837,6 +6837,33 @@ class TestProUiStatic:
             assert gone not in source, gone
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_trailer_is_its_own_tool_not_a_create_trailing_panel(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        # Trailer (distill) is a first-class suite tool: a Home card + its own
+        # view + wiring, no longer a <details> panel trailing every Create step
+        for needle in (
+            'id="pm-distill"',             # the Home tool card
+            'id="distill"',                # the standalone view
+            'id="distill-back"',           # its own back-to-Projects control
+            "function openDistillTool",
+            '$("pm-distill").addEventListener',
+            'distill: "Trailer"',          # topbar title for the view
+            '$("distill").hidden = v !== "distill"',
+            "Go to Trailer",               # keyboard shortcut label
+            # the controls moved intact (same IDs, so the JS is unchanged)
+            'id="cre-dst-file-btn"',
+            'id="cre-dst-btn"',
+            'id="cre-dst-result"',
+        ):
+            assert needle in source, needle
+        # and it is NO LONGER a trailing Create panel
+        for gone in (
+            'id="cre-distill"',            # the retired <details> wrapper
+            "#create.ws-mode #cre-distill",  # the retired hide-in-workspace rule
+        ):
+            assert gone not in source, gone
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_inspector_markup_and_wiring(self):
         source = _APP_HTML.read_text(encoding="utf-8")
         for needle in (

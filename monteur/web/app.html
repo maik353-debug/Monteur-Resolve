@@ -1131,9 +1131,6 @@ svg text.axis {
    each panel scrolls internally. Neutral NLE grey tokens, small + dense. */
 #create.ws-mode { max-width: none; padding: 12px 16px 12px; }
 #create.ws-mode .eyebrow, #create.ws-mode .wiz-saved { display: none; }
-/* the always-on trailing tools (trailer distiller) belong to a finished cut,
-   not the Footage workspace — keep them off the full-window Media page */
-#create.ws-mode #cre-distill { display: none; }
 .ws-step { padding: 0; border: 0; background: transparent; }
 .ws {
   display: flex; flex-direction: column;
@@ -2122,6 +2119,15 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           <p>Turn a finished cut into vertical Shorts — Monteur pulls the strongest beats it already used and reframes each to 9:16.</p>
           <span class="pm-intent-go">Pick a cut <span class="arw" aria-hidden="true">→</span></span>
         </button>
+        <button class="pm-intent" id="pm-distill" type="button" style="--c:#c96a5a">
+          <span class="pm-intent-glow" aria-hidden="true"></span>
+          <span class="pm-intent-ic" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M4 5l4 3-4 3V5zM12 5l4 3-4 3V5z" fill="currentColor"/><rect x="3" y="15" width="18" height="4" rx="1.5" stroke="currentColor" stroke-width="1.7"/><path d="M7 15v4M13 15v4" stroke="currentColor" stroke-width="1.5"/></svg>
+          </span>
+          <h3>Trailer</h3>
+          <p>Distill a punchy trailer from a finished cut — Monteur reads your timeline export and cuts a short from exactly the shots you already picked.</p>
+          <span class="pm-intent-go">Drop a cut <span class="arw" aria-hidden="true">→</span></span>
+        </button>
       </div>
       <div class="pm-recents-head">
         <p class="pm-sub">Recent projects</p>
@@ -2171,6 +2177,58 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           <div class="export-bar" style="margin-top: 12px;">
             <button class="btn primary" id="shorts-save" type="button">Save all as projects<span class="spin" aria-hidden="true"></span></button>
           </div>
+        </div>
+      </section>
+    </section>
+
+    <section id="distill" hidden>
+      <header class="dash-head">
+        <div class="dash-title">
+          <p class="eyebrow">Trailer</p>
+          <h1>Distill a trailer from a finished cut</h1>
+          <p class="dash-meta">Your finished film already IS the curation — every shot in it was hand-picked. Drop its timeline export (EDL or FCPXML) and Monteur cuts a short trailer from exactly those shots. Sources that aren&rsquo;t on this machine still work; the export carries their paths through.</p>
+        </div>
+        <div class="dash-actions">
+          <button class="btn ghost" id="distill-back" type="button">← Projects</button>
+        </div>
+      </header>
+
+      <section class="card" style="margin-top: 14px;">
+        <p class="seg-heading" style="margin-top: 0;">1 · The finished cut</p>
+        <div class="path-row">
+          <button class="btn ghost" id="cre-dst-file-btn" type="button">Choose cut file&hellip;</button>
+          <ul class="chiplist" id="cre-dst-chip"></ul>
+        </div>
+        <label class="sr-only" for="cre-dst-music">Trailer music file path (optional)</label>
+        <div class="path-row">
+          <input type="text" id="cre-dst-music" placeholder="Music for the trailer (optional) — /Users/you/Music/song.mp3" spellcheck="false" autocomplete="off">
+          <button class="btn ghost" id="cre-dst-browse-music" type="button">Browse&hellip;</button>
+        </div>
+        <p class="help-small">No music? The trailer keeps the clips&rsquo; own sound.</p>
+        <div class="export-bar" style="border-top: 0; margin-top: 4px; padding-top: 0;">
+          <label class="export-field">Target length (s)
+            <input type="number" id="cre-dst-target" min="5" step="5" value="60" inputmode="numeric">
+          </label>
+          <label class="export-field">Canvas
+            <select id="cre-dst-canvas"></select>
+          </label>
+          <div class="export-field">
+            <span id="cre-dst-fmt-label">File format</span>
+            <div class="seg-toggle" role="group" aria-labelledby="cre-dst-fmt-label">
+              <button type="button" id="cre-dst-fmt-edl" aria-pressed="false">EDL</button>
+              <button type="button" id="cre-dst-fmt-fcpxml" aria-pressed="true">FCPXML</button>
+            </div>
+          </div>
+          <button class="btn primary" id="cre-dst-btn" type="button">Distill trailer<span class="spin" aria-hidden="true"></span></button>
+        </div>
+        <div id="cre-dst-panel"></div>
+        <p class="scan-note" id="cre-dst-msg" role="status" hidden></p>
+        <div class="card" id="cre-dst-result" style="margin: 14px 0 0;" hidden>
+          <h3 id="cre-dst-result-title" tabindex="-1">Your trailer is ready</h3>
+          <div class="result-stats" id="cre-dst-summary"></div>
+          <ul class="plan-notes" id="cre-dst-notes"></ul>
+          <button class="btn primary" id="cre-dst-download" type="button" style="margin-top: 12px;">Download timeline</button>
+          <p class="help-small">Import it in Resolve via File → Import → Timeline&hellip; — the trailer references the same media as your film.</p>
         </div>
       </section>
     </section>
@@ -3104,47 +3162,6 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         </div>
       </aside>
 
-      <details class="fine-tune" id="cre-distill" style="margin-top: 22px;">
-        <summary>Distill a trailer from a finished cut</summary>
-        <div class="rank-body">
-          <p class="help-small">Your finished film already IS the curation — every shot in it was hand-picked. Drop its timeline export (EDL or FCPXML) and Monteur cuts a short trailer from exactly those shots. Sources that aren&rsquo;t on this machine still work; the export carries their paths through.</p>
-          <div class="path-row">
-            <button class="btn ghost" id="cre-dst-file-btn" type="button">Choose cut file&hellip;</button>
-            <ul class="chiplist" id="cre-dst-chip"></ul>
-          </div>
-          <label class="sr-only" for="cre-dst-music">Trailer music file path (optional)</label>
-          <div class="path-row">
-            <input type="text" id="cre-dst-music" placeholder="Music for the trailer (optional) — /Users/you/Music/song.mp3" spellcheck="false" autocomplete="off">
-            <button class="btn ghost" id="cre-dst-browse-music" type="button">Browse&hellip;</button>
-          </div>
-          <p class="help-small">No music? The trailer keeps the clips&rsquo; own sound.</p>
-          <div class="export-bar" style="border-top: 0; margin-top: 4px; padding-top: 0;">
-            <label class="export-field">Target length (s)
-              <input type="number" id="cre-dst-target" min="5" step="5" value="60" inputmode="numeric">
-            </label>
-            <label class="export-field">Canvas
-              <select id="cre-dst-canvas"></select>
-            </label>
-            <div class="export-field">
-              <span id="cre-dst-fmt-label">File format</span>
-              <div class="seg-toggle" role="group" aria-labelledby="cre-dst-fmt-label">
-                <button type="button" id="cre-dst-fmt-edl" aria-pressed="false">EDL</button>
-                <button type="button" id="cre-dst-fmt-fcpxml" aria-pressed="true">FCPXML</button>
-              </div>
-            </div>
-            <button class="btn primary" id="cre-dst-btn" type="button">Distill trailer<span class="spin" aria-hidden="true"></span></button>
-          </div>
-          <div id="cre-dst-panel"></div>
-          <p class="scan-note" id="cre-dst-msg" role="status" hidden></p>
-          <div class="card" id="cre-dst-result" style="margin: 14px 0 0;" hidden>
-            <h3 id="cre-dst-result-title" tabindex="-1">Your trailer is ready</h3>
-            <div class="result-stats" id="cre-dst-summary"></div>
-            <ul class="plan-notes" id="cre-dst-notes"></ul>
-            <button class="btn primary" id="cre-dst-download" type="button" style="margin-top: 12px;">Download timeline</button>
-            <p class="help-small">Import it in Resolve via File → Import → Timeline&hellip; — the trailer references the same media as your film.</p>
-          </div>
-        </div>
-      </details>
     </section>
 
     <section id="movie" hidden>
@@ -4033,7 +4050,7 @@ function renderTrend() {
 var VIEWS = ["home", "create", "movie", "pacing", "assembly"];
 
 // the topbar center title for each working view; create shows the project name
-var VIEW_TITLES = { movie: "Movie", pacing: "Analysis", assembly: "Movie · Assemble", shorts: "Shorts" };
+var VIEW_TITLES = { movie: "Movie", pacing: "Analysis", assembly: "Movie · Assemble", shorts: "Shorts", distill: "Trailer" };
 
 /* Drive the context-aware topbar off the current view. On Home: a quiet
    "Projects" label, no back control. Inside a view: the "‹ Projects" back
@@ -4054,6 +4071,9 @@ function updateTopbarContext() {
 function setView(view) {
   if (state.view === "create" && view !== "create") creStopJobs(); // leaving the wizard stops its poll loops
   if (state.view === "movie" && view !== "movie") movStopJobs(); // leaving the movie view stops its poll loops
+  // Trailer is its own view now — leaving it stops its poll loop (the server
+  // keeps distilling; there is no reattach, so a return starts fresh)
+  if (state.view === "distill" && view !== "distill" && distillPanel.running()) { distillPanel.stop(); setDistillBusy(false); }
   if (view === "create") { refreshProjects(); creUpdatePages(); } // keep projects + page-bar ticks current
   state.view = view;
   // active-state now lives in the contextual header, not a persistent tab row —
@@ -4068,6 +4088,7 @@ function updateMainVisibility() {
   $("movie").hidden = v !== "movie";
   $("assembly").hidden = v !== "assembly";
   $("shorts").hidden = v !== "shorts";
+  $("distill").hidden = v !== "distill";
   var pacing = v === "pacing";
   $("welcome").hidden = !pacing || !!state.primary;
   $("dashboard").hidden = !pacing || !state.primary;
@@ -4089,6 +4110,7 @@ $("pm-new").addEventListener("click", function () { newProject(); });
 $("pm-movie").addEventListener("click", function () { setView("movie"); });
 $("pm-analysis").addEventListener("click", function () { setView("pacing"); });
 $("pm-shorts").addEventListener("click", function () { openShortsTool(); });
+$("pm-distill").addEventListener("click", function () { openDistillTool(); });
 $("mov-goto-assembly").addEventListener("click", function () { setView("assembly"); });
 $("asm-back").addEventListener("click", function () { setView("movie"); });
 
@@ -4167,6 +4189,7 @@ var MENU = {
   create: function () { setView("create"); },
   movie: function () { setView("movie"); },
   shorts: function () { openShortsTool(); },
+  distill: function () { openDistillTool(); },
   settings: function () { openSettings(false); },
   shortcuts: function () { openShortcuts(); },
   checkUpdates: function () { openUpdate(); },
@@ -4210,7 +4233,8 @@ var APP_MENUS = [
     { label: "Create", key: "Ctrl+2", checked: function () { return state.view === "create"; }, run: MENU.create },
     { label: "Movie", key: "Ctrl+3", checked: function () { return state.view === "movie"; }, run: MENU.movie },
     { label: "Analyze", key: "Ctrl+4", checked: function () { return state.view === "pacing"; }, run: MENU.analyze },
-    { label: "Shorts", key: "Ctrl+5", checked: function () { return state.view === "shorts"; }, run: MENU.shorts }
+    { label: "Shorts", key: "Ctrl+5", checked: function () { return state.view === "shorts"; }, run: MENU.shorts },
+    { label: "Trailer", key: "Ctrl+6", checked: function () { return state.view === "distill"; }, run: MENU.distill }
   ] },
   { label: "Help", items: [
     { label: "Keyboard shortcuts", key: "Ctrl+/", run: MENU.shortcuts },
@@ -4229,6 +4253,7 @@ var SHORTCUTS = [
   { combo: "Ctrl+3", label: "Go to Movie", run: MENU.movie },
   { combo: "Ctrl+4", label: "Go to Analyze", run: MENU.analyze },
   { combo: "Ctrl+5", label: "Go to Shorts", run: MENU.shorts },
+  { combo: "Ctrl+6", label: "Go to Trailer", run: MENU.distill },
   { combo: "Ctrl+,", label: "Settings", run: MENU.settings },
   { combo: "Ctrl+/", label: "Keyboard shortcuts", run: MENU.shortcuts }
 ];
@@ -12355,13 +12380,28 @@ function startYouTubeUpload(prefix) {
   });
 });
 
-/* ---- distill a trailer from a finished cut (monteur.distill) ---------- */
+/* ---- Trailer: distill a trailer from a finished cut (monteur.distill) ----
+   Its OWN Home destination (a suite tool, like Shorts) — not a trailing
+   panel on every Create step. A finished cut IS the curation, so this reads
+   a timeline export and cuts a short from exactly those shots. */
 
 var dst = {
   timeline: null,   // {filename, content, fps?} — the uploaded finished cut
   format: "fcpxml", // download format
   result: null      // {data, format} from the last finished distill job
 };
+
+function openDistillTool() {
+  setView("distill");
+  // a fresh visit starts clean, but never discards a running distill
+  if (!distillPanel.running()) {
+    $("cre-dst-msg").hidden = true;
+    $("cre-dst-result").hidden = true;
+    var focus = $("cre-dst-file-btn");
+    if (focus) focus.focus();
+  }
+}
+$("distill-back").addEventListener("click", function () { setView("home"); refreshProjects(); });
 
 [
   ["uhd", "Wide 16:9 · 4K"],
