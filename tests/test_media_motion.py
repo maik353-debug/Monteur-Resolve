@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from monteur.media import (
+    _metrics_from_frames,
     _parse_keyframe_pts,
     _phase_shift,
     audio_metrics,
@@ -36,6 +37,28 @@ needs_ffmpeg = pytest.mark.skipif(not HAVE_FFMPEG, reason="imageio_ffmpeg not in
 def textured_frame(seed=42, shape=(90, 160)):
     rng = np.random.default_rng(seed)
     return (rng.random(shape) * 255).astype(np.float32)
+
+
+def test_residual_motion_separates_pan_from_subject_motion():
+    # A pure camera pan (the whole frame shifts) leaves ~0 residual once the
+    # global shift is aligned out; a subject moving IN a still frame leaves a
+    # large residual. Both have high raw `motion`.
+    base = textured_frame(seed=7)
+    panned = np.roll(base, (0, 6), axis=1)  # content moved right 6 px (a pan)
+    subject = base.copy()
+    subject[30:60, 30:60] = 255 - subject[30:60, 30:60]  # a patch changes, frame still
+
+    pan_metrics = _metrics_from_frames([base, panned], [0.0, 0.5])
+    sub_metrics = _metrics_from_frames([base, subject], [0.0, 0.5])
+
+    # both moved a lot in raw terms
+    assert pan_metrics[1].motion > 5.0
+    assert sub_metrics[1].motion > 5.0
+    # ...but the pan's residual is a small fraction of its motion, while the
+    # subject motion is (almost) all residual
+    assert pan_metrics[1].residual < 0.5 * pan_metrics[1].motion
+    assert sub_metrics[1].residual > 0.8 * sub_metrics[1].motion
+    assert sub_metrics[1].residual > pan_metrics[1].residual
 
 
 def test_phase_correlation_recovers_rolled_shift():

@@ -197,6 +197,11 @@ class FrameMetric:
       (relative within one clip, not comparable across clips)
     * motion — mean absolute pixel difference to the previous sample;
       high + erratic = shake, moderate + steady = action
+    * residual — motion LEFT after the global camera shift (dx, dy) is
+      removed: previous is aligned to the current frame by the estimated
+      pan and re-differenced, so a pure camera pan reads ~0 while a subject
+      moving IN the frame reads high. This is the honest "something is
+      happening" signal (camera-independent action).
     """
 
     t: float  # seconds
@@ -205,6 +210,7 @@ class FrameMetric:
     motion: float
     dx: float = 0.0  # global horizontal motion (px/sample, + = content moves right)
     dy: float = 0.0  # global vertical motion (px/sample, + = content moves down)
+    residual: float = 0.0  # motion the camera pan does NOT explain (subject action)
 
 
 # Phase-correlation tuning (see _phase_shift): a correlation peak weaker than
@@ -292,6 +298,15 @@ def _metrics_from_frames(frames, times) -> list[FrameMetric]:
         sharpness = float((gx**2 + gy**2).mean())
         motion = float(np.abs(frame - previous).mean()) if previous is not None else 0.0
         dx, dy = _phase_shift(previous, frame) if previous is not None else (0.0, 0.0)
+        # residual (subject) motion: align previous to the current frame by the
+        # estimated global pan, then what remains is motion the camera does NOT
+        # explain. np.roll wraps a thin border, a negligible constant on a
+        # 160x90 frame; when there is no pan (dx=dy=0) residual == motion.
+        if previous is not None:
+            aligned = np.roll(previous, (int(round(dy)), int(round(dx))), axis=(0, 1))
+            residual = float(np.abs(frame - aligned).mean())
+        else:
+            residual = 0.0
         metrics.append(
             FrameMetric(
                 t=float(t),
@@ -300,6 +315,7 @@ def _metrics_from_frames(frames, times) -> list[FrameMetric]:
                 motion=motion,
                 dx=dx,
                 dy=dy,
+                residual=residual,
             )
         )
         previous = frame

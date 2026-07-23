@@ -411,9 +411,11 @@ def find_moments(
 
     Slides a ``min_length`` window (step = half the window) across each
     USABLE segment. A window scores by mean sharpness rank plus a bonus for
-    moderate, steady motion — motion between 0.5x and 2.5x the clip median
-    means *something happens* in frame and beats a static tripod shot, while
-    extreme motion (handled by SHAKY upstream) earns nothing. Overlapping
+    moderate, steady RESIDUAL (subject) motion — residual between 0.5x and
+    2.5x the clip median means *something happens IN frame* (the camera pan
+    already removed) and beats both a static tripod shot AND a pan across
+    nothing, while extreme motion (handled by SHAKY upstream) earns nothing.
+    Overlapping
     windows are deduplicated (the better one wins) and the result is capped
     at 12 per clip, sorted best-first.
 
@@ -430,8 +432,13 @@ def find_moments(
     eps = 1e-9
     ranks = _sharpness_ranks(metrics)
     median_motion, _ = _motion_stats(metrics)
-    band_lo = _MODERATE_MOTION_BAND[0] * median_motion
-    band_hi = _MODERATE_MOTION_BAND[1] * median_motion
+    # The "something happens in frame" bonus keys off RESIDUAL (subject)
+    # motion, not total motion, so a pure camera pan no longer earns the
+    # action bonus for nothing — only real in-frame action does.
+    residuals = [m.residual for m in metrics[1:]]
+    median_residual = statistics.median(residuals) if residuals else 0.0
+    band_lo = _MODERATE_MOTION_BAND[0] * median_residual
+    band_hi = _MODERATE_MOTION_BAND[1] * median_residual
     peak_motion = max((m.motion for m in metrics[1:]), default=0.0)
     step = min_length / 2
 
@@ -447,9 +454,9 @@ def find_moments(
             ]
             if idx:
                 mean_rank = sum(ranks[j] for j in idx) / len(idx)
-                if median_motion > 0:
+                if median_residual > 0:
                     moderate = sum(
-                        1 for j in idx if band_lo <= metrics[j].motion <= band_hi
+                        1 for j in idx if band_lo <= metrics[j].residual <= band_hi
                     ) / len(idx)
                 else:
                     moderate = 0.0

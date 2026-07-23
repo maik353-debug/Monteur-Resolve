@@ -34,9 +34,16 @@ except ImportError:
     HAVE_FFMPEG = False
 
 
-def make_metrics(brightness, sharpness, motion, step=0.5):
-    """Build a synthetic clip from per-sample value lists (2 samples/sec)."""
+def make_metrics(brightness, sharpness, motion, step=0.5, residual=None):
+    """Build a synthetic clip from per-sample value lists (2 samples/sec).
+
+    ``residual`` (subject motion) defaults to mirroring ``motion`` — with no
+    camera pan the residual equals the total motion, which is the case these
+    synthetic clips model unless a test says otherwise.
+    """
     n = max(len(brightness), len(sharpness), len(motion))
+    if residual is None:
+        residual = motion
 
     def pick(values, i):
         return values[i] if i < len(values) else values[-1]
@@ -49,6 +56,7 @@ def make_metrics(brightness, sharpness, motion, step=0.5):
                 brightness=pick(brightness, i),
                 sharpness=pick(sharpness, i),
                 motion=0.0 if i == 0 else pick(motion, i),
+                residual=0.0 if i == 0 else pick(residual, i),
             )
         )
     return out
@@ -197,6 +205,23 @@ def test_moments_prefer_moderate_motion_over_static():
     moving = [m for m in moments if m.start >= 6.0]
     assert moving and static
     assert min(m.score for m in moving) > max(m.score for m in static)
+
+
+def test_action_bonus_ignores_pure_camera_pan():
+    # First half: a PAN — lots of total motion but ~zero residual (the camera
+    # moves, nothing moves IN frame). Second half: real subject action —
+    # moderate residual. The action bonus must favour the subject-motion half,
+    # not the pan, even though the pan has MORE total motion.
+    motion = [8] * 12 + [2] * 12       # the pan has the higher total motion
+    residual = [0] * 12 + [2] * 12     # ...but only the 2nd half has in-frame action
+    metrics = make_metrics([120] * 24, [300] * 24, motion, residual=residual)
+    segments = classify_metrics(metrics, 12.0)
+    moments = find_moments(segments, metrics, min_length=1.0)
+    pan = [m for m in moments if m.end <= 6.0]
+    action = [m for m in moments if m.start >= 6.0]
+    assert action, "the subject-motion half must yield moments"
+    # the real action outscores the pan-only window
+    assert max(m.score for m in action) > max((m.score for m in pan), default=0.0)
 
 
 def test_moments_respect_min_length():
