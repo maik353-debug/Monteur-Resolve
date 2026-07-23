@@ -41,13 +41,22 @@ def clean_env(monkeypatch, tmp_path):
     return monkeypatch
 
 
-def test_backend_auto_prefers_api_with_api_key(clean_env):
+def test_backend_auto_prefers_free_cli_over_api_key(clean_env):
+    # cost guard: with BOTH a key and the CLI present, Auto uses the FREE CLI
+    # (a subscription-logged-in Claude Code bills nothing) — never the paid API
     clean_env.setenv("ANTHROPIC_API_KEY", "sk-test")
     clean_env.setattr(ai, "_cli_path", lambda: "/usr/local/bin/claude")
+    assert ai._resolve_backend() == "claude-cli"
+
+
+def test_backend_auto_falls_back_to_api_when_no_cli(clean_env):
+    # a key but no CLI on PATH — the API is the only way, so Auto uses it
+    clean_env.setenv("ANTHROPIC_API_KEY", "sk-test")
+    clean_env.setattr(ai, "_cli_path", lambda: None)
     assert ai._resolve_backend() == "api"
 
 
-def test_backend_auto_auth_token_counts_as_credentials(clean_env):
+def test_backend_auto_auth_token_falls_back_to_api_when_no_cli(clean_env):
     clean_env.setenv("ANTHROPIC_AUTH_TOKEN", "token")
     clean_env.setattr(ai, "_cli_path", lambda: None)
     assert ai._resolve_backend() == "api"
@@ -133,9 +142,16 @@ def test_env_backend_wins_over_settings(clean_env):
     assert ai._resolve_backend() == "claude-cli"
 
 
-def test_settings_key_selects_api_in_auto_mode(clean_env):
+def test_settings_key_still_prefers_free_cli_in_auto_mode(clean_env):
+    # a Studio-saved key does NOT force the paid API in auto — the free CLI wins
     _write_settings(api_key="sk-from-studio")
     clean_env.setattr(ai, "_cli_path", lambda: "/usr/local/bin/claude")
+    assert ai._resolve_backend() == "claude-cli"
+
+
+def test_settings_key_selects_api_in_auto_mode_without_cli(clean_env):
+    _write_settings(api_key="sk-from-studio")
+    clean_env.setattr(ai, "_cli_path", lambda: None)
     assert ai._resolve_backend() == "api"
 
 
@@ -489,7 +505,10 @@ class _FakeSDKClient:
 def api_backend(clean_env):
     def install(message):
         fake = _FakeSDKClient(message)
-        clean_env.setenv("ANTHROPIC_API_KEY", "sk-test")  # auto-selects "api"
+        clean_env.setenv("ANTHROPIC_API_KEY", "sk-test")
+        # Auto now PREFERS the free CLI, so pin these API-backend tests to the
+        # API explicitly (a test env has a real `claude` on PATH otherwise).
+        clean_env.setenv("MONTEUR_AI_BACKEND", "api")
         clean_env.setattr(ai, "_client", lambda: fake)
         # any subprocess use would be a routing bug
         clean_env.setattr(
@@ -590,9 +609,9 @@ def test_api_refusal_raises(api_backend):
         complete("prompt")
 
 
-def test_api_wins_over_cli_when_credentials_exist(api_backend, clean_env):
-    """Credentials + claude on PATH: auto-selection must still pick the API."""
-    fake = api_backend(_FakeMessage("api answer"))
+def test_forced_api_uses_api_even_with_cli_present(api_backend, clean_env):
+    """Explicitly choosing API gets it even though the free CLI is on PATH."""
+    fake = api_backend(_FakeMessage("api answer"))  # the fixture forces api
     clean_env.setattr(ai, "_cli_path", lambda: "/usr/local/bin/claude")
     assert complete("prompt") == "api answer"
     assert len(fake.stream_calls) == 1

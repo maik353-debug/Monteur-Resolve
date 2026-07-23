@@ -20,9 +20,10 @@ Backend resolution order (see :func:`_resolve_backend`):
 2. else the settings file's ``ai_backend`` when Studio's settings panel
    forced ``"api"`` or ``"claude-cli"`` (:mod:`monteur.settings` —
    ``~/.monteur/settings.json``);
-3. else auto: the API when a key exists (environment OR settings file),
-   otherwise the ``claude`` CLI when it is on PATH, otherwise a
-   :class:`MonteurAIError` explaining every option.
+3. else auto: the FREE ``claude`` CLI when it is on PATH (a
+   subscription-logged-in Claude Code bills nothing, so it is preferred over
+   the paid API), otherwise the API when a key exists (environment OR settings
+   file), otherwise a :class:`MonteurAIError` explaining every option.
 
 Within the API path the key precedence is: ``ANTHROPIC_API_KEY`` /
 ``ANTHROPIC_AUTH_TOKEN`` from the environment win (an explicit
@@ -151,9 +152,9 @@ def _resolve_backend() -> str:
 
     1. ``MONTEUR_AI_BACKEND`` in the environment (developer escape hatch),
     2. else a forced choice saved in Studio's settings file,
-    3. else auto: the API when a key exists (environment or settings),
-       else the ``claude`` CLI when on PATH, else a MonteurAIError
-       explaining every option.
+    3. else auto: the free ``claude`` CLI when on PATH (preferred so a stray
+       key never bills), else the API when a key exists (environment or
+       settings), else a MonteurAIError explaining every option.
     """
     forced = os.environ.get(BACKEND_ENV, "").strip().lower()
     if forced:
@@ -184,10 +185,14 @@ def _resolve_backend() -> str:
         # A forced-api choice without any key fails inside the API request
         # with its own clear message; resolution honours the user's choice.
         return "api"
-    if _env_credentials() or _settings_api_key():
-        return "api"
+    # Auto: prefer the FREE Claude Code CLI (a subscription-logged-in `claude`
+    # bills nothing) over the paid API — so having an API key lying around never
+    # silently runs an expensive compose against it. A user who wants the API
+    # despite a present CLI selects "API" in Studio's settings (honoured above).
     if _cli_path() is not None:
         return "claude-cli"
+    if _env_credentials() or _settings_api_key():
+        return "api"
     raise MonteurAIError(_NO_BACKEND_MESSAGE)
 
 
