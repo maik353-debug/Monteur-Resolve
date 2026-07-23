@@ -818,6 +818,150 @@ def test_apply_pacing_by_phase_falls_back_to_pace_for_omitted_phases():
     assert plan.entries[-1].record_end == 12.0
 
 
+# --- self-critique: watch the cut, fix what misses ---------------------------
+
+
+def fake_sequence(replies, calls=None):
+    """A monteur.ai.complete stand-in returning successive replies in order."""
+    seq = [r if isinstance(r, str) else json.dumps(r) for r in replies]
+    state = {"i": 0}
+
+    def _complete(prompt, *, system="", json_schema=None, **kwargs):
+        i = min(state["i"], len(seq) - 1)
+        state["i"] += 1
+        if calls is not None:
+            calls.append({"prompt": prompt, "system": system})
+        return seq[i]
+
+    return _complete
+
+
+def _coincidence_card(rate, culprits):
+    """A one-metric Scorecard: peak-on-beat at ``rate`` (passes at ≥ 0.8)."""
+    from monteur.critique import Metric, Scorecard
+
+    m = Metric(
+        name="coincidence", value=rate, passed=rate >= 0.8 - 1e-9, unit="rate",
+        culprits=list(culprits), hard=True, sample=4,
+    )
+    return Scorecard(metrics={"coincidence": m})
+
+
+def test_self_critique_revises_an_off_beat_cut_and_keeps_the_better_cast(monkeypatch):
+    calls: list[dict] = []
+    cast0 = {
+        "story": "the ride", "cast": [{"slot": 0, "clip": "a.mp4", "start": 0.0}],
+        "titles": [], "why": [],
+    }
+    repair = {"cast": [{"slot": 2, "clip": "b.mp4", "start": 20.0}]}
+    monkeypatch.setattr(ai, "complete", fake_sequence([cast0, repair], calls))
+    # the first cut misses the beat (0.5, slot 2 at fault); the revision lands it
+    cards = iter([_coincidence_card(0.5, [2]), _coincidence_card(1.0, [])])
+    monkeypatch.setattr("monteur.compose.critique", lambda plan, **kw: next(cards))
+
+    plan = compose_montage(make_reports(), make_music(), cut_lead=0.0)
+
+    assert len(calls) == 2  # exactly one revision pass fired
+    # the revision prompt names the failing slot and asks for a re-cast
+    assert "REVISION PASS" in calls[1]["prompt"]
+    assert "slot 3" in calls[1]["prompt"]  # 0-based slot 2 shown 1-based
+    note = next((n for n in plan.notes if n.startswith("self-critique:")), None)
+    assert note is not None
+    assert "50%→100%" in note and "acceptance met" in note
+
+
+def test_self_critique_skips_when_the_first_cut_is_clean(monkeypatch):
+    calls: list[dict] = []
+    cast0 = {
+        "story": "s", "cast": [{"slot": 0, "clip": "a.mp4", "start": 0.0}],
+        "titles": [], "why": [],
+    }
+    monkeypatch.setattr(ai, "complete", fake_sequence([cast0], calls))
+    monkeypatch.setattr(
+        "monteur.compose.critique", lambda plan, **kw: _coincidence_card(1.0, [])
+    )
+
+    plan = compose_montage(make_reports(), make_music(), cut_lead=0.0)
+
+    assert len(calls) == 1  # a clean cut ships without a second completion
+    assert not any(n.startswith("self-critique:") for n in plan.notes)
+
+
+def test_self_critique_can_be_disabled(monkeypatch):
+    calls: list[dict] = []
+    cast0 = {
+        "story": "s", "cast": [{"slot": 0, "clip": "a.mp4", "start": 0.0}],
+        "titles": [], "why": [],
+    }
+    monkeypatch.setattr(ai, "complete", fake_sequence([cast0], calls))
+    monkeypatch.setattr(
+        "monteur.compose.critique", lambda plan, **kw: _coincidence_card(0.5, [1])
+    )
+
+    plan = compose_montage(
+        make_reports(), make_music(), cut_lead=0.0, critique_passes=0
+    )
+
+    assert len(calls) == 1  # budget 0 → single pass even though the cut misses
+    assert not any(n.startswith("self-critique:") for n in plan.notes)
+
+
+def test_self_critique_keeps_the_first_cast_when_a_revision_is_no_better(monkeypatch):
+    calls: list[dict] = []
+    cast0 = {
+        "story": "s", "cast": [{"slot": 0, "clip": "a.mp4", "start": 0.0}],
+        "titles": [], "why": [],
+    }
+    repair = {"cast": [{"slot": 1, "clip": "b.mp4", "start": 30.0}]}
+    monkeypatch.setattr(ai, "complete", fake_sequence([cast0, repair], calls))
+    # both passes score the same — the revision must NOT replace the first cast
+    monkeypatch.setattr(
+        "monteur.compose.critique", lambda plan, **kw: _coincidence_card(0.5, [1])
+    )
+
+    plan = compose_montage(make_reports(), make_music(), cut_lead=0.0)
+
+    assert len(calls) == 2  # the pass ran (budget allowed it)
+    note = next((n for n in plan.notes if n.startswith("self-critique:")), None)
+    assert note is not None and "best effort kept" in note  # honest: not met
+
+
+def test_merge_cast_overrides_by_slot_and_keeps_the_rest():
+    from monteur.compose import _merge_cast
+
+    base = {
+        "story": "keep", "why": ["w"], "titles": [{"dip": 0, "text": "T"}],
+        "cast": [
+            {"slot": 0, "clip": "a.mp4", "start": 1.0},
+            {"slot": 1, "clip": "a.mp4", "start": 2.0},
+        ],
+    }
+    repair = {"cast": [{"slot": 1, "clip": "b.mp4", "start": 9.0}], "pace": 4.0}
+    merged = _merge_cast(base, repair)
+
+    picks = {c["slot"]: (c["clip"], c["start"]) for c in merged["cast"]}
+    assert picks[0] == ("a.mp4", 1.0)  # untouched slot kept
+    assert picks[1] == ("b.mp4", 9.0)  # revised slot overridden
+    assert merged["pace"] == 4.0  # a revision lever is taken
+    assert merged["story"] == "keep"  # base story kept (repair sent none)
+    assert merged["titles"] == [{"dip": 0, "text": "T"}]
+
+
+def test_apply_cast_carries_the_cast_moments_peak():
+    from monteur.compose import _apply_cast
+
+    reports = make_reports()
+    reports[0].moments[0].peak_time = 2.0  # a picture peak inside the first moment
+    plan = plan_montage(reports, make_music(), cut_lead=0.0)
+    data = {
+        "story": "", "why": [], "titles": [],
+        "cast": [{"slot": 0, "clip": "a.mp4", "start": 0.0}],
+    }
+    _apply_cast(plan, data, reports)
+    # the cast entry carries the CAST moment's peak, so coincidence scores it
+    assert plan.entries[0].peak_source == pytest.approx(2.0)
+
+
 def test_prompt_has_no_daylight_lines_without_classes(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(ai, "complete", fake_complete(empty_reply(), calls))

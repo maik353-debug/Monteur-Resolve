@@ -53,6 +53,7 @@ Claude casts on scores/motion/order, and the plan notes recommend a
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 from dataclasses import replace
@@ -60,6 +61,7 @@ from pathlib import Path
 
 from monteur import ai
 from monteur import montage as _montage
+from monteur.critique import Scorecard, critique
 from monteur.montage import (
     MontagePlan,
     _shares_material,  # the shared zero-repeat overlap rule
@@ -69,6 +71,13 @@ from monteur.music import MusicAnalysis
 from monteur.sift import ClipReport, Moment
 
 _EPS = 1e-6
+
+#: How many self-critique REVISION passes the composer may run after the
+#: first cast (blueprint Wave 4: watch the cut, fix what misses). Each pass
+#: costs one more completion, so it only fires when the first cut actually
+#: misses a fixable acceptance metric (a picture peak off its beat) — a
+#: clean first cut ships immediately. 0 disables the loop (the pre-4 behaviour).
+COMPOSE_CRITIQUE_PASSES = 1
 
 #: Reasoning depth for the compose completion. The compose is a structured
 #: casting/story task over a dossier that is ALREADY fully analysed — no video
@@ -1017,6 +1026,10 @@ def _apply_cast(
             media_start=report.media_start,
             clip_duration=report.duration,
             label=getattr(moment, "label", ""),
+            # Carry the CAST moment's picture peak (not the grid pick's stale
+            # one) so the self-critique's coincidence metric honestly scores
+            # whether Claude's chosen action lands on this slot's cut.
+            peak_source=getattr(moment, "peak_time", -1.0),
         )
         cast_slots.add(i)
 
@@ -1143,6 +1156,146 @@ def _apply_cast(
             )
 
 
+# --- self-critique: watch the cut, fix what misses ----------------------------------
+
+
+def _valid_cast(data: dict) -> dict[int, dict]:
+    """The reply's cast as ``{slot: {slot,clip,start,...}}`` (bad rows dropped)."""
+    out: dict[int, dict] = {}
+    for raw in data.get("cast") or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            slot = int(raw["slot"])
+            str(raw["clip"])
+            float(raw["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        out.setdefault(slot, raw)
+    return out
+
+
+def _merge_cast(base: dict, repair: dict) -> dict:
+    """A new reply: ``base`` with ``repair``'s picks overriding by slot.
+
+    A revision pass only names the slots it changes; every other slot keeps
+    its first-pass pick. Story/why/titles stay the base's (a revision is
+    about the cut, not the words) unless the repair supplies its own; the
+    pacing levers (``pace``/``holds``/``pace_by_phase``/``music_in``) are
+    taken from the repair whenever it sends them.
+    """
+    cast = dict(_valid_cast(base))
+    cast.update(_valid_cast(repair))
+    merged = dict(base)
+    merged["cast"] = [cast[s] for s in sorted(cast)]
+    for key in ("pace", "holds", "pace_by_phase", "music_in", "titles", "why", "story"):
+        if repair.get(key) is not None:
+            merged[key] = repair[key]
+    return merged
+
+
+def _compose_pass(
+    grid: MontagePlan,
+    data: dict,
+    reports: list[ClipReport],
+    locked,
+    music_in_candidates: list[float],
+    allow_repeats: bool,
+) -> tuple[MontagePlan, Scorecard]:
+    """Cast ``data`` onto a FRESH copy of the pristine grid and score it.
+
+    Each pass starts from an untouched deep copy of the grid so a revision
+    re-casts from the same clean slate (stable slot indices, no compounded
+    notes) rather than on top of the previous pass. Scored BEFORE pacing —
+    the metrics talk about the CAST's cuts (stable original slot numbers the
+    revision prompt can name); the winning cast is paced once, afterwards.
+    """
+    plan = copy.deepcopy(grid)
+    _apply_cast(
+        plan,
+        data,
+        reports,
+        locked=locked,
+        music_in_candidates=music_in_candidates,
+        allow_repeats=allow_repeats,
+    )
+    return plan, critique(plan)
+
+
+def _fixable_culprits(card: Scorecard, locked) -> list[int]:
+    """Interior, non-locked slots whose picture peak misses its beat.
+
+    These are the slots a re-cast can actually fix (a different moment /
+    start whose action lands on the cut). Locked (arrangement) slots are
+    the editor's and left out.
+    """
+    m = card.metrics.get("coincidence")
+    if m is None or not m.sample or m.passed:
+        return []
+    return [i for i in m.culprits if i not in locked]
+
+
+def _repair_section(card: Scorecard, best_data: dict, locked) -> str:
+    """The REVISION block appended to the base prompt for a critique pass.
+
+    Names the failing acceptance metric (peak-on-beat) and the exact slots
+    that miss, with each one's current pick, and asks Claude to re-cast only
+    those slots to a moment whose action peak lands on the cut. The shot-size
+    grammar polish (soft) rides along when it too is off.
+    """
+    cast = _valid_cast(best_data)
+    lines = [
+        "REVISION PASS — you already composed the cut below; now WATCH IT BACK "
+        "against the house quality bar and fix only what misses. The timeline, "
+        "the beats and every other slot stay exactly as they are.",
+    ]
+    coincidence = card.metrics.get("coincidence")
+    culprits = _fixable_culprits(card, locked)
+    if coincidence is not None and culprits:
+        lines.append(
+            f"PEAK-ON-BEAT (the house's first promise): {coincidence.detail}. "
+            "The cut is only tight when the shot's strongest movement / impact "
+            "lands right ON its cut. These slots miss it — recast EACH to a "
+            "moment (or a start second) whose action peaks at the very start of "
+            "the shot, or to a calmer moment with no mid-shot spike:"
+        )
+        for i in culprits:
+            pick = cast.get(i)
+            if pick is not None:
+                lines.append(
+                    f"  - slot {i + 1}: now {pick.get('clip')} @ "
+                    f"{float(pick.get('start', 0.0)):.2f}s — its peak is off the cut"
+                )
+            else:
+                lines.append(f"  - slot {i + 1}: its peak is off the cut")
+    grammar = card.metrics.get("grammar")
+    if grammar is not None and grammar.sample and not grammar.passed and grammar.culprits:
+        pairs = ", ".join(str(i + 1) for i in grammar.culprits if i not in locked)
+        if pairs:
+            lines.append(
+                f"SHOT GRAMMAR (polish): slots {pairs} repeat the previous shot's "
+                "size — the eye wants scale to keep changing; pick a different "
+                "framing where you can."
+            )
+    lines.append(
+        "Return ONLY the slots you change in `cast` (slot + clip + start); every "
+        "slot you omit keeps its current pick. You may also adjust `holds` / "
+        "`pace` / `pace_by_phase`. Keep the story and titles."
+    )
+    return "\n".join(lines)
+
+
+def _critique_note(first: Scorecard, best: Scorecard, passes: int) -> str:
+    """One honest line narrating the self-critique loop for the plan notes."""
+    bits = [f"{passes} revision pass{'es' if passes != 1 else ''}"]
+    fm = first.metrics.get("coincidence")
+    bm = best.metrics.get("coincidence")
+    if fm is not None and bm is not None and fm.sample and bm.sample:
+        bits.append(f"peak-on-beat {fm.value * 100:.0f}%→{bm.value * 100:.0f}%")
+    verdict = "acceptance met" if best.passed() else "best effort kept"
+    return "self-critique: " + ", ".join(bits) + f" — {verdict}"
+
+
 # --- public API --------------------------------------------------------------------
 
 
@@ -1155,6 +1308,7 @@ def compose_montage(
     strict: bool = False,
     on_text=None,
     on_thinking=None,
+    critique_passes: int | None = None,
     **plan_kwargs,
 ) -> MontagePlan:
     """Plan a montage with Claude as the cutter (see the module docstring).
@@ -1185,6 +1339,17 @@ def compose_montage(
     note — never raises. ``strict=True``: those failures raise
     :class:`monteur.ai.MonteurAIError` with the actionable message (the
     Studio's mode — the user explicitly asked for the AI cut).
+
+    Self-critique (blueprint Wave 4): after the first cast, the cut is
+    scored by :func:`monteur.critique.critique`. When Claude cast slots and
+    a FIXABLE acceptance metric misses — a picture peak that does not land
+    on its beat — up to ``critique_passes`` REVISION completions let the
+    composer watch its own cut and re-cast only the flagged slots, and the
+    best-scoring cast ships (with a ``self-critique:`` note). A clean first
+    cut never spends a second completion. ``critique_passes`` defaults to
+    :data:`COMPOSE_CRITIQUE_PASSES`; ``0`` restores the single-pass
+    behaviour. Each pass re-casts a fresh copy of the pristine grid, so the
+    timeline, beats, dips and locked (arrangement) slots never move.
     """
     plan = plan_montage(reports, music, style=style, **plan_kwargs)
     if not plan.entries:
@@ -1232,32 +1397,69 @@ def compose_montage(
         plan.notes.append(f"composer unavailable: {exc}; heuristic cut")
         return plan
 
-    _apply_cast(
-        plan,
-        data,
-        reports,
-        locked=locked,
-        music_in_candidates=[
-            float(t) for t in context.get("music_in_candidates") or []
-        ],
-        allow_repeats=allow_repeats,
+    music_in_candidates = [
+        float(t) for t in context.get("music_in_candidates") or []
+    ]
+    # `plan` is the pristine beat grid — every pass re-casts a FRESH copy of it
+    # (stable slot indices, no compounded notes), so a revision starts from the
+    # same clean slate rather than on top of the last cast.
+    grid = plan
+    best_plan, best_card = _compose_pass(
+        grid, data, reports, locked, music_in_candidates, allow_repeats
     )
-    # re-pace after the cast: the composer sets the whole cut's base tempo
-    # (fast for energy, slow for a landscape / cinematic piece — it knows the
-    # brief), varies it per phase when the arc should speed up and slow down
-    # (a 6s-open / fast-climax / 6s-outro trailer), and marks specific shots
-    # to hold even longer. Runs on the cast entries (original slot indices);
-    # the timeline length never moves.
+    best_data = data
+    first_card = best_card
+    passes = 0
+    budget = COMPOSE_CRITIQUE_PASSES if critique_passes is None else max(0, critique_passes)
+
+    # Self-critique (blueprint Wave 4): watch the cut, fix what misses. When
+    # Claude actually cast slots and a FIXABLE acceptance metric misses — a
+    # picture peak that does not land on its beat (the house's first promise) —
+    # let the composer see its own cut and re-cast only the flagged slots,
+    # keeping the best-scoring cast across the bounded passes. A clean first
+    # cut ships immediately and never spends a second completion.
+    while (
+        passes < budget
+        and _valid_cast(best_data)
+        and not best_card.passed()
+        and _fixable_culprits(best_card, locked)
+    ):
+        passes += 1
+        repair_prompt = prompt + "\n\n" + _repair_section(best_card, best_data, locked)
+        try:
+            raw = ai.complete(
+                repair_prompt, system=_SYSTEM, json_schema=COMPOSE_SCHEMA,
+                effort=COMPOSE_EFFORT, on_delta=on_text, on_thinking=on_thinking,
+            )
+            rdata = json.loads(raw)
+            if not isinstance(rdata, dict):
+                raise ValueError("not a JSON object")
+        except (ai.MonteurAIError, ValueError):
+            break  # a failed revision is never fatal — keep the best cut so far
+        merged = _merge_cast(best_data, rdata)
+        plan_i, card_i = _compose_pass(
+            grid, merged, reports, locked, music_in_candidates, allow_repeats
+        )
+        # keep the better card; ties keep the earlier winner (no churn).
+        if card_i.aggregate() > best_card.aggregate() + _EPS:
+            best_plan, best_card, best_data = plan_i, card_i, merged
+
+    # Pace the WINNING cast once: the composer's base tempo (fast for energy,
+    # slow for a landscape / cinematic piece), varied per phase when the arc
+    # should speed up and slow down, plus specific held shots. Runs on the cast
+    # entries (original slot indices); the timeline length never moves.
     _apply_pacing(
-        plan,
-        data.get("pace"),
-        data.get("holds") or [],
+        best_plan,
+        best_data.get("pace"),
+        best_data.get("holds") or [],
         locked,
-        pace_by_phase=data.get("pace_by_phase"),
+        pace_by_phase=best_data.get("pace_by_phase"),
     )
+    if passes:
+        best_plan.notes.append(_critique_note(first_card, best_card, passes))
     if not context.get("vision"):
-        plan.notes.append(
+        best_plan.notes.append(
             'no vision labels — run "Let Claude watch your clips" '
             "(monteur create --see) for a smarter composed cut"
         )
-    return plan
+    return best_plan
