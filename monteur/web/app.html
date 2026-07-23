@@ -791,8 +791,9 @@ svg text.axis {
 .pm-lead { color: var(--ink-2); font-size: 13px; margin-top: 5px; }
 /* the three tools of the suite: intent-first hero tiles (What do you want
    to make?). Each carries its own accent (--c): Create / Movie / Analysis. */
-.pm-intents { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 20px 0 22px; }
-@media (max-width: 820px) { .pm-intents { grid-template-columns: 1fr; } }
+.pm-intents { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 20px 0 22px; }
+@media (max-width: 1080px) { .pm-intents { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 560px) { .pm-intents { grid-template-columns: 1fr; } }
 .pm-intent {
   position: relative; overflow: hidden; text-align: left; cursor: pointer;
   border: 1px solid var(--border); border-radius: 10px; padding: 18px 17px 16px;
@@ -1962,7 +1963,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
     <section id="home">
       <p class="pm-eyebrow">Studio</p>
       <h1 class="pm-title">What do you want to make?</h1>
-      <p class="pm-lead">Three tools, one place. Start fresh — or pick up where you left off below.</p>
+      <p class="pm-lead">Four tools, one place. Start fresh — or pick up where you left off below.</p>
       <div class="pm-intents">
         <button class="pm-intent" id="pm-new" type="button" style="--c:#5a86a8">
           <span class="pm-intent-glow" aria-hidden="true"></span>
@@ -1991,6 +1992,15 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           <p>Read the rhythm of a timeline — ASL, the pacing curve, and how versions compare as your edit evolves.</p>
           <span class="pm-intent-go">Load a timeline <span class="arw" aria-hidden="true">→</span></span>
         </button>
+        <button class="pm-intent" id="pm-shorts" type="button" style="--c:#b06a9c">
+          <span class="pm-intent-glow" aria-hidden="true"></span>
+          <span class="pm-intent-ic" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none"><rect x="7" y="3" width="10" height="18" rx="2" stroke="currentColor" stroke-width="1.7"/><path d="M11 9l4 3-4 3V9z" fill="currentColor"/></svg>
+          </span>
+          <h3>Shorts</h3>
+          <p>Turn a finished cut into vertical Shorts — Monteur pulls the strongest beats it already used and reframes each to 9:16.</p>
+          <span class="pm-intent-go">Pick a cut <span class="arw" aria-hidden="true">→</span></span>
+        </button>
       </div>
       <div class="pm-recents-head">
         <p class="pm-sub">Recent projects</p>
@@ -2003,6 +2013,45 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
       </div>
       <div class="pm-recents" id="pm-recents"></div>
       <p class="pm-empty" id="pm-recents-empty">No recent projects yet — your saved projects show up here.</p>
+    </section>
+
+    <section id="shorts" hidden>
+      <header class="dash-head">
+        <div class="dash-title">
+          <p class="eyebrow">Shorts</p>
+          <h1>Turn a cut into vertical Shorts</h1>
+          <p class="dash-meta">Pick a finished cut. Monteur pulls the strongest self-contained beats it already used, reframes each to 9:16 so the subject stays in frame, and saves every Short as its own project you can refine and export. No moment repeats across the set.</p>
+        </div>
+        <div class="dash-actions">
+          <button class="btn ghost" id="shorts-back" type="button">← Projects</button>
+        </div>
+      </header>
+
+      <section class="card" style="margin-top: 14px;">
+        <p class="seg-heading" style="margin-top: 0;">1 · Pick the cut</p>
+        <p class="card-sub">Your saved cuts — the finished long form each Short is pulled from.</p>
+        <div class="pm-recents" id="shorts-projects" style="margin-top: 12px;"></div>
+        <p class="pm-empty" id="shorts-projects-empty" hidden>No saved cuts yet — make one in Create first, then come back to spin Shorts off it.</p>
+      </section>
+
+      <section class="card" id="shorts-make" style="margin-top: 14px;" hidden>
+        <p class="seg-heading" style="margin-top: 0;">2 · How many Shorts</p>
+        <p class="card-sub" id="shorts-picked-sub">From <b id="shorts-picked-name"></b>.</p>
+        <div class="seg-toggle" role="group" aria-label="How many Shorts" id="shorts-count" style="margin: 10px 0;">
+          <button type="button" data-n="2" aria-pressed="true">2 Shorts</button>
+          <button type="button" data-n="3" aria-pressed="false">3</button>
+          <button type="button" data-n="4" aria-pressed="false">4</button>
+        </div>
+        <button class="btn primary" id="shorts-build" type="button">Make Shorts<span class="spin" aria-hidden="true"></span></button>
+        <p class="scan-note" id="shorts-msg" role="status" hidden></p>
+        <div id="shorts-result" hidden>
+          <p class="help-small" id="shorts-lead" style="margin: 12px 0 8px;"></p>
+          <div class="series-strip" id="shorts-list" style="flex-wrap: wrap;"></div>
+          <div class="export-bar" style="margin-top: 12px;">
+            <button class="btn primary" id="shorts-save" type="button">Save all as projects<span class="spin" aria-hidden="true"></span></button>
+          </div>
+        </div>
+      </section>
     </section>
 
     <div class="welcome" id="welcome" hidden>
@@ -2679,25 +2728,6 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         </div>
         <section class="tiles" id="cre-final-tiles" aria-label="Cut summary" style="margin: 14px 0 4px;"></section>
         <p class="sb-story" id="cre-final-story" hidden></p>
-
-        <div class="resolve-send" id="cre-shorts-card" hidden>
-          <p class="seg-heading" style="margin-top: 0;">Make Shorts</p>
-          <p class="help-small">Turn this finished cut into vertical 9:16 Shorts. Monteur pulls the strongest self-contained beats your edit already used, reframes each so the subject stays in frame, and saves every Short as its own project you can refine and export.</p>
-          <div class="seg-toggle" role="group" aria-label="How many Shorts" id="cre-shorts-count" style="margin: 10px 0;">
-            <button type="button" data-n="2" aria-pressed="true">2 Shorts</button>
-            <button type="button" data-n="3" aria-pressed="false">3</button>
-            <button type="button" data-n="4" aria-pressed="false">4</button>
-          </div>
-          <button class="btn primary" id="cre-shorts-btn" type="button">Make Shorts<span class="spin" aria-hidden="true"></span></button>
-          <p class="scan-note" id="cre-shorts-msg" role="status" hidden></p>
-          <div id="cre-shorts-result" hidden>
-            <p class="help-small" id="cre-shorts-lead" style="margin: 12px 0 8px;"></p>
-            <div class="series-strip" id="cre-shorts-list" style="flex-wrap: wrap;"></div>
-            <div class="export-bar" style="margin-top: 12px;">
-              <button class="btn" id="cre-shorts-save" type="button">Save all as projects<span class="spin" aria-hidden="true"></span></button>
-            </div>
-          </div>
-        </div>
 
         <div class="resolve-send">
             <button class="btn primary" id="cre-resolve-btn" type="button">Build in DaVinci Resolve<span class="spin" aria-hidden="true"></span></button>
@@ -3827,7 +3857,7 @@ function renderTrend() {
 var VIEWS = ["home", "create", "movie", "pacing", "assembly"];
 
 // the topbar center title for each working view; create shows the project name
-var VIEW_TITLES = { movie: "Movie", pacing: "Analysis", assembly: "Movie · Assemble" };
+var VIEW_TITLES = { movie: "Movie", pacing: "Analysis", assembly: "Movie · Assemble", shorts: "Shorts" };
 
 /* Drive the context-aware topbar off the current view. On Home: a quiet
    "Projects" label, no back control. Inside a view: the "‹ Projects" back
@@ -3861,6 +3891,7 @@ function updateMainVisibility() {
   $("create").hidden = v !== "create";
   $("movie").hidden = v !== "movie";
   $("assembly").hidden = v !== "assembly";
+  $("shorts").hidden = v !== "shorts";
   var pacing = v === "pacing";
   $("welcome").hidden = !pacing || !!state.primary;
   $("dashboard").hidden = !pacing || !state.primary;
@@ -3881,6 +3912,7 @@ $("tb-back").addEventListener("click", function () { setView("home"); refreshPro
 $("pm-new").addEventListener("click", function () { newProject(); });
 $("pm-movie").addEventListener("click", function () { setView("movie"); });
 $("pm-analysis").addEventListener("click", function () { setView("pacing"); });
+$("pm-shorts").addEventListener("click", function () { openShortsTool(); });
 $("mov-goto-assembly").addEventListener("click", function () { setView("assembly"); });
 $("asm-back").addEventListener("click", function () { setView("movie"); });
 
@@ -3926,6 +3958,7 @@ var MENU = {
   home: function () { setView("home"); },
   create: function () { setView("create"); },
   movie: function () { setView("movie"); },
+  shorts: function () { openShortsTool(); },
   settings: function () { openSettings(false); },
   shortcuts: function () { openShortcuts(); },
   checkUpdates: function () { openUpdate(); },
@@ -3968,7 +4001,8 @@ var APP_MENUS = [
     { label: "Home", key: "Ctrl+1", checked: function () { return state.view === "home"; }, run: MENU.home },
     { label: "Create", key: "Ctrl+2", checked: function () { return state.view === "create"; }, run: MENU.create },
     { label: "Movie", key: "Ctrl+3", checked: function () { return state.view === "movie"; }, run: MENU.movie },
-    { label: "Analyze", key: "Ctrl+4", checked: function () { return state.view === "pacing"; }, run: MENU.analyze }
+    { label: "Analyze", key: "Ctrl+4", checked: function () { return state.view === "pacing"; }, run: MENU.analyze },
+    { label: "Shorts", key: "Ctrl+5", checked: function () { return state.view === "shorts"; }, run: MENU.shorts }
   ] },
   { label: "Help", items: [
     { label: "Keyboard shortcuts", key: "Ctrl+/", run: MENU.shortcuts },
@@ -3986,6 +4020,7 @@ var SHORTCUTS = [
   { combo: "Ctrl+2", label: "Go to Create", run: MENU.create },
   { combo: "Ctrl+3", label: "Go to Movie", run: MENU.movie },
   { combo: "Ctrl+4", label: "Go to Analyze", run: MENU.analyze },
+  { combo: "Ctrl+5", label: "Go to Shorts", run: MENU.shorts },
   { combo: "Ctrl+,", label: "Settings", run: MENU.settings },
   { combo: "Ctrl+/", label: "Keyboard shortcuts", run: MENU.shortcuts }
 ];
@@ -7559,14 +7594,6 @@ function renderCreResult(data) {
   prepareExportRow();
   $("cre-result").hidden = false;
   $("cre-history").hidden = !cre.projectId; // saved cuts have a restorable history
-  // "Make Shorts" — offered on a SAVED single cut (a folder-series is already
-  // Shorts; a Short shouldn't spawn Shorts). A fresh result clears old ones.
-  var shortsCard = $("cre-shorts-card");
-  if (shortsCard) {
-    var canShorts = !!cre.projectId && !cre.series;
-    shortsCard.hidden = !canShorts;
-    hideShortsResult();
-  }
   renderSeriesStrip(); // shows the Short picker when a series is active
   // the harvest step (4: Your cut) is reachable once a draft exists
   $("cre-next-3").disabled = false;
@@ -7758,25 +7785,93 @@ function startSeriesBuild(andThen) {
   });
 }
 
-/* ===== Make Shorts: a finished long-form cut -> vertical Shorts =====
-   Posts to the project's OWN series endpoint, which extracts Shorts from the
-   beats THIS cut already used (reusing its persisted sift — no re-scan), then
-   lets you save each Short as its own project to refine and export. Reuses the
-   identical shorts result shape the folder Series returns. */
-var creShorts = { count: 2, built: [] };
+function setCreFormat(fmt) {
+  cre.format = fmt;
+  $("cre-fmt-edl").setAttribute("aria-pressed", String(fmt === "edl"));
+  $("cre-fmt-fcpxml").setAttribute("aria-pressed", String(fmt === "fcpxml"));
+}
+$("cre-fmt-edl").addEventListener("click", function () { setCreFormat("edl"); });
+$("cre-fmt-fcpxml").addEventListener("click", function () { setCreFormat("fcpxml"); });
 
-function hideShortsResult() {
-  var result = $("cre-shorts-result");
-  if (result) result.hidden = true;
-  var msg = $("cre-shorts-msg");
-  if (msg) msg.hidden = true;
-  creShorts.built = [];
+/* ===== Shorts: a first-class suite tool — a finished cut -> vertical Shorts ==
+   Its OWN Home destination (not a Create step). Pick a saved cut, choose how
+   many, and Monteur extracts Shorts from the beats that cut already used
+   (reusing its persisted sift — no re-scan) via the project's /series endpoint,
+   then saves each Short as its own project to refine and export. */
+var shortsTool = { projectId: null, projectName: "", count: 2, built: [], gen: 0 };
+
+function openShortsTool() {
+  setView("shorts");
+  shortsTool.projectId = null;
+  shortsTool.projectName = "";
+  shortsResetResult();
+  $("shorts-make").hidden = true;
+  loadShortsProjects();
 }
 
-Array.prototype.forEach.call(document.querySelectorAll("#cre-shorts-count button"), function (btn) {
+function shortsResetResult() {
+  shortsTool.built = [];
+  var result = $("shorts-result");
+  if (result) result.hidden = true;
+  var msg = $("shorts-msg");
+  if (msg) msg.hidden = true;
+}
+
+function shortsProjectCard(project) {
+  var card = el("button", "pm-card");
+  card.type = "button";
+  card.dataset.type = "cut";
+  card.setAttribute("aria-label", "Pick " + String(project.name || "cut"));
+  var thumb = el("div", "pm-card-thumb");
+  var strip = el("div", "pm-filmstrip");
+  for (var i = 0; i < 6; i++) strip.appendChild(el("span"));
+  thumb.appendChild(strip);
+  thumb.appendChild(el("span", "pm-badge", project.has_plan ? "Cut" : "Footage"));
+  card.appendChild(thumb);
+  var meta = el("div", "pm-card-meta");
+  meta.appendChild(el("h3", null, String(project.name || "Untitled cut")));
+  var bits = [relTime(project.modified_at), projectPoolText(project)];
+  if (project.has_plan) bits.push("Plan ready");
+  meta.appendChild(el("p", null, bits.filter(Boolean).join(" · ")));
+  card.appendChild(meta);
+  if (String(project.id) === String(shortsTool.projectId)) card.classList.add("on");
+  card.addEventListener("click", function () { pickShortsProject(project); });
+  return card;
+}
+
+function loadShortsProjects() {
+  var host = $("shorts-projects");
+  var empty = $("shorts-projects-empty");
+  if (!host) return;
+  api("/api/projects").then(function (data) {
+    // the long forms Shorts are pulled from: Create cuts, newest first. A child
+    // Short is a cut too, so a Short can itself be re-shorted — harmless.
+    var cuts = ((data && data.projects) || []).filter(function (p) {
+      return String(p.type || "cut") === "cut";
+    });
+    clear(host);
+    empty.hidden = cuts.length > 0;
+    host.hidden = cuts.length === 0;
+    cuts.forEach(function (p) { host.appendChild(shortsProjectCard(p)); });
+  }).catch(function () { /* convenience surface — never an error state */ });
+}
+
+function pickShortsProject(project) {
+  shortsTool.projectId = project.id;
+  shortsTool.projectName = String(project.name || "this cut");
+  shortsResetResult();
+  $("shorts-picked-name").textContent = shortsTool.projectName;
+  $("shorts-make").hidden = false;
+  // reflect the pick in the card grid, then bring the build into view
+  loadShortsProjects();
+  var make = $("shorts-make");
+  if (make && make.scrollIntoView) make.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+Array.prototype.forEach.call(document.querySelectorAll("#shorts-count button"), function (btn) {
   btn.addEventListener("click", function () {
-    creShorts.count = parseInt(btn.dataset.n, 10) || 2;
-    Array.prototype.forEach.call(document.querySelectorAll("#cre-shorts-count button"), function (other) {
+    shortsTool.count = parseInt(btn.dataset.n, 10) || 2;
+    Array.prototype.forEach.call(document.querySelectorAll("#shorts-count button"), function (other) {
       other.setAttribute("aria-pressed", String(other === btn));
     });
   });
@@ -7784,14 +7879,14 @@ Array.prototype.forEach.call(document.querySelectorAll("#cre-shorts-count button
 
 function renderShortsList(result) {
   var shorts = (result && result.shorts) || [];
-  creShorts.built = shorts;
-  var lead = $("cre-shorts-lead");
+  shortsTool.built = shorts;
+  var lead = $("shorts-lead");
   var origin = result && result.from_edit
-    ? "pulled from the beats your edit used"
+    ? "pulled from the beats your cut used"
     : "pulled from your footage's strongest moments";
   lead.textContent = shorts.length + " vertical Short" + (shorts.length === 1 ? "" : "s")
     + " · " + origin + " · zero repeats across the set. Save them as projects to refine and export each on its own.";
-  var list = $("cre-shorts-list");
+  var list = $("shorts-list");
   clear(list);
   shorts.forEach(function (short, i) {
     var seed = short.seed || {};
@@ -7801,65 +7896,72 @@ function renderShortsList(result) {
     chip.appendChild(el("span", "series-chip-sub", label + " · " + fmtClock(short.duration || 0) + " · " + (short.cuts || 0) + " cuts"));
     list.appendChild(chip);
   });
-  $("cre-shorts-result").hidden = shorts.length === 0;
-  if (!shorts.length) creNote("cre-shorts-msg", "No Shorts could be made — this cut needs a few distinct strong moments.", true);
+  $("shorts-result").hidden = shorts.length === 0;
+  if (!shorts.length) shortsNote("No Shorts could be made — this cut needs a few distinct strong moments.", true);
 }
 
-function pollShortsJob(jobId) {
+function shortsNote(message, isError) {
+  var msg = $("shorts-msg");
+  if (!msg) return;
+  msg.textContent = message;
+  msg.classList.toggle("error", !!isError);
+  msg.hidden = false;
+}
+
+function pollShortsJob(jobId, gen) {
   return new Promise(function (resolve) {
     function tick() {
+      if (gen !== shortsTool.gen || state.view !== "shorts") { resolve(); return; } // left the tool
       api("/api/jobs/" + encodeURIComponent(String(jobId))).then(function (job) {
         if (job.state === "done") { renderShortsList(job.result || {}); resolve(); }
         else if (job.state === "error" || job.state === "cancelled") {
-          creNote("cre-shorts-msg", job.message || "Couldn't make Shorts.", true); resolve();
+          shortsNote(job.message || "Couldn't make Shorts.", true); resolve();
         } else { window.setTimeout(tick, 500); }
       }).catch(function (err) {
-        creNote("cre-shorts-msg", err && err.message ? err.message : String(err), true); resolve();
+        shortsNote(err && err.message ? err.message : String(err), true); resolve();
       });
     }
     tick();
   });
 }
 
-function startProjectShorts() {
-  if (!cre.projectId) { toast("Save this cut first — Shorts come from a saved project."); return; }
-  $("cre-shorts-msg").hidden = true;
-  hideShortsResult();
-  return busy($("cre-shorts-btn"), function () {
-    return api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/series",
-               { method: "POST", body: { series: creShorts.count, canvas: "vertical-uhd" } })
-      .then(function (data) { return pollShortsJob(data.job); });
+function startShortsBuild() {
+  if (!shortsTool.projectId) { toast("Pick a cut first."); return; }
+  $("shorts-msg").hidden = true;
+  shortsResetResult();
+  var gen = ++shortsTool.gen;
+  return busy($("shorts-build"), function () {
+    return api("/api/projects/" + encodeURIComponent(String(shortsTool.projectId)) + "/series",
+               { method: "POST", body: { series: shortsTool.count, canvas: "vertical-uhd" } })
+      .then(function (data) { return pollShortsJob(data.job, gen); });
   });
 }
 
-$("cre-shorts-btn").addEventListener("click", startProjectShorts);
+$("shorts-build").addEventListener("click", startShortsBuild);
+$("shorts-back").addEventListener("click", function () { setView("home"); refreshProjects(); });
 
-// test seam (like window.monteurScanAnim): render a shorts result directly
-window.monteurShorts = { render: renderShortsList, state: function () { return creShorts; } };
-
-$("cre-shorts-save").addEventListener("click", function () {
-  if (!cre.projectId || !creShorts.built.length) return;
-  busy($("cre-shorts-save"), function () {
-    var payload = { shorts: creShorts.built.map(function (short, i) {
+$("shorts-save").addEventListener("click", function () {
+  if (!shortsTool.projectId || !shortsTool.built.length) return;
+  busy($("shorts-save"), function () {
+    var payload = { shorts: shortsTool.built.map(function (short, i) {
       return { plan_json: short.plan_json, label: "Short " + (i + 1) };
     }) };
-    return api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/series/save",
+    return api("/api/projects/" + encodeURIComponent(String(shortsTool.projectId)) + "/series/save",
                { method: "POST", body: payload })
       .then(function (data) {
         var n = (data.created || []).length;
         toast("Saved " + n + " Short" + (n === 1 ? "" : "s") + " as project" + (n === 1 ? "" : "s") + ".", "success");
-        refreshProjects(); // they show up in Home recents right away
       });
   });
 });
 
-function setCreFormat(fmt) {
-  cre.format = fmt;
-  $("cre-fmt-edl").setAttribute("aria-pressed", String(fmt === "edl"));
-  $("cre-fmt-fcpxml").setAttribute("aria-pressed", String(fmt === "fcpxml"));
-}
-$("cre-fmt-edl").addEventListener("click", function () { setCreFormat("edl"); });
-$("cre-fmt-fcpxml").addEventListener("click", function () { setCreFormat("fcpxml"); });
+// test seam (like window.monteurScanAnim): drive the Shorts tool directly
+window.monteurShorts = {
+  open: openShortsTool,
+  render: renderShortsList,
+  pick: pickShortsProject,
+  state: function () { return shortsTool; },
+};
 
 $("cre-download").addEventListener("click", function () {
   if (!cre.result || buildPanel.running() || revisePanel.running() || directPanel.running()) return;
