@@ -117,6 +117,28 @@ COMPOSE_SCHEMA: dict = {
                 "required": ["dip", "text"],
             },
         },
+        # Optional: cast slots that should HOLD (breathe) — a hero, an
+        # establishing wide, an emotional beat. Each stretches by absorbing
+        # the short punchy shots right after it, so ONE shot breathes while
+        # the rest of the cut stays fast. Duration/beat-grid/music never move.
+        "holds": {
+            "type": "array",
+            "description": (
+                "optional: slots that should breathe — a hero / establishing / "
+                "emotional beat held long while the rest of the cut stays punchy"
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "slot": {"type": "integer"},
+                    "seconds": {
+                        "type": "number",
+                        "description": "optional target hold length (~2-6s)",
+                    },
+                },
+                "required": ["slot"],
+            },
+        },
         "why": {
             "type": "array",
             "items": {"type": "string"},
@@ -135,6 +157,12 @@ COMPOSE_SCHEMA: dict = {
     },
     "required": ["story", "cast", "titles", "why"],
 }
+
+#: Default and minimum length (seconds) of a composer-chosen breathing hold.
+#: The maximum is montage._MAX_CUT_SECONDS — the same ceiling the engine's own
+#: holds respect, so a breath never becomes a dead stare.
+_BREATHE_TARGET = 3.5
+_BREATHE_MIN = 2.0
 
 #: A composer music_in within this many seconds of a candidate snaps to it;
 #: anything further off is an invalid pick (kept the engine's choice).
@@ -198,13 +226,17 @@ CRAFT_BRIEFS: dict[str, str] = {
 
 _SYSTEM = (
     "You are a seasoned film editor composing a montage. The beat grid is "
-    "LOCKED: every slot's position and length is final, and so are the "
-    "black dips and fades — your job is the casting (which clip, from "
-    "which second, fills each slot), the act titles on the dips, and the "
-    "story they add up to. Tell ONE story across the whole cut; every act "
-    "must escalate or breathe on purpose. Use only clips and windows from "
-    "the inventory — never invent material. Write titles in the language "
-    "of the editor's brief and the footage labels."
+    "LOCKED: slot positions and the black dips and fades are final — your job "
+    "is the casting (which clip, from which second, fills each slot), the act "
+    "titles on the dips, and the story they add up to. You have ONE more lever: "
+    "a great cut is NOT uniformly fast — it breathes. You may mark a few slots "
+    "to HOLD (a hero, an establishing wide, an emotional or resolving beat); a "
+    "held shot lingers by absorbing the quick shots right after it, so it lands "
+    "while everything else stays punchy. Hold sparingly and on purpose — an "
+    "opener that sets the place, the shot on the drop, the closer that resolves. "
+    "Tell ONE story across the whole cut; every act must escalate or breathe on "
+    "purpose. Use only clips and windows from the inventory — never invent "
+    "material. Write titles in the language of the editor's brief and labels."
 )
 
 
@@ -495,6 +527,18 @@ def _build_prompt(context: dict, style: str, brief: str) -> str:
             "story around them."
         )
     parts.append(
+        "BREATHING (optional `holds`): the slot lengths in the dossier are the "
+        "engine's fast default. A cut that is fast everywhere is exhausting — "
+        "the best ones breathe. In `holds`, list the FEW slots that should hold "
+        "long: an establishing opener, the hero shot on the drop, an emotional "
+        "beat, the resolving closer. Each held slot stretches by absorbing the "
+        "quick shots right after it (so the total length and the beats never "
+        "move — you are trading a burst of quick shots for one that lingers). "
+        "Give each a `slot` and optionally `seconds` (~2-6). Use it sparingly: "
+        "2-4 holds in a typical cut, none if the piece is meant to be relentless "
+        "(a hard-hitting short). NEVER hold a `locked` slot."
+    )
+    parts.append(
         "DOSSIER (slots in record order; dips are black title slots; the "
         "inventory is every usable moment):\n"
         + json.dumps(context, ensure_ascii=False)
@@ -660,6 +704,89 @@ def _enforce_no_reuse(
                 stuck.append((i, j))
                 skip.add((i, j))
     return resourced, stuck
+
+
+def _apply_holds(plan: MontagePlan, holds, locked=frozenset()) -> None:
+    """Stretch composer-chosen slots into breathing holds — in place.
+
+    Each entry in ``holds`` names a cast ``slot`` (and an optional target
+    ``seconds``) the composer wants to breathe: a hero, an establishing wide,
+    an emotional beat. The held shot grows by ABSORBING the short shots right
+    after it, so the timeline never moves — total duration, the beat grid, the
+    music sync, the dips and the SFX all stay put; the cut simply trades a run
+    of quick shots for ONE that holds, while the rest stays punchy. Safe by
+    construction: a hold that would cross a dip, a locked slot, the
+    ``montage._MAX_CUT_SECONDS`` ceiling, or the source clip's own available
+    footage just absorbs fewer shots (or none — a pure no-op).
+    """
+    if not holds:
+        return
+    entries = plan.entries
+    n = len(entries)
+    if n < 2:
+        return
+    dip_starts = [d[0] for d in (plan.dips or [])]
+
+    def _dip_at(t: float) -> bool:
+        return any(abs(t - ds) <= _DROP_MATCH for ds in dip_starts)
+
+    targets: dict[int, float] = {}
+    for h in holds:
+        if not isinstance(h, dict):
+            continue
+        try:
+            s = int(h["slot"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (0 <= s < n) or s in locked:
+            continue
+        raw = h.get("seconds")
+        try:
+            sec = float(raw) if raw is not None else _BREATHE_TARGET
+        except (TypeError, ValueError):
+            sec = _BREATHE_TARGET
+        targets[s] = max(_BREATHE_MIN, min(_montage._MAX_CUT_SECONDS, sec))
+    if not targets:
+        return
+
+    merged: list = []
+    held = 0
+    i = 0
+    while i < n:
+        e = entries[i]
+        target = targets.get(i)
+        if target is not None:
+            avail = (e.clip_duration or 0.0) - e.source_start
+            new_end = e.record_end
+            j = i + 1
+            while (
+                (new_end - e.record_start) < target - _EPS
+                and j < n
+                and j not in locked
+                and not _dip_at(entries[j - 1].record_end)  # don't swallow a dip
+                and (entries[j].record_end - e.record_start)
+                <= _montage._MAX_CUT_SECONDS + _EPS
+                and (entries[j].record_end - e.record_start) <= avail + _EPS
+            ):
+                new_end = entries[j].record_end
+                j += 1
+            if new_end > e.record_end + _EPS:
+                length = new_end - e.record_start
+                merged.append(
+                    replace(e, record_end=new_end, source_end=e.source_start + length)
+                )
+                held += 1
+                i = j
+                continue
+        merged.append(e)
+        i += 1
+
+    if held:
+        plan.entries = merged
+        plan.notes.append(
+            f"breathing: {held} shot{'s' if held != 1 else ''} held long so the "
+            "cut isn't uniformly fast"
+        )
 
 
 def _apply_cast(
@@ -995,6 +1122,11 @@ def compose_montage(
         ],
         allow_repeats=allow_repeats,
     )
+    # contextual breathing: after the cast, let the shots Claude marked HOLD
+    # stretch by absorbing the quick shots after them — so the cut is not
+    # uniformly fast; a hero/establishing/emotional beat gets room while the
+    # rest stays punchy. Runs on the cast entries (original slot indices).
+    _apply_holds(plan, data.get("holds") or [], locked)
     if not context.get("vision"):
         plan.notes.append(
             'no vision labels — run "Let Claude watch your clips" '
