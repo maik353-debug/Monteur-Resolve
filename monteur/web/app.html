@@ -166,6 +166,8 @@ h1, h2, h3, p { margin: 0; }
    lets the caption sit flush in the corner. In a browser none of this shows
    and the bar is exactly the ordinary app top bar. */
 .tb-left { display: flex; align-items: center; gap: 4px; min-width: 0; }
+/* invisible full-height filler that makes the empty title-bar area draggable */
+.tb-drag-fill { flex: 1 1 auto; align-self: stretch; min-width: 8px; min-height: 42px; }
 /* the File/View/Help menu is the universal control surface — Settings and
    everything else live here, in the browser and in the native shell alike.
    (Only the window caption buttons below are native-shell-only.) */
@@ -1854,6 +1856,9 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
     </div>
     <!-- native window menu bar (shown only in the pywebview shell) -->
     <nav class="tb-menu" id="tb-menu" aria-label="Application menu"></nav>
+    <!-- fills the empty bar so the WHOLE title bar drags the window, not just
+         the logo/title text (WebView2 ignores -webkit-app-region reliably) -->
+    <div class="tb-drag-fill pywebview-drag-region" aria-hidden="true"></div>
   </div>
   <!-- Context-aware center: on Home just a quiet "Projects" label; inside any
        working view a "‹ Projects" back-to-hub control + the view's context
@@ -1870,6 +1875,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
   <div class="tb-right">
     <!-- Settings live in the File menu; theme lives in Settings › Appearance.
          Nothing floats loose on the bar. -->
+    <div class="tb-drag-fill pywebview-drag-region" aria-hidden="true"></div>
     <!-- native window caption buttons (shown only in the pywebview shell) -->
     <div class="tb-caption" id="tb-caption">
       <button class="capbtn cap-min" id="cap-min" type="button" title="Minimize" aria-label="Minimize">
