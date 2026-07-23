@@ -267,3 +267,58 @@ def test_empty_cache_searches_to_nothing(tmp_path):
     _write(tmp_path, {})
     assert load_annotations(tmp_path) == []
     assert search_footage(tmp_path, "kurve") == []
+
+
+# --- spoken lines from transcript sidecars (whisper -> find) -------------------
+
+
+def _transcript(folder: Path, name: str, segments: list[tuple[float, float, str]]) -> None:
+    """Write a <clip>.json transcript sidecar next to a media file."""
+    clip = folder / name
+    clip.write_bytes(b"not really a video")
+    clip.with_suffix(".json").write_text(
+        json.dumps({"language": "de", "segments": [
+            {"start": s, "end": e, "text": t} for s, e, t in segments
+        ]}),
+        encoding="utf-8",
+    )
+
+
+def test_load_spoken_reads_transcript_segments(tmp_path):
+    _transcript(tmp_path, "talk.mp4", [(0.0, 2.0, "Hier fahren wir die Kurve"), (2.0, 4.0, "Bergab jetzt")])
+    spoken = find.load_spoken(tmp_path)
+    assert len(spoken) == 2
+    assert all(s.spoken for s in spoken)
+    assert spoken[0].label == "Hier fahren wir die Kurve"
+    assert spoken[0].start == 0.0 and spoken[0].end == 2.0
+
+
+def test_load_spoken_ignores_non_transcript_json(tmp_path):
+    clip = tmp_path / "a.mp4"
+    clip.write_bytes(b"v")
+    clip.with_suffix(".json").write_text(json.dumps({"something": "else"}), encoding="utf-8")
+    assert find.load_spoken(tmp_path) == []
+
+
+def test_search_finds_spoken_words(tmp_path):
+    _transcript(tmp_path, "talk.mp4", [(0.0, 2.0, "und hier kommt die Kurve"), (2.0, 4.0, "ganz ruhig")])
+    # no vision cache at all -> speech alone still searches
+    hits = search_footage(tmp_path, "kurve")
+    assert len(hits) == 1
+    assert hits[0].spoken and "Kurve" in hits[0].label
+
+
+def test_search_merges_vision_and_speech(tmp_path):
+    cache = {}
+    _put(tmp_path, cache, "seen.mp4", 0.0, 2.0, _entry(label="a curve in the road", tags=["kurve"]))
+    _write(tmp_path, cache)
+    _transcript(tmp_path, "talk.mp4", [(0.0, 2.0, "die Kurve war eng")])
+    hits = search_footage(tmp_path, "kurve")
+    sources = sorted(("spoken" if s.spoken else "seen") for s in hits)
+    assert sources == ["seen", "spoken"]
+
+
+def test_no_vision_and_no_transcripts_raises_hint(tmp_path):
+    # nothing indexed -> the run-see/transcribe hint
+    with pytest.raises(FileNotFoundError):
+        search_footage(tmp_path, "kurve")

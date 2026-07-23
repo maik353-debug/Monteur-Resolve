@@ -430,7 +430,9 @@ def cmd_find(args: argparse.Namespace) -> None:
         mm_in, ss_in = divmod(int(shot.start), 60)
         mm_out, ss_out = divmod(int(shot.end), 60)
         line = (f"  {name}  {mm_in}:{ss_in:02d}-{mm_out}:{ss_out:02d}  "
-                f"{shot.label or '(no label)'}")
+                f"{'“' + shot.label + '”' if shot.spoken else (shot.label or '(no label)')}")
+        if shot.spoken:
+            line += "  [spoken]"
         if shot.hero >= 0.5:
             line += f"  [hero {shot.hero:.1f}]"
         print(line)

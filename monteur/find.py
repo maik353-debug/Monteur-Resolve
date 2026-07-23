@@ -29,6 +29,7 @@ never returns ghost hits.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -70,6 +71,9 @@ class FoundShot:
     hero: float
     group: str
     relevance: float
+    #: True when this "shot" is a spoken line from a transcript sidecar
+    #: (``<clip>.json``) rather than a vision annotation.
+    spoken: bool = False
 
 
 def _parse_key(key: str) -> tuple[str, float, float, float] | None:
@@ -152,6 +156,53 @@ def load_annotations(folder: str | Path) -> list[FoundShot]:
     return shots
 
 
+def load_spoken(folder: str | Path) -> list[FoundShot]:
+    """Every spoken line from ``<clip>.json`` transcript sidecars in ``folder``.
+
+    ``monteur transcribe`` writes one ``<clip>.json`` (``{"segments": [...],
+    "language": ...}``) next to each media file; each segment becomes a
+    searchable spoken "shot" (label = the words said, ``spoken=True``). A folder
+    with no transcripts returns ``[]`` — speech is an optional signal, never a
+    gate. Segments of clips that no longer exist are skipped.
+    """
+    from monteur.media import MEDIA_EXTENSIONS
+
+    folder = Path(folder)
+    shots: list[FoundShot] = []
+    try:
+        media = [p for p in folder.iterdir() if p.suffix.lower() in MEDIA_EXTENSIONS]
+    except OSError:
+        return shots
+    for clip in sorted(media):
+        sidecar = clip.with_suffix(".json")
+        if not sidecar.is_file():
+            continue
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        segments = data.get("segments") if isinstance(data, dict) else None
+        if not isinstance(segments, list):
+            continue  # not a transcript sidecar
+        abspath = str(clip.resolve())
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            text = str(seg.get("text") or "").strip()
+            if not text:
+                continue
+            try:
+                start = float(seg.get("start") or 0.0)
+                end = float(seg.get("end") or start)
+            except (TypeError, ValueError):
+                continue
+            shots.append(FoundShot(
+                clip_path=abspath, start=start, end=end, label=text,
+                tags=[], role="", hero=0.0, group="", relevance=1.0, spoken=True,
+            ))
+    return shots
+
+
 def _token_matches(token: str, word: str) -> bool:
     """Bidirectional prefix match; the shorter side needs >= _MIN_PREFIX chars."""
     if token == word:
@@ -180,14 +231,30 @@ def search_footage(folder: str | Path, query: str, limit: int = 20) -> list[Foun
     one token hit are returned, best first (relevance desc, then hero desc),
     at most ``limit``.
 
+    Searches BOTH signals: the vision cache AND spoken lines from ``<clip>.json``
+    transcript sidecars (``monteur transcribe``) — so a word that was *said*
+    ("die Kurve") is found even without a vision label, and spoken hits are
+    flagged ``spoken=True``. Either signal alone is enough.
+
     The special queries "hero" / "held" (alone) return all shots with
-    hero >= 0.5, ranked by hero. An empty query raises ValueError; a missing
-    cache raises FileNotFoundError telling the user to run ``monteur see``.
+    hero >= 0.5, ranked by hero (vision only — spoken lines carry no hero).
+    An empty query raises ValueError; a folder with neither a vision cache nor
+    transcripts raises FileNotFoundError telling the user to run ``monteur see``.
     """
     tokens = _WORDS.findall(query.lower())
     if not tokens:
         raise ValueError("give me something to look for")
-    shots = load_annotations(folder)
+    # vision annotations (may be absent) + spoken lines from transcripts (also
+    # optional) — either signal alone is enough to search.
+    try:
+        vision = load_annotations(folder)
+    except FileNotFoundError as exc:
+        vision = None
+        vision_error = exc
+    spoken = load_spoken(folder)
+    if vision is None and not spoken:
+        raise vision_error  # nothing indexed at all -> the "run see/transcribe" hint
+    shots = (vision or []) + spoken
 
     if query.strip().lower() in ("hero", "held"):
         heroes = [s for s in shots if s.hero >= _HERO_FLOOR]

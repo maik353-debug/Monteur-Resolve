@@ -66,10 +66,13 @@ Craft templates:
       iterate in plain German/English ("zweite Hälfte ruhiger"), pinned
       shots survive verbatim, untouched regions stay bit-identical,
       cuts stay on the beat grid
-- [ ] Marry Whisper to the montage: speech-aware cutting for travel
-      films with voice — don't cut mid-sentence, duck-the-music cues in
-      mix mode, spoken moments as protected slots; transcript words as
-      a search signal in `monteur find`; a transcribe button in Studio
+- [~] Marry Whisper to the montage. DONE: **transcript words as a search
+      signal in `monteur find`** — spoken lines from `<clip>.json` transcript
+      sidecars are searched alongside the vision cache (either signal alone
+      works), and spoken hits are flagged (`find.load_spoken`, `[spoken]` in the
+      CLI). OPEN: speech-aware cutting (don't cut mid-sentence, spoken moments
+      as protected slots, duck-the-music in mix mode) and a transcribe button in
+      Studio.
 - [x] Movie creator stage 1 (`monteur movie new`): idea + constraints ->
       Claude drafts the blueprint — Fountain screenplay (assembly-ready),
       scene list with concrete shooting tips, sound notes, cut intents,
