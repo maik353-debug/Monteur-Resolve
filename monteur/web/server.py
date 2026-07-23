@@ -5462,26 +5462,28 @@ def serve(
     # "process just vanishes with no Python exception" while serving) into a
     # printed native traceback instead of a silent death. Idempotent + guarded
     # so enabling it can never itself take the server down.
+    _crash_log = None  # kept alive for the server's lifetime (faulthandler holds its fd)
     try:
         import faulthandler
 
         if not faulthandler.is_enabled():
-            # enable() captures stderr's fileno and raises if there isn't one
-            # (e.g. under pythonw.exe). Fall back to the original stderr, then
-            # to a log file, so a native crash is never silent just because the
-            # console stream is unusual.
+            # Log native crashes to a DURABLE FILE, always — not just the console
+            # (which vanishes when the window/terminal closes), so a crash can
+            # actually be found and sent for diagnosis. Falls back to stderr only
+            # if the file can't be opened.
             try:
-                faulthandler.enable(all_threads=True)
-            except (ValueError, AttributeError, OSError):
-                target = getattr(sys, "__stderr__", None)
-                if target is not None:
-                    faulthandler.enable(file=target, all_threads=True)
-                else:
-                    log = open(Path(project_root) / "monteur-crash.log", "a")
-                    faulthandler.enable(file=log, all_threads=True)
-                    print(
-                        f"(Native-crash logging goes to {log.name})", flush=True
-                    )
+                crash_path = Path(project_root) / "monteur-crash.log"
+                crash_path.parent.mkdir(parents=True, exist_ok=True)
+                _crash_log = open(crash_path, "a", buffering=1)  # noqa: SIM115 - lives with the server
+                faulthandler.enable(file=_crash_log, all_threads=True)
+                print(f"(Native-crash log: {crash_path})", flush=True)
+            except OSError:
+                try:
+                    faulthandler.enable(all_threads=True)  # stderr
+                except (ValueError, AttributeError, OSError):
+                    target = getattr(sys, "__stderr__", None)
+                    if target is not None:
+                        faulthandler.enable(file=target, all_threads=True)
     except Exception as exc:  # noqa: BLE001 - diagnostics must never break startup
         print(
             f"(Note: could not enable native crash reporting: {exc})", flush=True
