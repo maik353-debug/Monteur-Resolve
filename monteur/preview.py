@@ -372,27 +372,31 @@ def _segments(plan: MontagePlan) -> list[tuple[str, float, object]]:
 
 def _dip_titles(
     plan: MontagePlan, segments: list[tuple[str, float, object]]
-) -> dict[int, str]:
-    """Segment index -> composed act title for that black dip.
+) -> dict[int, tuple[str, str]]:
+    """Segment index -> ``(act title, animation)`` for that black dip.
 
-    ``plan.dips`` aligns with ``plan.title_texts`` by index; a black
-    segment is matched to its dip by record position. Shared by both
-    renderers (blueprint 1.8: the preview must show the same titles the
-    export shows). Empty when the plan has no composed titles.
+    ``plan.dips`` aligns with ``plan.title_texts`` (and ``plan.title_anims``)
+    by index; a black segment is matched to its dip by record position.
+    Shared by both renderers (blueprint 1.8: the preview must show the same
+    titles the export shows). The animation is one of ``none``/``fade``/
+    ``slide``/``type`` (``""`` or an out-of-range index means ``none``).
+    Empty when the plan has no composed titles.
     """
     starts: list[float] = []
     cursor = 0.0
     for _kind, length, _entry in segments:
         starts.append(cursor)
         cursor += length
-    titles: dict[int, str] = {}
+    titles: dict[int, tuple[str, str]] = {}
     for j, (dip_start, _dip_len) in enumerate(plan.dips):
         text = plan.title_texts[j].strip() if j < len(plan.title_texts) else ""
         if not text:
             continue
+        anim = plan.title_anims[j] if j < len(plan.title_anims) else ""
+        anim = anim if anim in ("fade", "slide", "type") else "none"
         for i, (kind, _length, _entry) in enumerate(segments):
             if kind == "black" and abs(starts[i] - dip_start) < 0.05:
-                titles[i] = text
+                titles[i] = (text, anim)
                 break
     return titles
 
@@ -727,11 +731,14 @@ def render_preview(
                 if i in titles:
                     # The act title over its black dip (blueprint 1.8) —
                     # the same drawtext the export uses, preview quality.
+                    title_text, title_anim = titles[i]
                     text_file = str(Path(tmpdir) / f"title_{i:04d}.txt")
-                    Path(text_file).write_text(titles[i], encoding="utf-8")
+                    Path(text_file).write_text(title_text, encoding="utf-8")
                     video_args = [
                         "-vf",
-                        _title_filter(text_file, font, h, length, title_fade),
+                        _title_filter(
+                            text_file, font, h, length, title_fade, title_anim
+                        ),
                     ]
                 _run_ffmpeg(
                     [
@@ -887,32 +894,96 @@ def _title_filter(
     height: int,
     dip_len: float,
     fade_s: float = _TITLE_FADE,
+    anim: str = "fade",
 ) -> str:
     """The drawtext filter for one act title over a black dip segment.
 
     Plain white, centered, font size proportional to the canvas height.
-    A dip long enough to afford it fades the text in and out over
-    ``fade_s`` seconds INSIDE the dip (the :data:`_TITLE_FADE` target,
-    beat-quantized by the renderers through the shared
-    :func:`monteur.montage.quantize_finish` helper — blueprint 1.7; a
-    beatless plan passes 0.3 s unchanged); a short dip shows the text
-    for the dip's full length. The alpha expression always cuts to 0
-    after ``dip_len`` — a segment extended for a following dissolve
-    must not carry the title into the extension.
+    ``anim`` selects how the title enters (blueprint 1.7, beat-quantized
+    fade window ``fade_s`` — the :data:`_TITLE_FADE` target, or 0.3 s on a
+    beatless plan):
+
+    * ``fade`` (default, the historical behaviour): fade in and out over
+      ``fade_s`` seconds INSIDE the dip; a short dip shows the text for the
+      dip's full length.
+    * ``none``: a hard cut — the title is simply held for the dip, no fade.
+    * ``slide``: slide in from the left to centre over ``fade_s`` while
+      fading in, hold, then fade out.
+    * ``type``: a typewriter reveal — the text builds up prefix by prefix
+      over the first part of the dip, then holds.
+
+    Every mode cuts to nothing after ``dip_len`` — a segment extended for a
+    following dissolve must not carry the title into the extension.
     """
+    size = max(12, round(height / 12))
     fade = fade_s if dip_len >= 2 * fade_s + 0.2 else 0.0
+    base = f"drawtext=fontfile={_fq(font)}:fontcolor=white:fontsize={size}"
+
+    # a symmetric fade-in/out alpha inside the dip (0 outside it)
     if fade > 0:
-        alpha = (
+        fade_alpha = (
             f"if(lt(t,{fade:.3f}),t/{fade:.3f},"
             f"if(lt(t,{dip_len - fade:.3f}),1,"
             f"max(({dip_len:.3f}-t)/{fade:.3f},0)))"
         )
     else:
-        alpha = f"lt(t,{dip_len:.3f})"
-    size = max(12, round(height / 12))
+        fade_alpha = f"lt(t,{dip_len:.3f})"
+    hard_alpha = f"lt(t,{dip_len:.3f})"
+
+    if anim == "type":
+        # A true typewriter: one drawtext per growing prefix, each shown for
+        # its own slice of the reveal window, the full line held afterwards.
+        # Each prefix is written to a sibling text file (next to ``text_file``)
+        # so drawtext reads it with ``textfile=`` — no inline text escaping,
+        # and the caller still hands us a single -vf filter chain.
+        text = Path(text_file).read_text(encoding="utf-8")
+        chars = list(text)
+        n = len(chars)
+        if n <= 1:
+            return (
+                f"{base}:textfile={_fq(text_file)}"
+                f":x=(w-text_w)/2:y=(h-text_h)/2:alpha={_fq(hard_alpha)}"
+            )
+        reveal = min(dip_len * 0.6, 0.06 * n)
+        reveal = max(reveal, 0.2)
+        step = reveal / n
+        # a stable left origin so the line grows rightwards from where the
+        # finished, centred line begins (approx width from the glyph count)
+        full_w = f"({0.5 * size:.3f}*{n})"
+        stem = Path(text_file)
+        parts: list[str] = []
+        for k in range(1, n + 1):
+            prefix = "".join(chars[:k])
+            pfile = stem.with_name(f"{stem.stem}_typ{k:03d}.txt")
+            pfile.write_text(prefix, encoding="utf-8")
+            start = (k - 1) * step
+            # the last prefix holds to the end of the dip; the rest tick past
+            end = dip_len if k == n else k * step
+            enable = f"between(t,{start:.3f},{end:.3f})"
+            parts.append(
+                f"{base}:textfile={_fq(str(pfile))}"
+                f":x=(w-{full_w})/2:y=(h-text_h)/2"
+                f":alpha={_fq(hard_alpha)}:enable={_fq(enable)}"
+            )
+        return ",".join(parts)
+
+    if anim == "slide":
+        # slide in from off-screen left to centre over the fade window, hold
+        slide = fade if fade > 0 else min(dip_len * 0.4, _TITLE_FADE)
+        slide = max(slide, 0.01)
+        x_expr = (
+            f"if(lt(t,{slide:.3f}),"
+            f"(t/{slide:.3f})*((w-text_w)/2+text_w)-text_w,"
+            f"(w-text_w)/2)"
+        )
+        return (
+            f"{base}:textfile={_fq(text_file)}"
+            f":x={_fq(x_expr)}:y=(h-text_h)/2:alpha={_fq(fade_alpha)}"
+        )
+
+    alpha = hard_alpha if anim == "none" else fade_alpha
     return (
-        f"drawtext=fontfile={_fq(font)}:textfile={_fq(text_file)}"
-        f":fontcolor=white:fontsize={size}"
+        f"{base}:textfile={_fq(text_file)}"
         f":x=(w-text_w)/2:y=(h-text_h)/2:alpha={_fq(alpha)}"
     )
 
@@ -1501,11 +1572,14 @@ def render_export(
                     "-map", "0:v:0",
                 ]
                 if i in titles:
+                    title_text, title_anim = titles[i]
                     text_file = str(Path(tmpdir) / f"title_{i:04d}.txt")
-                    Path(text_file).write_text(titles[i], encoding="utf-8")
+                    Path(text_file).write_text(title_text, encoding="utf-8")
                     args += [
                         "-vf",
-                        _title_filter(text_file, font, h, length, title_fade),
+                        _title_filter(
+                            text_file, font, h, length, title_fade, title_anim
+                        ),
                     ]
                 args += [*seg_encode, "-an", seg]
                 _run_ffmpeg(

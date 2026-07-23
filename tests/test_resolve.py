@@ -71,17 +71,26 @@ class FakeMediaPoolItem:
 
 
 class FakeTextTool:
-    """A Fusion tool; reg_id 'TextPlus' makes it the Text+ tool."""
+    """A Fusion tool; reg_id 'TextPlus' makes it the Text+ tool.
+
+    ``SetInput`` accepts Fusion's optional third ``frame`` argument; calls
+    that pass a frame are recorded as keyframes so tests can assert an
+    animation was scripted (a plain static title never passes a frame).
+    """
 
     def __init__(self, reg_id: str = "TextPlus") -> None:
         self._reg_id = reg_id
         self.inputs: dict = {}
+        self.keyframes: dict = {}
 
     def GetAttrs(self) -> dict:
         return {"TOOLS_RegID": self._reg_id}
 
-    def SetInput(self, name: str, value) -> None:
-        self.inputs[name] = value
+    def SetInput(self, name: str, value, frame=None) -> None:
+        if frame is None:
+            self.inputs[name] = value
+        else:
+            self.keyframes.setdefault(name, []).append((frame, value))
 
 
 class FakeComp:
@@ -1481,6 +1490,47 @@ def test_add_titles_default_text_is_title() -> None:
     assert item._comp._tools[0].inputs["StyledText"] == "Title"
 
 
+def test_add_titles_animation_keyframes_the_text_plus() -> None:
+    # a picked animation keyframes a standard Text+ input; a static title
+    # (anim "none"/absent) never touches a keyframed input
+    timeline = standard_timeline()
+    bridge, _ = make_bridge([timeline])
+    warnings: list[str] = []
+    added = bridge.add_titles(
+        [
+            {"start": 0.0, "duration": 2.0, "text": "FADE", "anim": "fade"},
+            {"start": 4.0, "duration": 2.0, "text": "SLIDE", "anim": "slide"},
+            {"start": 8.0, "duration": 2.0, "text": "TYPE", "anim": "type"},
+            {"start": 12.0, "duration": 2.0, "text": "STATIC", "anim": "none"},
+        ],
+        fps=24.0,
+        warnings=warnings,
+    )
+    assert added == 4
+    assert warnings == []  # the fake Text+ accepts the frame arg -> animated
+    tools = [it._comp._tools[0] for it in timeline.created_title_items]
+    assert "Opacity" in tools[0].keyframes   # fade
+    assert "Center" in tools[1].keyframes    # slide
+    assert "WriteOnEnd" in tools[2].keyframes  # typewriter
+    assert tools[3].keyframes == {}          # static — no animation scripted
+
+
+def test_apply_title_anim_unsupported_host_is_false_not_raise() -> None:
+    # a Text+ whose SetInput rejects the frame arg keeps a static title:
+    # the helper returns False (caller then leaves a note), never raises
+    def no_keyframes(name, value, frame=None):
+        if frame is not None:
+            raise TypeError("this host cannot animate inputs by frame")
+
+    tool = FakeTextTool()
+    tool.SetInput = no_keyframes  # type: ignore[method-assign]
+    assert resolve._apply_title_anim(tool, FakeComp([tool]), "slide", 2.0, 24.0) is False
+    # "none" is static everywhere — no attempt, no keyframes
+    plain = FakeTextTool()
+    assert resolve._apply_title_anim(plain, FakeComp([plain]), "none", 2.0, 24.0) is False
+    assert plain.keyframes == {}
+
+
 # --- titles_from_plan --------------------------------------------------------------
 
 
@@ -1510,9 +1560,17 @@ def trailer_plan() -> MontagePlan:
 def test_titles_from_plan_uses_dips_and_following_labels() -> None:
     titles = resolve.titles_from_plan(trailer_plan())
     assert titles == [
-        {"start": 2.6, "duration": 2.0, "text": "the mountain pass"},
-        {"start": 5.0, "duration": 2.0, "text": "Title"},
+        {"start": 2.6, "duration": 2.0, "text": "the mountain pass", "anim": "none"},
+        {"start": 5.0, "duration": 2.0, "text": "Title", "anim": "none"},
     ]
+
+
+def test_titles_from_plan_carries_title_anims() -> None:
+    plan = trailer_plan()
+    plan.title_anims = ["slide"]  # only the first dip has an explicit anim
+    titles = resolve.titles_from_plan(plan)
+    assert titles[0]["anim"] == "slide"
+    assert titles[1]["anim"] == "none"  # unset -> none
 
 
 def test_titles_from_plan_explicit_texts_win() -> None:
@@ -3403,8 +3461,8 @@ def test_build_plan_isolated_sends_titles(monkeypatch) -> None:
     sent = json.loads(captured["input"])
     assert sent["name"] == "Trailer"
     assert sent["titles"] == [
-        {"start": 2.6, "duration": 2.0, "text": "the mountain pass"},
-        {"start": 5.0, "duration": 2.0, "text": "Title"},
+        {"start": 2.6, "duration": 2.0, "text": "the mountain pass", "anim": "none"},
+        {"start": 5.0, "duration": 2.0, "text": "Title", "anim": "none"},
     ]
 
 

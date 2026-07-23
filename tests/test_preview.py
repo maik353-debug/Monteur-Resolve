@@ -499,6 +499,60 @@ def test_render_export_dissolve_out_of_a_black_dip_always_works(tmp_path):
     assert result["duration"] == pytest.approx(6.0, abs=0.3)
 
 
+def test_title_filter_modes_build_valid_drawtext(tmp_path):
+    """Each animation mode yields a well-formed drawtext filter.
+
+    The four modes (none/fade/slide/type) select distinct drawtext
+    construction; none is a hard cut, fade animates alpha, slide animates
+    x, type is a chain of prefix reveals. drawtext need not be available in
+    the environment — this exercises the pure string construction.
+    """
+    tf = tmp_path / "title_0000.txt"
+    tf.write_text("Chapter One", encoding="utf-8")
+    font = "/usr/share/fonts/x.ttf"
+
+    none_f = preview._title_filter(str(tf), font, 720, 3.0, 0.3, "none")
+    fade_f = preview._title_filter(str(tf), font, 720, 3.0, 0.3, "fade")
+    slide_f = preview._title_filter(str(tf), font, 720, 3.0, 0.3, "slide")
+    type_f = preview._title_filter(str(tf), font, 720, 3.0, 0.3, "type")
+
+    for f in (none_f, fade_f, slide_f, type_f):
+        assert f.startswith("drawtext=")
+    # none: hard alpha (no fade ramp), centered
+    assert "alpha='lt(t,3.000)'" in none_f
+    assert "x=(w-text_w)/2" in none_f
+    # fade: alpha ramps in and out
+    assert "t/0.300" in fade_f
+    # slide: x is a function of t (an if() expression), still fades in
+    assert "x='if(lt(t," in slide_f
+    # type: a chain of prefix reveals (one drawtext per growing prefix)
+    assert type_f.count("drawtext=") == len("Chapter One")
+    assert "enable='between(t," in type_f
+    # ...and each prefix was written to a sibling text file
+    assert len(list(tmp_path.glob("title_0000_typ*.txt"))) == len("Chapter One")
+
+
+def test_dip_titles_carries_animation():
+    """_dip_titles pairs each title with its animation (unset -> none)."""
+    plan = MontagePlan(
+        entries=[MontageEntry("a.mp4", 0.0, 2.0, 0.0, 2.0, 1.0)],
+        music_path="",
+        duration=6.0,
+        title_texts=["Act I", "Act II"],
+        title_anims=["slide"],  # only the first dip has an explicit anim
+        dips=[(0.0, 1.0), (5.0, 1.0)],
+    )
+    segments = [
+        ("black", 1.0, None),   # dip 0 at t=0
+        ("clip", 4.0, None),
+        ("black", 1.0, None),   # dip 1 at t=5
+    ]
+    titles = preview._dip_titles(plan, segments)
+    assert titles[0] == ("Act I", "slide")
+    # second dip has no stored anim -> defaults to "none"
+    assert titles[2] == ("Act II", "none")
+
+
 @needs_ffmpeg
 @needs_demo
 def test_render_export_titles_on_the_dips(tmp_path):

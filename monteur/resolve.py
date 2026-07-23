@@ -2075,6 +2075,17 @@ class ResolveBridge:
                 # Fusion's SetInput returns None even on success — only an
                 # exception (handled below) means it failed.
                 tool.SetInput("StyledText", text)
+                # the picked title animation (blueprint 1.7) — best effort;
+                # a host that can't animate keeps the static title + a note
+                anim = str(spec.get("anim") or "none")
+                if anim in ("fade", "slide", "type"):
+                    if not _apply_title_anim(tool, comp, anim, duration, fps):
+                        warnings.append(
+                            f"{label}: this Resolve/Fusion build could not "
+                            f"script the '{anim}' title animation — the title "
+                            "is placed correctly but stays static; animate it "
+                            "by hand if you want the motion."
+                        )
         except MonteurResolveError:
             raise
         except Exception as exc:  # noqa: BLE001 - native API misbehaving
@@ -3030,6 +3041,7 @@ def titles_from_plan(plan, texts: list[str] | None = None) -> list[dict]:
         carried = [str(t) for t in getattr(plan, "title_texts", None) or []]
         if any(t.strip() for t in carried):
             texts = carried
+    anims = [str(a) for a in getattr(plan, "title_anims", None) or []]
     entries = sorted(plan.entries, key=lambda e: e.record_start)
     titles: list[dict] = []
     for index, (start, length) in enumerate(dips):
@@ -3042,11 +3054,14 @@ def titles_from_plan(plan, texts: list[str] | None = None) -> list[dict]:
                 None,
             )
             text = str(getattr(incoming, "label", "") or "").strip()
+        anim = anims[index] if index < len(anims) else ""
+        anim = anim if anim in ("fade", "slide", "type") else "none"
         titles.append(
             {
                 "start": float(start),
                 "duration": max(float(length), MIN_TITLE_SECONDS),
                 "text": text or "Title",
+                "anim": anim,
             }
         )
     return titles
@@ -3219,6 +3234,71 @@ def _find_text_plus_tool(comp: Any) -> Any | None:
         if filtered and not reg_id and fallback is None:
             fallback = tool  # the type filter already vouched for it
     return fallback
+
+
+def _comp_frame_span(comp, duration: float, fps: float) -> tuple[float, float]:
+    """The title comp's own [start, end] render frames.
+
+    Fusion animation keyframes are placed in comp-frame time. Prefer the
+    comp's declared render range (``COMPN_RenderStart``/``RenderEnd``); fall
+    back to ``0 .. duration*fps`` when the host does not expose it.
+    """
+    start, end = 0.0, max(1.0, duration * fps)
+    get_attrs = getattr(comp, "GetAttrs", None)
+    if callable(get_attrs):
+        try:
+            attrs = get_attrs() or {}
+            rs = attrs.get("COMPN_RenderStart")
+            re_ = attrs.get("COMPN_RenderEnd")
+            if rs is not None and re_ is not None and float(re_) > float(rs):
+                start, end = float(rs), float(re_)
+        except Exception:  # range probe only — never fatal
+            pass
+    return start, end
+
+
+def _apply_title_anim(tool, comp, anim: str, duration: float, fps: float) -> bool:
+    """Best-effort Fusion animation on a Text+ title (blueprint 1.7).
+
+    Keyframes a standard Text+ input for each mode:
+
+    * ``fade`` — ``Opacity`` 0 -> 1 over the head, 1 -> 0 over the tail.
+    * ``slide`` — ``Center`` X slides in from off-screen left to centre.
+    * ``type`` — ``WriteOnEnd`` 0 -> 1 (Fusion's native typewriter reveal).
+    * ``none`` / anything else — nothing to do.
+
+    Returns ``True`` when keyframes were set, ``False`` when the mode is
+    static or the host could not animate (the caller then leaves a plain,
+    correct title — a warning, never a raise, per this module's contract).
+    Fusion's ``SetInput(name, value, frame)`` creates a spline on an
+    un-animated input, so setting the same input at two frames animates it.
+    """
+    if anim not in ("fade", "slide", "type"):
+        return False
+    set_input = getattr(tool, "SetInput", None)
+    if not callable(set_input):
+        return False
+    start, end = _comp_frame_span(comp, duration, fps)
+    span = max(1.0, end - start)
+    head = min(span * 0.35, max(1.0, 0.3 * fps))  # ~0.3 s, capped to a third
+    try:
+        if anim == "fade":
+            set_input("Opacity", 0.0, start)
+            set_input("Opacity", 1.0, start + head)
+            set_input("Opacity", 1.0, end - head)
+            set_input("Opacity", 0.0, end)
+        elif anim == "slide":
+            # Center is 0..1 in screen space; slide from off-left to centre
+            set_input("Center", {1: -0.4, 2: 0.5}, start)
+            set_input("Center", {1: 0.5, 2: 0.5}, start + head)
+        elif anim == "type":
+            # Text+ "Write On" End reveals characters as it goes 0 -> 1
+            reveal = min(span * 0.6, 1.5 * fps)  # over up to ~1.5 s
+            set_input("WriteOnEnd", 0.0, start)
+            set_input("WriteOnEnd", 1.0, start + reveal)
+        return True
+    except Exception:  # noqa: BLE001 - host can't animate; leave a static title
+        return False
 
 
 # Resolve's fixed marker color palette.
