@@ -1594,11 +1594,12 @@ input.sb-dip-input {
   font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.04em;
   color: var(--ink-muted); white-space: nowrap;
 }
-.tl-frame { display: flex; align-items: stretch; margin: 0 0 5px; }
+.tl-frame { display: flex; align-items: stretch; margin: 0 0 5px; overflow-x: auto; }
 .tl-gutter {
   flex: 0 0 60px; display: flex; flex-direction: column;
   border: 1px solid var(--border); border-right: 0; border-radius: 3px 0 0 3px;
   overflow: hidden; background: var(--surface-2);
+  position: sticky; left: 0; z-index: 3;  /* stays pinned while the strip scrolls (zoom) */
 }
 .tlg {
   display: flex; align-items: center; gap: 4px; padding: 0 7px;
@@ -1620,7 +1621,10 @@ input.sb-dip-input {
 .tlg .sw-sfx { background: var(--sfx); }
 .tlg .sw-grade { background: var(--grade); }
 
-.tl-strip { flex: 1 1 auto; min-width: 0; position: relative; touch-action: none; }
+/* zoom: the strip widens past the frame and the frame scrolls; at zoom 1 it
+   fills the space beside the 60px gutter exactly (no scroll). Every child is
+   positioned in % of the strip, so they scale with it automatically. */
+.tl-strip { flex: 0 0 auto; width: calc(var(--tl-zoom, 1) * (100% - 60px)); position: relative; touch-action: none; }
 .tl-ruler {
   position: relative; height: 16px; overflow: hidden;
   border: 1px solid var(--border); border-radius: 0 3px 0 0;
@@ -2598,6 +2602,11 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
               <button class="tl-toggle" id="tl-snap" type="button" aria-pressed="true" title="Snap the playhead to the nearest downbeat when scrubbing">Snap</button>
               <span class="tl-bar-spacer"></span>
               <span class="tl-bpm" id="tl-bpm"></span>
+              <span class="tl-zoom" role="group" aria-label="Timeline zoom">
+                <button class="tl-toggle" id="tl-zoom-out" type="button" title="Zoom out" aria-label="Zoom out">−</button>
+                <span class="tl-zoom-lbl" id="tl-zoom-lbl">100%</span>
+                <button class="tl-toggle" id="tl-zoom-in" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+              </span>
             </div>
             <div class="tl-frame" id="cre-tl-frame" hidden>
               <div class="tl-gutter" aria-hidden="true">
@@ -9963,6 +9972,26 @@ function snapScrubTime(t) {
     tlSnap.on = !tlSnap.on;
     this.setAttribute("aria-pressed", String(tlSnap.on));
   });
+})();
+
+/* timeline zoom: widen the strip (the frame scrolls) so tight cuts get room.
+   Every strip child is positioned in % of the strip, so setting --tl-zoom
+   scales them all; the sticky gutter stays pinned. */
+var tlZoom = 1;
+(function () {
+  var strip = $("cre-strip"), lbl = $("tl-zoom-lbl");
+  var inBtn = $("tl-zoom-in"), outBtn = $("tl-zoom-out");
+  if (!strip || !inBtn || !outBtn) return;
+  function apply() {
+    tlZoom = Math.max(1, Math.min(6, tlZoom));
+    strip.style.setProperty("--tl-zoom", String(tlZoom));
+    if (lbl) lbl.textContent = Math.round(tlZoom * 100) + "%";
+    outBtn.disabled = tlZoom <= 1;
+    inBtn.disabled = tlZoom >= 6;
+  }
+  inBtn.addEventListener("click", function () { tlZoom = Math.round(tlZoom * 1.5 * 100) / 100; apply(); });
+  outBtn.addEventListener("click", function () { tlZoom = Math.round(tlZoom / 1.5 * 100) / 100; apply(); });
+  apply();
 })();
 
 /* the timeline strip is the scrubber: click/drag = seek the virtual clock */
