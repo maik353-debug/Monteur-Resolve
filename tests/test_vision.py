@@ -120,9 +120,9 @@ def test_annotation_lands_on_the_right_moments(tmp_path, monkeypatch, fake_frame
     notes = analyze_reports([a, b])
 
     # Each moment got the annotation minted for ITS header line.
-    assert a.moments[0].label == "seen Moment 1: a.mp4 at 00:10"  # mid 10.5s
-    assert a.moments[1].label == "seen Moment 2: a.mp4 at 00:30"
-    assert b.moments[0].label == "seen Moment 3: b.mp4 at 00:05"
+    assert a.moments[0].label.startswith("seen Moment 1: a.mp4 at 00:10")  # mid 10.5s
+    assert a.moments[1].label.startswith("seen Moment 2: a.mp4 at 00:30")
+    assert b.moments[0].label.startswith("seen Moment 3: b.mp4 at 00:05")
     for moment in (*a.moments, *b.moments):
         assert moment.tags == ["road", "curve"]
         assert moment.role == "build"
@@ -139,16 +139,21 @@ def test_annotation_lands_on_the_right_moments(tmp_path, monkeypatch, fake_frame
     assert fmt["type"] == "json_schema"
     items = fmt["schema"]["properties"]["moments"]["items"]
     assert set(items["required"]) == {"index", "label", "tags", "role", "hero", "group"}
-    # Content: per moment a text header immediately followed by its image.
+    # Content: per moment a text header followed by its consecutive frames
+    # (start/middle/end), so the model reads motion, not one still.
     content = kwargs["messages"][0]["content"]
     headers = [i for i, blk in enumerate(content)
                if blk["type"] == "text" and blk["text"].startswith("Moment ")]
     assert len(headers) == 3
     for i in headers:
-        image = content[i + 1]
-        assert image["type"] == "image"
-        assert image["source"]["media_type"] == "image/jpeg"
-        assert base64.standard_b64decode(image["source"]["data"]) == FAKE_JPEG
+        # the three blocks after each header are its frames
+        for k in range(1, vision._FRAMES_PER_MOMENT + 1):
+            image = content[i + k]
+            assert image["type"] == "image"
+            assert image["source"]["media_type"] == "image/jpeg"
+            assert base64.standard_b64decode(image["source"]["data"]) == FAKE_JPEG
+    total_images = sum(1 for blk in content if blk["type"] == "image")
+    assert total_images == 3 * vision._FRAMES_PER_MOMENT
 
 
 def test_model_env_override_and_explicit_arg(tmp_path, monkeypatch, fake_frames):
@@ -228,20 +233,55 @@ def test_mtime_change_invalidates_cache(tmp_path, monkeypatch, fake_frames):
 
 def test_interrupted_run_keeps_batch_progress(tmp_path, monkeypatch, fake_frames):
     # 10 moments = 2 batches; the API dies on batch 2. Batch 1 must be cached.
+    first = vision._BATCH_SIZE
     moments = [make_moment(float(i * 2), 1.0 - i * 0.05) for i in range(10)]
     a = make_report(tmp_path, "a.mp4", moments)
     use_client(monkeypatch, FakeClient(fail_after=1))
     with pytest.raises(MonteurVisionError, match="simulated API failure"):
         analyze_reports([a])
     cache = json.loads((tmp_path / ".monteur-vision.json").read_text())
-    assert len(cache) == 8  # the successful first batch survived
+    assert len(cache) == first  # the successful first batch survived
 
-    # Resuming only pays for the missing two moments.
+    # Resuming only pays for the missing moments.
     a2 = make_report(tmp_path, "a.mp4", [make_moment(float(i * 2), 1.0 - i * 0.05) for i in range(10)])
     client2 = use_client(monkeypatch, FakeClient())
     notes = analyze_reports([a2])
-    assert notes[0] == "10 moments analyzed, 8 from cache"
+    assert notes[0] == f"10 moments analyzed, {first} from cache"
     assert len(client2.calls) == 1
+
+
+def test_moment_frame_times_sample_across_the_window():
+    # a normal window yields _FRAMES_PER_MOMENT distinct, ordered times inside it
+    m = Moment(start=10.0, end=11.0, score=0.9)
+    times = vision._moment_frame_times(m, vision._FRAMES_PER_MOMENT)
+    assert len(times) == vision._FRAMES_PER_MOMENT
+    assert times == sorted(times)
+    assert all(10.0 <= t <= 11.0 for t in times)
+    # a sub-second window collapses to a single midpoint (no duplicate frames)
+    tiny = Moment(start=5.0, end=5.02, score=0.5)
+    assert vision._moment_frame_times(tiny, 3) == [pytest.approx(5.01)]
+
+
+def test_extract_moment_frames_survives_partial_failure(tmp_path, monkeypatch):
+    # if some frames fail but at least one lands, the moment is still described
+    calls = {"n": 0}
+
+    def flaky(path, t, height):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("one bad seek")
+        return FAKE_JPEG
+
+    monkeypatch.setattr(vision, "_extract_frame", flaky)
+    m = Moment(start=0.0, end=1.0, score=0.9)
+    frames = vision._extract_moment_frames("x.mp4", m, 360)
+    assert frames == [FAKE_JPEG, FAKE_JPEG]  # 3 attempted, 1 failed, 2 kept
+
+    # all frames failing raises (the caller then skips the clip)
+    monkeypatch.setattr(vision, "_extract_frame",
+                        lambda p, t, h: (_ for _ in ()).throw(RuntimeError("dead")))
+    with pytest.raises(MonteurVisionError):
+        vision._extract_moment_frames("x.mp4", m, 360)
 
 
 def test_explicit_cache_path_is_used(tmp_path, monkeypatch, fake_frames):
@@ -273,24 +313,37 @@ def test_max_moments_caps_but_keeps_one_per_clip(tmp_path, monkeypatch, fake_fra
     assert a.moments[1].label
     assert not a.moments[2].label and not b.moments[1].label and not c.moments[1].label
     assert "selected the best 4 of 7 moments (cost cap)" in notes
-    # Cost control on the wire too: exactly one batch of 4 images.
+    # Cost control on the wire too: exactly one batch of 4 moments, each
+    # carrying its consecutive frames.
     assert len(client.calls) == 1
     images = [blk for blk in client.calls[0]["messages"][0]["content"]
               if blk["type"] == "image"]
-    assert len(images) == 4
+    assert len(images) == 4 * vision._FRAMES_PER_MOMENT
 
 
-def test_batches_of_eight(tmp_path, monkeypatch, fake_frames):
+def test_batches_by_batch_size(tmp_path, monkeypatch, fake_frames):
     moments = [make_moment(float(i * 2), 1.0 - i * 0.05) for i in range(10)]
     a = make_report(tmp_path, "a.mp4", moments)
     client = use_client(monkeypatch, FakeClient())
     analyze_reports([a])
-    assert len(client.calls) == 2
-    per_call = [
+    # 10 moments, _BATCH_SIZE per request -> two batches
+    import math
+    assert len(client.calls) == math.ceil(10 / vision._BATCH_SIZE)
+    per_call_moments = [
+        sum(1 for blk in call["messages"][0]["content"]
+            if blk["type"] == "text" and blk["text"].startswith("Moment "))
+        for call in client.calls
+    ]
+    assert per_call_moments == [vision._BATCH_SIZE, 10 - vision._BATCH_SIZE]
+    # each moment carries its frames
+    per_call_images = [
         sum(1 for blk in call["messages"][0]["content"] if blk["type"] == "image")
         for call in client.calls
     ]
-    assert per_call == [8, 2]
+    assert per_call_images == [
+        vision._BATCH_SIZE * vision._FRAMES_PER_MOMENT,
+        (10 - vision._BATCH_SIZE) * vision._FRAMES_PER_MOMENT,
+    ]
 
 
 # ----------------------------------------------------------------- validation
@@ -459,7 +512,7 @@ def test_end_to_end_real_frames_fake_client(tmp_path, monkeypatch):
     notes = analyze_reports([report], frame_height=120)
 
     assert notes[0] == "1 moments analyzed, 0 from cache"
-    assert report.moments[0].label == "seen Moment 1: clip.mp4 at 00:01"
+    assert report.moments[0].label.startswith("seen Moment 1: clip.mp4 at 00:01")
     image = next(blk for blk in client.calls[0]["messages"][0]["content"]
                  if blk["type"] == "image")
     jpeg = base64.standard_b64decode(image["source"]["data"])

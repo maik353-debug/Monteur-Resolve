@@ -55,8 +55,9 @@ from monteur.sift import ClipReport, Moment
 DEFAULT_VISION_MODEL = "claude-haiku-4-5-20251001"  # cheap+fast vision; env MONTEUR_VISION_MODEL overrides
 
 # Cost / request tuning.
-_BATCH_SIZE = 8  # moments (images) per API request
-_MAX_TOKENS = 2000  # per batch: ~6 short fields x 8 moments needs far less
+_FRAMES_PER_MOMENT = 3  # start / middle / end — so Claude reads MOTION, not one still
+_BATCH_SIZE = 6  # moments per API request (x _FRAMES_PER_MOMENT images each)
+_MAX_TOKENS = 2000  # per batch: ~6 short fields x 6 moments needs far less
 _JPEG_QUALITY = 4  # ffmpeg -q:v: 2 is visually lossless, 4 is plenty for scene description
 _MAX_TAGS = 5  # keep tags a keyword set, not a caption
 _VALID_ROLES = ("opener", "build", "climax", "closer")  # "" = unknown/not analyzed
@@ -67,8 +68,12 @@ CACHE_FILENAME = ".monteur-vision.json"
 _SYSTEM = (
     "You are an experienced film editor's assistant logging action-cam and "
     "travel footage — motorcycle POV rides, road trips, landscapes. For each "
-    "numbered moment you see one frame. For every moment report: 'label' — one "
-    "short line of WHAT the frame shows, concrete and visual ('overtake in a "
+    "numbered moment you see SEVERAL consecutive frames spanning about one "
+    "second, in order. Read the MOTION and what the subject is actually DOING "
+    "across them — a rider standing beside a stopped bike is NOT 'riding', a "
+    "static landscape is not 'driving through a field'. Judge from the whole "
+    "little sequence, not one still. For every moment report: 'label' — one "
+    "short line of WHAT the moment shows, concrete and visual ('overtake in a "
     "left-hand curve', 'sunset over a mountain ridge'); 'tags' — 2-5 lowercase "
     "keywords ('curve', 'mountains', 'tunnel'); 'role' — its dramaturgical "
     "potential in a montage: 'opener' for establishing / scene-setting images, "
@@ -191,18 +196,23 @@ def _select_moments(
 
 
 def _moment_key(path: str, model: str, moment: Moment) -> str:
-    """Cache key: file identity (abspath + mtime) | moment window | model.
+    """Cache key: file identity (abspath + mtime) | window | model | frame count.
 
     The mtime makes re-exported or re-copied footage a cache MISS (the pixels
     may differ); the model makes an upgrade re-annotate rather than serve
-    stale descriptions from a weaker model.
+    stale descriptions from a weaker model; the frame count namespaces the
+    multi-frame (motion-aware) reading apart from the old single-still one, so
+    already-analyzed footage re-annotates with the better signal.
     """
     abspath = os.path.abspath(path)
     try:
         mtime = os.path.getmtime(abspath)
     except OSError:
         mtime = 0.0  # missing file: extraction will fail and note the clip
-    return f"{abspath}|{mtime}|{moment.start:.2f}-{moment.end:.2f}|{model}"
+    return (
+        f"{abspath}|{mtime}|{moment.start:.2f}-{moment.end:.2f}"
+        f"|{model}|{_FRAMES_PER_MOMENT}f"
+    )
 
 
 def _load_cache(path: Path) -> dict:
@@ -304,6 +314,49 @@ def _extract_frame(path: str, t: float, height: int) -> bytes:
     return result.stdout
 
 
+def _moment_frame_times(moment: Moment, count: int) -> list[float]:
+    """``count`` sample times across a moment window (start .. end, inclusive).
+
+    A short window collapses to fewer distinct times (deduped), so a
+    sub-second moment never asks ffmpeg for the same frame twice.
+    """
+    start, end = moment.start, max(moment.start, moment.end)
+    if count <= 1 or end - start < 0.05:
+        return [(start + end) / 2.0]
+    span = end - start
+    # pull the ends in slightly so the first/last frame isn't on the cut
+    lo, hi = start + span * 0.1, end - span * 0.1
+    times = [lo + (hi - lo) * k / (count - 1) for k in range(count)]
+    out: list[float] = []
+    for t in times:
+        if not out or abs(t - out[-1]) >= 0.04:
+            out.append(round(t, 3))
+    return out
+
+
+def _extract_moment_frames(path: str, moment: Moment, height: int) -> list[bytes]:
+    """The moment's frames (start/middle/end) as JPEGs — for motion reading.
+
+    Extracts up to :data:`_FRAMES_PER_MOMENT` frames across the window. If
+    some frames fail but at least one succeeds, the moment is still described
+    from what came through; only a moment that yields NO frame raises (the
+    caller then skips the whole clip, as before).
+    """
+    frames: list[bytes] = []
+    last_error: Exception | None = None
+    for t in _moment_frame_times(moment, _FRAMES_PER_MOMENT):
+        try:
+            frames.append(_extract_frame(path, t, height))
+        except Exception as exc:  # noqa: BLE001 — a partial sequence is still useful
+            last_error = exc
+    if not frames:
+        raise MonteurVisionError(
+            f"could not extract any frame from {path}"
+            + (f": {last_error}" if last_error else "")
+        )
+    return frames
+
+
 def _mmss(t: float) -> str:
     return f"{int(t // 60):02d}:{int(t % 60):02d}"
 
@@ -314,32 +367,44 @@ def _mmss(t: float) -> str:
 def _describe_batch(client, model: str, batch: list[tuple]) -> dict[int, dict]:
     """One vision request for up to _BATCH_SIZE moments; {index: clean entry}.
 
-    Each moment is a text block ("Moment N: <clipname> at MM:SS") followed by
-    its keyframe as a base64 JPEG image block; the structured-output schema
-    (guaranteed JSON, like monteur.brief) carries the annotations back keyed
-    by that index.
+    Each moment is a text block ("Moment N: <clipname> at MM:SS — K frames,
+    start -> end") followed by its K consecutive keyframes as base64 JPEG
+    image blocks; the structured-output schema (guaranteed JSON, like
+    monteur.brief) carries the annotations back keyed by that index. The
+    several frames let the model read motion instead of guessing from a
+    single still.
     """
     content: list[dict] = []
-    for n, (_i, report, moment, _key, jpeg) in enumerate(batch, start=1):
+    for n, (_i, report, moment, _key, jpegs) in enumerate(batch, start=1):
         midpoint = (moment.start + moment.end) / 2
+        k = len(jpegs)
+        seq = " — {} frames, start -> end".format(k) if k > 1 else ""
         content.append(
             {
                 "type": "text",
-                "text": f"Moment {n}: {Path(report.path).name} at {_mmss(midpoint)}",
+                "text": f"Moment {n}: {Path(report.path).name} at {_mmss(midpoint)}{seq}",
             }
         )
-        content.append(
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/jpeg",
-                    "data": base64.standard_b64encode(jpeg).decode("ascii"),
-                },
-            }
-        )
+        for jpeg in jpegs:
+            content.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": base64.standard_b64encode(jpeg).decode("ascii"),
+                    },
+                }
+            )
     content.append(
-        {"type": "text", "text": f"Describe all {len(batch)} moments above."}
+        {
+            "type": "text",
+            "text": (
+                f"Describe all {len(batch)} moments above. Each moment's frames "
+                "are consecutive in time — read them as a short clip and report "
+                "what is actually happening across them."
+            ),
+        }
     )
     try:
         response = client.messages.create(
@@ -411,8 +476,9 @@ def analyze_reports(
     """Annotate the reports' best moments with Claude vision, IN PLACE.
 
     Selects up to ``max_moments`` moments across all reports (best score
-    first, but at least one per clip when possible), extracts one keyframe
-    per moment, and fills each Moment's label/tags/role/hero/group. Returns
+    first, but at least one per clip when possible), extracts several
+    consecutive keyframes per moment (start/middle/end, so the model reads
+    motion), and fills each Moment's label/tags/role/hero/group. Returns
     human-readable notes (e.g. ``"14 moments analyzed, 6 from cache"``).
 
     ``model`` defaults to the ``MONTEUR_VISION_MODEL`` environment variable,
@@ -446,8 +512,8 @@ def analyze_reports(
     cached_count = 0
     api_count = 0
     failed_paths: set[str] = set()
-    # (selection index, report, moment, cache key, jpeg bytes)
-    pending: list[tuple[int, ClipReport, Moment, str, bytes]] = []
+    # (selection index, report, moment, cache key, jpeg frames)
+    pending: list[tuple[int, ClipReport, Moment, str, list[bytes]]] = []
 
     for i, (report, moment) in enumerate(selected, start=1):
         name = Path(report.path).name
@@ -461,13 +527,12 @@ def analyze_reports(
             continue  # the clip already failed to yield a frame — skip it
         _call_progress(progress, i, total, name, "frames")
         try:
-            midpoint = (moment.start + moment.end) / 2
-            jpeg = _extract_frame(report.path, midpoint, frame_height)
+            jpegs = _extract_moment_frames(report.path, moment, frame_height)
         except Exception as exc:  # noqa: BLE001 — one bad clip must not abort the run
             failed_paths.add(report.path)
             notes.append(f"{name}: could not extract a frame — clip skipped ({exc})")
             continue
-        pending.append((i, report, moment, key, jpeg))
+        pending.append((i, report, moment, key, jpegs))
 
     client = None  # created lazily: an all-cache run never needs credentials
     for start in range(0, len(pending), _BATCH_SIZE):
@@ -475,7 +540,7 @@ def analyze_reports(
         if client is None:
             client = _client()
         described = _describe_batch(client, model, batch)
-        for n, (i, report, moment, key, _jpeg) in enumerate(batch, start=1):
+        for n, (i, report, moment, key, _jpegs) in enumerate(batch, start=1):
             entry = described.get(n)
             if entry is None:
                 continue  # the model dropped a moment — leave it unannotated
