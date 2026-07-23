@@ -477,12 +477,14 @@ def find_moments(
     at 12 per clip, sorted best-first.
 
     Every kept moment additionally carries its intra-moment machinery
-    (blueprint 1.1/1.9): ``envelope`` — (t, motion / clip peak motion)
-    samples inside the window, ``peak_time`` — the envelope maximum (from
-    motion alone here; :func:`apply_audio` re-blends it with the clip's
-    audio level), and ``frame_quality`` — (t, sharpness rank x brightness
-    adequacy) samples for the shorts' first-frame gate. A motionless clip
-    yields a flat envelope and ``peak_time`` -1.0 (no signal).
+    (blueprint 1.1/1.9): ``envelope`` — (t, normalised energy) samples inside
+    the window, built from RESIDUAL (subject) motion so the peak marks the
+    real in-frame action (falling back to total motion when the window has no
+    subject motion, e.g. a pure camera glide); ``peak_time`` — the envelope
+    maximum (from the visual energy here; :func:`apply_audio` re-blends it
+    with the clip's audio level), and ``frame_quality`` — (t, sharpness rank x
+    brightness adequacy) samples for the shorts' first-frame gate. A
+    motionless clip yields a flat envelope and ``peak_time`` -1.0 (no signal).
     """
     if not metrics or min_length <= 0:
         return []
@@ -534,13 +536,24 @@ def find_moments(
                     (1 - _MOMENT_MOTION_BONUS) * mean_rank
                     + _MOMENT_MOTION_BONUS * moderate,
                 ) * exposure_ok
-                envelope = [
-                    (
-                        metrics[j].t,
-                        metrics[j].motion / peak_motion if peak_motion > 0 else 0.0,
-                    )
-                    for j in idx
-                ]
+                # The energy envelope (peak-on-beat, blueprint 1.1) drives WHERE
+                # the planner lands the cut: it aims this window's peak at the
+                # slot's beat. Build it from RESIDUAL (subject) motion so the
+                # cut lands on the real in-frame action peak — a punch, a jump
+                # apex — not a camera whip. When the window has no subject
+                # action (e.g. a drone glide: all camera, ~0 residual) it falls
+                # back to total motion so the shot still has an energy curve.
+                res_peak = max((metrics[j].residual for j in idx), default=0.0)
+                if res_peak > eps:
+                    envelope = [(metrics[j].t, metrics[j].residual / res_peak) for j in idx]
+                else:
+                    envelope = [
+                        (
+                            metrics[j].t,
+                            metrics[j].motion / peak_motion if peak_motion > 0 else 0.0,
+                        )
+                        for j in idx
+                    ]
                 candidates.append(
                     Moment(
                         start=start,

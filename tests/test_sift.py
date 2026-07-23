@@ -214,6 +214,21 @@ def test_moments_prefer_moderate_motion_over_static():
     assert min(m.score for m in moving) > max(m.score for m in static)
 
 
+def test_peak_time_follows_subject_action_not_camera_motion():
+    # within a window, the CAMERA whip peaks early (t=1.0) but the SUBJECT
+    # action peaks late (t=2.5). The energy envelope drives cut-on-action, so
+    # its peak must land on the subject action, not the camera swing.
+    motion =   [1, 1, 9, 1, 1, 1, 1, 1]   # camera whip at index 2 (t=1.0)
+    residual = [1, 1, 1, 1, 1, 9, 1, 1]   # subject action at index 5 (t=2.5)
+    metrics = make_metrics([120] * 8, [300] * 8, motion, residual=residual)
+    segments = classify_metrics(metrics, 4.0)
+    moments = find_moments(segments, metrics, min_length=2.0)
+    covering = [m for m in moments if m.start <= 2.5 < m.end]
+    assert covering, "need a moment spanning the subject-action peak"
+    # the peak_time sits at the residual (action) peak, not the motion peak
+    assert min(abs(m.peak_time - 2.5) for m in covering) < 0.3
+
+
 def test_exposure_penalty_downweights_blown_and_crushed_moments():
     # two usable halves, identical sharpness/motion; the second half is badly
     # blown out (60% clipped) -> its moments must score below the clean half's
