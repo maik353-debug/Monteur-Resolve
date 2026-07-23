@@ -8306,11 +8306,10 @@ function newProject() {
   cre.projectName = "New cut";
   setView("create");
   creShowStep(1, false);
-  api("/api/projects", { method: "POST", body: { name: "New cut" } }).then(function (project) {
-    cre.projectId = (project && project.id) || null;
-    cre.projectName = (project && project.name) || "New cut";
-    refreshProjects();
-  }).catch(function () { /* offline: the project is created lazily on first autosave */ });
+  // Do NOT create a project here — opening Create must not spawn an empty
+  // "New cut" project every time. The project is created LAZILY on the first
+  // real action (adding footage / first autosave via ensureProject), so an
+  // abandoned New-cut screen leaves nothing behind.
 }
 
 /* the current wizard controls as a project's "options" — the same keys a
