@@ -1259,6 +1259,37 @@ class TestWizardStepsUi:
             assert needle in html, needle
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_build_stage_live_feedback_is_wired(self):
+        # the ~90s compose stretch used to sit silent; now a live overlay
+        # shows the real material + which phase Claude is in, driven by the
+        # job's real progress stages (cache / music / compose) with a seam.
+        html = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            'id="cre-build-stage"',
+            'id="bstage-rail"',
+            'id="bstage-film"',
+            'id="bstage-caption"',
+            "function startBuildStage",
+            "function animateBuildProgress",
+            "function stopBuildStage",
+            "function startComposeCaptions",
+            "window.monteurBuildStage",
+            "startBuildStage(); // live feedback from the first moment",
+            "onProgress: function (pr) { animateBuildProgress(pr); }",
+            'BUILD_COMPOSE_CAPTIONS',
+            # the film strip pulls the REAL analyzed material
+            "function buildStageShotPaths",
+            "thumbUrl(path, 160)",
+            # terminal states always tear the overlay down
+            "stopBuildStage();",
+            # the panel status line also names the compose phase
+            'status.textContent = "Claude is composing your cut…"',
+            ".bstage-shot.considering",
+            "@keyframes bEq",
+        ):
+            assert needle in html, needle
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_folder_favorites_are_wired(self):
         # the footage explorer carries a persistent folder-favorites rail
         html = _APP_HTML.read_text(encoding="utf-8")

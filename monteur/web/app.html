@@ -1049,6 +1049,55 @@ svg text.axis {
   .seg-strip { transition: none; }
   .pool-card.analyzed .pool-thumb { animation: none; }
 }
+
+/* ---- build stage: live feedback while Claude composes the cut ----
+   The build's slow part is the ~90s Claude compose (one blocking call, no
+   finer progress to show). This overlay keeps the REAL material on screen,
+   shows which phase the build is in, and rotates a living caption so it
+   never looks frozen — you always see it's alive and what it's doing. */
+#cre-build-stage { margin: 14px 0 4px; }
+.bstage-rail { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.bstage-phase {
+  display: flex; align-items: center; gap: 7px; padding: 5px 12px 5px 9px;
+  border: 1px solid var(--line); border-radius: 999px; color: var(--ink-muted);
+  font-size: 12.5px; transition: color 0.25s, border-color 0.25s, background 0.25s;
+}
+.bstage-phase .bp-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--ink-muted);
+  transition: background 0.25s, box-shadow 0.25s;
+}
+.bstage-phase.active { color: var(--ink); border-color: var(--accent); background: rgba(232, 130, 60, 0.08); }
+.bstage-phase.active .bp-dot { background: var(--ember); box-shadow: 0 0 8px 1px var(--ember); animation: bpPulse 1.2s ease-in-out infinite; }
+.bstage-phase.done { color: var(--ink-2); }
+.bstage-phase.done .bp-dot { background: var(--good); box-shadow: none; animation: none; }
+@keyframes bpPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.bstage-film { display: flex; gap: 6px; overflow: hidden; padding: 2px 0; }
+.bstage-shot {
+  position: relative; flex: 0 0 auto; width: 92px; height: 56px; border-radius: 6px;
+  overflow: hidden; background: var(--panel-2); border: 1px solid var(--line);
+  opacity: 0; transform: translateY(8px) scale(0.96);
+  transition: opacity 0.35s ease, transform 0.35s cubic-bezier(.2, .7, .3, 1), box-shadow 0.25s, border-color 0.25s;
+}
+.bstage-shot.in { opacity: 1; transform: none; }
+.bstage-shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.bstage-shot.considering { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.bstage-shot.considering::after { content: ""; position: absolute; inset: 0; background: rgba(232, 130, 60, 0.16); }
+.bstage-caption { margin-top: 11px; display: flex; align-items: center; gap: 9px; min-height: 20px; }
+.bstage-eq { display: inline-flex; align-items: flex-end; gap: 2px; height: 14px; }
+.bstage-eq span { width: 3px; background: var(--ember); border-radius: 1px; height: 40%; animation: bEq 0.9s ease-in-out infinite; }
+.bstage-eq span:nth-child(2) { animation-delay: 0.15s; }
+.bstage-eq span:nth-child(3) { animation-delay: 0.3s; }
+.bstage-eq span:nth-child(4) { animation-delay: 0.45s; }
+@keyframes bEq { 0%, 100% { height: 30%; } 50% { height: 100%; } }
+.bstage-cap-text { color: var(--ink-2); font-size: 13px; }
+.bstage-cap-text.swap { animation: bCapIn 0.4s ease; }
+@keyframes bCapIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .bstage-shot { transition: opacity 0.2s; transform: none; }
+  .bstage-phase.active .bp-dot { animation: none; }
+  .bstage-eq span { animation: none; height: 60%; }
+  .bstage-cap-text.swap { animation: none; }
+}
 .pool-play {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   opacity: 0; transition: opacity 0.12s; pointer-events: none; margin-bottom: 8px;
@@ -2585,6 +2634,11 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           <button class="btn primary" id="cre-next-3" type="button" disabled>Continue to color →</button>
         </div>
         <div id="cre-build-panel"></div>
+        <div id="cre-build-stage" hidden>
+          <div class="bstage-rail" id="bstage-rail"></div>
+          <div class="bstage-film" id="bstage-film"></div>
+          <div class="bstage-caption" id="bstage-caption"></div>
+        </div>
         <p class="scan-note" id="cre-build-msg" role="status" hidden></p>
         <div id="cre-result" hidden>
           <div class="series-strip" id="cre-series-strip" hidden></div>
@@ -5721,6 +5775,8 @@ function makeJobPanel(hostId, texts) {
         lines.push("▸ " + String(p.name || "segment"));
       } else if (p.stage === "movie") {
         lines.push("Claude · " + String(p.name || "drafting the screenplay") + "…");
+      } else if (p.stage === "compose") {
+        lines.push("Claude · " + String(p.name || "composing the cut") + "…");
       } else if (p.stage === "scene") {
         var scText = "Scene";
         if (typeof p.index === "number" && typeof p.total === "number" && p.total > 0) {
@@ -5741,6 +5797,7 @@ function makeJobPanel(hostId, texts) {
     else if (last && last.stage === "export") status.textContent = "Exporting the video…";
     else if (last && last.stage === "resolve") status.textContent = "Building the timeline in Resolve…";
     else if (last && last.stage === "movie") status.textContent = "Claude is writing your screenplay…";
+    else if (last && last.stage === "compose") status.textContent = "Claude is composing your cut…";
     else if (last && last.stage === "scene") status.textContent = "Assembling scene " + (typeof last.index === "number" ? last.index : "") + (typeof last.total === "number" && last.total > 0 ? " of " + last.total : "") + "…";
     else if (cached > 0 && (total === 0 || done >= total)) status.textContent = "Using your previous scan — nothing to re-watch.";
     else status.textContent = texts.working;
@@ -8026,6 +8083,157 @@ function renderCreResult(data) {
   $("cre-next-3b").disabled = false;
 }
 
+/* ================= Build stage: live feedback during the build =========
+   The build's slow part is Claude composing the cut — one blocking ~90s
+   call with no finer progress to report. The build panel's log alone left
+   that stretch silent, so this overlay keeps the REAL material on screen
+   (clip thumbnails), shows which phase the build is in (reading the clips
+   -> hearing the music -> Claude composing), and rotates a living caption.
+   It's driven by the job's real progress stages (cache / music / compose);
+   client-side motion is used ONLY across the single blocking compose tick,
+   where the server has nothing finer to give. */
+var buildStage = { timers: [], capTimer: 0, considerTimer: 0, phase: "", capIndex: 0 };
+
+var BUILD_COMPOSE_CAPTIONS = [
+  "Reading the room — what is this tour really about",
+  "Finding the through-line",
+  "Casting your strongest moments",
+  "Ordering the beats so it builds",
+  "Marking the act breaks",
+  "Writing the titles",
+  "Timing every cut to the music"
+];
+
+function buildStageShotPaths() {
+  // the real material: prefer the analyzed clips, fall back to the pool
+  var paths = [];
+  (cre.clips || []).forEach(function (c) { if (c && c.path) paths.push(c.path); });
+  if (!paths.length) (cre.poolClips || []).forEach(function (c) { if (c && c.path) paths.push(c.path); });
+  return paths.slice(0, 12);
+}
+
+function clearBuildStageTimers() {
+  buildStage.timers.forEach(function (t) { window.clearTimeout(t); });
+  buildStage.timers = [];
+  if (buildStage.capTimer) { window.clearInterval(buildStage.capTimer); buildStage.capTimer = 0; }
+  if (buildStage.considerTimer) { window.clearInterval(buildStage.considerTimer); buildStage.considerTimer = 0; }
+}
+
+function startBuildStage() {
+  var host = $("cre-build-stage");
+  if (!host) return;
+  clearBuildStageTimers();
+  buildStage.phase = "";
+  buildStage.capIndex = 0;
+  host.hidden = false;
+  // the phase rail: original-audio builds have no song step, so drop it
+  var rail = $("bstage-rail");
+  clear(rail);
+  var phases = [["read", "Reading your clips"], ["music", "Hearing the music"], ["compose", "Claude composing the cut"]];
+  if (cre.audio === "original") phases = [phases[0], phases[2]];
+  phases.forEach(function (p) {
+    var chip = el("div", "bstage-phase");
+    chip.dataset.phase = p[0];
+    chip.appendChild(el("span", "bp-dot"));
+    chip.appendChild(el("span", null, p[1]));
+    rail.appendChild(chip);
+  });
+  // the real material, revealed one shot at a time
+  var film = $("bstage-film");
+  clear(film);
+  var shotPaths = buildStageShotPaths();
+  shotPaths.forEach(function (path, i) {
+    var shot = el("div", "bstage-shot");
+    var img = document.createElement("img");
+    img.loading = "lazy";
+    img.alt = "";
+    img.src = thumbUrl(path, 160);
+    shot.appendChild(img);
+    film.appendChild(shot);
+    buildStage.timers.push(window.setTimeout(function () { shot.classList.add("in"); }, 90 + i * 120));
+  });
+  setBuildCaption("Reading your analyzed clips…", false);
+  setBuildPhase("read");
+}
+
+function setBuildPhase(phase) {
+  if (buildStage.phase === phase) return;
+  buildStage.phase = phase;
+  var order = ["read", "music", "compose"];
+  var rank = order.indexOf(phase);
+  var rail = $("bstage-rail");
+  if (!rail) return;
+  Array.prototype.forEach.call(rail.children, function (chip) {
+    var r = order.indexOf(chip.dataset.phase);
+    chip.classList.toggle("active", chip.dataset.phase === phase);
+    chip.classList.toggle("done", r > -1 && r < rank);
+  });
+}
+
+function setBuildCaption(text, withEq) {
+  var cap = $("bstage-caption");
+  if (!cap) return;
+  clear(cap);
+  if (withEq) {
+    var eq = el("span", "bstage-eq");
+    for (var i = 0; i < 4; i++) eq.appendChild(el("span"));
+    cap.appendChild(eq);
+  }
+  cap.appendChild(el("span", "bstage-cap-text swap", text));
+}
+
+function startComposeCaptions() {
+  if (buildStage.capTimer) return; // already rotating
+  buildStage.capIndex = 0;
+  setBuildCaption("Claude · " + BUILD_COMPOSE_CAPTIONS[0], false);
+  buildStage.capTimer = window.setInterval(function () {
+    buildStage.capIndex = (buildStage.capIndex + 1) % BUILD_COMPOSE_CAPTIONS.length;
+    setBuildCaption("Claude · " + BUILD_COMPOSE_CAPTIONS[buildStage.capIndex], false);
+  }, 3800);
+  // light one thumbnail at a time — "Claude is looking at this moment"
+  var shots = $("bstage-film").querySelectorAll(".bstage-shot");
+  if (shots.length) {
+    var idx = 0;
+    buildStage.considerTimer = window.setInterval(function () {
+      Array.prototype.forEach.call(shots, function (s) { s.classList.remove("considering"); });
+      shots[idx % shots.length].classList.add("considering");
+      idx += 1;
+    }, 900);
+  }
+}
+
+/* onProgress handler: advance the visible phase from the job's real stages.
+   Progress accumulates, so the newest stage present wins (compose > music >
+   cache). The long compose tick has no finer signal — client-side captions
+   carry it. */
+function animateBuildProgress(progress) {
+  var host = $("cre-build-stage");
+  if (!host || host.hidden) return;
+  var stages = {};
+  (progress || []).forEach(function (p) { if (p && p.stage) stages[p.stage] = p; });
+  if (stages.compose) {
+    setBuildPhase("compose");
+    startComposeCaptions();
+  } else if (stages.music) {
+    setBuildPhase("music");
+    if (buildStage.capTimer) return; // don't clobber compose captions if racing
+    setBuildCaption("Listening to " + String(stages.music.name || "your song") + " — reading the beat", true);
+  } else if (stages.cache) {
+    setBuildPhase("read");
+    if (buildStage.capTimer) return;
+    setBuildCaption(String(stages.cache.name || "reading your clips") + "…", false);
+  }
+}
+
+function stopBuildStage() {
+  clearBuildStageTimers();
+  var host = $("cre-build-stage");
+  if (host) host.hidden = true;
+}
+
+// test seam (like window.monteurScanAnim): drive the build stage directly
+window.monteurBuildStage = function (progress) { animateBuildProgress(progress); };
+
 function startBuild(andThen) {
   if (buildPanel.running()) return;
   var body = creBuildBody();
@@ -8047,6 +8255,7 @@ function startBuild(andThen) {
   // never read as "nothing to rebuild" on the next step 2 -> 3 hop
   cre.buildFp = null;
   setBuildBusy(true);
+  startBuildStage(); // live feedback from the first moment, before the POST resolves
   api("/api/create/build", { method: "POST", body: body }).then(function (data) {
     // remember the running build so navigating away (or a reload) can
     // reattach — the server keeps building either way
@@ -8066,9 +8275,14 @@ function startBuild(andThen) {
    logic lives once. Every terminal state clears the stored record so a
    finished build never reattaches again. */
 function attachBuildJob(jobId, body, andThen) {
+  // reattach paths (nav back mid-build, reload) never ran startBuild, so
+  // seed the stage here too — a fresh start already opened it (idempotent).
+  if ($("cre-build-stage") && $("cre-build-stage").hidden) startBuildStage();
   buildPanel.start(jobId, {
+    onProgress: function (pr) { animateBuildProgress(pr); },
     onDone: function (result) {
       clearActiveJob();
+      stopBuildStage();
       setBuildBusy(false);
       cre.result = { data: result, format: body.format, body: body, kind: "build" };
       // the options this draft was built with — until one changes, going
@@ -8092,12 +8306,14 @@ function attachBuildJob(jobId, body, andThen) {
     },
     onCancelled: function () {
       clearActiveJob();
+      stopBuildStage();
       setBuildBusy(false);
       creNote("cre-build-msg", "Build cancelled — nothing was written. Build again whenever you're ready.");
       $("cre-build-btn").focus();
     },
     onError: function (message) {
       clearActiveJob();
+      stopBuildStage();
       setBuildBusy(false);
       creNote("cre-build-msg", message, true);
       toast(message, "error");
