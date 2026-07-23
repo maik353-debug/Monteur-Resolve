@@ -1545,7 +1545,7 @@ class TestWizardStepsUi:
         html = _APP_HTML.read_text(encoding="utf-8")
         assert "body.arrangement = cre.arrange.seq.map" in html
         # drafts: saved with the settings, restored on resume
-        assert '"arrangement"].forEach' in html
+        assert '"arrangement", "treatment"].forEach' in html
         assert "Array.isArray(s.arrangement)" in html
 
 
@@ -3824,6 +3824,133 @@ class TestDirectorFromProject:
         job = _wait_for_job(server, data["job"])
         assert job["state"] == "error"
         assert "analyze" in job["message"].lower()
+
+
+class TestTreatmentApi:
+    """POST /api/create/treatment — the Regie-Vorschlag (monteur.treatment)."""
+
+    def _project(self, tmp_path, with_reports=True):
+        from monteur import projects
+        from monteur.sift import ClipReport, Moment
+
+        clip = tmp_path / "a.mp4"; clip.write_bytes(b"x")
+        project = projects.create_project(
+            "regie", media_pool=[{"path": str(clip), "kind": "file"}]
+        )
+        if with_reports:
+            projects.save_reports(project, [ClipReport(
+                path=str(clip), duration=90.0,
+                moments=[Moment(10.0, 15.0, 0.9, label="sunrise over the pass")],
+            )])
+        return project
+
+    def test_treatment_proposes_from_stored_reports(self, server, tmp_path, monkeypatch):
+        from monteur import ai
+
+        project = self._project(tmp_path)
+        reply = {
+            "format": "trailer", "style": "trailer", "energy": "varied",
+            "mood": "episch", "platform": "reel", "length_seconds": 30,
+            "grade": "cinematic", "hook": "the pass", "rationale": "grounded",
+        }
+        seen: dict = {}
+
+        def fake_complete(prompt, **kwargs):
+            seen["prompt"] = prompt
+            return json.dumps(reply)
+
+        monkeypatch.setattr(ai, "complete", fake_complete)
+        data = _post(
+            f"{server}/api/create/treatment",
+            {"project": project.id, "brief": "Alpen"},
+        )
+        t = data["treatment"]
+        assert t["format"] == "trailer" and t["energy"] == "varied"
+        assert t["platform"] == "reel" and t["length_seconds"] == 30.0
+        # the proposal was grounded in the project's STORED analysis
+        assert "sunrise over the pass" in seen["prompt"]
+        assert "Alpen" in seen["prompt"]
+
+    def test_treatment_missing_project_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/treatment", {"brief": "x"})
+        assert exc_info.value.code == 400
+        assert "project" in json.loads(exc_info.value.read())["error"]
+
+    def test_treatment_no_analysis_is_400(self, server, tmp_path):
+        project = self._project(tmp_path, with_reports=False)
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/treatment", {"project": project.id})
+        assert exc_info.value.code == 400
+        assert "analyze" in json.loads(exc_info.value.read())["error"].lower()
+
+    def test_treatment_degrades_when_backend_down(self, server, tmp_path, monkeypatch):
+        from monteur import ai
+
+        project = self._project(tmp_path)
+
+        def boom(*a, **k):
+            raise ai.MonteurAIError("no backend")
+
+        monkeypatch.setattr(ai, "complete", boom)
+        data = _post(f"{server}/api/create/treatment", {"project": project.id})
+        # a neutral default is returned, not a 500
+        assert data["treatment"]["format"] == "montage"
+        assert "nicht verfügbar" in data["treatment"]["rationale"]
+
+    def test_fold_treatment_into_build_payload(self):
+        from monteur.web import server as srv
+
+        payload = {
+            "treatment": {
+                "format": "trailer", "style": "trailer", "energy": "calm",
+                "platform": "reel", "length_seconds": 25,
+            },
+            "brief": "Alpen",
+        }
+        srv._fold_treatment_into_payload(payload)
+        assert payload["brief"].startswith("REGIE: trailer")
+        assert "atmend durchgehend" in payload["brief"]  # calm energy spelled out
+        assert payload["brief"].rstrip().endswith("Alpen")  # user's words last
+        assert payload["style"] == "trailer"
+        assert payload["platform"] == "reel"
+        assert payload["max_duration"] == 25.0
+
+    def test_fold_treatment_respects_explicit_controls(self):
+        from monteur.web import server as srv
+
+        payload = {
+            "treatment": {"style": "trailer", "platform": "reel", "energy": "calm"},
+            "style": "travel", "platform": "youtube", "max_duration": 12,
+        }
+        srv._fold_treatment_into_payload(payload)
+        assert payload["style"] == "travel"  # an explicit control always wins
+        assert payload["platform"] == "youtube"
+        assert payload["max_duration"] == 12
+
+    def test_fold_treatment_fills_over_the_auto_style_sentinel(self):
+        from monteur.web import server as srv
+
+        # "auto" is the build's open sentinel — the treatment's style fills it
+        payload = {"treatment": {"style": "trailer", "energy": "driving"}, "style": "auto"}
+        srv._fold_treatment_into_payload(payload)
+        assert payload["style"] == "trailer"
+
+    def test_fold_treatment_is_noop_without_treatment(self):
+        from monteur.web import server as srv
+
+        payload = {"brief": "hi"}
+        srv._fold_treatment_into_payload(payload)
+        assert payload == {"brief": "hi"}
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_regie_panel_is_wired_in_the_html(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        # the panel, the fetch button and the build wiring all present
+        assert 'id="cre-regie"' in html and 'id="cre-regie-get"' in html
+        assert "/api/create/treatment" in html
+        assert "if (cre.treatment) body.treatment = cre.treatment;" in html
+        assert "function renderRegie" in html and "function creRegieGet" in html
 
 
 class TestCoverageApi:

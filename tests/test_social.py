@@ -749,7 +749,7 @@ class TestPlatformUi:
     def test_payload_and_drafts_carry_the_platform(self):
         html = _APP_HTML.read_text(encoding="utf-8")
         assert 'body.platform = cre.platform' in html
-        assert '"platform", "arrangement"].forEach' in html
+        assert '"platform", "arrangement", "treatment"].forEach' in html
         assert "s.platform" in html  # draft restore
 
     def test_short_style_card_exists(self):

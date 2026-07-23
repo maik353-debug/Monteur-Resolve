@@ -994,6 +994,28 @@ svg text.axis {
   font-size: 12.5px; font-weight: 650; cursor: pointer;
 }
 .see-check input { width: 14px; height: 14px; accent-color: var(--accent); margin: 0; flex: none; }
+/* Regie-Vorschlag: Claude proposes a treatment, shown as editable chips */
+.regie { margin: 4px 0 12px; max-width: 640px; }
+.regie-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.regie-head .help-small { margin: 0; flex: 1; min-width: 200px; }
+.regie-body { margin-top: 12px; }
+.regie-body[hidden] { display: none; }
+.regie-why {
+  font-size: 12px; color: var(--ink-2); font-style: italic;
+  margin: 0 0 10px; padding-left: 10px; border-left: 2px solid var(--accent);
+}
+.regie-chips { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px 12px; }
+.regie-chip { display: flex; flex-direction: column; gap: 3px; }
+.regie-chip > span {
+  font-size: 10px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase;
+  color: var(--ink-muted);
+}
+.regie-chip select, .regie-chip input {
+  padding: 6px 8px; border: 1px solid var(--border); border-radius: 3px;
+  background: var(--input-bg); color: var(--ink); font-size: 12.5px; width: 100%;
+}
+.regie-busy { font-size: 12.5px; color: var(--accent); }
+.regie-busy.error { color: var(--critical); }
 .clip-sem {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 7px;
   font-size: 11.5px; margin-top: 8px; color: var(--ink-2);
@@ -2695,6 +2717,13 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         <label class="sr-only" for="cre-brief">What is this video?</label>
         <textarea id="cre-brief" rows="3" spellcheck="false" placeholder="What is this video? Who is it for, how should it feel &mdash; e.g. &ldquo;Alps motorcycle trip with three friends, fast and epic, end on the summit.&rdquo;"></textarea>
         <p class="help-small" style="max-width: 620px;">Optional, one or two sentences. Claude reads it when composing the cut, and it doubles as the default context for Director&rsquo;s notes in step 3.</p>
+        <div class="regie" id="cre-regie">
+          <div class="regie-head">
+            <button type="button" class="btn ghost" id="cre-regie-get">&#10024;&nbsp;Get a director&rsquo;s proposal</button>
+            <span class="help-small" id="cre-regie-hint">Not sure how to steer it? Claude reads your footage and suggests a format, pace, mood &amp; platform &mdash; then you tweak the chips.</span>
+          </div>
+          <div class="regie-body" id="cre-regie-body" hidden></div>
+        </div>
         <label class="see-check">
           <input type="checkbox" id="cre-ai-cut">
           <span>Claude composes the cut</span>
@@ -5800,6 +5829,7 @@ var cre = {
   projectId: null,        // the real project this cut persists to (null = not created yet)
   projectName: "",        // the current project's name (kept in sync with the store)
   grade: { brightness: 0, contrast: 0, saturation: 0, warmth: 0, look: "" }, // the color grade (step 4)
+  treatment: null,        // the Regie-Vorschlag (format/energy/mood/platform/…) once proposed/edited
   seriesCount: 1,         // how many videos: 1 = a single cut, >1 = a Series of Shorts
   series: null,           // the built series {shorts:[...], active} when seriesCount > 1
   buildFp: null,          // fingerprint of the options the working draft was BUILT with
@@ -7052,6 +7082,7 @@ function seeEnabled() { return $("cre-see").checked; }
 /* "Claude composes the cut" — auto-suggested ON after a scan that carried
    vision annotations (never hard-disabled); a manual toggle always wins */
 $("cre-ai-cut").addEventListener("change", function () { cre.aiCutTouched = true; });
+$("cre-regie-get").addEventListener("click", creRegieGet);
 function scanHasVision(clips) {
   return (clips || []).some(function (clip) {
     return (clip.moments || []).some(function (m) {
@@ -8208,6 +8239,96 @@ $("cre-arr-apply").addEventListener("click", function () {
 
 /* ---- step 3: build & download ---- */
 
+/* ---- Regie-Vorschlag: Claude proposes a treatment, shown as editable chips ---- */
+var REGIE_FIELDS = [
+  { key: "format", label: "Format", type: "select", options: [
+    ["montage", "Montage (to music)"], ["trailer", "Trailer"],
+    ["informative", "Informative / text"], ["one_shot", "One-shot"],
+    ["mini_film", "Mini-film"] ] },
+  { key: "energy", label: "Pace", type: "select", options: [
+    ["driving", "Driving (fast)"], ["varied", "Varied (slow-fast-slow)"],
+    ["calm", "Calm (slow)"] ] },
+  { key: "mood", label: "Mood", type: "text", placeholder: "e.g. epic, calm" },
+  { key: "platform", label: "Platform", type: "select", options: [
+    ["youtube", "YouTube (16:9)"], ["reel", "Reel (9:16)"],
+    ["short", "Short (9:16)"], ["tiktok", "TikTok (9:16)"] ] },
+  { key: "length_seconds", label: "Length (s)", type: "number" },
+  { key: "grade", label: "Grade", type: "select", options: [
+    ["neutral", "Neutral"], ["warm", "Warm"], ["cool", "Cool"],
+    ["cinematic", "Cinematic"], ["vibrant", "Vibrant"] ] },
+  { key: "hook", label: "Opening hook", type: "text", placeholder: "which shot cold-opens" }
+];
+
+function renderRegie() {
+  var body = $("cre-regie-body");
+  if (!body) return;
+  var t = cre.treatment;
+  if (!t) { body.hidden = true; body.innerHTML = ""; return; }
+  body.hidden = false;
+  var html = "";
+  if (t.rationale) html += '<p class="regie-why">' + escapeHtml(String(t.rationale)) + "</p>";
+  html += '<div class="regie-chips">';
+  REGIE_FIELDS.forEach(function (f) {
+    var val = t[f.key];
+    html += '<label class="regie-chip"><span>' + escapeHtml(f.label) + "</span>";
+    if (f.type === "select") {
+      html += '<select data-regie="' + f.key + '">';
+      f.options.forEach(function (o) {
+        var sel = String(val || "") === o[0] ? " selected" : "";
+        html += '<option value="' + escapeHtml(o[0]) + '"' + sel + ">" + escapeHtml(o[1]) + "</option>";
+      });
+      html += "</select>";
+    } else if (f.type === "number") {
+      var nv = (val === 0 || !val) ? "" : String(val);
+      html += '<input type="number" min="3" max="600" step="1" data-regie="' + f.key + '" value="' + escapeHtml(nv) + '" placeholder="auto">';
+    } else {
+      html += '<input type="text" data-regie="' + f.key + '" value="' + escapeHtml(String(val || "")) + '"' +
+        (f.placeholder ? ' placeholder="' + escapeHtml(f.placeholder) + '"' : "") + ">";
+    }
+    html += "</label>";
+  });
+  html += "</div>";
+  body.innerHTML = html;
+  var controls = body.querySelectorAll("[data-regie]");
+  for (var i = 0; i < controls.length; i++) {
+    controls[i].addEventListener("change", onRegieEdit);
+  }
+}
+
+function onRegieEdit(ev) {
+  if (!cre.treatment) return;
+  var el = ev.target;
+  var key = el.getAttribute("data-regie");
+  if (!key) return;
+  if (key === "length_seconds") {
+    var n = parseFloat(el.value);
+    cre.treatment[key] = (isFinite(n) && n > 0) ? n : 0;
+  } else {
+    cre.treatment[key] = el.value;
+  }
+  saveProject();
+}
+
+function creRegieGet() {
+  var btn = $("cre-regie-get");
+  var hint = $("cre-regie-hint");
+  return busy(btn, function () {
+    return ensurePoolProject().then(function (pid) {
+      if (!pid) throw new Error("Add and analyze some footage first, then ask for a proposal.");
+      if (hint) hint.textContent = "Claude is reading your footage…";
+      var payload = { project: pid, brief: $("cre-brief").value.trim() };
+      var music = $("cre-music").value.trim();
+      if (music) payload.music = music;
+      return api("/api/create/treatment", { method: "POST", body: payload }).then(function (data) {
+        cre.treatment = (data && data.treatment) || null;
+        renderRegie();
+        saveProject();
+        if (hint) hint.textContent = "Tweak any chip — it steers the composed cut. Re-run for a fresh take.";
+      });
+    });
+  });
+}
+
 function creBuildBody() {
   var body = {
     // the storyboard builds from the PROJECT's analyzed clips (no folder
@@ -8226,6 +8347,9 @@ function creBuildBody() {
     ai_cut: $("cre-ai-cut").checked,
     brief: $("cre-brief").value.trim()
   };
+  // the Regie-Vorschlag: the server weaves it into the brief (so the composer
+  // is told the format/pace/mood) and fills style/platform/length where open
+  if (cre.treatment) body.treatment = cre.treatment;
   // the "What are you making?" chip: the server re-resolves the preset
   // (canvas forced, length capped, style unless explicitly overridden)
   if (cre.platform && cre.platform !== "custom") body.platform = cre.platform;
@@ -9176,6 +9300,7 @@ function newProject() {
   cre.poolSel = {};
   renderPool({ clips: [], entries: [] });
   restoreGrade(null);         // a fresh project starts on a neutral grade
+  cre.treatment = null; renderRegie(); // ...and with no Regie-Vorschlag yet
   cre.series = null; setSeriesCount(1); // ...and as a single cut, not a series
   creResetRevise();       // clear any plan/storyboard left from the previous cut
   creUpdatePages();
@@ -9196,7 +9321,7 @@ function draftSettingsFromState() {
   var settings = {};
   ["audio", "order", "style", "canvas", "transitions", "fps", "format",
    "max_duration", "pace", "allow_repeats", "sfx", "cut_lead", "see",
-   "ai_cut", "brief", "elements", "platform", "arrangement"].forEach(function (key) {
+   "ai_cut", "brief", "elements", "platform", "arrangement", "treatment"].forEach(function (key) {
     if (body[key] !== undefined) settings[key] = body[key];
   });
   return settings;
@@ -9350,6 +9475,8 @@ function restoreWizardFromDraft(draft) {
     if (s.elements) $("cre-sfx").checked = true; // the folder implies the layer
   }
   if (typeof s.brief === "string") setBriefText(s.brief); // both homes of the one brief
+  cre.treatment = (s.treatment && typeof s.treatment === "object") ? s.treatment : null;
+  renderRegie();
   if (typeof s.ai_cut === "boolean") {
     $("cre-ai-cut").checked = s.ai_cut;
     cre.aiCutTouched = true; // a restored decision beats the scan suggestion

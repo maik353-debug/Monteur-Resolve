@@ -1860,6 +1860,36 @@ def _validate_platform(payload: dict) -> None:
         )
 
 
+def _fold_treatment_into_payload(payload: dict) -> None:
+    """Fold a confirmed Regie-Vorschlag (``payload['treatment']``) into a build.
+
+    The editable chips the user accepted become the composer's directive: the
+    treatment weaves into the ``brief`` (so the composer is always TOLD the
+    format / pacing / mood instead of falling back to a generic default) and
+    fills ``style`` / ``platform`` / ``max_duration`` ONLY where the user left
+    them open — an explicit control the user set always wins. A missing or
+    empty treatment is a no-op. In place; safe to call unconditionally.
+    """
+    treatment = payload.get("treatment")
+    if not isinstance(treatment, dict) or not treatment:
+        return
+    from monteur import treatment as _treatment_mod
+
+    payload["brief"] = _treatment_mod.treatment_to_brief(
+        treatment, str(payload.get("brief") or "")
+    )
+    # "auto" is the build's open/unset sentinel — the treatment's style fills it;
+    # a style the user explicitly chose (travel, trailer, …) always wins.
+    if str(payload.get("style") or "").strip() in ("", "auto") and treatment.get("style"):
+        payload["style"] = str(treatment["style"])
+    if not str(payload.get("platform") or "").strip() and treatment.get("platform"):
+        payload["platform"] = str(treatment["platform"])
+    if not payload.get("max_duration"):
+        secs = _treatment_mod.treatment_max_seconds(treatment)
+        if secs:
+            payload["max_duration"] = secs
+
+
 def _plan_from_payload(job: dict, payload: dict):
     """Shared plan construction for build and kit jobs.
 
@@ -1876,6 +1906,10 @@ def _plan_from_payload(job: dict, payload: dict):
     music_path = payload.get("music") or ""
     see = bool(payload.get("see"))
     vision = {"ran": False, "notes": [], "error": ""}
+
+    # Regie-Vorschlag: a confirmed treatment folds into the composer's brief and
+    # fills style / platform / length where the user left them open (see helper).
+    _fold_treatment_into_payload(payload)
 
     # Platform preset ("What are you making?"): resolved HERE, at the
     # caller layer — plan_montage never takes a platform. The payload is
@@ -3936,6 +3970,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/create/revise"): self._create_revise,
             ("POST", "/api/create/direct"): self._create_direct,
             ("POST", "/api/create/direct/apply"): self._create_direct_apply,
+            ("POST", "/api/create/treatment"): self._create_treatment,
             ("POST", "/api/create/distill"): self._create_distill,
             ("POST", "/api/create/export"): self._create_export,
             ("GET", "/api/clipinfo"): self._clipinfo,
@@ -4386,6 +4421,47 @@ class MonteurHandler(BaseHTTPRequestHandler):
             daemon=True,
         ).start()
         self._send_json({"job": job["id"]})
+
+    def _create_treatment(self) -> None:
+        """POST /api/create/treatment {project, music?, brief?} → {treatment}.
+
+        The Regie-Vorschlag: Claude reads the project's OWN stored analysis
+        (moments + vision labels) and the chosen music, and proposes a creative
+        treatment — format, style, pacing energy, mood, platform, length, grade
+        and the opening hook — grounded in what the footage actually is. So
+        "say nothing" no longer means "generic default"; it means "Claude looks
+        at your material and suggests". Synchronous (one bounded Claude call),
+        returning the normalized treatment the Studio renders as editable chips.
+        Never fails the request: an unreachable backend yields a neutral default
+        whose rationale says so.
+        """
+        from monteur import projects
+        from monteur import treatment as _treatment
+
+        payload = self._read_json()
+        project_id = str(payload.get("project") or "")
+        if not project_id:
+            raise ApiError(400, "missing 'project' to propose a treatment from")
+        project = projects.load_project(project_id)
+        if project is None:
+            raise ApiError(404, f"unknown project {project_id!r}")
+        reports = projects.load_reports(project)
+        if not reports:
+            raise ApiError(
+                400,
+                "No analyzed footage yet — open the Footage tab, analyze your "
+                "clips, then ask for a Regie-Vorschlag.",
+            )
+        music = None
+        music_path = str(payload.get("music") or "")
+        if music_path:
+            try:
+                music = projects.load_music(project, music_path)
+            except Exception:
+                music = None
+        brief = str(payload.get("brief") or "")
+        result = _treatment.propose_treatment(reports, music, brief=brief)
+        self._send_json({"treatment": result})
 
     def _coverage(self) -> None:
         payload = self._read_json()
