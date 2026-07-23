@@ -118,6 +118,15 @@ _BRIGHT_FULL = 120.0  # brightness at (or above) this = fully adequate
 _MODERATE_MOTION_BAND = (0.5, 2.5)  # x clip median: "something happens"
 _MOMENT_MOTION_BONUS = 0.25  # weight of the moderate-motion bonus
 _MAX_MOMENTS = 12  # cap per clip
+# Hard-cut detection (find_scene_cuts): a scene change is an ISOLATED
+# frame-to-frame discontinuity — a motion spike that towers over BOTH its
+# neighbours (so sustained shake/action is not a cut) and the clip, paired
+# with a brightness jump (the picture genuinely changed). Deliberately
+# conservative: a false split fragments a good shot, so only a confident
+# discontinuity counts.
+_CUT_NEIGHBOUR_FACTOR = 2.2  # spike must exceed this x each neighbour's motion
+_CUT_MEDIAN_FACTOR = 3.5     # ...and this x the clip's median motion
+_CUT_MIN_BRIGHTNESS_JUMP = 12.0  # ...and the mean luma must jump at least this
 
 # Audio heuristics (all approximate, see module docstring).
 _AUDIO_CLIP_WINDOW_MIN = 0.001  # a window "clips" above this clipping fraction
@@ -214,6 +223,7 @@ class ClipReport:
     usable_ratio: float = 0.0  # share of the clip classified usable
     notes: list[str] = field(default_factory=list)
     media_start: float = 0.0  # seconds: the file's embedded start timecode (0 if none)
+    scene_cuts: list[float] = field(default_factory=list)  # hard-cut times inside the clip
 
 
 def _percentile(values: list[float], q: float) -> float:
@@ -404,8 +414,45 @@ def _envelope_peak(envelope: list[tuple[float, float]]) -> float:
     return best_t
 
 
+def find_scene_cuts(metrics: list[FrameMetric]) -> list[float]:
+    """Times of HARD cuts inside the clip (already-edited source footage).
+
+    A cut is an isolated frame-to-frame discontinuity: a motion spike that
+    towers over BOTH neighbours (so sustained shake or fast action is not a
+    cut) and the clip median, paired with a brightness jump (the picture
+    genuinely changed). Deliberately conservative — a false split fragments a
+    good shot — so a single continuous take (the common case for raw footage)
+    returns ``[]``. Each returned time is the first frame of the new shot.
+
+    Note: reliable only with dense sampling; the sparse keyframe path on long
+    clips makes every gap look large, so the neighbour test (not just the
+    median) is what keeps it honest there.
+    """
+    if len(metrics) < 3:
+        return []
+    motions = [m.motion for m in metrics[1:]]
+    median = statistics.median(motions) if motions else 0.0
+    if median <= 0:
+        return []
+    cuts: list[float] = []
+    for i in range(1, len(metrics) - 1):
+        cur = metrics[i].motion
+        neighbour = max(metrics[i - 1].motion, metrics[i + 1].motion, 1e-9)
+        bright_jump = abs(metrics[i].brightness - metrics[i - 1].brightness)
+        if (
+            cur >= _CUT_MEDIAN_FACTOR * median
+            and cur >= _CUT_NEIGHBOUR_FACTOR * neighbour
+            and bright_jump >= _CUT_MIN_BRIGHTNESS_JUMP
+        ):
+            cuts.append(round(metrics[i].t, 3))
+    return cuts
+
+
 def find_moments(
-    segments: list[ClipSegment], metrics: list[FrameMetric], min_length: float = 1.0
+    segments: list[ClipSegment],
+    metrics: list[FrameMetric],
+    min_length: float = 1.0,
+    scene_cuts: list[float] | None = None,
 ) -> list[Moment]:
     """Rank the best usable moments, longest-window-first scoring.
 
@@ -441,6 +488,7 @@ def find_moments(
     band_hi = _MODERATE_MOTION_BAND[1] * median_residual
     peak_motion = max((m.motion for m in metrics[1:]), default=0.0)
     step = min_length / 2
+    cuts = scene_cuts or []
 
     candidates: list[Moment] = []
     for seg in segments:
@@ -449,6 +497,11 @@ def find_moments(
         start = seg.start
         while start + min_length <= seg.end + eps:
             end = start + min_length
+            # a moment must not straddle a hard cut — a window that contains a
+            # scene change in its interior would splice two shots into one
+            if any(start + eps < c < end - eps for c in cuts):
+                start += step
+                continue
             idx = [
                 j for j, m in enumerate(metrics) if start - eps <= m.t < end - eps
             ]
@@ -674,7 +727,13 @@ def analyze_clip(path: str, cancel=None) -> ClipReport:
         return report
 
     report.segments = classify_metrics(metrics, info.duration)
-    report.moments = find_moments(report.segments, metrics)
+    report.scene_cuts = find_scene_cuts(metrics)
+    report.moments = find_moments(report.segments, metrics, scene_cuts=report.scene_cuts)
+    if report.scene_cuts:
+        report.notes.append(
+            f"{len(report.scene_cuts)} hard cut(s) inside the clip — "
+            "moments kept within single shots"
+        )
 
     # One calm note for intentionally flat/Log material (never per-segment).
     if _is_flat_log(metrics):
@@ -687,7 +746,7 @@ def analyze_clip(path: str, cancel=None) -> ClipReport:
     # the clip clearly has detail, surface its best stretches anyway.
     if not report.moments and _has_visual_detail(metrics):
         whole = [ClipSegment(start=0.0, end=info.duration, label=USABLE, score=0.0)]
-        report.moments = find_moments(whole, metrics)
+        report.moments = find_moments(whole, metrics, scene_cuts=report.scene_cuts)
 
     # Audio features are best-effort: no audio stream or a failed audio
     # decode silently skips them (highlights stay 0.0, no audio notes).
@@ -988,6 +1047,7 @@ def report_from_dict(d: dict) -> ClipReport:
         usable_ratio=float(d.get("usable_ratio", 0.0)),
         notes=[str(n) for n in (d.get("notes") or [])],
         media_start=float(d.get("media_start", 0.0)),
+        scene_cuts=[float(c) for c in (d.get("scene_cuts") or [])],
     )
 
 

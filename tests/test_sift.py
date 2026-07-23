@@ -207,6 +207,49 @@ def test_moments_prefer_moderate_motion_over_static():
     assert min(m.score for m in moving) > max(m.score for m in static)
 
 
+def test_find_scene_cuts_flags_isolated_discontinuity():
+    from monteur.sift import find_scene_cuts
+
+    # steady clip with ONE hard cut at sample 10: a lone motion spike paired
+    # with a brightness jump, neighbours calm
+    motion = [2.0] * 24
+    motion[10] = 12.0
+    bright = [100.0] * 24
+    for i in range(10, 24):
+        bright[i] = 150.0  # the picture changed at the cut
+    metrics = make_metrics(bright, [300] * 24, motion)
+    cuts = find_scene_cuts(metrics)
+    assert cuts == [pytest.approx(metrics[10].t)]
+
+
+def test_find_scene_cuts_ignores_sustained_motion():
+    from monteur.sift import find_scene_cuts
+
+    # fast action / shake: high motion throughout, no isolated spike -> no cut
+    metrics = make_metrics([120] * 24, [300] * 24, [9.0] * 24)
+    assert find_scene_cuts(metrics) == []
+    # a gradual brightness ramp with calm motion is not a cut either
+    ramp = [100.0 + i * 3 for i in range(24)]
+    assert find_scene_cuts(make_metrics(ramp, [300] * 24, [2.0] * 24)) == []
+
+
+def test_moments_never_straddle_a_scene_cut():
+    from monteur.sift import find_scene_cuts
+
+    # a hard cut mid-clip: no kept moment may contain it in its interior
+    motion = [2.0] * 24
+    motion[12] = 14.0
+    bright = [100.0] * 12 + [150.0] * 12
+    metrics = make_metrics(bright, [300] * 24, motion)
+    segments = classify_metrics(metrics, 12.0)
+    cuts = find_scene_cuts(metrics)
+    assert cuts, "the test needs a detected cut"
+    moments = find_moments(segments, metrics, min_length=1.0, scene_cuts=cuts)
+    cut_t = cuts[0]
+    for m in moments:
+        assert not (m.start + 1e-9 < cut_t < m.end - 1e-9), (m.start, m.end, cut_t)
+
+
 def test_action_bonus_ignores_pure_camera_pan():
     # First half: a PAN — lots of total motion but ~zero residual (the camera
     # moves, nothing moves IN frame). Second half: real subject action —
