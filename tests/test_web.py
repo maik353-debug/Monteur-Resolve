@@ -1291,6 +1291,11 @@ class TestWizardStepsUi:
             'status.textContent = "Claude is composing your cut…"',
             ".bstage-shot.considering",
             "@keyframes bEq",
+            # the REAL progress: Claude's compose answer streaming in live
+            'id="bstage-script"',
+            "function showComposeScript",
+            "stages.compose.chars > 0 && stages.compose.script",
+            "Claude is writing your cut — ",
         ):
             assert needle in html, needle
 

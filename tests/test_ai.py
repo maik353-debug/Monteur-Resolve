@@ -216,8 +216,25 @@ def test_vision_client_env_key_wins_over_settings_key(clean_env):
 # --- the claude-cli backend -----------------------------------------------------------
 
 
-def _cli_result(result_text="Hello from Claude", **overrides) -> bytes:
-    """A claude -p --output-format json stdout payload (success by default)."""
+def _delta_line(text: str) -> bytes:
+    """One stream-json content_block_delta (an answer text chunk)."""
+    return (
+        json.dumps(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": text},
+                },
+            }
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _result_line(result_text="Hello from Claude", **overrides) -> bytes:
+    """The terminal stream-json result event (success by default)."""
     data = {
         "type": "result",
         "subtype": "success",
@@ -225,33 +242,94 @@ def _cli_result(result_text="Hello from Claude", **overrides) -> bytes:
         "result": result_text,
     }
     data.update(overrides)
-    return json.dumps(data).encode("utf-8")
+    return (json.dumps(data) + "\n").encode("utf-8")
+
+
+def _cli_stream(result_text="Hello from Claude", *, deltas=None, **overrides) -> bytes:
+    """A full stream-json stdout: optional text deltas, then the result event."""
+    body = b"".join(_delta_line(d) for d in (deltas or []))
+    if overrides.pop("omit_result", False):
+        return body
+    return body + _result_line(result_text, **overrides)
+
+
+class _RecordingStdin:
+    """Captures what the feeder thread writes, tolerating close()."""
+
+    def __init__(self):
+        self.data = bytearray()
+
+    def write(self, chunk):
+        self.data += chunk
+
+    def close(self):
+        pass
+
+
+class _BlockingStdout:
+    """A stdout that never yields a line and never ends — to trip inactivity."""
+
+    def __init__(self, released):
+        self._released = released
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self._released.wait(2.0)  # unblocked by kill(); else times out safely
+        raise StopIteration
+
+
+class _FakePopen:
+    def __init__(self, stdout_bytes, returncode=0, stderr=b"", block=False):
+        import io
+        import threading as _t
+
+        self._released = _t.Event()
+        self.stdout = _BlockingStdout(self._released) if block else io.BytesIO(stdout_bytes)
+        self.stderr = io.BytesIO(stderr)
+        self.stdin = _RecordingStdin()
+        self.returncode = returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
+        self._released.set()
+
+    def poll(self):
+        return self.returncode
 
 
 @pytest.fixture
 def cli_backend(clean_env):
-    """Force the CLI backend with a fake exe; install() fakes subprocess.run."""
+    """Force the CLI backend with a fake exe; install() fakes subprocess.Popen.
+
+    The real backend streams ``--output-format stream-json``, so the fake feeds
+    the process's stdout line by line (one JSON event per line).
+    """
     clean_env.setenv("MONTEUR_AI_BACKEND", "claude-cli")
     clean_env.setattr(ai, "_cli_path", lambda: "/fake/claude")
     calls = []
 
-    def install(stdout=b"", returncode=0, stderr=b"", raises=None):
-        def fake_run(cmd, input=None, capture_output=None, timeout=None):
-            calls.append({"cmd": list(cmd), "input": input, "timeout": timeout})
+    def install(stdout=b"", returncode=0, stderr=b"", raises=None, block=False):
+        proc = _FakePopen(stdout, returncode=returncode, stderr=stderr, block=block)
+
+        def fake_popen(cmd, stdin=None, stdout=None, stderr=None):
+            calls.append({"cmd": list(cmd), "proc": proc})
             if raises is not None:
                 raise raises
-            return subprocess.CompletedProcess(
-                cmd, returncode, stdout=stdout, stderr=stderr
-            )
+            return proc
 
-        clean_env.setattr(ai.subprocess, "run", fake_run)
+        clean_env.setattr(ai.subprocess, "Popen", fake_popen)
         return calls
 
     return install
 
 
 def test_cli_success_parses_result_and_wires_flags(cli_backend):
-    calls = cli_backend(stdout=_cli_result("Hallo Schnitt"))
+    calls = cli_backend(stdout=_cli_stream("Hallo Schnitt"))
     out = complete(
         "tick the best takes",
         system="be an editor",
@@ -263,52 +341,68 @@ def test_cli_success_parses_result_and_wires_flags(cli_backend):
     cmd = call["cmd"]
     assert cmd[0] == "/fake/claude"
     assert "-p" in cmd
-    assert cmd[cmd.index("--output-format") + 1] == "json"
+    # streamed now, so the build gets an inactivity timeout + live progress
+    assert cmd[cmd.index("--output-format") + 1] == "stream-json"
+    assert "--verbose" in cmd
+    assert "--include-partial-messages" in cmd
     assert cmd[cmd.index("--model") + 1] == "claude-opus-4-8"
     assert cmd[cmd.index("--system-prompt") + 1] == "be an editor"
     assert cmd[cmd.index("--tools") + 1] == ""  # pure completion: no tools
     assert "--no-session-persistence" in cmd
     assert cmd[cmd.index("--effort") + 1] == "medium"
     # the prompt travels on stdin, not the command line
-    assert call["input"] == "tick the best takes".encode("utf-8")
-    assert call["timeout"] == ai.CLI_TIMEOUT_SECONDS
+    assert bytes(call["proc"].stdin.data) == "tick the best takes".encode("utf-8")
 
 
 def test_cli_omits_optional_flags_when_unset(cli_backend):
-    calls = cli_backend(stdout=_cli_result())
+    calls = cli_backend(stdout=_cli_stream())
     complete("prompt only")
     cmd = calls[0]["cmd"]
     assert "--system-prompt" not in cmd
     assert "--effort" not in cmd
 
 
+def test_cli_streams_text_deltas_to_on_delta(cli_backend):
+    cli_backend(stdout=_cli_stream("Cut A then B", deltas=["Cut A", " then B"]))
+    seen = []
+    out = complete("compose", on_delta=seen.append)
+    assert out == "Cut A then B"  # the final result is authoritative
+    assert seen == ["Cut A", " then B"]  # ...but the deltas streamed live
+
+
 def test_cli_nonzero_exit_includes_stderr_tail(cli_backend):
-    cli_backend(returncode=1, stderr=b"Invalid API key. Please run /login")
+    # no result event + a failing exit code surfaces the stderr tail
+    cli_backend(
+        stdout=b"", returncode=1, stderr=b"Invalid API key. Please run /login"
+    )
     with pytest.raises(MonteurAIError, match="exited with code 1.*Please run /login"):
         complete("prompt")
 
 
-def test_cli_garbage_output_raises(cli_backend):
-    cli_backend(stdout=b"totally not json")
-    with pytest.raises(MonteurAIError, match="unparseable"):
+def test_cli_no_result_event_raises(cli_backend):
+    # non-JSON noise is skipped; a stream that never carries a result is a failure
+    cli_backend(stdout=b"totally not json\n")
+    with pytest.raises(MonteurAIError, match="produced no result"):
         complete("prompt")
 
 
 def test_cli_is_error_result_raises(cli_backend):
-    cli_backend(stdout=_cli_result("credit balance too low", is_error=True))
-    with pytest.raises(MonteurAIError, match="credit balance too low"):
-        complete("prompt")
-
-
-def test_cli_non_success_subtype_raises(cli_backend):
-    cli_backend(stdout=_cli_result(subtype="error_during_execution"))
+    cli_backend(stdout=_cli_stream("credit balance too low", is_error=True))
     with pytest.raises(MonteurAIError, match="reported a failure"):
         complete("prompt")
 
 
-def test_cli_timeout_is_actionable(cli_backend):
-    cli_backend(raises=subprocess.TimeoutExpired(cmd="claude", timeout=300))
-    with pytest.raises(MonteurAIError, match="did not answer within"):
+def test_cli_non_success_subtype_raises(cli_backend):
+    cli_backend(stdout=_cli_stream(subtype="error_during_execution"))
+    with pytest.raises(MonteurAIError, match="reported a failure"):
+        complete("prompt")
+
+
+def test_cli_inactivity_timeout_is_actionable(cli_backend, clean_env):
+    # a truly silent process (no events at all) trips the inactivity limit
+    clean_env.setattr(ai, "CLI_TIMEOUT_SECONDS", 0.2)
+    cli_backend(block=True)
+    with pytest.raises(MonteurAIError, match="went silent"):
         complete("prompt")
 
 
@@ -319,18 +413,18 @@ def test_cli_missing_executable_is_actionable(cli_backend):
 
 
 def test_cli_json_schema_instructs_and_strips_fences(cli_backend):
-    calls = cli_backend(stdout=_cli_result('```json\n{"style": "trailer"}\n```'))
+    calls = cli_backend(stdout=_cli_stream('```json\n{"style": "trailer"}\n```'))
     out = complete("BRIEF: teaser", json_schema={"type": "object"})
     # the one common decoration is unwrapped; parsing stays the caller's job
     assert out == '{"style": "trailer"}'
-    sent = calls[0]["input"].decode("utf-8")
+    sent = bytes(calls[0]["proc"].stdin.data).decode("utf-8")
     assert sent.startswith("BRIEF: teaser")
     assert "JSON Schema" in sent
     assert '"type": "object"' in sent
 
 
 def test_cli_plain_text_is_not_fence_stripped(cli_backend):
-    cli_backend(stdout=_cli_result("```json\nlooks like code\n```"))
+    cli_backend(stdout=_cli_stream("```json\nlooks like code\n```"))
     # without a schema the text is returned verbatim
     assert complete("prompt") == "```json\nlooks like code\n```"
 
@@ -354,6 +448,11 @@ class _FakeMessage:
 class _FakeStream:
     def __init__(self, message):
         self._message = message
+        # the SDK exposes text as it arrives; the fake yields the whole answer
+        # in one chunk, enough to exercise on_delta plumbing
+        self.text_stream = [
+            b.text for b in message.content if getattr(b, "type", "") == "text"
+        ]
 
     def __enter__(self):
         return self
@@ -394,7 +493,7 @@ def api_backend(clean_env):
         clean_env.setattr(ai, "_client", lambda: fake)
         # any subprocess use would be a routing bug
         clean_env.setattr(
-            ai.subprocess, "run", lambda *a, **k: pytest.fail("CLI must not run")
+            ai.subprocess, "Popen", lambda *a, **k: pytest.fail("CLI must not run")
         )
         return fake
 
@@ -418,14 +517,19 @@ def test_api_text_completion_streams_with_effort(api_backend):
 def test_api_json_schema_uses_structured_output(api_backend):
     schema = {"type": "object", "additionalProperties": False}
     fake = api_backend(_FakeMessage('{"ok": true}'))
-    out = complete("prompt", system="sys", max_tokens=1024, json_schema=schema)
+    seen = []
+    out = complete(
+        "prompt", system="sys", max_tokens=1024, json_schema=schema, on_delta=seen.append
+    )
     assert out == '{"ok": true}'
-    assert fake.stream_calls == []
-    (kwargs,) = fake.create_calls
+    # structured output is STREAMED now (so the answer can drive live progress)
+    assert fake.create_calls == []
+    (kwargs,) = fake.stream_calls
     assert kwargs["max_tokens"] == 1024
     assert kwargs["output_config"] == {
         "format": {"type": "json_schema", "schema": schema}
     }
+    assert seen == ['{"ok": true}']  # the deltas reached on_delta
 
 
 def test_api_closes_open_object_schemas_on_the_wire(api_backend):
@@ -444,7 +548,7 @@ def test_api_closes_open_object_schemas_on_the_wire(api_backend):
     }
     fake = api_backend(_FakeMessage('{"ok": true}'))
     complete("prompt", system="sys", json_schema=schema)
-    (kwargs,) = fake.create_calls
+    (kwargs,) = fake.create_calls  # no on_delta → plain one-shot create()
     sent = kwargs["output_config"]["format"]["schema"]
     assert sent["additionalProperties"] is False
     assert sent["properties"]["items"]["items"]["additionalProperties"] is False
@@ -464,10 +568,10 @@ def test_api_structured_empty_response_raises_clear_error(api_backend):
 
 def test_api_json_schema_does_not_send_thinking(api_backend):
     # structured output must NOT ride with extended thinking (that returned an
-    # empty text block) — the create call carries no 'thinking' key
+    # empty text block) — the stream call carries no 'thinking' key
     fake = api_backend(_FakeMessage('{"ok": true}'))
     complete("prompt", json_schema={"type": "object"})
-    (kwargs,) = fake.create_calls
+    (kwargs,) = fake.create_calls  # no on_delta → plain one-shot create()
     assert "thinking" not in kwargs
 
 

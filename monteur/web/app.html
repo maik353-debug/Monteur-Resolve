@@ -1097,6 +1097,14 @@ svg text.axis {
 @keyframes bEq { 0%, 100% { height: 30%; } 50% { height: 100%; } }
 .bstage-cap-text { color: var(--ink-2); font-size: 13px; }
 .bstage-cap-text.swap { animation: bCapIn 0.4s ease; }
+/* the live script: Claude's compose answer streaming in as it is written —
+   honest, moving proof the build is alive (not a placeholder loop) */
+.bstage-script {
+  margin: 10px 0 0; max-height: 148px; overflow: auto; border-radius: 7px;
+  border: 1px solid var(--line); background: var(--panel-2); padding: 9px 11px;
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.5; color: var(--ink-2);
+  white-space: pre-wrap; word-break: break-word;
+}
 @keyframes bCapIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) {
   .bstage-shot { transition: opacity 0.2s; transform: none; }
@@ -2691,6 +2699,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           <div class="bstage-rail" id="bstage-rail"></div>
           <div class="bstage-film" id="bstage-film"></div>
           <div class="bstage-caption" id="bstage-caption"></div>
+          <pre class="bstage-script" id="bstage-script" hidden aria-live="polite"></pre>
         </div>
         <p class="scan-note" id="cre-build-msg" role="status" hidden></p>
         <div id="cre-result" hidden>
@@ -8157,6 +8166,8 @@ function startBuildStage() {
     film.appendChild(shot);
     buildStage.timers.push(window.setTimeout(function () { shot.classList.add("in"); }, 90 + i * 120));
   });
+  var script = $("bstage-script");
+  if (script) { script.hidden = true; script.textContent = ""; }
   setBuildCaption("Reading your analyzed clips…", false);
   setBuildPhase("read");
 }
@@ -8188,6 +8199,9 @@ function setBuildCaption(text, withEq) {
 }
 
 function startComposeCaptions() {
+  // the "thinking" placeholder: shown ONLY until Claude's first words stream in
+  // (see showComposeScript), so there's motion before the real text starts
+  startConsidering();
   if (buildStage.capTimer) return; // already rotating
   buildStage.capIndex = 0;
   setBuildCaption("Claude · " + BUILD_COMPOSE_CAPTIONS[0], false);
@@ -8195,16 +8209,40 @@ function startComposeCaptions() {
     buildStage.capIndex = (buildStage.capIndex + 1) % BUILD_COMPOSE_CAPTIONS.length;
     setBuildCaption("Claude · " + BUILD_COMPOSE_CAPTIONS[buildStage.capIndex], false);
   }, 3800);
-  // light one thumbnail at a time — "Claude is looking at this moment"
+}
+
+function stopComposeCaptions() {
+  if (buildStage.capTimer) { window.clearInterval(buildStage.capTimer); buildStage.capTimer = 0; }
+}
+
+// light one thumbnail at a time — "Claude is looking at this moment"
+function startConsidering() {
+  if (buildStage.considerTimer) return;
   var shots = $("bstage-film").querySelectorAll(".bstage-shot");
-  if (shots.length) {
-    var idx = 0;
-    buildStage.considerTimer = window.setInterval(function () {
-      Array.prototype.forEach.call(shots, function (s) { s.classList.remove("considering"); });
-      shots[idx % shots.length].classList.add("considering");
-      idx += 1;
-    }, 900);
+  if (!shots.length) return;
+  var idx = 0;
+  buildStage.considerTimer = window.setInterval(function () {
+    Array.prototype.forEach.call(shots, function (s) { s.classList.remove("considering"); });
+    shots[idx % shots.length].classList.add("considering");
+    idx += 1;
+  }, 900);
+}
+
+/* the REAL progress: Claude's compose answer streaming in as it is written.
+   Once the first characters arrive we drop the placeholder rotator and show
+   the live text + a growing character count — you can watch the cut being
+   written, which is the honest signal that the build is working. */
+function showComposeScript(text, chars) {
+  stopComposeCaptions();
+  startConsidering();
+  var box = $("bstage-script");
+  if (box) {
+    box.hidden = false;
+    box.textContent = String(text || "");
+    box.scrollTop = box.scrollHeight;
   }
+  var n = Number(chars || 0);
+  setBuildCaption("Claude is writing your cut — " + n.toLocaleString() + " characters", false);
 }
 
 /* onProgress handler: advance the visible phase from the job's real stages.
@@ -8218,7 +8256,12 @@ function animateBuildProgress(progress) {
   (progress || []).forEach(function (p) { if (p && p.stage) stages[p.stage] = p; });
   if (stages.compose) {
     setBuildPhase("compose");
-    startComposeCaptions();
+    // real streamed script once Claude starts writing; placeholder before that
+    if (stages.compose.chars > 0 && stages.compose.script) {
+      showComposeScript(stages.compose.script, stages.compose.chars);
+    } else {
+      startComposeCaptions();
+    }
   } else if (stages.music) {
     setBuildPhase("music");
     if (buildStage.capTimer) return; // don't clobber compose captions if racing

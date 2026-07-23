@@ -213,6 +213,25 @@ def test_prompt_carries_grammar_brief_slots_dips_and_inventory(monkeypatch):
     assert any(s.get("after_dip") for s in context["slots"])
 
 
+def test_compose_streams_the_answer_through_on_text(monkeypatch):
+    # the storyboard build passes on_text so it can show the cut being written
+    # live — compose must forward it to ai.complete's on_delta, verbatim
+    captured: dict = {}
+
+    def _complete(prompt, *, system="", json_schema=None, on_delta=None, **kwargs):
+        captured["on_delta"] = on_delta
+        if on_delta is not None:
+            on_delta("story so f")
+            on_delta("ar…")
+        return json.dumps(empty_reply())
+
+    monkeypatch.setattr(ai, "complete", _complete)
+    seen: list[str] = []
+    compose_montage(make_reports(), make_music(), on_text=seen.append, cut_lead=0.0)
+    assert captured["on_delta"] is not None  # forwarded, not dropped
+    assert seen == ["story so f", "ar…"]  # streamed straight through
+
+
 def test_prompt_says_when_vision_is_missing_and_notes_recommend_it(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(ai, "complete", fake_complete(empty_reply(), calls))
@@ -367,7 +386,7 @@ def test_reused_cast_is_rejected_when_repeats_off(monkeypatch):
 def test_dossier_and_prompt_say_reuse_is_forbidden_when_repeats_off(monkeypatch):
     captured: dict = {}
 
-    def spy(prompt, system=None, json_schema=None):
+    def spy(prompt, system=None, json_schema=None, on_delta=None, **kwargs):
         captured["prompt"] = prompt
         return json.dumps(empty_reply())
 

@@ -2008,15 +2008,32 @@ def _plan_from_payload(job: dict, payload: dict):
         # CLI's --ai-cut keeps the graceful fallback instead).
         from monteur.compose import compose_montage
 
+        # The compose is one long Claude call. Stream its answer into the job's
+        # progress so the storyboard build shows the cut being written live
+        # (character count + a running tail) instead of a frozen 90s wait. The
+        # entry dict is mutated in place; _job_view snapshots it on each poll.
         with _JOBS_LOCK:
-            job["progress"].append(
-                {"stage": "compose", "name": "Claude is composing the cut"}
-            )
+            compose_entry = {
+                "stage": "compose",
+                "name": "Claude is composing the cut",
+                "chars": 0,
+            }
+            job["progress"].append(compose_entry)
+        _script_chunks: list[str] = []
+
+        def _on_compose_text(chunk: str) -> None:
+            _script_chunks.append(chunk)
+            text = "".join(_script_chunks)
+            with _JOBS_LOCK:
+                compose_entry["chars"] = len(text)
+                compose_entry["script"] = text[-4000:]  # a live tail, capped
+
         plan = compose_montage(
             reports,
             music,
             brief=str(payload.get("brief") or ""),
             strict=True,
+            on_text=_on_compose_text,
             **plan_kwargs,
         )
     else:

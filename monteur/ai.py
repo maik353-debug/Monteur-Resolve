@@ -48,8 +48,12 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import shutil
 import subprocess
+import threading
+import time
+from collections.abc import Callable
 from dataclasses import asdict
 
 from monteur.analysis import PacingStats
@@ -60,9 +64,16 @@ DEFAULT_MODEL = "claude-opus-4-8"
 #: Environment variable that forces a backend ("api" or "claude-cli").
 BACKEND_ENV = "MONTEUR_AI_BACKEND"
 
-#: Wall-clock limit for one headless ``claude`` run. Generous on purpose:
-#: a screenplay draft is a long completion.
+#: How long the streaming ``claude`` CLI may produce NOTHING at all before we
+#: treat it as dead. This is an *inactivity* limit, not a wall-clock one: the
+#: CLI streams thinking + text tokens the whole time it works, so a legitimately
+#: slow completion (a big storyboard compose with deep reasoning) keeps resetting
+#: it and is never killed mid-thought — only a truly silent process trips it.
+#: The old hard 300s wall-clock cap was killing working builds; this replaces it.
 CLI_TIMEOUT_SECONDS = 300.0
+
+#: Absolute backstop: even while streaming, no single run may exceed this.
+CLI_TOTAL_CAP_SECONDS = 3600.0
 
 _SYSTEM = (
     "You are Monteur, an experienced film editor's assistant. You think like an "
@@ -226,27 +237,52 @@ def _complete_api(
     max_tokens: int,
     effort: str | None,
     json_schema: dict | None,
+    on_delta: Callable[[str], None] | None = None,
 ) -> str:
     """The Claude API backend (anthropic SDK)."""
     client = _client()
+
+    def _emit(chunk: str) -> None:
+        if chunk and on_delta is not None:
+            try:
+                on_delta(chunk)
+            except Exception:  # a UI callback must never fail a completion
+                pass
+
     try:
         if json_schema is not None:
             # Structured output is a single JSON answer — no extended thinking
             # (adaptive thinking here returned an empty text block: the JSON
             # never landed, "unparseable JSON: ''"). This matches the vision
-            # pass, which uses the same output_config and works.
-            message = client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                system=system,
-                output_config={
-                    "format": {
-                        "type": "json_schema",
-                        "schema": _closed_schema(json_schema),
-                    }
-                },
-                messages=[{"role": "user", "content": prompt}],
-            )
+            # pass, which uses the same output_config and works. We STREAM it
+            # only when a caller is listening (on_delta) — e.g. the storyboard
+            # build, so the cut can be shown as it's written; otherwise a plain
+            # create() keeps the simple one-shot path every other caller uses.
+            output_config = {
+                "format": {
+                    "type": "json_schema",
+                    "schema": _closed_schema(json_schema),
+                }
+            }
+            if on_delta is not None:
+                with client.messages.stream(
+                    model=model,
+                    max_tokens=max_tokens,
+                    system=system,
+                    output_config=output_config,
+                    messages=[{"role": "user", "content": prompt}],
+                ) as stream:
+                    for text in stream.text_stream:
+                        _emit(text)
+                    message = stream.get_final_message()
+            else:
+                message = client.messages.create(
+                    model=model,
+                    max_tokens=max_tokens,
+                    system=system,
+                    output_config=output_config,
+                    messages=[{"role": "user", "content": prompt}],
+                )
         else:
             with client.messages.stream(
                 model=model,
@@ -256,6 +292,8 @@ def _complete_api(
                 output_config={"effort": effort or "high"},
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
+                for text in stream.text_stream:
+                    _emit(text)
                 message = stream.get_final_message()
     except MonteurAIError:
         raise
@@ -285,15 +323,29 @@ def _complete_cli(
     model: str,
     effort: str | None,
     json_schema: dict | None,
+    on_delta: Callable[[str], None] | None = None,
 ) -> str:
-    """The Claude Code CLI backend: one headless, tool-less completion.
+    """The Claude Code CLI backend: one headless, tool-less completion, STREAMED.
 
     The prompt travels on stdin (immune to Windows quoting and command-line
-    length limits); ``--output-format json`` yields one result object whose
-    ``result`` field is the completion text. All tools are disabled — this
-    is a pure completion, the CLI must not touch files. With ``json_schema``
-    the schema is appended to the prompt as an instruction (the CLI cannot
-    enforce structured output); the caller's JSON parsing stays the judge.
+    length limits). We run ``--output-format stream-json`` so the CLI emits one
+    JSON event per line as it works — thinking tokens, then the answer's text
+    deltas, then a final ``result`` object. Streaming buys two things a single
+    blocking ``--output-format json`` run could not:
+
+    * **an inactivity timeout instead of a wall-clock one** — a big storyboard
+      compose can reason for minutes; as long as the CLI keeps emitting events
+      it is alive, and only a truly silent process (nothing for
+      :data:`CLI_TIMEOUT_SECONDS`) is killed. The old hard 300s wall was
+      terminating working builds;
+    * **honest progress** — ``on_delta`` receives the answer's text as it is
+      written, so a caller (the storyboard build) can show Claude composing
+      live instead of a frozen spinner.
+
+    All tools are disabled — this is a pure completion, the CLI must not touch
+    files. With ``json_schema`` the schema is appended to the prompt as an
+    instruction (the CLI cannot enforce structured output); the caller's JSON
+    parsing stays the judge.
     """
     exe = _cli_path()
     if exe is None:
@@ -309,7 +361,9 @@ def _complete_cli(
         exe,
         "-p",
         "--output-format",
-        "json",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
         "--model",
         model,
         "--tools",
@@ -321,44 +375,109 @@ def _complete_cli(
     if effort:
         cmd += ["--effort", effort]
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            input=prompt.encode("utf-8"),
-            capture_output=True,
-            timeout=CLI_TIMEOUT_SECONDS,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise MonteurAIError(
-            f"the 'claude' CLI did not answer within {int(CLI_TIMEOUT_SECONDS)}s "
-            "— try again, or set ANTHROPIC_API_KEY to use the API instead"
-        ) from exc
     except OSError as exc:
         raise MonteurAIError(f"could not run the 'claude' CLI: {exc}") from exc
-    stdout = result.stdout.decode("utf-8", "replace")
-    if result.returncode != 0:
-        tail = result.stderr.decode("utf-8", "replace").strip()[-500:]
+
+    # Drain stdout/stderr on threads (so a full pipe can never deadlock) and
+    # feed the prompt on another (a prompt bigger than the pipe buffer would
+    # block a same-thread write until the CLI drains it). The main loop then
+    # consumes stdout lines with an inactivity deadline.
+    lines: "queue.Queue[str | None]" = queue.Queue()
+    stderr_buf: list[bytes] = []
+
+    def _pump_stdout() -> None:
+        try:
+            for raw in proc.stdout:  # type: ignore[union-attr]
+                lines.put(raw.decode("utf-8", "replace"))
+        finally:
+            lines.put(None)  # sentinel: stdout closed → the run is over
+
+    def _pump_stderr() -> None:
+        try:
+            stderr_buf.append(proc.stderr.read())  # type: ignore[union-attr]
+        except OSError:
+            pass
+
+    def _feed_stdin() -> None:
+        try:
+            proc.stdin.write(prompt.encode("utf-8"))  # type: ignore[union-attr]
+            proc.stdin.close()  # type: ignore[union-attr]
+        except OSError:
+            pass
+
+    for target in (_pump_stdout, _pump_stderr, _feed_stdin):
+        threading.Thread(target=target, daemon=True).start()
+
+    result_text: str | None = None
+    failed = False
+    started = time.monotonic()
+    while True:
+        try:
+            line = lines.get(timeout=CLI_TIMEOUT_SECONDS)
+        except queue.Empty:
+            proc.kill()
+            raise MonteurAIError(
+                f"the 'claude' CLI went silent for {int(CLI_TIMEOUT_SECONDS)}s "
+                "— try again, or set ANTHROPIC_API_KEY to use the API instead"
+            )
+        if line is None:
+            break  # stdout closed — the run finished
+        if time.monotonic() - started > CLI_TOTAL_CAP_SECONDS:
+            proc.kill()
+            raise MonteurAIError(
+                "the 'claude' CLI ran too long — try again, or set "
+                "ANTHROPIC_API_KEY to use the API instead"
+            )
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            evt = json.loads(line)
+        except ValueError:
+            continue  # non-JSON noise (shouldn't happen on stdout) — skip
+        if not isinstance(evt, dict):
+            continue
+        etype = evt.get("type")
+        if etype == "stream_event":
+            inner = evt.get("event") or {}
+            if inner.get("type") == "content_block_delta":
+                delta = inner.get("delta") or {}
+                if delta.get("type") == "text_delta":
+                    chunk = delta.get("text") or ""
+                    if chunk and on_delta is not None:
+                        try:
+                            on_delta(chunk)
+                        except Exception:  # a UI callback must never kill a build
+                            pass
+        elif etype == "result":
+            if evt.get("is_error") or evt.get("subtype") not in (None, "success"):
+                failed = True
+            if isinstance(evt.get("result"), str):
+                result_text = evt["result"]
+
+    proc.wait()
+    stderr_text = (b"".join(stderr_buf)).decode("utf-8", "replace").strip()
+    if result_text is None:
+        if proc.returncode:
+            raise MonteurAIError(
+                f"the 'claude' CLI exited with code {proc.returncode}: "
+                f"{stderr_text[-500:] or 'no error output'}"
+            )
         raise MonteurAIError(
-            f"the 'claude' CLI exited with code {result.returncode}: "
-            f"{tail or stdout.strip()[-500:] or 'no error output'}"
+            "the 'claude' CLI produced no result"
+            + (f": {stderr_text[-300:]!r}" if stderr_text else "")
         )
-    try:
-        data = json.loads(stdout)
-    except ValueError as exc:
+    if failed:
         raise MonteurAIError(
-            f"the 'claude' CLI returned unparseable output: {stdout[:200]!r}"
-        ) from exc
-    if (
-        not isinstance(data, dict)
-        or data.get("is_error")
-        or data.get("subtype") != "success"
-        or not isinstance(data.get("result"), str)
-    ):
-        detail = data.get("result") if isinstance(data, dict) else None
-        raise MonteurAIError(
-            f"the 'claude' CLI reported a failure: {detail or stdout[:200]!r}"
+            f"the 'claude' CLI reported a failure: {result_text[:200]!r}"
         )
-    text = data["result"]
-    return _strip_fences(text) if json_schema is not None else text
+    return _strip_fences(result_text) if json_schema is not None else result_text
 
 
 def complete(
@@ -369,6 +488,7 @@ def complete(
     max_tokens: int = 16000,
     effort: str | None = None,
     json_schema: dict | None = None,
+    on_delta: Callable[[str], None] | None = None,
 ) -> str:
     """One Claude text completion through the selected backend.
 
@@ -383,6 +503,12 @@ def complete(
     ``max_tokens`` applies to the API backend; the CLI manages its own
     output limits.
 
+    ``on_delta`` (optional) receives the answer's text in the chunks the
+    model streams it — so a long completion (a storyboard compose) can show
+    live progress instead of a frozen spinner. It is best-effort: an
+    exception from the callback never fails the completion, and a backend
+    with nothing to stream simply never calls it.
+
     Raises :class:`MonteurAIError` when no backend is available or the
     request fails; a safety refusal on the API path raises too, while on
     the CLI path it simply comes back as text.
@@ -395,9 +521,15 @@ def complete(
             max_tokens=max_tokens,
             effort=effort,
             json_schema=json_schema,
+            on_delta=on_delta,
         )
     return _complete_cli(
-        prompt, system=system, model=model, effort=effort, json_schema=json_schema
+        prompt,
+        system=system,
+        model=model,
+        effort=effort,
+        json_schema=json_schema,
+        on_delta=on_delta,
     )
 
 
