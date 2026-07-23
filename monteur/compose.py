@@ -117,6 +117,21 @@ COMPOSE_SCHEMA: dict = {
                 "required": ["dip", "text"],
             },
         },
+        # Optional: the WHOLE cut's base tempo, in seconds per shot. Fast cuts
+        # to music suit SOME videos (energetic montages) but are wrong for
+        # others (a landscape / nature trailer must breathe throughout). Claude
+        # knows which from the brief, so it sets the baseline here; omit to keep
+        # the engine's fast default. `holds` still stretches specific shots on
+        # top. The timeline never moves — a slower pace means FEWER, longer
+        # shots over the same length, not a longer cut.
+        "pace": {
+            "type": "number",
+            "description": (
+                "optional base seconds-per-shot for the whole cut (~1 = fast "
+                "music-video energy, ~4-6 = calm / cinematic / landscape). Omit "
+                "for the engine's fast default."
+            ),
+        },
         # Optional: cast slots that should HOLD (breathe) — a hero, an
         # establishing wide, an emotional beat. Each stretches by absorbing
         # the short punchy shots right after it, so ONE shot breathes while
@@ -225,18 +240,22 @@ CRAFT_BRIEFS: dict[str, str] = {
 }
 
 _SYSTEM = (
-    "You are a seasoned film editor composing a montage. The beat grid is "
-    "LOCKED: slot positions and the black dips and fades are final — your job "
-    "is the casting (which clip, from which second, fills each slot), the act "
-    "titles on the dips, and the story they add up to. You have ONE more lever: "
-    "a great cut is NOT uniformly fast — it breathes. You may mark a few slots "
-    "to HOLD (a hero, an establishing wide, an emotional or resolving beat); a "
-    "held shot lingers by absorbing the quick shots right after it, so it lands "
-    "while everything else stays punchy. Hold sparingly and on purpose — an "
-    "opener that sets the place, the shot on the drop, the closer that resolves. "
-    "Tell ONE story across the whole cut; every act must escalate or breathe on "
-    "purpose. Use only clips and windows from the inventory — never invent "
-    "material. Write titles in the language of the editor's brief and labels."
+    "You are a seasoned film editor composing a montage. The beat grid's slot "
+    "positions and the black dips and fades are final — your job is the casting "
+    "(which clip, from which second, fills each slot), the act titles on the "
+    "dips, and the story they add up to. You also own the PACING, and this "
+    "matters enormously: fast cuts to music are right for SOME pieces "
+    "(energetic montages, hype reels) and completely wrong for others — a "
+    "landscape or nature trailer, a mood piece, a cinematic teaser must breathe "
+    "throughout, and a couple of long shots among fast ones fool no one. Read "
+    "the brief and the footage and decide: set `pace` (base seconds per shot) "
+    "to the tempo the CONTENT wants — small for energy, large (4-6s) for calm — "
+    "and mark specific slots in `holds` to linger even longer (a hero, the shot "
+    "on the drop, the resolving closer). A slower pace means fewer, longer "
+    "shots over the same length — the cut never gets longer. Tell ONE story "
+    "across the whole cut; every act must escalate or breathe on purpose. Use "
+    "only clips and windows from the inventory — never invent material. Write "
+    "titles in the language of the editor's brief and labels."
 )
 
 
@@ -527,16 +546,20 @@ def _build_prompt(context: dict, style: str, brief: str) -> str:
             "story around them."
         )
     parts.append(
-        "BREATHING (optional `holds`): the slot lengths in the dossier are the "
-        "engine's fast default. A cut that is fast everywhere is exhausting — "
-        "the best ones breathe. In `holds`, list the FEW slots that should hold "
-        "long: an establishing opener, the hero shot on the drop, an emotional "
-        "beat, the resolving closer. Each held slot stretches by absorbing the "
-        "quick shots right after it (so the total length and the beats never "
-        "move — you are trading a burst of quick shots for one that lingers). "
-        "Give each a `slot` and optionally `seconds` (~2-6). Use it sparingly: "
-        "2-4 holds in a typical cut, none if the piece is meant to be relentless "
-        "(a hard-hitting short). NEVER hold a `locked` slot."
+        "PACING — the single biggest quality lever, DECIDE IT DELIBERATELY: the "
+        "slot lengths in the dossier are the engine's FAST default (cut to the "
+        "music). That is right for an energetic montage and WRONG for a calm "
+        "piece. First set `pace` = the base seconds per shot the CONTENT wants: "
+        "~1 for hype/energy, ~2-3 for a steady story, ~4-6 for a landscape / "
+        "nature / mood / cinematic cut that should breathe THROUGHOUT (do not "
+        "leave such a piece on the fast default — a few long shots among fast "
+        "ones is not enough). Omit `pace` only when the fast default is genuinely "
+        "right. Then, ON TOP of the base, use `holds` for the FEW slots that "
+        "should linger even longer — an establishing opener, the hero on the "
+        "drop, the resolving closer (each a `slot` + optional `seconds`). Both "
+        "levers only ever GROW a shot by absorbing the quick shots after it, so "
+        "the total length and the beats never move — a slower pace just means "
+        "fewer, longer shots. NEVER re-pace or hold a `locked` slot."
     )
     parts.append(
         "DOSSIER (slots in record order; dips are black title slots; the "
@@ -706,21 +729,27 @@ def _enforce_no_reuse(
     return resourced, stuck
 
 
-def _apply_holds(plan: MontagePlan, holds, locked=frozenset()) -> None:
-    """Stretch composer-chosen slots into breathing holds — in place.
+def _apply_pacing(plan: MontagePlan, pace, holds, locked=frozenset()) -> None:
+    """Re-pace a composed cut to the composer's own tempo — in place.
 
-    Each entry in ``holds`` names a cast ``slot`` (and an optional target
-    ``seconds``) the composer wants to breathe: a hero, an establishing wide,
-    an emotional beat. The held shot grows by ABSORBING the short shots right
+    Two levers, one mechanism (a shot GROWS by absorbing the quick shots right
     after it, so the timeline never moves — total duration, the beat grid, the
-    music sync, the dips and the SFX all stay put; the cut simply trades a run
-    of quick shots for ONE that holds, while the rest stays punchy. Safe by
-    construction: a hold that would cross a dip, a locked slot, the
-    ``montage._MAX_CUT_SECONDS`` ceiling, or the source clip's own available
-    footage just absorbs fewer shots (or none — a pure no-op).
+    music sync, the dips and the SFX all stay put; a slower feel means FEWER,
+    longer shots over the same length, not a longer cut):
+
+    * ``pace`` (seconds) sets the WHOLE cut's base shot length. Fast cuts to
+      music suit energetic montages; a landscape / nature / cinematic piece
+      must breathe throughout, and one or two long shots among fast ones do
+      nothing — so the composer, which knows the brief, can slow EVERY shot.
+      ``None`` keeps the engine's fast default.
+    * ``holds`` names specific slots to hold even longer on top of the base
+      (a hero, the shot on the drop, the resolving closer).
+
+    Safe by construction: a shot that would cross a black dip, a locked
+    (arrangement) slot, the ``montage._MAX_CUT_SECONDS`` ceiling, or the source
+    clip's own available footage simply absorbs fewer shots (or none). A
+    ``None`` pace with no holds is a pure no-op.
     """
-    if not holds:
-        return
     entries = plan.entries
     n = len(entries)
     if n < 2:
@@ -730,8 +759,22 @@ def _apply_holds(plan: MontagePlan, holds, locked=frozenset()) -> None:
     def _dip_at(t: float) -> bool:
         return any(abs(t - ds) <= _DROP_MATCH for ds in dip_starts)
 
+    def _clamp(sec: float) -> float:
+        return max(_BREATHE_MIN, min(_montage._MAX_CUT_SECONDS, sec))
+
+    # the per-slot target length: the base pace on every slot, then holds
+    # override with their (usually longer) target.
     targets: dict[int, float] = {}
-    for h in holds:
+    if pace is not None:
+        try:
+            base = _clamp(float(pace))
+        except (TypeError, ValueError):
+            base = None
+        if base is not None:
+            for i in range(n):
+                if i not in locked:
+                    targets[i] = base
+    for h in holds or []:
         if not isinstance(h, dict):
             continue
         try:
@@ -742,10 +785,10 @@ def _apply_holds(plan: MontagePlan, holds, locked=frozenset()) -> None:
             continue
         raw = h.get("seconds")
         try:
-            sec = float(raw) if raw is not None else _BREATHE_TARGET
+            sec = _clamp(float(raw)) if raw is not None else _clamp(_BREATHE_TARGET)
         except (TypeError, ValueError):
-            sec = _BREATHE_TARGET
-        targets[s] = max(_BREATHE_MIN, min(_montage._MAX_CUT_SECONDS, sec))
+            sec = _clamp(_BREATHE_TARGET)
+        targets[s] = max(targets.get(s, 0.0), sec)  # a hold never shortens the base
     if not targets:
         return
 
@@ -755,7 +798,7 @@ def _apply_holds(plan: MontagePlan, holds, locked=frozenset()) -> None:
     while i < n:
         e = entries[i]
         target = targets.get(i)
-        if target is not None:
+        if target is not None and (e.record_end - e.record_start) < target - _EPS:
             avail = (e.clip_duration or 0.0) - e.source_start
             new_end = e.record_end
             j = i + 1
@@ -783,10 +826,12 @@ def _apply_holds(plan: MontagePlan, holds, locked=frozenset()) -> None:
 
     if held:
         plan.entries = merged
-        plan.notes.append(
-            f"breathing: {held} shot{'s' if held != 1 else ''} held long so the "
-            "cut isn't uniformly fast"
+        note = (
+            f"pacing: cut re-paced to ~{float(pace):g}s shots"
+            if pace is not None
+            else f"breathing: {held} shot{'s' if held != 1 else ''} held long"
         )
+        plan.notes.append(note)
 
 
 def _apply_cast(
@@ -1122,11 +1167,11 @@ def compose_montage(
         ],
         allow_repeats=allow_repeats,
     )
-    # contextual breathing: after the cast, let the shots Claude marked HOLD
-    # stretch by absorbing the quick shots after them — so the cut is not
-    # uniformly fast; a hero/establishing/emotional beat gets room while the
-    # rest stays punchy. Runs on the cast entries (original slot indices).
-    _apply_holds(plan, data.get("holds") or [], locked)
+    # re-pace after the cast: the composer sets the whole cut's base tempo
+    # (fast for energy, slow for a landscape / cinematic piece — it knows the
+    # brief) and marks specific shots to hold even longer. Runs on the cast
+    # entries (original slot indices); the timeline length never moves.
+    _apply_pacing(plan, data.get("pace"), data.get("holds") or [], locked)
     if not context.get("vision"):
         plan.notes.append(
             'no vision labels — run "Let Claude watch your clips" '

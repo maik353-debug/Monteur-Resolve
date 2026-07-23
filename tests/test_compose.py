@@ -670,10 +670,10 @@ def _hold_plan(n=6, clip_dur=60.0):
 
 
 def test_apply_holds_absorbs_the_next_shots_keeping_total_length():
-    from monteur.compose import _apply_holds
+    from monteur.compose import _apply_pacing
 
     plan = _hold_plan(6)  # six 1s shots, total 6s
-    _apply_holds(plan, [{"slot": 1, "seconds": 3.0}])
+    _apply_pacing(plan, None, [{"slot": 1, "seconds": 3.0}])
     assert len(plan.entries) == 4  # slot 1 absorbed two neighbours to reach 3s
     assert plan.entries[0].record_end == 1.0  # slot 0 untouched
     held = plan.entries[1]
@@ -687,37 +687,37 @@ def test_apply_holds_absorbs_the_next_shots_keeping_total_length():
 
 
 def test_apply_holds_never_crosses_a_dip():
-    from monteur.compose import _apply_holds
+    from monteur.compose import _apply_pacing
 
     plan = _hold_plan(6)
     plan.dips = [(2.0, 0.5)]  # a black title dip at the slot-1/2 boundary
-    _apply_holds(plan, [{"slot": 1, "seconds": 4.0}])
+    _apply_pacing(plan, None, [{"slot": 1, "seconds": 4.0}])
     assert len(plan.entries) == 6  # the hold can't swallow the dip -> no-op
 
 
 def test_apply_holds_respects_the_source_footage():
-    from monteur.compose import _apply_holds
+    from monteur.compose import _apply_pacing
 
     # slot 1 starts at 1.0s of a 2.5s clip -> only 1.5s of footage to hold on
     plan = _hold_plan(6, clip_dur=2.5)
-    _apply_holds(plan, [{"slot": 1, "seconds": 5.0}])
+    _apply_pacing(plan, None, [{"slot": 1, "seconds": 5.0}])
     assert len(plan.entries) == 6  # can't stretch past the clip -> no-op
 
 
 def test_apply_holds_never_touches_a_locked_slot():
-    from monteur.compose import _apply_holds
+    from monteur.compose import _apply_pacing
 
     plan = _hold_plan(6)
-    _apply_holds(plan, [{"slot": 1, "seconds": 3.0}], locked={1})
+    _apply_pacing(plan, None, [{"slot": 1, "seconds": 3.0}], locked={1})
     assert len(plan.entries) == 6  # the editor's arrangement is final
 
 
 def test_apply_holds_caps_at_the_max_cut_ceiling():
     from monteur import montage as _m
-    from monteur.compose import _apply_holds
+    from monteur.compose import _apply_pacing
 
     plan = _hold_plan(20)  # twenty 1s shots
-    _apply_holds(plan, [{"slot": 0, "seconds": 999.0}])  # absurd target
+    _apply_pacing(plan, None, [{"slot": 0, "seconds": 999.0}])  # absurd target
     assert plan.entries[0].record_end <= _m._MAX_CUT_SECONDS + 1e-6
 
 
@@ -725,23 +725,53 @@ def test_prompt_and_schema_offer_breathing_holds():
     from monteur.compose import COMPOSE_SCHEMA, _build_prompt, compose_context
 
     assert "holds" in COMPOSE_SCHEMA["properties"]
+    assert "pace" in COMPOSE_SCHEMA["properties"]
     reports = make_reports()
     plan = plan_montage(reports, make_music(), cut_lead=0.0)
     prompt = _build_prompt(compose_context(plan, reports, make_music()), "auto", "")
-    assert "BREATHING" in prompt and "hold" in prompt.lower()
+    assert "PACING" in prompt and "hold" in prompt.lower()
 
 
-def test_compose_forwards_the_composers_holds(monkeypatch):
+def test_compose_forwards_the_composers_pace_and_holds(monkeypatch):
     captured: dict = {}
     monkeypatch.setattr(
-        "monteur.compose._apply_holds",
-        lambda plan, holds, locked=frozenset(): captured.__setitem__("holds", holds),
+        "monteur.compose._apply_pacing",
+        lambda plan, pace, holds, locked=frozenset(): captured.update(
+            {"pace": pace, "holds": holds}
+        ),
     )
     reply = empty_reply()
-    reply["holds"] = [{"slot": 2, "seconds": 4.0}]
+    reply["pace"] = 4.0
+    reply["holds"] = [{"slot": 2, "seconds": 6.0}]
     monkeypatch.setattr(ai, "complete", fake_complete(reply))
     compose_montage(make_reports(), make_music(), cut_lead=0.0)
-    assert captured["holds"] == [{"slot": 2, "seconds": 4.0}]
+    assert captured["pace"] == 4.0
+    assert captured["holds"] == [{"slot": 2, "seconds": 6.0}]
+
+
+def test_apply_pacing_slows_the_whole_cut_keeping_total_length():
+    # a global pace re-paces EVERY shot (a landscape trailer that must breathe),
+    # not just a couple — fewer, longer shots over the SAME length
+    from monteur.compose import _apply_pacing
+
+    plan = _hold_plan(12)  # twelve 1s shots, total 12s
+    _apply_pacing(plan, 3.0, [])
+    assert len(plan.entries) == 4  # ~3s shots throughout
+    assert all(
+        e.record_end - e.record_start == pytest.approx(3.0) for e in plan.entries
+    )
+    assert plan.entries[-1].record_end == 12.0  # total length unchanged
+    assert any("re-paced" in n for n in plan.notes)
+
+
+def test_apply_pacing_holds_extend_beyond_the_base_pace():
+    from monteur.compose import _apply_pacing
+
+    plan = _hold_plan(12)
+    _apply_pacing(plan, 2.0, [{"slot": 0, "seconds": 4.0}])
+    # slot 0 holds 4s (its own hold), the rest fall on the 2s base
+    assert plan.entries[0].record_end == pytest.approx(4.0)
+    assert plan.entries[1].record_end - plan.entries[1].record_start == pytest.approx(2.0)
 
 
 def test_prompt_has_no_daylight_lines_without_classes(monkeypatch):
