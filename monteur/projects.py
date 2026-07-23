@@ -129,6 +129,15 @@ class Project:
     #: and the composer reads each note as the editor's instruction for that
     #: exact moment. Survives re-analysis because it is keyed by path + time.
     moment_notes: dict = field(default_factory=dict)
+    #: Editor's own per-moment RATING, keyed like ``moment_notes`` (path|start),
+    #: 1..5 (0 / absent = no override, the machine score decides). Set from the
+    #: Moments inspector; biases the moment's casting weight and rides into the
+    #: composer's dossier so Claude favours the moments the editor loves.
+    moment_ratings: dict = field(default_factory=dict)
+    #: Editor's own per-moment EXCLUDE set, keyed the same way (value ``True``).
+    #: An excluded moment is dropped before planning — it can never land in the
+    #: cut — so the editor can veto a stretch outright from the inspector.
+    moment_excludes: dict = field(default_factory=dict)
     #: Lightweight index of saved cuts — each ``{"id","created_at","label",
     #: "shots","duration"}``. The full plan snapshot lives in
     #: ``versions/<id>.json``, so listing history never reads every plan.
@@ -184,6 +193,14 @@ def project_to_dict(project: Project) -> dict:
         data["clip_notes"] = {str(k): str(v) for k, v in project.clip_notes.items()}
     if project.moment_notes:  # only-when-non-empty: keeps noteless manifests unchanged
         data["moment_notes"] = {str(k): str(v) for k, v in project.moment_notes.items()}
+    if project.moment_ratings:  # only-when-non-empty
+        data["moment_ratings"] = {
+            str(k): int(v) for k, v in project.moment_ratings.items() if int(v or 0)
+        }
+    if project.moment_excludes:  # only-when-non-empty
+        data["moment_excludes"] = {
+            str(k): True for k, v in project.moment_excludes.items() if v
+        }
     if project.migrated_from_draft:
         data["migrated_from_draft"] = project.migrated_from_draft
     # only-when-not-default, so existing "cut" manifests stay byte-identical
@@ -241,6 +258,16 @@ def project_from_dict(data: dict) -> Project:
             str(k): str(v)
             for k, v in (data.get("moment_notes") or {}).items()
         } if isinstance(data.get("moment_notes"), dict) else {},
+        moment_ratings={
+            str(k): int(v)
+            for k, v in (data.get("moment_ratings") or {}).items()
+            if str(v).lstrip("-").isdigit() and int(v)
+        } if isinstance(data.get("moment_ratings"), dict) else {},
+        moment_excludes={
+            str(k): True
+            for k, v in (data.get("moment_excludes") or {}).items()
+            if v
+        } if isinstance(data.get("moment_excludes"), dict) else {},
     )
 
 

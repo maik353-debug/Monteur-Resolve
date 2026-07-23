@@ -1502,13 +1502,23 @@ class TestWizardStepsUi:
             "function renderClipsReview",
             "function momentCard",
             "function clipMomentsGroup",
-            "function saveMomentNote",
-            "/moment-note",
             # each moment card shows the frame at that moment's start
             '"&t=" + encodeURIComponent(String(m.start',
             # the tab is labelled Moments, and renders on navigation
             'label: "Moments"',
             'if (step.key === "clips") renderClipsReview();',
+            # the inspector side panel: preview, rate, exclude, note -> one write
+            'id="cre-moment-insp"',
+            "function openMomentInspector",
+            "function renderMomentStars",
+            "function setMomentMark",
+            "/moment-mark",
+            'id="mi-stars"',
+            'id="mi-exclude"',
+            'id="mi-play"',
+            # clicking a card opens the inspector; leaving the step closes it
+            "openMomentInspector(clipPath, m, card)",
+            "else closeMomentInspector();",
         ):
             assert needle in html, needle
 
@@ -2542,6 +2552,62 @@ class TestClipsReviewApi:
         with pytest.raises(urllib.error.HTTPError) as exc:
             _post(f"{server}/api/projects/{project.id}/moment-note", {"path": clip})
         assert exc.value.code == 400
+
+    def test_clips_carry_rating_and_exclude(self, server, tmp_path):
+        project, clip = self._seed(tmp_path)
+        data = _get(f"{server}/api/projects/{project.id}/clips")
+        m = data["clips"][0]["moments"][0]
+        assert m["rating"] == 0 and m["exclude"] is False  # unmarked by default
+
+    def test_moment_mark_sets_rating_exclude_note_partially(self, server, tmp_path):
+        from monteur import projects
+
+        project, clip = self._seed(tmp_path)
+        key = f"{os.path.abspath(clip)}|1.00"
+        # rate it
+        r = _post(f"{server}/api/projects/{project.id}/moment-mark",
+                  {"path": clip, "start": 1.0, "rating": 5})
+        assert r["rating"] == 5
+        # ...then exclude it in a SEPARATE partial write — rating must survive
+        r = _post(f"{server}/api/projects/{project.id}/moment-mark",
+                  {"path": clip, "start": 1.0, "exclude": True})
+        assert r["exclude"] is True
+        reloaded = projects.load_project(project.id)
+        assert reloaded.moment_ratings[key] == 5  # untouched by the exclude write
+        assert reloaded.moment_excludes[key] is True
+        # GET /clips reflects both on the right moment
+        moments = _get(f"{server}/api/projects/{project.id}/clips")["clips"][0]["moments"]
+        assert moments[0]["rating"] == 5 and moments[0]["exclude"] is True
+        # clearing: rating 0 removes it, exclude False removes it
+        _post(f"{server}/api/projects/{project.id}/moment-mark",
+              {"path": clip, "start": 1.0, "rating": 0, "exclude": False})
+        reloaded = projects.load_project(project.id)
+        assert key not in reloaded.moment_ratings and key not in reloaded.moment_excludes
+
+    def test_moment_mark_rating_out_of_range_is_400(self, server, tmp_path):
+        project, clip = self._seed(tmp_path)
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(f"{server}/api/projects/{project.id}/moment-mark",
+                  {"path": clip, "start": 1.0, "rating": 9})
+        assert exc.value.code == 400
+
+    def test_excluded_moment_is_dropped_before_planning(self, server, tmp_path):
+        # the veto is real: an excluded moment never reaches plan_montage
+        from monteur import projects
+        from monteur.web import server as srv
+
+        project, clip = self._seed(tmp_path)
+        _post(f"{server}/api/projects/{project.id}/moment-mark",
+              {"path": clip, "start": 1.0, "exclude": True})
+        project = projects.load_project(project.id)
+        reports = projects.load_reports(project)
+        job = {"progress": [], "cancel": __import__("threading").Event()}
+        payload = {"project": project.id, "folder": "", "max_duration": 8,
+                   "audio": "original", "learn": False}
+        plan, used_reports, _music, _vision = srv._plan_from_payload(job, payload)
+        starts = [round(m.start, 2) for r in used_reports for m in r.moments]
+        assert 1.0 not in starts  # the excluded moment is gone
+        assert 5.0 in starts      # the kept one remains
 
     def test_clip_note_still_persists(self, server, tmp_path):
         # the clip-level note endpoint stays (still feeds the composer per clip)

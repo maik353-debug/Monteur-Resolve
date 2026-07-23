@@ -628,6 +628,28 @@ def test_compose_context_omits_moment_note_when_none():
     assert not any("note" in i for i in context["inventory"])  # only-when-present
 
 
+def test_editor_moment_rating_reaches_the_inventory_and_prompt(monkeypatch):
+    calls: list[dict] = []
+    monkeypatch.setattr(ai, "complete", fake_complete(empty_reply(), calls))
+    reports = make_reports()
+    reports[0].moments[0].user_rating = 5  # the editor loves this beat
+    compose_montage(reports, make_music(), cut_lead=0.0)
+    prompt = calls[0]["prompt"]
+    context = json.loads(prompt[prompt.index("{") : prompt.rindex("}") + 1])
+    rated = [i for i in context["inventory"] if i.get("rating")]
+    assert len(rated) == 1 and rated[0]["rating"] == 5
+    assert "THE EDITOR'S MOMENT RATINGS" in prompt
+
+
+def test_compose_context_omits_moment_rating_when_none():
+    from monteur.compose import compose_context
+
+    reports = make_reports()
+    plan = plan_montage(reports, make_music(), cut_lead=0.0)
+    context = compose_context(plan, reports, make_music())
+    assert not any("rating" in i for i in context["inventory"])
+
+
 def test_prompt_has_no_daylight_lines_without_classes(monkeypatch):
     calls: list[dict] = []
     monkeypatch.setattr(ai, "complete", fake_complete(empty_reply(), calls))

@@ -386,6 +386,9 @@ def compose_context(
             # strongest steer, in the editor's words, for this exact stretch.
             if getattr(m, "user_note", "").strip():
                 item["note"] = m.user_note.strip()
+            # ...and the editor's star rating (1..5), a direct preference signal
+            if getattr(m, "user_rating", 0):
+                item["rating"] = int(m.user_rating)
             inventory.append(item)
 
     # The editor's own per-clip notes (from the Clips review step) — Claude's
@@ -475,6 +478,14 @@ def _build_prompt(context: dict, style: str, brief: str) -> str:
             "steer there is: weight it ABOVE every machine label for that "
             "moment, favour casting the moment where its note asks, and honour "
             "it in the story you tell."
+        )
+    if any(item.get("rating") for item in context.get("inventory") or []):
+        parts.append(
+            "THE EDITOR'S MOMENT RATINGS: an inventory moment may carry a "
+            "`rating` from 1 to 5 — the editor's own star rating for that "
+            "stretch. Strongly favour casting the 4- and 5-star moments (the "
+            "editor loves them) and lean away from the 1- and 2-star ones; a "
+            "rating outweighs the machine `score` for that moment."
         )
     if any(slot.get("locked") for slot in context.get("slots") or []):
         parts.append(

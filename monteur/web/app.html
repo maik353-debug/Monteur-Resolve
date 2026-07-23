@@ -1340,8 +1340,47 @@ svg text.axis {
 .moment-card .mc-thumb { position: relative; aspect-ratio: 16 / 9; background: var(--panel-2); overflow: hidden; }
 .moment-card .mc-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .moment-card .mc-time { position: absolute; left: 6px; bottom: 6px; font-family: var(--mono); font-size: 10px; padding: 2px 6px; border-radius: 999px; background: rgba(20, 20, 24, 0.72); color: #fff; }
+.moment-card { text-align: left; cursor: pointer; color: inherit; font: inherit; transition: border-color 0.12s, box-shadow 0.12s, opacity 0.12s; }
+.moment-card:hover { border-color: var(--accent); }
+.moment-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .moment-card .mc-body { display: flex; flex-direction: column; gap: 7px; padding: 10px 11px; }
 .moment-card.has-note { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.moment-card.excluded { opacity: 0.5; }
+.moment-card.excluded .mc-thumb img { filter: grayscale(1); }
+.moment-card .mc-badges { position: absolute; right: 6px; top: 6px; display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+.mc-badge { font-family: var(--mono); font-size: 9px; letter-spacing: 0.03em; text-transform: uppercase; padding: 2px 6px; border-radius: 999px; background: rgba(20, 20, 24, 0.72); color: #fff; }
+.mc-badge.star { background: var(--ember); color: #1b1b1e; }
+.mc-badge.excl { background: var(--warning); color: #1b1b1e; }
+/* the moment inspector: a right-side drawer over the Moments grid */
+.moment-insp {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(380px, 92vw); z-index: 60;
+  background: var(--panel); border-left: 1px solid var(--line); box-shadow: -8px 0 24px rgba(0, 0, 0, 0.28);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.moment-insp .mi-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.moment-insp .mi-title { font-weight: 650; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.moment-insp .mi-head .btn { margin-left: auto; flex: none; }
+.moment-insp .mi-body { padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+.moment-insp .mi-preview { position: relative; aspect-ratio: 16 / 9; border-radius: 8px; overflow: hidden; background: var(--panel-2); }
+.moment-insp .mi-preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.moment-insp .mi-play {
+  position: absolute; inset: 0; margin: auto; width: 48px; height: 48px; border-radius: 50%; border: 0;
+  background: rgba(20, 20, 24, 0.66); color: #fff; font-size: 18px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; transition: background 0.12s;
+}
+.moment-insp .mi-play:hover { background: var(--accent); }
+.moment-insp .mi-readlabel { font-size: 13px; color: var(--ink); margin-bottom: 7px; }
+.moment-insp .mi-field { display: flex; flex-direction: column; gap: 6px; }
+.moment-insp .mi-flabel { font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-2); }
+.moment-insp .mi-flabel .help-small { text-transform: none; font-weight: 400; letter-spacing: 0; }
+.moment-insp .mi-stars { display: flex; gap: 3px; }
+.moment-insp .mi-star { border: 0; background: transparent; cursor: pointer; font-size: 24px; line-height: 1; color: var(--line-2); padding: 0 1px; transition: color 0.1s, transform 0.1s; }
+.moment-insp .mi-star:hover { transform: scale(1.12); }
+.moment-insp .mi-star.on { color: var(--ember); }
+.moment-insp .mi-check { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+.moment-insp .mi-check input { width: 16px; height: 16px; accent-color: var(--accent); }
+.moment-insp .cc-note { min-height: 84px; }
+@media (prefers-reduced-motion: reduce) { .moment-insp .mi-star:hover { transform: none; } }
 .radio-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 6px 0 14px; }
 @media (max-width: 700px) { .radio-cards { grid-template-columns: 1fr; } }
 .radio-cards.stack { grid-template-columns: 1fr; gap: 6px; margin-bottom: 6px; }
@@ -2519,6 +2558,31 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         </div>
         <p class="scan-note" id="cre-clips-msg" role="status" hidden></p>
         <div class="clips-grid" id="cre-clips-grid"></div>
+        <aside class="moment-insp" id="cre-moment-insp" hidden aria-label="Moment inspector">
+          <div class="mi-head">
+            <span class="mi-title" id="mi-title">Moment</span>
+            <button class="btn ghost small" id="mi-close" type="button" aria-label="Close the inspector">&times;</button>
+          </div>
+          <div class="mi-body">
+            <div class="mi-preview">
+              <img id="mi-thumb" alt="">
+              <button class="mi-play" id="mi-play" type="button" aria-label="Play this moment"><span>&#9658;</span></button>
+            </div>
+            <div class="mi-read" id="mi-read"></div>
+            <div class="mi-field">
+              <span class="mi-flabel">Your rating</span>
+              <div class="mi-stars" id="mi-stars" role="group" aria-label="Rate this moment"></div>
+              <span class="help-small">Claude favours your 4–5★ moments and leans away from 1–2★. Click a star again to clear it.</span>
+            </div>
+            <div class="mi-field">
+              <label class="mi-check"><input type="checkbox" id="mi-exclude"> <span>Exclude this moment from the cut</span></label>
+            </div>
+            <div class="mi-field">
+              <span class="mi-flabel">Your note <span class="help-small">(Claude reads it when composing)</span></span>
+              <textarea id="mi-note" class="cc-note" maxlength="500" placeholder="e.g. THE hero shot — open on it; or: skip, too shaky"></textarea>
+            </div>
+          </div>
+        </aside>
       </section>
 
       <section class="wiz-step" id="cre-step-2" hidden aria-labelledby="cre-h2">
@@ -6212,7 +6276,8 @@ function creShowStep(n, focusHeading) {
   }
   if (step.key === "options") syncContinueHint(); // fresh look at "would this click rebuild?"
   if (step.key === "color") applyGradePreview(); // reflect the grade on the controls
-  if (step.key === "clips") renderClipsReview(); // the analyzed clips + Claude's notes
+  if (step.key === "clips") renderClipsReview(); // the analyzed moments + Claude's read
+  else closeMomentInspector(); // the moment drawer belongs to the Moments step
   if (focusHeading && $(step.head)) $(step.head).focus();
 }
 
@@ -7674,14 +7739,26 @@ function creNavTo(n) {
 
 /* ===== Moments review step: the MOMENTS the sift pulls, + Claude's read =====
    These are the stretches that actually land in the cut. Fetches the project's
-   stored analysis (GET /api/projects/<id>/clips) — grouped by clip, but the
-   card IS the moment: its own thumbnail (the frame at its start), what Claude
-   saw in THAT stretch, and your per-moment note (saved on blur to
-   /moment-note), which the composer reads weighted above the machine labels.
-   Works on a re-opened project because it reads the PROJECT store. */
+   stored analysis (GET /api/projects/<id>/clips) — grouped by clip. Each card
+   IS a moment: its own frame + what Claude saw + your marks (rating / excluded
+   / note). Clicking a card opens the inspector (a side panel) to preview it,
+   rate it, exclude it, or write the note — all saved to /moment-mark and read
+   by the composer. Works on a re-opened project (it reads the PROJECT store). */
+function momentStateBadges(card, m) {
+  // reflect the editor's marks on the card face (recomputed on every change)
+  var badges = card.querySelector(".mc-badges");
+  clear(badges);
+  card.classList.toggle("excluded", !!m.exclude);
+  card.classList.toggle("has-note", !!(m.note && m.note.trim()));
+  card.classList.toggle("rated", !!m.rating);
+  if (m.exclude) badges.appendChild(el("span", "mc-badge excl", "excluded"));
+  if (m.rating) badges.appendChild(el("span", "mc-badge star", "★ " + m.rating));
+  if (m.note && m.note.trim()) badges.appendChild(el("span", "mc-badge note", "note"));
+}
+
 function momentCard(clipPath, m) {
-  var card = el("div", "clip-card moment-card");
-  if (m.note) card.classList.add("has-note");
+  var card = el("button", "clip-card moment-card");
+  card.type = "button";
   var thumb = el("div", "mc-thumb");
   var img = document.createElement("img");
   img.loading = "lazy";
@@ -7689,6 +7766,7 @@ function momentCard(clipPath, m) {
   img.src = thumbUrl(clipPath, 240) + "&t=" + encodeURIComponent(String(m.start || 0));
   thumb.appendChild(img);
   thumb.appendChild(el("span", "mc-time", fmt1(m.start) + "–" + fmt1(m.end) + "s"));
+  thumb.appendChild(el("div", "mc-badges"));
   card.appendChild(thumb);
   var body = el("div", "mc-body");
   var labelText = m.label || (m.role || m.tags && m.tags.length
@@ -7700,16 +7778,9 @@ function momentCard(clipPath, m) {
   if (m.daylight) meta.appendChild(el("span", "cc-chip", m.daylight));
   if (m.shot_size) meta.appendChild(el("span", "cc-chip", m.shot_size));
   if (meta.children.length) body.appendChild(meta);
-  if (m.tags && m.tags.length) body.appendChild(el("div", "cc-tags", m.tags.join(" · ")));
-  body.appendChild(el("div", "cc-note-lbl", "Your note on this moment (Claude reads it when composing):"));
-  var ta = document.createElement("textarea");
-  ta.className = "cc-note";
-  ta.value = m.note || "";
-  ta.maxLength = 500;
-  ta.placeholder = "e.g. this is THE hero shot — open on it; or: skip, too shaky";
-  ta.addEventListener("blur", function () { saveMomentNote(clipPath, m.start, ta.value.trim(), card); });
-  body.appendChild(ta);
   card.appendChild(body);
+  momentStateBadges(card, m);
+  card.addEventListener("click", function () { openMomentInspector(clipPath, m, card); });
   return card;
 }
 
@@ -7732,6 +7803,92 @@ function clipMomentsGroup(c) {
   group.appendChild(grid);
   return group;
 }
+
+/* ---- the moment inspector (side panel): preview, rate, exclude, note ---- */
+var momentInsp = { clipPath: "", m: null, card: null };
+
+function openMomentInspector(clipPath, m, card) {
+  momentInsp = { clipPath: clipPath, m: m, card: card };
+  var panel = $("cre-moment-insp");
+  if (!panel) return;
+  $("mi-title").textContent = baseName(clipPath) + " · " + fmt1(m.start) + "–" + fmt1(m.end) + "s";
+  var img = $("mi-thumb");
+  img.src = thumbUrl(clipPath, 480) + "&t=" + encodeURIComponent(String(m.start || 0));
+  // Claude's read
+  var read = $("mi-read");
+  clear(read);
+  read.appendChild(el("div", "mi-readlabel", m.label || "Not Claude-checked yet — “Let Claude check” on the Footage page"));
+  var chips = el("div", "cc-meta");
+  if (m.role) chips.appendChild(el("span", "cc-chip role", m.role));
+  if ((m.hero || 0) >= 0.6) chips.appendChild(el("span", "cc-chip hero", "hero " + Number(m.hero).toFixed(1)));
+  if (m.daylight) chips.appendChild(el("span", "cc-chip", m.daylight));
+  if (m.shot_size) chips.appendChild(el("span", "cc-chip", m.shot_size));
+  if (typeof m.score === "number") chips.appendChild(el("span", "cc-chip", "score " + Number(m.score).toFixed(2)));
+  if (chips.children.length) read.appendChild(chips);
+  if (m.tags && m.tags.length) read.appendChild(el("div", "cc-tags", m.tags.join(" · ")));
+  renderMomentStars(m.rating || 0);
+  $("mi-exclude").checked = !!m.exclude;
+  var note = $("mi-note");
+  note.value = m.note || "";
+  panel.hidden = false;
+  document.documentElement.classList.add("mi-open");
+  $("mi-close").focus();
+}
+
+function closeMomentInspector() {
+  var panel = $("cre-moment-insp");
+  if (panel) panel.hidden = true;
+  document.documentElement.classList.remove("mi-open");
+}
+
+function renderMomentStars(rating) {
+  var host = $("mi-stars");
+  clear(host);
+  for (var i = 1; i <= 5; i++) {
+    (function (n) {
+      var star = el("button", "mi-star" + (n <= rating ? " on" : ""));
+      star.type = "button";
+      star.textContent = "★";
+      star.setAttribute("aria-label", n + " star" + (n === 1 ? "" : "s"));
+      star.addEventListener("click", function () {
+        // click the current rating again to clear it (back to the machine score)
+        setMomentMark({ rating: (momentInsp.m && momentInsp.m.rating === n) ? 0 : n });
+      });
+      host.appendChild(star);
+    })(i);
+  }
+}
+
+/* one write for every inspector control — a partial /moment-mark update. Keeps
+   the in-memory moment + the card badges in sync so nothing needs a refetch. */
+function setMomentMark(patch) {
+  var m = momentInsp.m;
+  if (!m || !cre.projectId || !momentInsp.clipPath) return;
+  var body = { path: momentInsp.clipPath, start: m.start };
+  ["note", "rating", "exclude"].forEach(function (k) {
+    if (k in patch) body[k] = patch[k];
+  });
+  api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/moment-mark",
+    { method: "POST", body: body })
+    .then(function (res) {
+      if ("rating" in patch) { m.rating = res.rating; renderMomentStars(m.rating || 0); }
+      if ("exclude" in patch) m.exclude = res.exclude;
+      if ("note" in patch) m.note = res.note;
+      if (momentInsp.card) momentStateBadges(momentInsp.card, m);
+    })
+    .catch(function (err) { toast(err && err.message ? err.message : String(err), "error"); });
+}
+
+$("mi-close").addEventListener("click", closeMomentInspector);
+document.addEventListener("keydown", function (e) {
+  if (e.key === "Escape" && !$("cre-moment-insp").hidden) closeMomentInspector();
+});
+$("mi-exclude").addEventListener("change", function () { setMomentMark({ exclude: $("mi-exclude").checked }); });
+$("mi-note").addEventListener("blur", function () { setMomentMark({ note: $("mi-note").value.trim() }); });
+$("mi-play").addEventListener("click", function () {
+  var m = momentInsp.m;
+  if (m) openMiniPlayer(momentInsp.clipPath, m.start, m.end, m.label || baseName(momentInsp.clipPath));
+});
 
 function renderClipsReview() {
   var grid = $("cre-clips-grid");
@@ -7758,14 +7915,6 @@ function renderClipsReview() {
     .catch(function (err) {
       creNote("cre-clips-msg", err && err.message ? err.message : String(err), true);
     });
-}
-
-function saveMomentNote(path, start, note, card) {
-  if (!cre.projectId || !path) return;
-  api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/moment-note",
-    { method: "POST", body: { path: path, start: start, note: note } })
-    .then(function () { if (card) card.classList.toggle("has-note", !!note); })
-    .catch(function () { /* best-effort — the note re-saves on the next blur */ });
 }
 
 // any option edit may change whether entering the Storyboard would rebuild —

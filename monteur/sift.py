@@ -228,6 +228,10 @@ class Moment:
     # start) and is applied onto the moment before the composer reads it, so it
     # survives a re-sift and never bloats the cached report.
     user_note: str = ""
+    # The editor's own RATING for this moment (1..5; 0 = no override). Transient
+    # like ``user_note`` — it lives in ``project.moment_ratings`` and is applied
+    # before the composer reads it, biasing this moment's casting weight.
+    user_rating: int = 0
 
 
 @dataclass
@@ -1067,6 +1071,7 @@ def _moment_from_dict(m: dict) -> Moment:
         exit_focus=_tuple2_or_none(m.get("exit_focus")),
         phash=int(m.get("phash", 0) or 0),
         user_note=str(m.get("user_note", "")),
+        user_rating=int(m.get("user_rating", 0) or 0),
     )
 
 

@@ -1918,16 +1918,32 @@ def _plan_from_payload(job: dict, payload: dict):
                 note = notes_by_path.get(os.path.abspath(report.path))
                 if note:
                     report.user_note = str(note)
-        # ...and the finer per-MOMENT notes (Moments review step) ride onto the
-        # individual moments (keyed by path + start), so the composer reads the
-        # editor's instruction for each stretch that lands in the cut
+        # ...and the finer per-MOMENT marks (Moments inspector) ride onto the
+        # individual moments (keyed by path + start): the editor's note and
+        # rating land on each moment for the composer, and EXCLUDED moments are
+        # dropped here so they can never reach the plan or the cut.
         moment_notes = project.moment_notes or {}
-        if moment_notes:
+        moment_ratings = project.moment_ratings or {}
+        moment_excludes = project.moment_excludes or {}
+        if moment_notes or moment_ratings:
             for report in reports:
                 for m in report.moments:
-                    note = moment_notes.get(_moment_key(report.path, m.start))
-                    if note:
-                        m.user_note = str(note)
+                    key = _moment_key(report.path, m.start)
+                    if moment_notes.get(key):
+                        m.user_note = str(moment_notes[key])
+                    if moment_ratings.get(key):
+                        m.user_rating = int(moment_ratings[key])
+                        # a rating also nudges the heuristic score, so a loved
+                        # moment wins (and a disliked one loses) even on a plain
+                        # cut without the composer. 3 stars = neutral (no change)
+                        m.score = max(0.0, min(1.0,
+                            float(m.score) + (m.user_rating - 3) * 0.1))
+        if moment_excludes:
+            for report in reports:
+                report.moments = [
+                    m for m in report.moments
+                    if not moment_excludes.get(_moment_key(report.path, m.start))
+                ]
         with _JOBS_LOCK:
             job["progress"].append(
                 {"stage": "cache", "name": f"using {len(reports)} analyzed clips"}
@@ -4000,6 +4016,10 @@ class MonteurHandler(BaseHTTPRequestHandler):
                 pid = rest[: -len("/moment-note")]
                 if pid and "/" not in pid:
                     return lambda: self._project_moment_note(pid)
+            elif rest.endswith("/moment-mark") and method == "POST":
+                pid = rest[: -len("/moment-mark")]
+                if pid and "/" not in pid:
+                    return lambda: self._project_moment_mark(pid)
             elif rest.endswith("/series/save") and method == "POST":
                 pid = rest[: -len("/series/save")]
                 if pid and "/" not in pid:
@@ -5293,10 +5313,13 @@ class MonteurHandler(BaseHTTPRequestHandler):
             raise ApiError(404, f"unknown project {project_id!r}")
         reports = projects.load_reports(project)
         notes = project.moment_notes or {}
+        ratings = project.moment_ratings or {}
+        excludes = project.moment_excludes or {}
         clips = []
         for report in reports:
             moments = []
             for m in sorted(report.moments, key=lambda m: m.start):
+                key = _moment_key(report.path, m.start)
                 moments.append({
                     "start": round(float(m.start), 2),
                     "end": round(float(m.end), 2),
@@ -5307,7 +5330,9 @@ class MonteurHandler(BaseHTTPRequestHandler):
                     "hero": round(float(m.hero or 0.0), 2),
                     "daylight": str(m.daylight or ""),
                     "shot_size": str(m.shot_size or ""),
-                    "note": str(notes.get(_moment_key(report.path, m.start), "")),
+                    "note": str(notes.get(key, "")),
+                    "rating": int(ratings.get(key, 0) or 0),
+                    "exclude": bool(excludes.get(key, False)),
                 })
             clips.append({
                 "path": report.path,
@@ -5376,6 +5401,67 @@ class MonteurHandler(BaseHTTPRequestHandler):
         project.moment_notes = notes
         projects.save_project(project)
         self._send_json({"ok": True, "key": key, "note": note})
+
+    def _project_moment_mark(self, project_id: str) -> None:
+        """POST /api/projects/<id>/moment-mark {path, start, note?, rating?, exclude?}.
+
+        The Moments inspector's one write: a PARTIAL update of a moment's editor
+        marks (keyed by clip path + start). Only the fields present in the body
+        change — ``note`` (str, "" clears), ``rating`` (1..5, 0 clears the
+        override), ``exclude`` (bool). Everything survives re-analysis and rides
+        onto the moment before the composer reads it (an excluded moment is
+        dropped before planning)."""
+        from monteur import projects
+
+        project = projects.load_project(project_id)
+        if project is None:
+            raise ApiError(404, f"unknown project {project_id!r}")
+        payload = self._read_json()
+        path = str(payload.get("path") or "").strip()
+        if not path:
+            raise ApiError(400, "missing 'path' (the clip the moment is in)")
+        if payload.get("start") is None:
+            raise ApiError(400, "missing 'start' (the moment's start time)")
+        try:
+            start = float(payload.get("start"))
+        except (TypeError, ValueError):
+            raise ApiError(400, "'start' must be a number (the moment's start time)")
+        key = _moment_key(path, start)
+        result = {"ok": True, "key": key}
+        if "note" in payload:
+            note = str(payload.get("note") or "").strip()
+            notes = dict(project.moment_notes or {})
+            if note:
+                notes[key] = note
+            else:
+                notes.pop(key, None)
+            project.moment_notes = notes
+            result["note"] = note
+        if "rating" in payload:
+            try:
+                rating = int(payload.get("rating") or 0)
+            except (TypeError, ValueError):
+                raise ApiError(400, "'rating' must be a whole number 0..5")
+            if not 0 <= rating <= 5:
+                raise ApiError(400, "'rating' must be between 0 and 5 (0 clears it)")
+            ratings = dict(project.moment_ratings or {})
+            if rating:
+                ratings[key] = rating
+            else:
+                ratings.pop(key, None)
+            project.moment_ratings = ratings
+            result["rating"] = rating
+        if "exclude" in payload:
+            exclude = bool(payload.get("exclude"))
+            excludes = dict(project.moment_excludes or {})
+            if exclude:
+                excludes[key] = True
+            else:
+                excludes.pop(key, None)
+            project.moment_excludes = excludes
+            result["exclude"] = exclude
+        projects.save_project(project)
+        self._send_json(result)
 
     def _project_series(self, project_id: str) -> None:
         """POST /api/projects/<id>/series {series:N, canvas?} — long form -> Shorts.
