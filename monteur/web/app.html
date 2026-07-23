@@ -1098,11 +1098,15 @@ svg text.axis {
 }
 .ws-iconbtn.small { width: auto; padding: 0 9px; font-size: 11px; font-weight: 600; }
 .ws-iconbtn:hover { color: var(--ink); }
-.ws-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: 250px minmax(0, 1fr) 300px; }
-@media (max-width: 1000px) { .ws-grid { grid-template-columns: 200px minmax(0, 1fr) 240px; } }
+.ws-grid { flex: 1; min-height: 0; display: grid;
+  grid-template-columns: var(--ws-exp, 250px) 6px minmax(0, 1fr) 6px var(--ws-play, 300px); }
+@media (max-width: 1000px) { .ws-grid { --ws-exp: 200px; --ws-play: 240px; } }
 .ws-col { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .ws-explorer { border-right: 1px solid #000; }
 .ws-playercol { border-left: 1px solid #000; }
+/* draggable pane dividers — a thin strip on each fixed-column boundary */
+.ws-split { cursor: col-resize; z-index: 5; background: #000; transition: background 0.12s; }
+.ws-split:hover, .ws-split.dragging { background: var(--accent); }
 .ws-panelhead {
   display: flex; align-items: center; gap: 8px; flex: none; height: 30px; padding: 0 10px;
   background: var(--topbar); border-bottom: 1px solid #000;
@@ -2255,6 +2259,8 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
               <div class="ws-drophint">Drag videos into the Media Pool &rarr;</div>
             </div>
 
+            <div class="ws-split" data-split="exp" role="separator" aria-orientation="vertical" title="Drag to resize"></div>
+
             <!-- CENTRE: MEDIA POOL (drop target) -->
             <div class="ws-col ws-poolcol">
               <div class="ws-poolhead" id="cre-pool-actions">
@@ -2283,6 +2289,8 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
                 <p class="scan-note" id="cre-vision-msg" role="status" hidden></p>
               </div>
             </div>
+
+            <div class="ws-split" data-split="play" role="separator" aria-orientation="vertical" title="Drag to resize"></div>
 
             <!-- RIGHT: MINI-PLAYER + INSPECTOR -->
             <div class="ws-col ws-playercol">
@@ -6444,6 +6452,35 @@ function wsLoadClip(path, name) {
 }
 
 function wsPause() { var v = $("ws-video"); if (v) { try { v.pause(); } catch (e) { /* nothing loaded */ } } }
+
+/* draggable pane dividers on the Footage workspace: drag the Explorer|Pool or
+   Pool|Player boundary to resize. Each boundary drives a CSS variable on the
+   grid; the flexible centre pool absorbs the change. */
+(function wsSplitters() {
+  var grid = document.querySelector(".ws-grid");
+  if (!grid) return;
+  var active = null;
+  grid.addEventListener("pointerdown", function (e) {
+    var split = e.target.closest ? e.target.closest(".ws-split") : null;
+    if (!split) return;
+    active = split;
+    split.classList.add("dragging");
+    try { split.setPointerCapture(e.pointerId); } catch (x) {}
+    e.preventDefault();
+  });
+  window.addEventListener("pointermove", function (e) {
+    if (!active) return;
+    var r = grid.getBoundingClientRect();
+    if (active.dataset.split === "exp") {
+      grid.style.setProperty("--ws-exp", Math.max(150, Math.min(560, e.clientX - r.left)) + "px");
+    } else {
+      grid.style.setProperty("--ws-play", Math.max(220, Math.min(640, r.right - e.clientX)) + "px");
+    }
+  });
+  function end() { if (active) { active.classList.remove("dragging"); active = null; } }
+  window.addEventListener("pointerup", end);
+  window.addEventListener("pointercancel", end);
+})();
 
 /* the mini-player's own transport: click the frame to play/pause (with a badge
    that pops), a scrub bar along the bottom that fills with playback and seeks
@@ -11212,12 +11249,16 @@ renderLookChips();
 /* the preview frame: a representative shot from the cut (a hero/drop frame
    when there is one, else the middle shot's midpoint) */
 function colorPreviewFrame(plan) {
-  var entries = (plan.entries || []).slice().sort(function (a, b) {
+  // the build result's compact `plan` carries no entries (they live in the full
+  // plan_json); fall back to it so the Color page actually gets a frame.
+  var src = (plan && plan.entries && plan.entries.length)
+    ? plan : ((rev && rev.planJson) || plan || {});
+  var entries = (src.entries || []).slice().sort(function (a, b) {
     return (a.record_start || 0) - (b.record_start || 0);
   });
   if (!entries.length) return;
   var pick = entries[Math.floor(entries.length / 2)];
-  (plan.drop_marks || []).some(function (t) {
+  (src.drop_marks || []).some(function (t) {
     for (var i = 0; i < entries.length; i++) {
       if (t >= (entries[i].record_start || 0) && t < (entries[i].record_end || 0)) {
         pick = entries[i]; return true;
@@ -11230,6 +11271,8 @@ function colorPreviewFrame(plan) {
   if (frame) frame.src = "/api/thumb?clip=" +
     encodeURIComponent(String(pick.clip_path || "")) + "&t=" + mid.toFixed(3) + "&w=640";
 }
+// test seam (like window.monteurScanAnim): drive the colour preview directly
+window.monteurColorFrame = colorPreviewFrame;
 
 $("cre-export-btn").addEventListener("click", exportVideo);
 
