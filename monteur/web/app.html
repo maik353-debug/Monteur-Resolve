@@ -365,7 +365,6 @@ h1, h2, h3, p { margin: 0; }
 .btn.busy .spin { display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 /* the quiet "this click will rebuild" note inside step 2's continue button */
-.btn .rebuild-hint { opacity: 0.7; font-weight: 400; font-size: 0.86em; margin-left: 4px; }
 
 /* ---------- main / welcome -------------------------------------------- */
 .main { flex: 1; overflow-y: auto; min-width: 0; position: relative; }
@@ -936,6 +935,13 @@ svg text.axis {
 .wiz-bar span.on { color: var(--ink); background: var(--surface-2); box-shadow: inset 0 -2px 0 var(--accent); }
 .wiz-bar span.on b { color: var(--accent); border-color: var(--accent); }
 .wiz-bar span.on.done b { color: var(--good); border-color: var(--good); }
+/* the retired "rebuild needed" hint, now a marker on the Storyboard tab: a
+   draft exists but an option changed since it was built (a rebuild is pending) */
+.wiz-bar span.dirty b { color: var(--accent); border-color: var(--accent); }
+.wiz-bar span.dirty::after {
+  content: "\2022"; color: var(--accent); font-size: 16px; line-height: 0; margin-left: -2px;
+  animation: bpPulse 1.4s ease-in-out infinite;
+}
 .wiz-saved { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--ink-muted); margin: 0 0 14px; }
 .wiz-saved-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); flex: none; }
 .wiz-step {
@@ -2393,7 +2399,6 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             <button class="btn" id="cre-scan-btn" type="button" disabled>Analyze selected<span class="spin" aria-hidden="true"></span></button>
             <button class="btn" id="cre-see-btn" type="button" disabled>Check with Claude<span class="spin" aria-hidden="true"></span></button>
             <button class="btn" id="cre-transcribe-btn" type="button" title="Transcribe speech (whisper) so you can search spoken words">Transcribe<span class="spin" aria-hidden="true"></span></button>
-            <button class="btn primary" id="cre-next-1" type="button" hidden>Continue to options &rarr;</button>
           </div>
 
           <div class="ws-grid">
@@ -2491,10 +2496,6 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
         </div>
         <p class="scan-note" id="cre-clips-msg" role="status" hidden></p>
         <div class="clips-grid" id="cre-clips-grid"></div>
-        <div class="wiz-nav">
-          <button class="btn ghost" id="cre-back-clips" type="button">&larr; Back</button>
-          <button class="btn primary" id="cre-next-clips" type="button">Continue to options &rarr;</button>
-        </div>
       </section>
 
       <section class="wiz-step" id="cre-step-2" hidden aria-labelledby="cre-h2">
@@ -2672,10 +2673,6 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             </div>
           </div>
         </details>
-        <div class="wiz-nav">
-          <button class="btn ghost" id="cre-back-2" type="button">← Back</button>
-          <button class="btn primary" id="cre-next-2" type="button">Continue to storyboard →<span class="rebuild-hint" id="cre-next-2-hint" hidden>(rebuild needed)</span></button>
-        </div>
       </section>
 
       <section class="wiz-step" id="cre-step-3" hidden aria-labelledby="cre-h3">
@@ -2687,9 +2684,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           </div>
         </div>
         <div class="wiz-nav">
-          <button class="btn ghost" id="cre-back-3" type="button">← Back</button>
           <button class="btn" id="cre-build-btn" type="button">Rebuild draft<span class="spin" aria-hidden="true"></span></button>
-          <button class="btn primary" id="cre-next-3" type="button" disabled>Continue to color →</button>
         </div>
         <div id="cre-build-panel"></div>
         <div id="cre-build-stage" hidden>
@@ -2848,9 +2843,6 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
               <button class="btn primary" id="cre-dir-apply" type="button" hidden style="margin-top: 10px;">Apply suggestions<span class="spin" aria-hidden="true"></span></button>
             </div>
           </div>
-          <div class="wiz-nav" style="margin-top: 18px;">
-            <button class="btn primary" id="cre-next-3b" type="button" disabled>Continue to color →</button>
-          </div>
         </div>
       </section>
 
@@ -2862,10 +2854,6 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             <h1 id="cre-h4" tabindex="-1">Look &amp; color</h1>
             <p class="wiz-lead">Grade the whole cut on one adjustment layer &mdash; pick a look, then fine-tune. Non-destructive and local; it bakes into Monteur&rsquo;s own export, never the Resolve build.</p>
           </div>
-        </div>
-        <div class="wiz-nav">
-          <button class="btn ghost" id="cre-back-4" type="button">← Back to storyboard</button>
-          <button class="btn primary" id="cre-next-4" type="button">Continue to your cut →</button>
         </div>
 
         <div class="color-block" id="cre-color">
@@ -2907,9 +2895,6 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             <h1 id="cre-h5" tabindex="-1">Your cut</h1>
             <p class="wiz-lead">Send the finished cut out &mdash; a live Resolve timeline, an exported video, or a timeline file. Change the cut in Storyboard; the look lives in Color.</p>
           </div>
-        </div>
-        <div class="wiz-nav">
-          <button class="btn ghost" id="cre-back-5" type="button">← Back to color</button>
         </div>
         <section class="tiles" id="cre-final-tiles" aria-label="Cut summary" style="margin: 14px 0 4px;"></section>
         <p class="sb-story" id="cre-final-story" hidden></p>
@@ -5955,12 +5940,10 @@ function setBuildBusy(on) {
   var btn = $("cre-build-btn");
   btn.classList.toggle("busy", on);
   btn.disabled = on;
-  $("cre-back-3").disabled = on;
   $("cre-arr-apply").disabled = on || !cre.arrange.dirty;
-  // mid-build the draft is in flux — the harvest step waits for it
-  var gate = on || !rev.planJson;
-  $("cre-next-3").disabled = gate;
-  $("cre-next-3b").disabled = gate;
+  // mid-build the draft is in flux — Color/Your cut wait for it; the tab-bar
+  // guard (creNavTo) refuses those pages while the build is running
+  creUpdatePages();
 }
 function setRankBusy(on) {
   var btn = $("cre-rank-btn");
@@ -6144,6 +6127,9 @@ function creUpdatePages() {
     var cls = [];
     if (i === n) cls.push("on");
     if (step.done && step.done()) cls.push("done");
+    // the retired "rebuild needed" hint, now on the Storyboard tab: a draft
+    // exists but an option changed since it was built (opening it rebuilds)
+    if (step.key === "storyboard" && cre.result && rev && rev.planJson && buildIsDirty()) cls.push("dirty");
     b.className = cls.join(" ");
     b.setAttribute("aria-current", i === n ? "step" : "false");
   });
@@ -7009,7 +6995,6 @@ function attachScanJob(jobId) {
       loadPool();
       var n = cre.clips.length;
       toast("Analyzed " + n + (n === 1 ? " clip." : " clips."), "success");
-      if (n) $("cre-next-1").focus();
     },
     onCancelled: function () {
       clearActiveJob();
@@ -7087,7 +7072,6 @@ function runStagedAnalysis(endpoint, opts) {
   $("cre-result").hidden = true;
   $("cre-find-msg").hidden = true;
   clear($("cre-find-results"));
-  $("cre-next-1").hidden = true;
   updateSuggestion();
   // the derived folder still feeds build/storyboard downstream
   $("cre-folder").value = poolScanFolder();
@@ -7186,8 +7170,8 @@ function qualityStrip(clip) {
 function renderClips() {
   var clips = cre.clips || [];
   // the "Full analysis report" grid was removed (the pool cards carry per-clip
-  // status now); only the Continue gating below remains essential.
-  $("cre-next-1").hidden = clips.length === 0;
+  // status now). Forward navigation is the tab bar; the Clips/Options tabs
+  // light (done) via creUpdatePages once clips exist.
   var grid = $("cre-clips");
   if (!grid) return;
   clear(grid);
@@ -7596,9 +7580,10 @@ function creValidateStep2() {
 }
 
 /* the step strip is rendered FROM WIZ_STEPS — add a page to that list and a
-   chip appears here automatically. Free navigation: the page bar jumps
-   DIRECTLY to any page (raw creShowStep — never a rebuild); the next/back
-   buttons below stay as a linear convenience. */
+   chip appears here automatically. The page bar (the tab bar at the bottom)
+   is the wizard's ONLY navigation now: the old per-page next/back buttons are
+   retired. Every chip routes through creNavTo, which carries the side-effects
+   those buttons used to (see below). */
 (function renderWizBar() {
   var nav = $("wiz-bar");
   if (!nav) return;
@@ -7611,16 +7596,42 @@ function creValidateStep2() {
     span.appendChild(document.createTextNode(step.label));
     span.setAttribute("role", "button");
     span.setAttribute("tabindex", "0");
-    span.addEventListener("click", function () { creShowStep(i, true); });
+    span.addEventListener("click", function () { creNavTo(i); });
     span.addEventListener("keydown", function (e) {
       if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
-        e.preventDefault(); creShowStep(i, true);
+        e.preventDefault(); creNavTo(i);
       }
     });
     nav.appendChild(span);
   });
 })();
-$("cre-next-1").addEventListener("click", function () { saveProject(); creShowStep(creStepIndex("clips"), true); });
+
+/* The tab bar is the wizard's navigation, so the side-effects the retired
+   next/back buttons carried now ride on the page jump itself:
+   - leaving Footage/Clips/Options persists the project (as "Continue" did);
+   - entering the Storyboard builds the draft on the FIRST visit, and rebuilds
+     when an option changed since the last build (exactly what "Continue to
+     storyboard" did) — unchanged options are pure navigation;
+   - Color and Your cut still need a built draft (the old buttons were disabled
+     until one existed), and wait while a build is running.
+   Programmatic jumps elsewhere keep calling creShowStep directly (no build). */
+function creNavTo(n) {
+  var key = creStepKey(n);
+  var fromKey = creStepKey(cre.step);
+  if (fromKey === "footage" || fromKey === "clips" || fromKey === "options") saveProject();
+  if (key === "storyboard") {
+    if (!creValidateStep2()) { creShowStep(creStepIndex("options"), true); return; }
+    var needsBuild = !(cre.result && rev.planJson) || buildIsDirty();
+    creShowStep(creStepIndex("storyboard"), true);
+    if (needsBuild) startBuild(null);
+    return;
+  }
+  if (key === "color" || key === "cut") {
+    if (buildPanel.running()) { toast("The draft is still building — one moment."); return; }
+    if (!(cre.result && rev.planJson)) { toast("Build your draft first — open the Storyboard to assemble the cut."); return; }
+  }
+  creShowStep(n, true);
+}
 
 /* ===== Clips review step: the analyzed clips + Claude's read + your note ===
    Fetches the project's stored analysis (GET /api/projects/<id>/clips), one
@@ -7690,41 +7701,12 @@ function saveClipNote(path, note, card) {
     .catch(function () { /* best-effort — the note re-saves on the next blur */ });
 }
 
-$("cre-back-clips").addEventListener("click", function () { creShowStep(creStepIndex("footage"), true); });
-$("cre-next-clips").addEventListener("click", function () { saveProject(); creShowStep(creStepIndex("options"), true); });
-// any option edit in step 2 may flip the continue button's rebuild hint —
+// any option edit may change whether entering the Storyboard would rebuild —
+// refresh the tab bar's rebuild marker (creUpdatePages, via syncContinueHint).
 // chips bubble "click", text fields "input", selects/checkboxes "change"
 ["click", "input", "change"].forEach(function (kind) {
   $("cre-step-2").addEventListener(kind, function () { syncContinueHint(); });
 });
-$("cre-back-2").addEventListener("click", function () { creShowStep(creStepIndex("footage"), true); });
-$("cre-next-2").addEventListener("click", function () {
-  if (!creValidateStep2()) return;
-  // the FIRST visit builds — the result IS the working draft. After that,
-  // returning with unchanged options is pure navigation: the draft (with
-  // every revise/apply/adjust since the build) is simply shown again.
-  // Only a changed option — or step 3's "Rebuild draft" — builds anew.
-  if (cre.result && rev.planJson && !buildIsDirty()) {
-    creShowStep(creStepIndex("storyboard"), true);
-    return;
-  }
-  creShowStep(creStepIndex("storyboard"), true);
-  startBuild(null);
-});
-$("cre-back-3").addEventListener("click", function () { creShowStep(creStepIndex("options"), true); });
-/* Storyboard -> Color (the grade), then Color -> Your cut (the harvest) */
-function creGoColor() {
-  if (!cre.result || !rev.planJson) return;
-  creShowStep(creStepIndex("color"), true);
-}
-$("cre-next-3").addEventListener("click", creGoColor);
-$("cre-next-3b").addEventListener("click", creGoColor);
-$("cre-back-4").addEventListener("click", function () { creShowStep(creStepIndex("storyboard"), true); });
-$("cre-next-4").addEventListener("click", function () {
-  if (!cre.result || !rev.planJson) return;
-  creShowStep(creStepIndex("cut"), true);
-});
-$("cre-back-5").addEventListener("click", function () { creShowStep(creStepIndex("color"), true); });
 
 /* ---- step 3: "Add / reorder scenes" — the board's order editor ---------
    The palette + lane from the old Arrange step, re-homed into the
@@ -8028,11 +8010,10 @@ function buildFingerprint() { return buildFingerprintOf(creBuildBody()); }
 function buildIsDirty() {
   return !cre.buildFp || buildFingerprint() !== cre.buildFp;
 }
-/* step 2's continue button whispers when the click will rebuild a draft */
-function syncContinueHint() {
-  var hasDraft = !!(cre.result && rev && rev.planJson);
-  $("cre-next-2-hint").hidden = !(hasDraft && buildIsDirty());
-}
+/* the Storyboard tab whispers (a pulsing dot) when opening it would rebuild:
+   a draft exists but an option changed since it was built. creUpdatePages
+   paints the marker; this just re-runs it after an Options edit. */
+function syncContinueHint() { creUpdatePages(); }
 
 function renderCreResult(data) {
   var plan = data.plan || {};
@@ -8103,9 +8084,8 @@ function renderCreResult(data) {
   $("cre-result").hidden = false;
   $("cre-history").hidden = !cre.projectId; // saved cuts have a restorable history
   renderSeriesStrip(); // shows the Short picker when a series is active
-  // the harvest step (4: Your cut) is reachable once a draft exists
-  $("cre-next-3").disabled = false;
-  $("cre-next-3b").disabled = false;
+  // a draft now exists — light the Color/Your cut tabs (creNavTo lets them in)
+  creUpdatePages();
 }
 
 /* ================= Build stage: live feedback during the build =========
@@ -9516,9 +9496,9 @@ function creResetRevise() {
   $("cre-sb-music").hidden = true;
   $("cre-notes-block").hidden = true;
   $("cre-revise").hidden = true;
-  // no plan — the harvest step has nothing to harvest
-  $("cre-next-3").disabled = true;
-  $("cre-next-3b").disabled = true;
+  // no plan — the Color/Your cut tabs have nothing to grade or harvest
+  // (creNavTo gates them on a draft; refresh their lit/done state)
+  creUpdatePages();
   clear($("cre-final-tiles"));
   $("cre-final-story").hidden = true;
   $("cre-rev-rationale").hidden = true;

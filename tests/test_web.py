@@ -1189,8 +1189,12 @@ class TestWizardStepsUi:
         assert html.index('id="cre-step-1"') < html.index('id="cre-step-2"') \
             < html.index('id="cre-step-3"') < html.index('id="cre-step-4"') \
             < html.index('id="cre-step-5"')
-        # entering the storyboard runs the build — the working draft
-        assert 'creShowStep(creStepIndex("storyboard"), true);\n  startBuild(null);' in html
+        # entering the storyboard runs the build — the working draft. The tab
+        # bar is the navigation now, so the build rides on creNavTo's jump.
+        assert (
+            'creShowStep(creStepIndex("storyboard"), true);\n'
+            "    if (needsBuild) startBuild(null);" in html
+        )
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_storyboard_step_holds_the_creative_tools(self):
@@ -1212,11 +1216,12 @@ class TestWizardStepsUi:
             'id="cre-rev-brief"',
             'id="cre-dir-btn"',
             'id="cre-dir-apply"',
-            # the path onward — the storyboard now leads to the Color page
-            'id="cre-next-3"',
-            "Continue to color",
+            # the manual rebuild stays; forward nav is the tab bar now
+            # (the retired "Continue to color" button is gone)
+            'id="cre-build-btn"',
         ):
             assert needle in step3, needle
+        assert 'id="cre-next-3"' not in step3  # retired: the tab bar navigates
         # harvest controls do NOT live in the storyboard
         for absent in (
             'id="cre-resolve-btn"',
@@ -1363,13 +1368,11 @@ class TestWizardStepsUi:
             'id="cre-look-chips"',
             'id="cg-brightness"',
             'id="cre-color-frame"',
-            # navigation: back to storyboard, on to the cut
-            'id="cre-back-4"',
-            "Back to storyboard",
-            'id="cre-next-4"',
-            "Continue to your cut",
         ):
             assert needle in step4, needle
+        # navigation is the tab bar now — the page's own next/back buttons are gone
+        assert 'id="cre-back-4"' not in step4
+        assert 'id="cre-next-4"' not in step4
         # the Color page is JUST the grade — no harvest, no storyboard
         for absent in (
             'id="cre-export-btn"',
@@ -1398,11 +1401,10 @@ class TestWizardStepsUi:
             'id="cre-kit-btn"',
             'id="cre-save-draft"',
             'id="cre-draft-name"',
-            # the way back — to the Color page
-            'id="cre-back-5"',
-            "Back to color",
         ):
             assert needle in step5, needle
+        # navigation is the tab bar now — the page's own Back button is gone
+        assert 'id="cre-back-5"' not in step5
         # NO storyboard, NO revise, NO director block, NO grade in the harvest
         for absent in (
             'id="cre-sb-board"',
@@ -1488,7 +1490,8 @@ class TestWizardStepsUi:
             "function clipReviewCard",
             "function saveClipNote",
             "/clip-note",
-            'creShowStep(creStepIndex("clips"), true)',  # footage Continue -> clips
+            # the Clips page renders when the tab bar navigates onto it
+            'if (step.key === "clips") renderClipsReview();',
         ):
             assert needle in html, needle
 
@@ -7361,7 +7364,7 @@ class TestPlayoutAcceptance:
             page.goto(server)
             page.click("#pm-new")  # enter the create workflow from the Home hub
             _pool_scan(page, self.DEMO)
-            page.wait_for_selector("#cre-next-1", state="visible", timeout=120_000)
+            page.wait_for_selector("#wbar-1.done", timeout=120_000)  # footage analyzed
             page.wait_for_function(
                 "document.getElementById('cre-proxy-status')"
                 ".textContent.indexOf('Playback ready') === 0",
@@ -7370,11 +7373,11 @@ class TestPlayoutAcceptance:
             page.screenshot(path=str(shots / "playout-step1-proxies.png"))
 
             # ---- step 2 -> 3: build the draft ------------------------------
-            page.click("#cre-next-1")
-            page.click("#cre-next-clips")  # footage -> clips -> options
+            page.click("#wbar-2")
+            page.click("#wbar-3")  # footage -> clips -> options, via the tab bar
             page.click("#audio-original")  # no song: fast + deterministic
             page.fill("#cre-maxlen", "12")
-            page.click("#cre-next-2")  # entering the storyboard builds
+            page.click("#wbar-4")  # entering the storyboard builds
             page.wait_for_selector(
                 "#cre-strip-blocks .tl-block", state="visible", timeout=180_000
             )
@@ -7556,12 +7559,12 @@ class TestPlayoutAcceptance:
             page.goto(server)
             page.click("#pm-new")  # enter the create workflow from the Home hub
             _pool_scan(page, self.DEMO)
-            page.wait_for_selector("#cre-next-1", state="visible", timeout=120_000)
-            page.click("#cre-next-1")
-            page.click("#cre-next-clips")  # footage -> clips -> options
+            page.wait_for_selector("#wbar-1.done", timeout=120_000)  # footage analyzed
+            page.click("#wbar-2")
+            page.click("#wbar-3")  # footage -> clips -> options, via the tab bar
             page.fill("#cre-music", f"{self.DEMO}/song.wav")
             page.fill("#cre-maxlen", "12")
-            page.click("#cre-next-2")
+            page.click("#wbar-4")
             page.wait_for_selector(
                 "#cre-strip-blocks .tl-block", state="visible", timeout=180_000
             )
@@ -7642,10 +7645,17 @@ class TestNoRebuildOnCleanReturn:
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_continue_handler_skips_a_clean_rebuild(self):
         html = _APP_HTML.read_text(encoding="utf-8")
-        # clean draft -> pure navigation, no job
-        assert "if (cre.result && rev.planJson && !buildIsDirty())" in html
-        # ...and the dirty/no-draft path still builds exactly as before
-        assert 'creShowStep(creStepIndex("storyboard"), true);\n  startBuild(null);' in html
+        # the tab-bar jump to the storyboard builds ONLY when there's no draft
+        # yet, or an option changed since the last build — a clean draft is
+        # pure navigation, no job
+        assert (
+            "var needsBuild = !(cre.result && rev.planJson) || buildIsDirty();"
+            in html
+        )
+        assert (
+            'creShowStep(creStepIndex("storyboard"), true);\n'
+            "    if (needsBuild) startBuild(null);" in html
+        )
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_fingerprint_is_stored_on_build_success_and_resume(self):
@@ -7674,14 +7684,20 @@ class TestNoRebuildOnCleanReturn:
         )
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
-    def test_step2_continue_carries_the_quiet_hint(self):
+    def test_storyboard_tab_marks_a_pending_rebuild(self):
         html = _APP_HTML.read_text(encoding="utf-8")
-        assert 'id="cre-next-2-hint"' in html
-        assert "(rebuild needed)" in html
-        # the hint lives INSIDE the continue button and starts hidden
-        button = html.split('id="cre-next-2"', 1)[1].split("</button>", 1)[0]
-        assert 'id="cre-next-2-hint" hidden' in button
-        # ...and is refreshed on step entry and on step-2 edits
+        # the retired "(rebuild needed)" hint that lived inside the continue
+        # button is now a pulsing marker ON the Storyboard tab chip
+        assert 'id="cre-next-2-hint"' not in html
+        assert "(rebuild needed)" not in html
+        assert ".wiz-bar span.dirty" in html  # the tab marker's styling
+        # creUpdatePages paints it when a draft exists but an option changed
+        assert (
+            'step.key === "storyboard" && cre.result && rev && rev.planJson '
+            "&& buildIsDirty()" in html
+        )
+        assert "function syncContinueHint() { creUpdatePages(); }" in html
+        # ...refreshed on step entry and on step-2 edits
         assert 'if (step.key === "options") syncContinueHint();' in html
         assert '$("cre-step-2").addEventListener(kind' in html
 
@@ -7720,16 +7736,16 @@ class TestNoRebuildOnCleanReturn:
             page.goto(server)
             page.click("#pm-new")  # enter the create workflow from the Home hub
             _pool_scan(page, self.DEMO)
-            page.wait_for_selector("#cre-next-1", state="visible", timeout=120_000)
+            page.wait_for_selector("#wbar-1.done", timeout=120_000)  # footage analyzed
 
             # ---- step 2 -> 3: the ONE initial build --------------------------
             # WITH music: the revise autosave keeps the music path, so the
             # reload+resume leg below restores a resumable, valid wizard
-            page.click("#cre-next-1")
-            page.click("#cre-next-clips")  # footage -> clips -> options
+            page.click("#wbar-2")
+            page.click("#wbar-3")  # footage -> clips -> options, via the tab bar
             page.fill("#cre-music", f"{self.DEMO}/song.wav")
             page.fill("#cre-maxlen", "12")
-            page.click("#cre-next-2")
+            page.click("#wbar-4")  # entering the storyboard builds
             page.wait_for_selector(
                 "#cre-strip-blocks .tl-block", state="visible", timeout=180_000
             )
@@ -7737,32 +7753,30 @@ class TestNoRebuildOnCleanReturn:
             board_1 = page.evaluate(board_js)
             page.screenshot(path=str(shots / "norebuild-01-first-build.png"))
 
-            # ---- back to options, change NOTHING, continue: NO build job ----
-            page.click("#cre-back-3")
+            # ---- back to options, change NOTHING, return: NO build job ----
+            page.click("#wbar-3")  # storyboard -> options, via the tab bar
             page.wait_for_selector("#cre-step-2", state="visible")
-            assert page.is_hidden("#cre-next-2-hint")  # clean: no rebuild note
-            page.locator("#cre-next-2").scroll_into_view_if_needed()
+            assert not page.locator("#wbar-4.dirty").count()  # clean: no rebuild mark
             page.screenshot(path=str(shots / "norebuild-02-options-clean.png"))
-            page.click("#cre-next-2")
+            page.click("#wbar-4")
             page.wait_for_selector("#cre-strip-blocks .tl-block", state="visible")
             page.wait_for_timeout(800)  # a rebuild would POST immediately
             assert len(build_posts) == 1, "clean navigation must never rebuild"
             assert page.evaluate(board_js) == board_1  # the board is identical
             page.screenshot(path=str(shots / "norebuild-03-clean-return.png"))
 
-            # ---- change pace: the hint appears, continue rebuilds ------------
+            # ---- change pace: the tab marks dirty, returning rebuilds --------
             # (pace lives in the Fine-tune block now — open it first)
-            page.click("#cre-back-3")
+            page.click("#wbar-3")
             page.evaluate("document.getElementById('cre-finetune').open = true")
             page.click("#pace-2")
-            page.wait_for_selector("#cre-next-2-hint", state="visible")
-            page.locator("#cre-next-2").scroll_into_view_if_needed()
+            page.wait_for_selector("#wbar-4.dirty")  # the Storyboard tab whispers
             page.screenshot(path=str(shots / "norebuild-04-dirty-hint.png"))
             with page.expect_request(
                 lambda r: r.method == "POST" and "/api/create/build" in r.url,
                 timeout=10_000,
             ):
-                page.click("#cre-next-2")
+                page.click("#wbar-4")
             page.wait_for_selector(
                 "#cre-strip-blocks .tl-block", state="visible", timeout=180_000
             )
@@ -7780,10 +7794,10 @@ class TestNoRebuildOnCleanReturn:
             revised = page.evaluate(plan_js)
             assert revised != plan_before_revise
             assert "revision:" in revised  # the engine marks revised plans
-            page.click("#cre-back-3")
+            page.click("#wbar-3")
             page.wait_for_selector("#cre-step-2", state="visible")
-            assert page.is_hidden("#cre-next-2-hint")  # a revise is NOT dirty
-            page.click("#cre-next-2")
+            assert not page.locator("#wbar-4.dirty").count()  # a revise is NOT dirty
+            page.click("#wbar-4")
             page.wait_for_selector("#cre-strip-blocks .tl-block", state="visible")
             page.wait_for_timeout(800)
             assert len(build_posts) == 2, "a revise must not re-arm the build"
@@ -7804,10 +7818,10 @@ class TestNoRebuildOnCleanReturn:
             )
             resumed = page.evaluate(plan_js)
             assert "revision:" in resumed  # the autosave carried the revised cut
-            page.click("#cre-back-3")
+            page.click("#wbar-3")
             page.wait_for_selector("#cre-step-2", state="visible")
-            assert page.is_hidden("#cre-next-2-hint")  # resume seeds a clean fp
-            page.click("#cre-next-2")
+            assert not page.locator("#wbar-4.dirty").count()  # resume seeds a clean fp
+            page.click("#wbar-4")
             page.wait_for_selector("#cre-strip-blocks .tl-block", state="visible")
             page.wait_for_timeout(800)
             assert len(build_posts) == 2, (
@@ -8258,11 +8272,11 @@ class TestPlayoutMusicFreeRun:
             page.goto(server)
             page.click("#pm-new")  # enter the create workflow from the Home hub
             _pool_scan(page, self.DEMO)
-            page.wait_for_selector("#cre-next-1", state="visible", timeout=120_000)
+            page.wait_for_selector("#wbar-1.done", timeout=120_000)  # footage analyzed
 
             # ---- step 2: slim options; pace + transitions in Fine-tune -------
-            page.click("#cre-next-1")
-            page.click("#cre-next-clips")  # footage -> clips -> options
+            page.click("#wbar-2")
+            page.click("#wbar-3")  # footage -> clips -> options, via the tab bar
             assert page.is_hidden("#pace-auto")   # tucked away until opened
             assert page.is_hidden("#trans-auto")
             page.locator("#cre-finetune").scroll_into_view_if_needed()
@@ -8279,7 +8293,7 @@ class TestPlayoutMusicFreeRun:
             # ---- build WITH music, untouched Auto controls --------------------
             page.fill("#cre-music", f"{self.DEMO}/song.wav")
             page.fill("#cre-maxlen", "12")
-            page.click("#cre-next-2")
+            page.click("#wbar-4")
             page.wait_for_selector(
                 "#cre-strip-blocks .tl-block", state="visible", timeout=180_000
             )
