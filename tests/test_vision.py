@@ -250,6 +250,22 @@ def test_interrupted_run_keeps_batch_progress(tmp_path, monkeypatch, fake_frames
     assert len(client2.calls) == 1
 
 
+def test_near_duplicate_moments_are_deduped_from_selection():
+    # a clip with three moments, two of them near-identical (same phash) plus
+    # one distinct — the selection keeps the clip's best + the DISTINCT one,
+    # never the near-duplicate, so the budget is not spent twice on one shot
+    dup_a = Moment(start=0.0, end=1.0, score=0.9, phash=0b1010101010101010)
+    dup_b = Moment(start=5.0, end=6.0, score=0.85, phash=0b1010101010101011)  # 1 bit off
+    distinct = Moment(start=10.0, end=11.0, score=0.8, phash=0b0101010101010101)
+    report = ClipReport(path="/x/a.mp4", duration=60.0,
+                        moments=[dup_a, dup_b, distinct])
+    picked = vision._select_moments([report], max_moments=3)
+    starts = sorted(m.start for _r, m in picked)
+    assert 0.0 in starts        # the clip's best (reserved)
+    assert 10.0 in starts       # the distinct moment
+    assert 5.0 not in starts    # the near-duplicate of the best is dropped
+
+
 def test_moment_frame_times_sample_across_the_window():
     # a normal window yields _FRAMES_PER_MOMENT distinct, ordered times inside it
     m = Moment(start=10.0, end=11.0, score=0.9)

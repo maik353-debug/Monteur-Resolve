@@ -61,6 +61,33 @@ def test_residual_motion_separates_pan_from_subject_motion():
     assert sub_metrics[1].residual > pan_metrics[1].residual
 
 
+def smooth_frame(cx, cy, shape=(90, 160)):
+    """A smooth low-frequency 'scene' (a bright blob on a gradient) — like real
+    footage, unlike white noise, so a perceptual hash is stable under a small
+    nudge and only shifts when the composition really changes."""
+    ys, xs = np.mgrid[0 : shape[0], 0 : shape[1]].astype(np.float32)
+    grad = (xs / shape[1]) * 120.0
+    blob = 130.0 * np.exp(-(((xs - cx) ** 2 + (ys - cy) ** 2) / (2 * 25.0**2)))
+    return np.clip(grad + blob, 0, 255).astype(np.float32)
+
+
+def test_dhash_near_identical_frames_hash_close():
+    from monteur.media import _dhash, phash_distance
+
+    base = smooth_frame(80, 45)
+    # a small exposure bump + 1px shift keeps the SAME composition -> close hash
+    nudged = np.clip(np.roll(base, 1, axis=1) * 1.05, 0, 255).astype(np.float32)
+    different = smooth_frame(20, 70)  # the subject is somewhere else entirely
+
+    h_base = _dhash(base, np)
+    h_nudged = _dhash(nudged, np)
+    h_diff = _dhash(different, np)
+
+    assert phash_distance(h_base, h_base) == 0
+    assert phash_distance(h_base, h_nudged) <= 6          # near-identical
+    assert phash_distance(h_base, h_diff) > 6             # clearly different
+
+
 def test_phase_correlation_recovers_rolled_shift():
     prev = textured_frame()
     cur = np.roll(prev, (3, -5), axis=(0, 1))  # content: down 3 px, left 5 px

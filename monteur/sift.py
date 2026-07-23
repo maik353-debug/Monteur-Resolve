@@ -212,6 +212,12 @@ class Moment:
     # against the INCOMING entry_focus for eye-trace continuity (3.1).
     entry_focus: tuple[float, float] | None = None  # attention point at window start
     exit_focus: tuple[float, float] | None = None   # attention point at window end
+    # 64-bit perceptual (difference) hash of the moment's representative
+    # frame, filled offline by the sift. Near-identical shots hash close
+    # together (small Hamming distance) — a LOCAL scene-similarity signal
+    # that works without the vision API: dedupes the vision selection and
+    # keeps near-duplicate takes from sitting back to back. 0 = not hashed.
+    phash: int = 0
 
 
 @dataclass
@@ -542,6 +548,7 @@ def find_moments(
                             )
                             for j in idx
                         ],
+                        phash=metrics[idx[len(idx) // 2]].phash,
                     )
                 )
             start += step
@@ -1028,6 +1035,7 @@ def _moment_from_dict(m: dict) -> Moment:
         shot_size=str(m.get("shot_size", "")),
         entry_focus=_tuple2_or_none(m.get("entry_focus")),
         exit_focus=_tuple2_or_none(m.get("exit_focus")),
+        phash=int(m.get("phash", 0) or 0),
     )
 
 

@@ -49,7 +49,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from monteur.media import find_ffmpeg
+from monteur.media import find_ffmpeg, phash_distance
 from monteur.sift import ClipReport, Moment
 
 DEFAULT_VISION_MODEL = "claude-haiku-4-5-20251001"  # cheap+fast vision; env MONTEUR_VISION_MODEL overrides
@@ -60,6 +60,7 @@ _BATCH_SIZE = 6  # moments per API request (x _FRAMES_PER_MOMENT images each)
 _MAX_TOKENS = 2000  # per batch: ~6 short fields x 6 moments needs far less
 _JPEG_QUALITY = 4  # ffmpeg -q:v: 2 is visually lossless, 4 is plenty for scene description
 _MAX_TAGS = 5  # keep tags a keyword set, not a caption
+_DEDUP_HAMMING = 6  # <=6 of 64 hash bits differ -> a near-identical shot, skipped
 _VALID_ROLES = ("opener", "build", "climax", "closer")  # "" = unknown/not analyzed
 
 #: Cache file name, created next to the first report's footage.
@@ -167,9 +168,12 @@ def _select_moments(
 
     Best score first — but every clip gets its own best moment reserved when
     the budget allows, so a shoot with one spectacular clip does not starve
-    the quieter clips out of the cut entirely. The returned list is in
-    processing order (file order, then time), which keeps ffmpeg seeks and
-    progress output tidy.
+    the quieter clips out of the cut entirely. Beyond the one-per-clip
+    reservation, near-DUPLICATE moments (small perceptual-hash Hamming
+    distance to one already chosen) are skipped, so the cost budget — and
+    the composer's dossier — is not spent three times on the same shot. The
+    returned list is in processing order (file order, then time), which
+    keeps ffmpeg seeks and progress output tidy.
     """
     if max_moments <= 0:
         return []
@@ -186,8 +190,17 @@ def _select_moments(
     # best-scoring clips win their slot.
     best.sort(key=lambda rm: (-rm[1].score, position[id(rm[0])]))
     picked = best[:max_moments]
+    seen = [rm[1].phash for rm in picked if rm[1].phash]
     rest.sort(key=lambda rm: (-rm[1].score, position[id(rm[0])], rm[1].start))
-    picked.extend(rest[: max(0, max_moments - len(picked))])
+    for rm in rest:
+        if len(picked) >= max_moments:
+            break
+        h = rm[1].phash
+        if h and any(phash_distance(h, s) <= _DEDUP_HAMMING for s in seen):
+            continue  # a near-identical shot is already selected — don't repeat it
+        picked.append(rm)
+        if h:
+            seen.append(h)
     picked.sort(key=lambda rm: (position[id(rm[0])], rm[1].start))
     return picked
 

@@ -211,6 +211,7 @@ class FrameMetric:
     dx: float = 0.0  # global horizontal motion (px/sample, + = content moves right)
     dy: float = 0.0  # global vertical motion (px/sample, + = content moves down)
     residual: float = 0.0  # motion the camera pan does NOT explain (subject action)
+    phash: int = 0  # 64-bit perceptual (difference) hash of the frame
 
 
 # Phase-correlation tuning (see _phase_shift): a correlation peak weaker than
@@ -281,6 +282,37 @@ def _parse_keyframe_pts(stderr_text: str) -> list[float]:
     return [float(m) for m in _PTS_TIME_RE.findall(stderr_text)]
 
 
+def _resize_mean(frame, np, rows: int, cols: int):
+    """Block-average ``frame`` down to a ``rows``x``cols`` grid (for hashing)."""
+    row_edges = np.linspace(0, frame.shape[0], rows + 1).astype(int)
+    col_edges = np.linspace(0, frame.shape[1], cols + 1).astype(int)
+    out = np.empty((rows, cols), dtype=np.float32)
+    for r in range(rows):
+        for c in range(cols):
+            block = frame[row_edges[r]:row_edges[r + 1], col_edges[c]:col_edges[c + 1]]
+            out[r, c] = float(block.mean()) if block.size else 0.0
+    return out
+
+
+def _dhash(frame, np) -> int:
+    """A 64-bit difference hash: 8x9 block means, row-wise adjacent compares.
+
+    Robust to small exposure/scale/framing changes, so near-identical shots
+    hash close together (small Hamming distance). Pure numpy, no PIL.
+    """
+    small = _resize_mean(frame, np, 8, 9)
+    diff = small[:, 1:] > small[:, :-1]  # 8x8 booleans
+    bits = 0
+    for b in diff.reshape(-1):
+        bits = (bits << 1) | int(b)
+    return bits
+
+
+def phash_distance(a: int, b: int) -> int:
+    """Hamming distance between two 64-bit perceptual hashes (0 = identical)."""
+    return bin((a ^ b) & ((1 << 64) - 1)).count("1")
+
+
 def _metrics_from_frames(frames, times) -> list[FrameMetric]:
     """Per-frame quality metrics for decoded grayscale frames at ``times``.
 
@@ -316,6 +348,7 @@ def _metrics_from_frames(frames, times) -> list[FrameMetric]:
                 dx=dx,
                 dy=dy,
                 residual=residual,
+                phash=_dhash(frame, np),
             )
         )
         previous = frame
