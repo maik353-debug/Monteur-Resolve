@@ -209,6 +209,12 @@ h1, h2, h3, p { margin: 0; }
 
 .tb-caption { display: none; align-items: stretch; margin-left: 8px; }
 :root.native-shell .tb-caption { display: flex; }
+/* frameless resize grips: hidden in the browser, shown in the native window */
+.win-grip { display: none; position: fixed; z-index: 9999; }
+:root.native-shell .win-grip { display: block; }
+.win-grip.win-e { top: 0; right: 0; width: 5px; height: 100%; cursor: ew-resize; }
+.win-grip.win-s { left: 0; bottom: 0; height: 5px; width: 100%; cursor: ns-resize; }
+.win-grip.win-se { right: 0; bottom: 0; width: 15px; height: 15px; cursor: nwse-resize; z-index: 10000; }
 /* mica: a faint tint layered on the title bar in the native window */
 :root.native-shell .topbar {
   padding-right: 0; -webkit-app-region: drag; app-region: drag;
@@ -1923,6 +1929,12 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
 </script>
 </head>
 <body>
+
+<!-- frameless window resize grips (native shell only) — Electron-style edge/
+     corner handles that drive the window size through the pywebview bridge -->
+<div class="win-grip win-e" data-grip="e" aria-hidden="true"></div>
+<div class="win-grip win-s" data-grip="s" aria-hidden="true"></div>
+<div class="win-grip win-se" data-grip="se" aria-hidden="true"></div>
 
 <header class="topbar">
   <div class="tb-left">
@@ -3941,6 +3953,38 @@ $("asm-back").addEventListener("click", function () { setView("movie"); });
   }
   if (window.pywebview && window.pywebview.api) activate();
   else window.addEventListener("pywebviewready", activate);
+})();
+
+/* frameless window resize: the edge/corner grips drive the pywebview window
+   size through the bridge (a frameless window has no OS resize border). We
+   resize from the right/bottom/corner only (top-left stays put, so no move()
+   is needed); deltas use screenX/Y (absolute) since the content coords shift
+   as the window grows. rAF-coalesced so the bridge isn't spammed. */
+(function windowResize() {
+  function bridge() { return window.pywebview && window.pywebview.api; }
+  var drag = null, pending = false;
+  function commit() {
+    pending = false;
+    var api = bridge();
+    if (drag && api && api.resize) { try { api.resize(drag.nw, drag.nh); } catch (e) {} }
+  }
+  document.addEventListener("pointerdown", function (e) {
+    var g = e.target && e.target.closest ? e.target.closest(".win-grip") : null;
+    if (!g || !bridge()) return;
+    drag = { edge: g.dataset.grip, w: window.innerWidth, h: window.innerHeight,
+             x: e.screenX, y: e.screenY, nw: window.innerWidth, nh: window.innerHeight };
+    try { g.setPointerCapture(e.pointerId); } catch (x) {}
+    e.preventDefault();
+  });
+  window.addEventListener("pointermove", function (e) {
+    if (!drag) return;
+    drag.nw = drag.edge === "s" ? drag.w : drag.w + (e.screenX - drag.x);
+    drag.nh = drag.edge === "e" ? drag.h : drag.h + (e.screenY - drag.y);
+    if (!pending) { pending = true; requestAnimationFrame(commit); }
+  });
+  function end() { drag = null; }
+  window.addEventListener("pointerup", end);
+  window.addEventListener("pointercancel", end);
 })();
 
 /* the app menu bar (File / View / Help) — the universal control surface,

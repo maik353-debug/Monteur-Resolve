@@ -5877,6 +5877,27 @@ class _WindowControls:
         except Exception:  # noqa: BLE001
             pass
 
+    def resize(self, width, height) -> None:
+        """Resize the frameless window — the page's edge grips call this.
+
+        A frameless window has no OS resize border, so app.html draws its own
+        edge/corner grips (Electron-style) and drives the size through here.
+        Clamped to the same minimum the window was created with; any bad value
+        or backend quirk is swallowed so a resize drag can never wedge the app.
+        """
+        win = self._window()
+        if win is None:
+            return
+        try:
+            w = max(900, int(width))
+            h = max(600, int(height))
+        except (TypeError, ValueError):
+            return
+        try:
+            win.resize(w, h)
+        except Exception:  # noqa: BLE001 — a resize drag must never crash the app
+            pass
+
 
 def serve_app(
     port: int = 8765,
@@ -5962,6 +5983,8 @@ def serve_app(
         height=size[1],
         min_size=(900, 600),
         frameless=True,
+        resizable=True,   # frameless drops OS resize borders — app.html draws its
+                          # own edge grips that drive _WindowControls.resize()
         easy_drag=False,  # the title bar's -webkit-app-region owns dragging
         js_api=_WindowControls(webview),
     )

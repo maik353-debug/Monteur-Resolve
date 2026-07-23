@@ -7261,14 +7261,24 @@ class TestNativeShell:
             def destroy(self):
                 recorder.append("destroy")
 
+        class _Win2(_Win):
+            def resize(self, w, h):
+                recorder.append(("resize", w, h))
+
         wv = types.ModuleType("webview")
-        wv.windows = [_Win()]
+        wv.windows = [_Win2()]
         controls = server._WindowControls(wv)
         controls.minimize()
         controls.toggle_maximize()  # -> maximize
         controls.toggle_maximize()  # -> restore
+        controls.resize(1280, 820)          # the frameless edge grips call this
+        controls.resize(100, 100)           # clamped up to the window minimum
+        controls.resize("bad", None)        # junk is swallowed, no window call
         controls.close()
-        assert recorder == ["minimize", "maximize", "restore", "destroy"]
+        assert recorder == [
+            "minimize", "maximize", "restore",
+            ("resize", 1280, 820), ("resize", 900, 600), "destroy",
+        ]
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_one_bar_with_menu_and_caption(self):
