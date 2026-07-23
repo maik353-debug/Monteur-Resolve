@@ -2275,7 +2275,7 @@ class TestStoryboardFromProject:
         assert "vision" not in stages
         assert "start" not in stages
         assert any(
-            p.get("stage") == "cache" and "analyzed clips" in str(p.get("name"))
+            p.get("stage") == "cache" and "composed timeline" in str(p.get("name"))
             for p in job["progress"]
         )
 
@@ -3495,7 +3495,7 @@ class TestDirectorFromProject:
         stages = [p.get("stage") for p in job["progress"]]
         assert "vision" not in stages and "start" not in stages  # no re-sift
         assert any(
-            p.get("stage") == "cache" and "analyzed clips" in str(p.get("name"))
+            p.get("stage") == "cache" and "composed timeline" in str(p.get("name"))
             for p in job["progress"]
         )
 

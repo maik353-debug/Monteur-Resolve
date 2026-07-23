@@ -2680,7 +2680,7 @@ def _run_direct_job(job: dict, payload: dict) -> None:
                 )
             with _JOBS_LOCK:
                 job["progress"].append(
-                    {"stage": "cache", "name": f"reading {len(reports)} analyzed clips"}
+                    {"stage": "cache", "name": "reading your composed timeline"}
                 )
         else:
             # One folder (the Create card) or several (the Movie card sends
