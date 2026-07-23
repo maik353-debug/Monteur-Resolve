@@ -1324,6 +1324,24 @@ class TestWizardStepsUi:
             assert needle in html, needle
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_project_is_renamable_from_the_topbar(self):
+        # the Create topbar title IS the project name — click to rename it, and
+        # the name rides into the lazy create or straight to the store
+        html = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            "function startProjectRename",
+            "function finishProjectRename",
+            "function wireProjectRename",
+            'title.classList.toggle("renamable", renamable)',
+            'title.contentEditable = "true"',
+            "cre.projectName = name;",
+            "saveProject(); // persists the name",
+            ".tb-ctx-title.renamable",
+            ".tb-ctx-title.editing",
+        ):
+            assert needle in html, needle
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_wizard_is_full_width(self):
         # every wizard step spans the window like the footage page (no narrow
         # centered column)
