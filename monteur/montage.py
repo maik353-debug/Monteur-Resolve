@@ -6889,6 +6889,34 @@ def adjust_entry_boundary(
     return adjusted
 
 
+def _music_bed_to(
+    plan: MontagePlan, duration: float
+) -> dict[str, list]:
+    """The music-bed strip fields clipped to ``duration`` (record seconds).
+
+    The song plays as a continuous bed from ``music_start``: record second
+    ``t`` always sounds song time ``music_start + t``, so a re-flow of the
+    picture never MOVES the drops, downbeats, energy samples or arc phases —
+    it only shortens the tail. Clipping (never shifting) is exactly what
+    :func:`_shorten_montage`'s length-trim already does (blueprint 1.7); this
+    shares that recipe so any grid surgery keeps the bed honest instead of
+    trailing marks past the new end.
+    """
+    cut = duration
+    return {
+        "phases": [
+            (s, min(e, cut), lab) for s, e, lab in plan.phases if s < cut - _EPS
+        ],
+        "music_energy": (
+            plan.music_energy[: int(math.floor(cut * MUSIC_ENERGY_RATE)) + 1]
+            if plan.music_energy
+            else []
+        ),
+        "beat_marks": [t for t in plan.beat_marks if t <= cut + _EPS],
+        "drop_marks": [t for t in plan.drop_marks if t <= cut + _EPS],
+    }
+
+
 def _resequence_entries(
     plan: MontagePlan, order: list[int], note: str
 ) -> MontagePlan:
@@ -6963,6 +6991,12 @@ def _resequence_entries(
     )
     new_duration = max(0.0, plan.duration - (old_span - cursor))
 
+    # The song is a continuous bed — a re-flow clips the tail off the drops,
+    # downbeats, energy and arc phases, it never shifts them (music_start is
+    # unchanged). sfx cues are left verbatim here: some are music-anchored
+    # (impacts on drops) and some picture-anchored (sub-drops on dips), so
+    # they cannot be shifted 1:1 — `resync_audio` re-lays the whole layer.
+    bed = _music_bed_to(plan, new_duration)
     adjusted = replace(
         plan,
         entries=new_entries,
@@ -6971,11 +7005,11 @@ def _resequence_entries(
         title_anims=new_anims if had_anims else [],
         duration=new_duration,
         notes=list(plan.notes) + [note],
-        sfx=list(plan.sfx),
-        phases=list(plan.phases),
-        music_energy=list(plan.music_energy),
-        beat_marks=list(plan.beat_marks),
-        drop_marks=list(plan.drop_marks),
+        sfx=[c for c in plan.sfx if c.time <= new_duration + _EPS],
+        phases=bed["phases"],
+        music_energy=bed["music_energy"],
+        beat_marks=bed["beat_marks"],
+        drop_marks=bed["drop_marks"],
         music_gaps=list(plan.music_gaps),
     )
     # A dip that moved (or vanished) takes its deliberate silence with it —
@@ -7053,6 +7087,46 @@ def move_entry(plan: MontagePlan, slot: int, to: int) -> MontagePlan:
     return _resequence_entries(
         plan, order, f"move: slot {slot + 1} -> position {to + 1}"
     )
+
+
+def resync_audio(plan: MontagePlan) -> MontagePlan:
+    """Re-lay the sound-design cues onto the edited timeline — pure surgery.
+
+    After a delete/move, the cut structure has changed but the sfx layer was
+    left where the ORIGINAL cut placed it (grid surgery cannot shift cues
+    1:1 — impacts are music-anchored to the drops while sub-drops are
+    picture-anchored to the dips). This re-runs the SFX planner against the
+    plan's CURRENT structure, so every cue lands on the timeline as it stands
+    now: ambience under the opening, risers into the act changes, impacts on
+    the drops (``drop_marks``) and climax, sub-drops under the dips, whooshes
+    on the fastest cuts.
+
+    The music bed itself (``music_path``/``music_start``) is untouched — it
+    plays continuously, so nothing about the song needs re-analysis; only the
+    cue placement is refreshed. The music-bed strip fields are re-clipped to
+    the current duration for good measure. The original plan is never
+    modified; the returned plan carries a ``resync:`` note. A plan with no
+    music or no entries returns an equivalent copy (nothing to re-lay).
+    """
+    bed = _music_bed_to(plan, plan.duration)
+    adjusted = replace(
+        plan,
+        sfx=[],
+        phases=bed["phases"],
+        music_energy=bed["music_energy"],
+        beat_marks=bed["beat_marks"],
+        drop_marks=bed["drop_marks"],
+        notes=list(plan.notes),
+    )
+    if adjusted.entries and adjusted.duration > _EPS:
+        # the drop-forced cut times the SFX planner keys impacts to ARE the
+        # plan's drop marks (record seconds); the arc phases come along too
+        _plan_sfx(adjusted, list(adjusted.phases), list(adjusted.drop_marks))
+    _prune_music_gaps(adjusted)
+    adjusted.notes.append(
+        f"resync: re-laid {len(adjusted.sfx)} sound cues onto the edited cut"
+    )
+    return adjusted
 
 
 def pin_entry(plan: MontagePlan, entry: MontageEntry) -> None:

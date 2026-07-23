@@ -2506,6 +2506,68 @@ class TestMoveEntry:
             move_entry(plan, "x", 0)
 
 
+def _sfx_plan():
+    """A boundary plan carrying a full music-bed strip + SFX layer."""
+    from monteur.montage import SfxCue
+
+    plan = make_boundary_plan()  # 3x 2s = 6s
+    plan.phases = [(0.0, 2.0, "opening"), (2.0, 4.0, "build"), (4.0, 6.0, "climax")]
+    plan.music_energy = [round(0.1 * i, 2) for i in range(13)]  # 6s * 2/s + 1
+    plan.beat_marks = [1.0, 2.0, 3.0, 4.0, 5.0]
+    plan.drop_marks = [2.0, 4.0]
+    plan.sfx = [
+        SfxCue(0.0, 2.0, "ambience", "amb", "opening"),
+        SfxCue(4.0, 0.5, "impact", "hit", "on the drop"),
+    ]
+    return plan
+
+
+class TestResequenceClipsTheMusicBed:
+    def test_delete_truncates_marks_energy_and_phases(self):
+        from monteur.montage import MUSIC_ENERGY_RATE, delete_entry
+
+        plan = _sfx_plan()
+        adjusted = delete_entry(plan, 1)  # 6s -> 4s
+        assert adjusted.duration == pytest.approx(4.0)
+        # drops/beats/energy/phases beyond the new end are clipped, not shifted
+        assert adjusted.drop_marks == [2.0, 4.0]  # both still within 4s
+        assert adjusted.beat_marks == [1.0, 2.0, 3.0, 4.0]  # 5.0 dropped
+        assert len(adjusted.music_energy) == int(4.0 * MUSIC_ENERGY_RATE) + 1
+        assert all(s <= 4.0 + 1e-6 for s, _e, _l in adjusted.phases)
+        assert adjusted.phases[-1][1] == pytest.approx(4.0)  # climax clipped
+        # a cue past the new end is dropped; the original plan is untouched
+        assert all(c.time <= 4.0 + 1e-6 for c in adjusted.sfx)
+        assert plan.duration == pytest.approx(6.0)
+
+
+class TestResyncAudio:
+    def test_relays_sfx_onto_the_current_cut(self):
+        from monteur.montage import delete_entry, resync_audio
+
+        plan = _sfx_plan()
+        edited = delete_entry(plan, 1)  # the sfx layer is now stale
+        before = list(edited.sfx)
+        resynced = resync_audio(edited)
+        # a fresh SFX layer was planned (ambience under the opening is always
+        # present) and every cue lands within the edited duration
+        assert resynced.sfx  # non-empty
+        assert all(c.time <= resynced.duration + 1e-6 for c in resynced.sfx)
+        assert any(c.kind == "ambience" for c in resynced.sfx)
+        assert any(n.startswith("resync:") for n in resynced.notes)
+        # the input plan is never modified in place
+        assert edited.sfx == before
+
+    def test_no_entries_is_a_safe_noop(self):
+        from dataclasses import replace
+
+        from monteur.montage import resync_audio
+
+        plan = replace(_sfx_plan(), entries=[], duration=0.0)
+        resynced = resync_audio(plan)
+        assert resynced.sfx == []  # nothing to re-lay
+        assert any(n.startswith("resync:") for n in resynced.notes)
+
+
 # --- time-of-day coherence (Moment.daylight) -----------------------------------
 
 

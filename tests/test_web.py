@@ -1042,6 +1042,49 @@ class TestPlanAdjustSurgery:
         assert out["title_texts"] == ["Two"]
         assert out["title_anims"] == ["slide"]
 
+    def _plan_with_sfx(self):
+        from monteur.montage import MontageEntry, MontagePlan, SfxCue, plan_to_dict
+
+        return plan_to_dict(MontagePlan(
+            music_path="/song.wav", music_start=0.0, duration=12.0,
+            entries=[
+                MontageEntry("a.mp4", 0.0, 4.0, 0.0, 4.0, 0.9),
+                MontageEntry("b.mp4", 0.0, 4.0, 4.0, 8.0, 0.8),
+                MontageEntry("c.mp4", 0.0, 4.0, 8.0, 12.0, 0.7),
+            ],
+            phases=[(0.0, 4.0, "opening"), (4.0, 8.0, "build"), (8.0, 12.0, "climax")],
+            drop_marks=[4.0, 8.0], beat_marks=[2.0, 4.0, 6.0, 8.0, 10.0],
+            sfx=[
+                SfxCue(0.0, 2.0, "ambience", "amb", "opening"),
+                SfxCue(8.0, 0.5, "impact", "hit", "on the drop"),
+            ],
+        ))
+
+    def test_resync_audio_relays_the_sfx_layer(self, server):
+        # delete a shot, then re-lay the sound onto the edited cut
+        pj = self._plan_with_sfx()
+        edited = _post(f"{server}/api/plan/adjust", {"plan_json": pj, "delete": 1})
+        resynced = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": edited["plan_json"], "resync_audio": True},
+        )
+        out = resynced["plan_json"]
+        dur = out["duration"]
+        assert out["sfx"]  # a fresh SFX layer exists
+        assert all(c["time"] <= dur + 1e-6 for c in out["sfx"])
+        assert any(n.startswith("resync:") for n in out["notes"])
+
+    def test_resync_audio_empty_plan_is_400(self, server):
+        from monteur.montage import MontagePlan, plan_to_dict
+
+        pj = plan_to_dict(MontagePlan(music_path=None, duration=0.0, entries=[]))
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(
+                f"{server}/api/plan/adjust",
+                {"plan_json": pj, "resync_audio": True},
+            )
+        assert exc.value.code == 400
+
 
 def _step3_html(html):
     """The Storyboard step's markup (between its section tag and step 4's)."""
@@ -1134,6 +1177,17 @@ class TestWizardStepsUi:
         # the music-entry note comes from the plan notes
         assert "function sbMusicLine" in html
         assert "music enters|music window" in html
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_relay_sound_button_is_wired(self):
+        # the timeline carries a "Re-lay sound" action that re-lays the SFX
+        # layer onto the edited cut via the resync_audio adjust mode
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert 'id="tl-resync"' in html
+        assert "function resyncAudio" in html
+        assert "resync_audio: true" in html
+        # it is only revealed when the plan carries an SFX layer
+        assert 'resyncBtn.hidden = !((plan.sfx || []).length)' in html
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_rebuild_draft_survives_navigation(self):

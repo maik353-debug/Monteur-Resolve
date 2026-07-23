@@ -2607,6 +2607,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
                 <span class="tl-zoom-lbl" id="tl-zoom-lbl">100%</span>
                 <button class="tl-toggle" id="tl-zoom-in" type="button" title="Zoom in" aria-label="Zoom in">+</button>
               </span>
+              <button class="tl-toggle" id="tl-resync" type="button" hidden title="Re-lay the sound cues so they land on the drops of the edited cut">Re-lay sound</button>
             </div>
             <div class="tl-frame" id="cre-tl-frame" hidden>
               <div class="tl-gutter" aria-hidden="true">
@@ -10490,6 +10491,9 @@ function renderTimelineStrip() {
   host.hidden = false;
   frame.hidden = false;
   bar.hidden = false;
+  // Re-lay sound is only meaningful once a plan carries an SFX layer
+  var resyncBtn = $("tl-resync");
+  if (resyncBtn) resyncBtn.hidden = !((plan.sfx || []).length);
   // BPM readout from the plan's tempo; "beat grid" when downbeats exist
   var bpm = Math.round(plan.tempo || 0);
   var hasBeats = (plan.beat_marks || []).length > 0;
@@ -11006,6 +11010,51 @@ function moveShot(dir) {
 $("cre-insp-delete").addEventListener("click", deleteShot);
 $("cre-insp-move-left").addEventListener("click", function () { moveShot(-1); });
 $("cre-insp-move-right").addEventListener("click", function () { moveShot(1); });
+
+/* Re-lay the sound cues onto the CURRENT cut (a timeline-wide op, not
+   shot-specific — so it does not go through applyPlanSurgery's slot path).
+   After a delete/move the impacts no longer land on the drops; this asks
+   the engine to re-place the whole SFX layer over the edited timeline. */
+function resyncAudio() {
+  if (!rev.planJson) return;
+  if (buildPanel.running() || revisePanel.running() || directPanel.running()) return;
+  var built = (cre.result && cre.result.body) || {};
+  var body = {
+    plan_json: rev.planJson,
+    project: cre.projectId || undefined,
+    fps: built.fps || fpsFrom($("cre-fps")), format: cre.format,
+    resync_audio: true
+  };
+  if (built.audio) body.audio = built.audio;
+  if (built.canvas) body.canvas = built.canvas;
+  var btn = $("tl-resync");
+  if (btn) btn.disabled = true;
+  api("/api/plan/adjust", { method: "POST", body: body }).then(function (result) {
+    var prevTempo = (cre.result && cre.result.data && cre.result.data.plan &&
+      cre.result.data.plan.tempo) || 0;
+    if (prevTempo && result.plan && !result.plan.tempo) result.plan.tempo = prevTempo;
+    rev.planJson = (result && result.plan_json) || rev.planJson;
+    var exportBody = { plan_json: rev.planJson, fps: body.fps, format: body.format };
+    if (body.audio) exportBody.audio = body.audio;
+    if (body.canvas) exportBody.canvas = body.canvas;
+    cre.result = {
+      data: result, format: body.format,
+      body: (cre.result && cre.result.body) || null,
+      kind: "export", exportBody: exportBody
+    };
+    $("cre-resolve-msg").hidden = true;
+    $("cre-resolve-result").hidden = true;
+    renderCreResult(result);
+    renderStoryboard();
+    resetPreview(); // the cut's sound changed — the old preview is stale
+    toast("Sound re-laid onto the edited cut.", "success");
+  }).catch(function (err) {
+    toast(err && err.message ? err.message : String(err), "error");
+  }).then(function () {
+    if (btn) btn.disabled = false;
+  });
+}
+$("tl-resync").addEventListener("click", resyncAudio);
 Array.prototype.forEach.call($("cre-insp-trans").querySelectorAll("button"), function (btn) {
   btn.addEventListener("click", function () { applyTransition(String(btn.dataset.trans)); });
 });

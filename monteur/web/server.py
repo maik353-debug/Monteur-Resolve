@@ -4513,6 +4513,9 @@ class MonteurHandler(BaseHTTPRequestHandler):
         * move — ``{"move": <slot>, "to": <index>}``:
           monteur.montage.move_entry reorders the entry and re-flows the
           grid. Engine ValueErrors (bad index, empty result) are 400s.
+        * resync_audio — ``{"resync_audio": true}``:
+          monteur.montage.resync_audio re-lays the SFX layer onto the
+          current cut so the sounds land on the drops again after an edit.
         """
         from monteur.montage import (
             ARRANGEMENT_TRANSITIONS,
@@ -4520,6 +4523,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             delete_entry,
             move_entry,
             plan_from_dict,
+            resync_audio,
         )
 
         payload = self._read_json()
@@ -4529,6 +4533,16 @@ class MonteurHandler(BaseHTTPRequestHandler):
             )
         if "title" in payload or "dip" in payload:
             self._plan_adjust_title(payload)
+            return
+        if payload.get("resync_audio"):
+            # re-lay the SFX layer onto the CURRENT cut (after a delete/move
+            # the sounds no longer land on the drops) — pure plan surgery
+            plan = plan_from_dict(payload["plan_json"])  # bad -> ValueError -> 400
+            if not plan.entries:
+                raise ApiError(400, "the plan has no entries — nothing to re-lay")
+            adjusted = resync_audio(plan)
+            _persist_plan_edit(payload, adjusted, "resync")
+            self._send_json(_plan_export_result(adjusted, payload))
             return
         if "delete" in payload:
             try:
