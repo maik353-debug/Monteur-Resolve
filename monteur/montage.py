@@ -5222,9 +5222,11 @@ def plan_montage(
             )
             if seg is not None:
                 slack = min(slack, seg.end)
-            nxt = next((s for s in starts if s > m.start + _EPS), None)
-            if nxt is not None:
-                slack = min(slack, nxt)
+            # `starts` is sorted — the next same-clip moment is one bisect away
+            # (was a linear scan per moment, i.e. O(moments^2) per report).
+            j = bisect.bisect_right(starts, m.start + _EPS)
+            if j < len(starts):
+                slack = min(slack, starts[j])
             pool.append(
                 _PoolItem(
                     r.path, r.duration, m,

@@ -512,6 +512,11 @@ def find_moments(
     peak_motion = max((m.motion for m in metrics[1:]), default=0.0)
     step = min_length / 2
     cuts = scene_cuts or []
+    # metric timestamps are monotonic (both the uniform-sps and keyframe
+    # producers emit ascending times), so a window's member indices are the
+    # contiguous range [start-eps, end-eps) — a bisect pair instead of an
+    # O(metrics) scan per window (find_moments was O(metrics x windows)).
+    times = [m.t for m in metrics]
 
     candidates: list[Moment] = []
     for seg in segments:
@@ -525,9 +530,9 @@ def find_moments(
             if any(start + eps < c < end - eps for c in cuts):
                 start += step
                 continue
-            idx = [
-                j for j, m in enumerate(metrics) if start - eps <= m.t < end - eps
-            ]
+            lo = bisect_left(times, start - eps)
+            hi = bisect_left(times, end - eps)
+            idx = range(lo, hi)
             if idx:
                 mean_rank = sum(ranks[j] for j in idx) / len(idx)
                 if median_residual > 0:
