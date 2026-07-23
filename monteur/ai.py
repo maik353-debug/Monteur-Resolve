@@ -231,11 +231,14 @@ def _complete_api(
     client = _client()
     try:
         if json_schema is not None:
+            # Structured output is a single JSON answer — no extended thinking
+            # (adaptive thinking here returned an empty text block: the JSON
+            # never landed, "unparseable JSON: ''"). This matches the vision
+            # pass, which uses the same output_config and works.
             message = client.messages.create(
                 model=model,
                 max_tokens=max_tokens,
                 system=system,
-                thinking={"type": "adaptive"},
                 output_config={
                     "format": {
                         "type": "json_schema",
@@ -260,7 +263,19 @@ def _complete_api(
         raise MonteurAIError(f"Claude API request failed: {exc}") from exc
     if getattr(message, "stop_reason", None) == "refusal":
         raise MonteurAIError("The request was declined by the model's safety system.")
-    return "".join(block.text for block in message.content if block.type == "text")
+    text = "".join(
+        block.text for block in message.content if block.type == "text"
+    )
+    if json_schema is not None and not text.strip():
+        # a structured request that produced no text — surface WHY (e.g.
+        # max_tokens) instead of a downstream "unparseable JSON: ''"
+        reason = getattr(message, "stop_reason", None) or "unknown"
+        raise MonteurAIError(
+            "Claude returned no structured output (stop reason: "
+            f"{reason}). If this persists the request may be hitting the "
+            "token limit — try a shorter brief or fewer clips."
+        )
+    return text
 
 
 def _complete_cli(

@@ -454,6 +454,23 @@ def test_api_closes_open_object_schemas_on_the_wire(api_backend):
     assert "additionalProperties" not in schema["properties"]["items"]["items"]
 
 
+def test_api_structured_empty_response_raises_clear_error(api_backend):
+    # a structured request that comes back with no text (e.g. all budget spent)
+    # must surface WHY, not a downstream "unparseable JSON: ''"
+    api_backend(_FakeMessage("", stop_reason="max_tokens"))
+    with pytest.raises(MonteurAIError, match="no structured output"):
+        complete("prompt", json_schema={"type": "object"})
+
+
+def test_api_json_schema_does_not_send_thinking(api_backend):
+    # structured output must NOT ride with extended thinking (that returned an
+    # empty text block) — the create call carries no 'thinking' key
+    fake = api_backend(_FakeMessage('{"ok": true}'))
+    complete("prompt", json_schema={"type": "object"})
+    (kwargs,) = fake.create_calls
+    assert "thinking" not in kwargs
+
+
 def test_closed_schema_is_idempotent_and_non_mutating():
     from monteur.ai import _closed_schema
 
