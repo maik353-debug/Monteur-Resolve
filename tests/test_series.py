@@ -16,6 +16,9 @@ from monteur.series import (
     DEFAULT_SHORT_SECONDS,
     SeriesShort,
     plan_series,
+    restrict_to_edit,
+    series_from_edit,
+    used_source_ranges,
 )
 from monteur.sift import ClipReport, Moment
 
@@ -223,3 +226,101 @@ def test_unknown_canvas_rejected():
 
 def test_default_short_length_cap_is_sane():
     assert 10.0 <= DEFAULT_SHORT_SECONDS <= 90.0
+
+
+# --- shorts from an existing long-form EDIT (project -> shorts) ---------------
+
+
+def _edit_plan(*spans: tuple[str, float, float]) -> dict:
+    """A minimal plan_to_dict with the given (clip_path, src_start, src_end) uses."""
+    return {
+        "monteur_plan": 1,
+        "entries": [
+            {"clip_path": c, "source_start": a, "source_end": b}
+            for c, a, b in spans
+        ],
+    }
+
+
+def test_used_source_ranges_reads_a_plan():
+    plan = _edit_plan(
+        ("/footage/clip00.mp4", 20.0, 24.0),
+        ("/footage/clip00.mp4", 80.0, 84.0),
+        ("/footage/clip02.mp4", 20.0, 24.0),
+    )
+    ranges = used_source_ranges(plan)
+    assert ranges["/footage/clip00.mp4"] == [(20.0, 24.0), (80.0, 84.0)]
+    assert ranges["/footage/clip02.mp4"] == [(20.0, 24.0)]
+
+
+def test_used_source_ranges_skips_junk():
+    plan = _edit_plan(("/a.mp4", 5.0, 5.0))  # zero length
+    plan["entries"].append({"clip_path": "", "source_start": 1, "source_end": 2})
+    plan["entries"].append({"clip_path": "/b.mp4", "source_start": "x", "source_end": 2})
+    assert used_source_ranges(plan) == {}
+    assert used_source_ranges(None) == {}
+
+
+def test_restrict_keeps_only_used_moments():
+    reports = make_tour(6, 3)  # each clip: moments at 20, 50, 80 s
+    # the edit used clip00's first moment and clip02's second moment
+    plan = _edit_plan(
+        ("/footage/clip00.mp4", 20.0, 24.0),
+        ("/footage/clip02.mp4", 50.0, 54.0),
+    )
+    kept = restrict_to_edit(reports, plan)
+    paths = {r.path for r in kept}
+    assert paths == {"/footage/clip00.mp4", "/footage/clip02.mp4"}
+    c0 = next(r for r in kept if r.path == "/footage/clip00.mp4")
+    assert [m.start for m in c0.moments] == [20.0]  # only the used beat
+    c2 = next(r for r in kept if r.path == "/footage/clip02.mp4")
+    assert [m.start for m in c2.moments] == [50.0]
+
+
+def test_restrict_matches_by_basename_when_paths_drift():
+    reports = make_tour(2, 2)  # absolute /footage/clipNN.mp4
+    plan = _edit_plan(("clip00.mp4", 20.0, 24.0))  # relative path in the plan
+    kept = restrict_to_edit(reports, plan)
+    assert {r.path for r in kept} == {"/footage/clip00.mp4"}
+
+
+def test_restrict_empty_for_no_plan():
+    assert restrict_to_edit(make_tour(), None) == []
+    assert restrict_to_edit(make_tour(), {"entries": []}) == []
+
+
+def test_series_from_edit_extracts_the_edits_beats():
+    reports = make_tour(6, 3)
+    # the edit used one strong beat in each of four distinct clips
+    plan = _edit_plan(
+        ("/footage/clip00.mp4", 20.0, 24.0),
+        ("/footage/clip01.mp4", 20.0, 24.0),
+        ("/footage/clip02.mp4", 20.0, 24.0),
+        ("/footage/clip03.mp4", 20.0, 24.0),
+    )
+    shorts, from_edit = series_from_edit(reports, plan, make_music(), count=3)
+    assert from_edit is True
+    assert len(shorts) == 3
+    # every seed is a beat the edit actually used
+    used = used_source_ranges(plan)
+    for s in shorts:
+        spans = used.get(s.seed.clip_path, [])
+        assert any(
+            min(s.seed.end, b) - max(s.seed.start, a) > 1e-6 for a, b in spans
+        ), f"seed {s.seed.clip_path}@{s.seed.start} not from the edit"
+
+
+def test_series_from_edit_falls_back_when_the_edit_is_too_lean():
+    reports = make_tour(6, 3)  # rich footage
+    plan = _edit_plan(("/footage/clip00.mp4", 20.0, 24.0))  # edit used ONE beat
+    shorts, from_edit = series_from_edit(reports, plan, make_music(), count=3)
+    # one beat can't seed three distinct shorts -> fall back to the full pool
+    assert from_edit is False
+    assert len(shorts) == 3
+
+
+def test_series_from_edit_no_plan_uses_the_pool():
+    reports = make_tour(6, 3)
+    shorts, from_edit = series_from_edit(reports, None, make_music(), count=3)
+    assert from_edit is False
+    assert len(shorts) == 3

@@ -374,3 +374,127 @@ def plan_series(
         plan.notes.append(note)
         shorts.append(SeriesShort(plan=plan, seed=seed, note=note, canvas=canvas))
     return shorts
+
+
+# --- shorts from an existing long-form EDIT (project -> shorts) ---------------
+#
+# plan_series above turns a raw footage POOL into shorts. When the user already
+# has a finished long-form CUT (a Monteur project), the shorts should come out
+# of the beats the EDIT actually used, not the whole raw pool — the long form
+# is where the good moments were already found. These helpers filter the
+# footage reports down to the moments the plan drew from, then reuse the exact
+# same plan_series engine. When the edit is too lean to seed the wanted number
+# of distinct shorts, they fall back to the full footage pool so the user still
+# gets shorts, and report which path was taken.
+
+
+def used_source_ranges(plan: dict | None) -> dict[str, list[tuple[float, float]]]:
+    """Map ``clip_path`` -> the ``(source_start, source_end)`` ranges a plan uses.
+
+    Reads a :func:`monteur.montage.plan_to_dict` dict. Malformed or zero-length
+    entries are skipped; an empty/None plan yields ``{}``.
+    """
+    ranges: dict[str, list[tuple[float, float]]] = {}
+    for entry in (plan or {}).get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("clip_path")
+        try:
+            start = float(entry.get("source_start"))
+            end = float(entry.get("source_end"))
+        except (TypeError, ValueError):
+            continue
+        if not path or end <= start + _EPS:
+            continue
+        ranges.setdefault(str(path), []).append((start, end))
+    return ranges
+
+
+def _overlaps_any(moment: Moment, ranges: list[tuple[float, float]]) -> bool:
+    """True if the moment's span overlaps any ``(start, end)`` in ``ranges``."""
+    for start, end in ranges:
+        if min(moment.end, end) - max(moment.start, start) > _EPS:
+            return True
+    return False
+
+
+def restrict_to_edit(
+    reports: list[ClipReport], plan: dict | None
+) -> list[ClipReport]:
+    """Keep only the moments a long-form ``plan`` actually used.
+
+    A moment is "used" when it overlaps a source range some plan entry drew
+    from its clip (the same overlap match the change list uses). Clip identity
+    (path, duration, segments, usable_ratio, notes, media_start) is preserved;
+    a report left with no used moment is dropped. Clip paths are matched
+    exactly, then by basename, so a plan saved with a differently-spelled path
+    (relative vs absolute) still lines up with its report.
+    """
+    ranges = used_source_ranges(plan)
+    if not ranges:
+        return []
+    by_name: dict[str, list[tuple[float, float]]] = {}
+    for path, spans in ranges.items():
+        by_name.setdefault(PurePath(path).name, []).extend(spans)
+    out: list[ClipReport] = []
+    for r in reports:
+        spans = ranges.get(r.path) or by_name.get(PurePath(r.path).name) or []
+        if not spans:
+            continue
+        moments = [m for m in r.moments if _overlaps_any(m, spans)]
+        if not moments:
+            continue
+        out.append(
+            ClipReport(
+                path=r.path,
+                duration=r.duration,
+                segments=list(r.segments),
+                moments=moments,
+                usable_ratio=r.usable_ratio,
+                notes=list(r.notes),
+                media_start=r.media_start,
+            )
+        )
+    return out
+
+
+def series_from_edit(
+    reports: list[ClipReport],
+    plan: dict | None,
+    music: MusicAnalysis | None = None,
+    *,
+    count: int,
+    canvas: str = "vertical-uhd",
+    max_seconds: float | None = DEFAULT_SHORT_SECONDS,
+    **plan_kwargs,
+) -> tuple[list[SeriesShort], bool]:
+    """Shorts extracted from the beats a long-form ``plan`` actually used.
+
+    Filters ``reports`` to the moments the long form drew from and runs the
+    unchanged :func:`plan_series` on them, so the shorts are genuine extracts
+    of the edit — not a fresh cut of the raw pool. When the edit is too lean to
+    seed ``count`` distinct shorts (few beats, one clip), falls back to the
+    full footage moment pool so the user still gets shorts.
+
+    Returns ``(shorts, from_edit)`` — ``from_edit`` is ``True`` when the shorts
+    came out of the edit, ``False`` when the fallback footage pool was used.
+    Deterministic and offline, like :func:`plan_series`.
+    """
+    used = restrict_to_edit(reports, plan)
+    edit_shorts: list[SeriesShort] = []
+    if used:
+        edit_shorts = plan_series(
+            used, music, count=count, canvas=canvas,
+            max_seconds=max_seconds, **plan_kwargs,
+        )
+        if len(edit_shorts) >= count:
+            return edit_shorts, True
+    # The edit alone couldn't seed the full count — try the whole footage pool
+    # and keep whichever yields more distinct shorts (ties favour the edit).
+    full_shorts = plan_series(
+        reports, music, count=count, canvas=canvas,
+        max_seconds=max_seconds, **plan_kwargs,
+    )
+    if edit_shorts and len(edit_shorts) >= len(full_shorts):
+        return edit_shorts, True
+    return full_shorts, False

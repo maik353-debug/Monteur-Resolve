@@ -1762,6 +1762,137 @@ def _clear_scan_cache():
         web_server._CLIP_CACHE.clear()
 
 
+class TestProjectSeriesApi:
+    """POST /api/projects/<id>/series (+ /save) — a long form -> vertical Shorts.
+
+    Drives the project -> shorts path without real media: synthetic sift
+    reports are seeded straight into the server's clip cache, so the route
+    reuses "persisted" analysis exactly as a re-opened project would. Covers
+    the not-analyzed guard, the shorts result shape, and saving chosen shorts
+    as child projects on the same footage.
+    """
+
+    def _seed_clips(self, tmp_path, n=4):
+        """n tiny clip files, each with a strong moment seeded in the cache."""
+        from monteur.sift import ClipReport, ClipSegment, Moment
+        from monteur.web import server as web_server
+
+        paths = []
+        for c in range(n):
+            p = tmp_path / f"clip{c:02d}.mp4"
+            p.write_bytes(b"not really a video")
+            report = ClipReport(
+                path=str(p), duration=180.0,
+                segments=[ClipSegment(0.0, 4.0, "usable", 0.9)],
+                moments=[
+                    Moment(20.0, 24.0, 0.9 - 0.05 * c, label="tunnel"),
+                    Moment(80.0, 84.0, 0.7 - 0.05 * c, label="curve"),
+                ],
+                usable_ratio=0.8, notes=[], media_start=0.0,
+            )
+            with web_server._CLIP_CACHE_LOCK:
+                web_server._CLIP_CACHE[os.path.abspath(str(p))] = (
+                    os.path.getmtime(p), report,
+                )
+            paths.append(str(p))
+        return paths
+
+    def _project(self, name="long form", *, media=None, plan=None):
+        from monteur import projects
+
+        return projects.create_project(
+            name,
+            media_pool=[{"path": p, "kind": "file"} for p in (media or [])],
+            plan=plan,
+        )
+
+    def test_series_needs_analyzed_footage(self, server, tmp_path):
+        # a clip in the pool but NO seeded report -> honest "analyze first"
+        clip = tmp_path / "unscanned.mp4"
+        clip.write_bytes(b"x")
+        project = self._project(media=[str(clip)])
+        data = _post(
+            f"{server}/api/projects/{project.id}/series", {"series": 2}
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "analyze" in job["message"].lower()
+
+    def test_series_from_a_project_returns_shorts(self, server, tmp_path):
+        clips = self._seed_clips(tmp_path, 4)
+        project = self._project(media=clips)
+        data = _post(
+            f"{server}/api/projects/{project.id}/series",
+            {"series": 3, "canvas": "vertical-uhd"},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done", job.get("message")
+        result = job["result"]
+        assert result["count"] == 3
+        assert result["requested"] == 3
+        # no long-form plan on the project -> the footage pool seeded the shorts
+        assert result["from_edit"] is False
+        assert result["analyzed"] == 4
+        for short in result["shorts"]:
+            assert short["plan_json"]["entries"]  # a real cut
+            assert short["canvas"] == "vertical-uhd"
+            assert short["cuts"] >= 1
+
+    def test_series_extracts_the_edits_beats_when_a_plan_exists(self, server, tmp_path):
+        clips = self._seed_clips(tmp_path, 4)
+        # a long-form plan that used the FIRST beat of each of the four clips
+        plan = {
+            "monteur_plan": 1,
+            "entries": [
+                {"clip_path": p, "source_start": 20.0, "source_end": 24.0}
+                for p in clips
+            ],
+        }
+        project = self._project(media=clips, plan=plan)
+        data = _post(f"{server}/api/projects/{project.id}/series", {"series": 3})
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done", job.get("message")
+        assert job["result"]["from_edit"] is True
+
+    def test_series_needs_at_least_two(self, server, tmp_path):
+        clips = self._seed_clips(tmp_path, 2)
+        project = self._project(media=clips)
+        data = _post(f"{server}/api/projects/{project.id}/series", {"series": 1})
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+
+    def test_series_save_creates_child_projects(self, server, tmp_path):
+        from monteur import projects
+
+        clips = self._seed_clips(tmp_path, 4)
+        project = self._project(name="My Tour", media=clips)
+        data = _post(f"{server}/api/projects/{project.id}/series", {"series": 2})
+        job = _wait_for_job(server, data["job"])
+        shorts = job["result"]["shorts"]
+
+        saved = _post(
+            f"{server}/api/projects/{project.id}/series/save",
+            {"shorts": [
+                {"plan_json": shorts[0]["plan_json"], "label": "Short 1"},
+                {"plan_json": shorts[1]["plan_json"], "label": "Short 2"},
+            ]},
+        )
+        assert len(saved["created"]) == 2
+        child = projects.load_project(saved["created"][0]["id"])
+        assert child is not None
+        assert child.name == "My Tour — Short 1"
+        assert child.has_plan
+        # the child references the SAME footage, so it can be refined on its own
+        assert {e["path"] for e in child.media_pool} == {os.path.abspath(p) for p in clips}
+        assert child.options.get("parent_project") == project.id
+
+    def test_series_save_rejects_empty(self, server, tmp_path):
+        project = self._project(media=self._seed_clips(tmp_path, 2))
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/projects/{project.id}/series/save", {"shorts": []})
+        assert exc_info.value.code == 400
+
+
 class TestVisionApi:
     DEMO = TestCreateApi.DEMO
 

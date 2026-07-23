@@ -66,6 +66,11 @@ API (all JSON):
     (sift ONLY the selected clips; optional vision when see=true)
 * ``POST /api/projects/<id>/see`` {"clips":[abs paths]}         -> {"job": id}
     (Claude-vision ONLY the selected clips — the staged "check" step)
+* ``POST /api/projects/<id>/series`` {"series":N, "canvas"?}    -> {"job": id}
+    (long form -> N vertical Shorts, extracted from the edit's beats)
+* ``POST /api/projects/<id>/series/save``
+    {"shorts":[{plan_json,label?}]}          -> {"created":[{id,name}]}
+    (persist chosen Shorts as child projects on the same footage)
 * ``POST /api/create/resolve`` {"plan_json", "fps"?, "name"?,
   "canvas"?, "audio"?}                                          -> {"job": id}
 * ``POST /api/resolve/render`` {"timeline"?, "target_dir",
@@ -2103,6 +2108,161 @@ def _run_series_job(job: dict, payload: dict) -> None:
         job["state"] = "error"
 
 
+def _project_reports(project) -> tuple[list, list]:
+    """Recall the PERSISTED sift reports for every clip in a project's pool.
+
+    Returns ``(reports, missing)`` — ``missing`` is the pooled clip paths with
+    no persisted sift yet (never analyzed). Never sifts here: the project ->
+    shorts path reuses the analysis the project already saved, so a re-opened
+    project makes shorts instantly and never re-crunches.
+    """
+    reports: list = []
+    missing: list = []
+    for clip in _resolve_pool(project)["clips"]:
+        ab = clip["path"]
+        report = _cached_clip_report(ab)
+        if report is None:
+            missing.append(ab)
+        else:
+            reports.append(report)
+    return reports, missing
+
+
+def _run_project_series_job(job: dict, project_id: str, payload: dict) -> None:
+    """Daemon-thread body for POST /api/projects/<id>/series.
+
+    Turns a finished long-form CUT into up to ``series`` genuinely different
+    vertical Shorts, EXTRACTED from the beats the edit actually used
+    (:func:`monteur.series.series_from_edit`). Reuses the project's persisted
+    sift — no re-scan — and the long form's own song when it still exists.
+    Each short carries its own full plan (save-plan format), its seed moment
+    and a "why this short" note, the same shape the folder series returns.
+    """
+    from monteur import projects
+    from monteur.media import MonteurMediaError
+    from monteur.montage import BEST_FIRST, plan_to_dict
+    from monteur.series import series_from_edit
+
+    try:
+        project = projects.load_project(project_id)
+        if project is None:
+            job["message"] = f"unknown project {project_id!r}"
+            job["state"] = "error"
+            return
+        try:
+            count = int(payload.get("series") or payload.get("count") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("'series' must be a whole number of videos")
+        if count < 2:
+            raise ValueError("a series needs at least 2 videos")
+        count = min(count, 8)
+
+        reports, missing = _project_reports(project)
+        if not reports:
+            raise ValueError(
+                "this project's footage isn't analyzed yet — open the Footage "
+                "tab and analyze the clips first, then make Shorts"
+            )
+
+        # Reuse the long form's song when it still exists, so the shorts are
+        # beat-synced; otherwise cut each short to the clips' own sound.
+        music = None
+        plan = project.plan if isinstance(project.plan, dict) else None
+        music_path = str((plan or {}).get("music_path") or "")
+        if music_path and os.path.isfile(music_path):
+            try:
+                from monteur.music import analyze_music
+
+                music = analyze_music(music_path)
+            except MonteurMediaError:
+                music = None
+
+        kwargs: dict = {}
+        if payload.get("order") == "best_first":
+            kwargs["order"] = BEST_FIRST
+        if payload.get("transitions"):
+            kwargs["transitions"] = str(payload["transitions"])
+        if payload.get("fps"):
+            kwargs["fps"] = float(payload["fps"])
+        canvas = str(payload.get("canvas") or "vertical-uhd")
+
+        shorts, from_edit = series_from_edit(
+            reports, plan, music, count=count, canvas=canvas, **kwargs
+        )
+        if not shorts:
+            raise ValueError(
+                "no usable moments for a series — the cut needs a few distinct "
+                "strong moments to seed different Shorts"
+            )
+        out = []
+        for i, short in enumerate(shorts):
+            out.append({
+                "index": i,
+                "plan_json": plan_to_dict(short.plan),
+                "seed": {
+                    "clip_path": short.seed.clip_path,
+                    "start": short.seed.start,
+                    "end": short.seed.end,
+                    "label": short.seed.label,
+                    "score": short.seed.score,
+                },
+                "note": short.note,
+                "canvas": short.canvas,
+                "duration": short.plan.duration,
+                "cuts": len(short.plan.entries),
+            })
+        result = {
+            "shorts": out,
+            "count": len(out),
+            "requested": count,
+            "from_edit": from_edit,
+            "analyzed": len(reports),
+            "missing": len(missing),
+            "tempo": music.tempo if music is not None else 0,
+        }
+        job["result"] = result
+        job["state"] = "done"
+    except (MonteurMediaError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
+def _save_series_shorts(project, shorts: list) -> list:
+    """Persist chosen Shorts as CHILD projects referencing the same footage.
+
+    Each ``{"plan_json", "label"?}`` becomes a new "cut" project named after
+    the parent, carrying the parent's media pool (so a short can be re-opened,
+    refined and exported on its own) and a note linking it home. Returns the
+    created projects' ``{"id","name"}`` — the Studio opens them from there.
+    """
+    from monteur import projects
+
+    created: list = []
+    total = len(shorts)
+    for i, item in enumerate(shorts, start=1):
+        if not isinstance(item, dict):
+            continue
+        plan_json = item.get("plan_json")
+        if not isinstance(plan_json, dict) or not plan_json:
+            continue
+        label = str(item.get("label") or "").strip() or f"Short {i} of {total}"
+        name = f"{project.name} — {label}"
+        note = f"Short cut from “{project.name}” (project {project.id})"
+        child = projects.create_project(
+            name,
+            media_pool=[dict(e) for e in project.media_pool],
+            plan=plan_json,
+            notes=[note],
+            options={"parent_project": project.id, "series_short": True},
+            type="cut",
+        )
+        created.append({"id": child.id, "name": child.name})
+    return created
+
+
 def _run_pick_job(job: dict, payload: dict) -> None:
     """Daemon-thread body for POST /api/create/pick (rank candidate songs)."""
     from monteur.media import MonteurMediaError
@@ -3616,6 +3776,14 @@ class MonteurHandler(BaseHTTPRequestHandler):
                 pid = rest[: -len("/see")]
                 if pid and "/" not in pid:
                     return lambda: self._project_see(pid)
+            elif rest.endswith("/series/save") and method == "POST":
+                pid = rest[: -len("/series/save")]
+                if pid and "/" not in pid:
+                    return lambda: self._project_series_save(pid)
+            elif rest.endswith("/series") and method == "POST":
+                pid = rest[: -len("/series")]
+                if pid and "/" not in pid:
+                    return lambda: self._project_series(pid)
             elif rest.endswith("/versions") and method == "GET":
                 pid = rest[: -len("/versions")]
                 if pid and "/" not in pid:
@@ -4764,6 +4932,43 @@ class MonteurHandler(BaseHTTPRequestHandler):
             daemon=True,
         ).start()
         self._send_json({"job": job["id"]})
+
+    def _project_series(self, project_id: str) -> None:
+        """POST /api/projects/<id>/series {series:N, canvas?} — long form -> Shorts.
+
+        Extracts up to N genuinely different vertical Shorts from the beats
+        this project's cut actually used, reusing its persisted sift (no
+        re-scan). Returns ``{"job": id}``; the job result carries the shorts'
+        plans, seeds and notes."""
+        payload = self._read_json()
+        job = _new_job("series")
+        threading.Thread(
+            target=_run_project_series_job,
+            args=(job, project_id, payload),
+            name=f"monteur-project-series-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _project_series_save(self, project_id: str) -> None:
+        """POST /api/projects/<id>/series/save {shorts:[{plan_json,label?}]}.
+
+        Persists the chosen Shorts as CHILD projects that reference the same
+        footage, so each opens in the timeline for its own refinement and
+        export. Returns ``{"created": [{"id","name"}]}``."""
+        from monteur import projects
+
+        project = projects.load_project(project_id)
+        if project is None:
+            raise ApiError(404, f"unknown project {project_id!r}")
+        payload = self._read_json()
+        shorts = payload.get("shorts")
+        if not isinstance(shorts, list) or not shorts:
+            raise ApiError(400, "missing 'shorts' (a non-empty list of {plan_json})")
+        created = _save_series_shorts(project, shorts)
+        if not created:
+            raise ApiError(400, "no valid shorts to save (each needs a 'plan_json')")
+        self._send_json({"created": created})
 
     def _learn_signal(self, family: str, context: str, direction: str) -> None:
         """Record a correction signal, best-effort (learning never blocks an edit)."""
