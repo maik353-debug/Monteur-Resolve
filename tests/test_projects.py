@@ -413,3 +413,76 @@ class TestVersionHistory:
     def test_empty_history_stays_out_of_manifest(self):
         p = create_project("v")
         assert "versions" not in project_to_dict(p)  # byte-identical to before
+
+
+class TestAnalysisStore:
+    """The sift + Claude labels live IN the project (analysis.json), so a
+    re-opened project builds from its own stored analysis and never re-scans."""
+
+    def _report(self, path, ratio=0.8, tags=None):
+        from monteur.sift import ClipReport, ClipSegment, Moment
+
+        return ClipReport(
+            path=str(path), duration=12.0,
+            segments=[ClipSegment(0.0, 3.0, "usable", 0.9)],
+            moments=[Moment(1.0, 3.0, 0.9, label="curve", tags=tags or ["kurve"], hero=0.7)],
+            usable_ratio=ratio, notes=["ok"], media_start=0.0,
+        )
+
+    def _clip(self, tmp_path, name):
+        p = tmp_path / name
+        p.write_bytes(b"not really a video")
+        return p
+
+    def test_save_then_load_round_trips_with_labels(self, tmp_path):
+        clip = self._clip(tmp_path, "a.mp4")
+        project = create_project("p", media_pool=[str(clip)])
+        projects.save_reports(project, [self._report(clip, 0.72, tags=["hero", "kurve"])])
+
+        # a FRESH load (a re-opened project) — the analysis is in the bundle
+        reopened = load_project(project.id)
+        reports = projects.load_reports(reopened)
+        assert len(reports) == 1
+        assert reports[0].usable_ratio == 0.72
+        assert reports[0].moments[0].tags == ["hero", "kurve"]  # Claude labels survive
+        assert (reopened.root / "analysis.json").is_file()
+
+    def test_load_skips_a_stale_clip(self, tmp_path):
+        import os
+        import time
+
+        clip = self._clip(tmp_path, "a.mp4")
+        project = create_project("p", media_pool=[str(clip)])
+        projects.save_reports(project, [self._report(clip)])
+        future = time.time() + 10
+        os.utime(clip, (future, future))  # a re-export -> mtime changed
+        assert projects.load_reports(project) == []
+        assert projects.analyzed_count(project) == 0
+
+    def test_save_merges_and_replaces_same_clip(self, tmp_path):
+        a, b = self._clip(tmp_path, "a.mp4"), self._clip(tmp_path, "b.mp4")
+        project = create_project("p", media_pool=[str(a), str(b)])
+        projects.save_reports(project, [self._report(a, 0.5)])
+        projects.save_reports(project, [self._report(b, 0.6)])  # must not drop a
+        projects.save_reports(project, [self._report(a, 0.9)])  # re-analyse a
+        reports = {r.path: r for r in projects.load_reports(project)}
+        assert len(reports) == 2
+        assert reports[str(a)].usable_ratio == 0.9  # replaced, not duplicated
+
+    def test_load_is_pool_order(self, tmp_path):
+        a, b, c = (self._clip(tmp_path, n) for n in ("a.mp4", "b.mp4", "c.mp4"))
+        project = create_project("p", media_pool=[str(a), str(b), str(c)])
+        # store out of order
+        projects.save_reports(project, [self._report(c), self._report(a), self._report(b)])
+        paths = [r.path for r in projects.load_reports(project)]
+        assert paths == [str(a), str(b), str(c)]
+
+    def test_empty_when_nothing_analysed(self, tmp_path):
+        project = create_project("p", media_pool=[str(self._clip(tmp_path, "a.mp4"))])
+        assert projects.load_reports(project) == []
+        assert projects.analyzed_count(project) == 0
+
+    def test_corrupt_store_degrades_to_empty(self, tmp_path):
+        project = create_project("p")
+        (project.root / "analysis.json").write_text("{not json", encoding="utf-8")
+        assert projects.load_reports(project) == []

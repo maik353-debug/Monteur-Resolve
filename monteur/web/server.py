@@ -1557,13 +1557,34 @@ def _analyze_selected(job: dict, clips: list) -> list:
     return reports
 
 
-def _run_analyze_job(job: dict, clips: list, see: bool = False) -> None:
+def _save_project_analysis(project_id: str, reports: list) -> None:
+    """Store reports (with any Claude labels) IN the project — best-effort.
+
+    The analysis is part of the project: the storyboard build reads it back and
+    never re-scans the pool. A failure here never fails the analyse job (the
+    footage sidecar is already written); it just means the build would ask to
+    analyse again."""
+    if not project_id or not reports:
+        return
+    try:
+        from monteur import projects
+
+        project = projects.load_project(project_id)
+        if project is not None:
+            projects.save_reports(project, reports)
+    except Exception:  # noqa: BLE001 — storing analysis is never a gate
+        pass
+
+
+def _run_analyze_job(job: dict, clips: list, see: bool = False, project_id: str = "") -> None:
     """Daemon body for POST /api/projects/<id>/analyze — sift a SUBSET.
 
     Produces the SAME result shape as the folder scan ({"clips", optional
     "vision_*", "proxies_job"}) so the Studio's scan panel + heartbeat +
     Cancel + reload-reattach drive it unchanged. Optionally runs the vision
-    pass on the just-analyzed clips when ``see`` is set."""
+    pass on the just-analyzed clips when ``see`` is set. The reports (with any
+    labels) are stored IN the project so the build reads them back, never
+    re-scanning."""
     from monteur.media import MediaCancelled, MonteurMediaError
     from monteur.sift import SiftCancelled
 
@@ -1577,6 +1598,7 @@ def _run_analyze_job(job: dict, clips: list, see: bool = False) -> None:
             else:
                 result["vision_notes"] = notes
             _remember_clip_reports(reports)  # annotations landed in place
+        _save_project_analysis(project_id, reports)  # analysis lives in the project
         result["clips"] = [asdict(r) for r in reports]
         try:
             result["proxies_job"] = _start_clip_proxies_job(
@@ -1596,13 +1618,14 @@ def _run_analyze_job(job: dict, clips: list, see: bool = False) -> None:
         job["state"] = "error"
 
 
-def _run_see_job(job: dict, clips: list) -> None:
+def _run_see_job(job: dict, clips: list, project_id: str = "") -> None:
     """Daemon body for POST /api/projects/<id>/see — Claude-check a SUBSET.
 
     Vision on ONLY the chosen clips (typically the good ones judged after
     analysis). Reuses a clip's cached report when fresh; sifts any that were
-    not analyzed yet, so this step stands alone. Same result shape + panel
-    plumbing as the analyze/scan jobs."""
+    not analyzed yet, so this step stands alone. The labeled reports are stored
+    IN the project. Same result shape + panel plumbing as the analyze/scan
+    jobs."""
     from monteur.media import MediaCancelled, MonteurMediaError
     from monteur.sift import SiftCancelled, analyze_clip
 
@@ -1623,6 +1646,7 @@ def _run_see_job(job: dict, clips: list) -> None:
         else:
             result["vision_notes"] = notes
         _remember_clip_reports(reports)  # annotations landed in place
+        _save_project_analysis(project_id, reports)  # analysis lives in the project
         result["clips"] = [asdict(r) for r in reports]
         job["result"] = result
         job["state"] = "done"
@@ -1790,10 +1814,35 @@ def _plan_from_payload(job: dict, payload: dict):
             payload["max_duration"] = resolved["max_duration"]
         platform_notes = resolved["notes"]
 
-    reports, cached = _sift_or_cached(job, folder)
-    if not cached and see:  # fresh sift: annotate before planning (soft-fail)
-        vision["ran"] = True
-        vision["notes"], vision["error"] = _apply_vision(job, reports)
+    # The storyboard build reads the project's OWN stored analysis — the sift
+    # + Claude labels saved when you analyzed the pool — and NEVER re-scans the
+    # media pool here (that is the Footage tab's job). Labels are baked into the
+    # stored reports, so there is no re-watch. Nothing analyzed -> a clear "go
+    # analyze first" message, not a scan.
+    project_id = str(payload.get("project") or "")
+    if project_id:
+        from monteur import projects
+
+        project = projects.load_project(project_id)
+        if project is None:
+            raise ValueError(f"unknown project {project_id!r}")
+        reports = projects.load_reports(project)
+        if not reports:
+            raise ValueError(
+                "No analyzed footage yet — open the Footage tab, analyze your "
+                "clips (and Claude-check them), then build the storyboard. The "
+                "storyboard is built from your analyzed clips, not a fresh scan."
+            )
+        with _JOBS_LOCK:
+            job["progress"].append(
+                {"stage": "cache", "name": f"using {len(reports)} analyzed clips"}
+            )
+    else:
+        # Legacy folder path (CLI / clients without a project): sift-or-cache.
+        reports, cached = _sift_or_cached(job, folder)
+        if not cached and see:  # fresh sift: annotate before planning (soft-fail)
+            vision["ran"] = True
+            vision["notes"], vision["error"] = _apply_vision(job, reports)
     if job["cancel"].is_set():
         raise SiftCancelled("cancelled")
 
@@ -4021,8 +4070,10 @@ class MonteurHandler(BaseHTTPRequestHandler):
 
     def _create_build(self) -> None:
         payload = self._read_json()
-        if not payload.get("folder"):
-            raise ApiError(400, "missing 'folder' (path to your footage)")
+        # the storyboard builds from a PROJECT's analyzed clips; a bare folder
+        # is the legacy/CLI path. One of the two must be present.
+        if not payload.get("project") and not payload.get("folder"):
+            raise ApiError(400, "missing 'project' (or 'folder') to build from")
         _validate_arrangement(payload)
         _validate_platform(payload)
         job = _new_job("build")
@@ -4911,7 +4962,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
         job = _new_job("scan")
         threading.Thread(
             target=_run_analyze_job,
-            args=(job, clips, see),
+            args=(job, clips, see, project_id),
             name=f"monteur-analyze-{job['id']}",
             daemon=True,
         ).start()
@@ -4927,7 +4978,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
         job = _new_job("scan")
         threading.Thread(
             target=_run_see_job,
-            args=(job, clips),
+            args=(job, clips, project_id),
             name=f"monteur-see-{job['id']}",
             daemon=True,
         ).start()

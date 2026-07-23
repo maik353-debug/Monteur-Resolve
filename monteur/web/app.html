@@ -7436,6 +7436,9 @@ $("cre-arr-apply").addEventListener("click", function () {
 
 function creBuildBody() {
   var body = {
+    // the storyboard builds from the PROJECT's analyzed clips (no folder
+    // re-scan); folder stays for the legacy/CLI path + drafts display
+    project: cre.projectId || undefined,
     folder: $("cre-folder").value.trim(),
     audio: cre.audio,
     order: cre.order,

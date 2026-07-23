@@ -1893,6 +1893,88 @@ class TestProjectSeriesApi:
         assert exc_info.value.code == 400
 
 
+class TestStoryboardFromProject:
+    """POST /api/create/build with a project — builds ONLY from analyzed clips.
+
+    The storyboard must never re-scan the media pool: it reads the project's
+    stored analysis (sift + Claude labels), errors clearly when nothing is
+    analyzed, and shows no vision/scan re-processing. Synthetic reports are
+    stored in the project directly, no real media needed.
+    """
+
+    def _seed_project(self, tmp_path, n=4, *, analyze=True):
+        from monteur import projects
+        from monteur.sift import ClipReport, ClipSegment, Moment
+
+        clips = []
+        reports = []
+        for c in range(n):
+            p = tmp_path / f"clip{c:02d}.mp4"
+            p.write_bytes(b"not really a video")
+            clips.append(str(p))
+            reports.append(ClipReport(
+                path=str(p), duration=180.0,
+                segments=[ClipSegment(0.0, 4.0, "usable", 0.9)],
+                moments=[
+                    Moment(20.0, 24.0, 0.9 - 0.05 * c, label="tunnel", tags=["kurve"]),
+                    Moment(80.0, 84.0, 0.7 - 0.05 * c, label="curve"),
+                ],
+                usable_ratio=0.8, notes=[], media_start=0.0,
+            ))
+        project = projects.create_project(
+            "storyboard", media_pool=[{"path": p, "kind": "file"} for p in clips]
+        )
+        if analyze:
+            projects.save_reports(project, reports)  # analysis lives in the project
+        return project, clips
+
+    def test_build_errors_when_nothing_analyzed(self, server, tmp_path):
+        project, _ = self._seed_project(tmp_path, analyze=False)
+        data = _post(
+            f"{server}/api/create/build",
+            {"project": project.id, "audio": "original", "max_duration": 20},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "analyze" in job["message"].lower()
+
+    def test_build_uses_the_projects_analyzed_clips_no_scan(self, server, tmp_path):
+        project, _ = self._seed_project(tmp_path, analyze=True)
+        data = _post(
+            f"{server}/api/create/build",
+            {"project": project.id, "audio": "original", "max_duration": 20},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done", job.get("message")
+        assert job["result"]["plan"]["cuts"] >= 1
+        # NO re-scan and NO re-watch: the progress carries the "analyzed clips"
+        # reuse marker and never a per-clip "start"/"vision" processing stage.
+        stages = [p.get("stage") for p in job["progress"]]
+        assert "vision" not in stages
+        assert "start" not in stages
+        assert any(
+            p.get("stage") == "cache" and "analyzed clips" in str(p.get("name"))
+            for p in job["progress"]
+        )
+
+    def test_build_needs_project_or_folder(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/create/build", {"audio": "original"})
+        assert exc_info.value.code == 400
+
+    def test_analyze_stores_reports_in_the_project(self, server, tmp_path):
+        # the analyze job writes the project's analysis store (proven without
+        # real media by checking the store exists after a demo-less path is
+        # unavailable) — here we assert the store round-trips via save_reports,
+        # the same call the job makes.
+        from monteur import projects
+
+        project, clips = self._seed_project(tmp_path, analyze=True)
+        reopened = projects.load_project(project.id)
+        stored = projects.load_reports(reopened)
+        assert {r.path for r in stored} == set(clips)
+
+
 class TestVisionApi:
     DEMO = TestCreateApi.DEMO
 

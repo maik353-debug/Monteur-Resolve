@@ -507,6 +507,123 @@ def restore_version(project: Project, version_id: str) -> bool:
     return True
 
 
+# --- analysis store: the sift + Claude labels live IN the project ------------
+#
+# Analysis (per-clip sift reports, carrying any Claude/vision labels) is part
+# of the PROJECT, not a loose sidecar next to the footage. It lives in
+# ``<root>/analysis.json`` keyed by ``abspath|mtime`` (the same key the sift
+# sidecar uses), so a re-opened project builds from its OWN stored analysis and
+# the storyboard never re-scans the media pool. Re-exported footage (mtime
+# changed) drops out as stale — analyse it again.
+
+#: The analysis store filename inside a bundle.
+_ANALYSIS_NAME = "analysis.json"
+
+#: Analysis store schema version.
+ANALYSIS_FORMAT_VERSION = 1
+
+
+def _analysis_path(project: Project) -> Path:
+    return project.root / _ANALYSIS_NAME
+
+
+def _load_analysis(project: Project) -> dict:
+    """The raw ``{key: report_dict}`` store, or ``{}`` when absent/corrupt."""
+    try:
+        data = json.loads(_analysis_path(project).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("monteur_analysis") != ANALYSIS_FORMAT_VERSION:
+        return {}
+    clips = data.get("clips")
+    return dict(clips) if isinstance(clips, dict) else {}
+
+
+def save_reports(project: Project, reports: list) -> None:
+    """Merge sift reports (with any Claude labels) into the project's store.
+
+    Best-effort and atomic: keyed by ``abspath|mtime``, a re-analysed clip
+    (new mtime) replaces its older entry, and a clip we cannot stat is skipped.
+    This is what makes the analysis part of the project — the build reads it
+    back with :func:`load_reports` and never re-scans the pool.
+    """
+    from monteur import sift
+
+    if not reports:
+        return
+    store = _load_analysis(project)
+    for report in reports:
+        try:
+            ab = os.path.abspath(report.path)
+            key = f"{ab}|{os.path.getmtime(ab)}"
+        except OSError:
+            continue
+        # drop any stale entry for the same clip (a different mtime)
+        store = {
+            k: v for k, v in store.items()
+            if str(k).rpartition("|")[0] != ab
+        }
+        try:
+            store[key] = sift.report_to_dict(report)
+        except Exception:  # noqa: BLE001 — one bad report never blocks the rest
+            continue
+    root = project.root
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        path = _analysis_path(project)
+        tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+        tmp.write_text(
+            json.dumps(
+                {"monteur_analysis": ANALYSIS_FORMAT_VERSION, "clips": store},
+                ensure_ascii=False, indent=1,
+            ) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+    except OSError:
+        pass  # a store we cannot write degrades to "not analysed", never a crash
+
+
+def load_reports(project: Project) -> list:
+    """The project's FRESH stored sift reports (mtime-checked), pool order.
+
+    Reports whose clip is gone or was re-exported (mtime changed) are skipped
+    as stale. Returns an empty list when nothing is analysed yet — the build
+    turns that into an "analyse your footage first" message, never a re-scan.
+    """
+    from monteur import sift
+
+    store = _load_analysis(project)
+    if not store:
+        return []
+    # pool order: pooled clip paths first (folders expanded is the web layer's
+    # job, so here we order by the media-pool file entries we know, then any
+    # remaining stored clips) — deterministic and stable for the build.
+    pool_order = {
+        os.path.abspath(str(e.get("path"))): i
+        for i, e in enumerate(project.media_pool)
+    }
+    fresh: list = []
+    for key, data in store.items():
+        ab, _, mtime = str(key).rpartition("|")
+        try:
+            if not mtime or os.path.getmtime(ab) != float(mtime):
+                continue
+        except OSError:
+            continue
+        try:
+            fresh.append((pool_order.get(ab, len(pool_order)), ab, sift.report_from_dict(data)))
+        except Exception:  # noqa: BLE001 — skip a corrupt entry, keep the rest
+            continue
+    fresh.sort(key=lambda t: (t[0], t[1]))
+    return [report for _, _, report in fresh]
+
+
+def analyzed_count(project: Project) -> int:
+    """How many of the project's clips have a fresh stored analysis (cheap)."""
+    return len(load_reports(project))
+
+
 # --- migration from drafts ---------------------------------------------------
 
 
