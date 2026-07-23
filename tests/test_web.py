@@ -6915,6 +6915,14 @@ class TestProUiStatic:
             # re-stamped on back-navigation (creShowStep -> applyGradeToBoard)
             "function applyGradeToBoard",
             "img.style.filter = gradeCss(cre.grade)",
+            # the grade bakes into the EXPORT and the PREVIEW (not just the UI):
+            # attachGrade rides it onto every render request body
+            "function attachGrade",
+            "attachGrade(exportBody);",
+            "attachGrade({ plan_json: rev.planJson, audio: audio, width: 640 })",
+            # ...and the storyboard's live playout preview shows the look
+            'var frame = $("po-frame");',
+            "if (frame) frame.style.filter = css;",
         ):
             assert needle in source, needle
         # all six looks are wired

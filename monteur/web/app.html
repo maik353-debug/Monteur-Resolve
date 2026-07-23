@@ -9896,6 +9896,7 @@ function applyDipTitle(dipIndex, text, anim) {
     var exportBody = { plan_json: rev.planJson, fps: body.fps, format: body.format };
     if (body.audio) exportBody.audio = body.audio;
     if (body.canvas) exportBody.canvas = body.canvas;
+    attachGrade(exportBody); // bake the colour grade into the export
     cre.result = {
       data: result, format: body.format,
       body: (cre.result && cre.result.body) || null,
@@ -10003,9 +10004,16 @@ function renderStoryboard() {
 /* re-stamp the current Look & color grade onto the already-built board
    thumbnails (used on back-navigation, when the board DOM is reused). */
 function applyGradeToBoard() {
-  var css = gradeCss(cre.grade);
+  // the storyboard's live preview IS the playout video now (the old card board
+  // was retired), so the grade must ride on it — otherwise the preview never
+  // shows the look the export bakes. A neutral grade resolves to "none".
+  var g = cre.grade || { brightness: 0, contrast: 0, saturation: 0, warmth: 0, look: "" };
+  var css = (gradeIsNeutral(g) && !g.look) ? "" : gradeCss(g);
+  var frame = $("po-frame");
+  if (frame) frame.style.filter = css;
+  // any storyboard thumbnails that still exist keep matching too
   Array.prototype.forEach.call(
-    document.querySelectorAll("#cre-sb-board .sb-thumb"),
+    document.querySelectorAll("#cre-strip-blocks .tl-block .tl-thumb, #cre-sb-board .sb-thumb"),
     function (img) { img.style.filter = css; }
   );
 }
@@ -10039,7 +10047,7 @@ function renderPreviewCut() {
   // quality is fixed at 640 px for v1; the audio mode follows the build's
   // (a plan without music can only play its clips' own sound)
   var audio = rev.planJson.music_path ? (built.audio || cre.audio || "music") : "original";
-  var body = { plan_json: rev.planJson, audio: audio, width: 640 };
+  var body = attachGrade({ plan_json: rev.planJson, audio: audio, width: 640 });
   $("cre-preview-msg").hidden = true;
   setPreviewBusy(true);
   api("/api/create/preview", { method: "POST", body: body }).then(function (data) {
@@ -11677,6 +11685,7 @@ function applyTransition(trans) {
     var exportBody = { plan_json: rev.planJson, fps: body.fps, format: body.format };
     if (body.audio) exportBody.audio = body.audio;
     if (body.canvas) exportBody.canvas = body.canvas;
+    attachGrade(exportBody); // bake the colour grade into the export
     cre.result = {
       data: result, format: body.format,
       body: (cre.result && cre.result.body) || null,
@@ -11720,6 +11729,7 @@ function applyPlanSurgery(extra, doneMsg, nextSlot) {
     var exportBody = { plan_json: rev.planJson, fps: body.fps, format: body.format };
     if (body.audio) exportBody.audio = body.audio;
     if (body.canvas) exportBody.canvas = body.canvas;
+    attachGrade(exportBody); // bake the colour grade into the export
     cre.result = {
       data: result, format: body.format,
       body: (cre.result && cre.result.body) || null,
@@ -11786,6 +11796,7 @@ function resyncAudio() {
     var exportBody = { plan_json: rev.planJson, fps: body.fps, format: body.format };
     if (body.audio) exportBody.audio = body.audio;
     if (body.canvas) exportBody.canvas = body.canvas;
+    attachGrade(exportBody); // bake the colour grade into the export
     cre.result = {
       data: result, format: body.format,
       body: (cre.result && cre.result.body) || null,
@@ -11830,6 +11841,7 @@ function applySfxEdit(spec, doneMsg, keepSfx) {
     var exportBody = { plan_json: rev.planJson, fps: body.fps, format: body.format };
     if (body.audio) exportBody.audio = body.audio;
     if (body.canvas) exportBody.canvas = body.canvas;
+    attachGrade(exportBody); // bake the colour grade into the export
     cre.result = {
       data: result, format: body.format,
       body: (cre.result && cre.result.body) || null,
@@ -12405,9 +12417,25 @@ function gradeToDict(g) {
 }
 /* CSS approximation for the live preview (the ffmpeg bake is the truth) */
 function gradeCss(g) {
-  return "brightness(" + (1 + g.brightness * 0.25).toFixed(3) + ") " +
+  var css = "brightness(" + (1 + g.brightness * 0.25).toFixed(3) + ") " +
     "contrast(" + (1 + g.contrast * 0.45).toFixed(3) + ") " +
     "saturate(" + Math.max(0, 1 + g.saturation).toFixed(3) + ")";
+  // warmth: a sepia wash tilts the image toward amber (positive) — a rough
+  // CSS stand-in for the export's real warm/cool balance, so the preview at
+  // least leans the right way
+  var w = g.warmth || 0;
+  if (w > 0) css += " sepia(" + Math.min(0.6, w * 0.6).toFixed(3) + ")";
+  else if (w < 0) css += " hue-rotate(" + Math.round(w * 18) + "deg)";
+  return css;
+}
+
+/* attach the current colour grade to a render request body (export / preview),
+   only when it is NOT neutral — a neutral grade leaves the request (and the
+   rendered bytes) exactly as before grading existed. This is what makes the
+   grade actually BAKE into Monteur's own export. */
+function attachGrade(body) {
+  if (!gradeIsNeutral(cre.grade) || cre.grade.look) body.grade = gradeToDict(cre.grade);
+  return body;
 }
 function applyGradePreview() {
   var g = cre.grade;

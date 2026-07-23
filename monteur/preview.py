@@ -612,6 +612,7 @@ def render_preview(
     progress=None,
     fade_in_s: float | None = None,
     fade_out_s: float | None = None,
+    grade: Grade | None = None,
     cancel=None,
 ) -> dict:
     """Render ``plan`` to a small uniform MP4 at ``out_path`` — no Resolve.
@@ -680,6 +681,10 @@ def render_preview(
         f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
         f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps:g}"
     )
+    # the colour grade rides on the picture, so the preview MATCHES the export
+    # (the same non-destructive look). Empty (neutral) leaves the chain as before.
+    grade_ff = grade_to_ffmpeg(grade) if grade else ""
+    clip_video_filter = video_filter + (("," + grade_ff) if grade_ff else "")
     encode = [
         "-c:v", "libx264", "-preset", _PRESET, "-crf", _CRF,
         "-pix_fmt", "yuv420p",
@@ -710,7 +715,7 @@ def render_preview(
                     audio_args = ["-an"]
                 _run_ffmpeg(
                     [
-                        *args, "-map", "0:v:0", "-vf", video_filter,
+                        *args, "-map", "0:v:0", "-vf", clip_video_filter,
                         *encode, *audio_args, seg,
                     ],
                     f"encoding segment {i + 1}/{len(segments)} ({name})",

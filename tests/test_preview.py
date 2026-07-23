@@ -122,6 +122,24 @@ def test_render_preview_music_mode(tmp_path):
 
 @needs_ffmpeg
 @needs_demo
+def test_render_preview_bakes_the_grade(tmp_path):
+    # the preview must MATCH the export — a non-neutral grade renders without
+    # error and still produces a valid, correctly-sized MP4
+    from monteur.color import Grade
+
+    out = tmp_path / "graded.mp4"
+    result = render_preview(
+        demo_plan(), str(out), width=640, audio="music",
+        grade=Grade(brightness=0.4, contrast=0.3, saturation=-0.2, warmth=0.5),
+    )
+    assert out.is_file() and out.stat().st_size > 0
+    info = probe(out)
+    assert info.width == 640 and info.height % 2 == 0
+    assert info.duration == pytest.approx(6.0, abs=0.3)
+
+
+@needs_ffmpeg
+@needs_demo
 def test_render_preview_original_mode(tmp_path):
     out = tmp_path / "original.mp4"
     result = render_preview(demo_plan(), str(out), audio="original")

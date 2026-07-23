@@ -837,6 +837,7 @@ def _run_preview_job(job: dict, payload: dict) -> None:
     finished preview at a time — the latest); a FAILED render deletes
     nothing, so the last good preview keeps playing.
     """
+    from monteur.color import grade_from_dict
     from monteur.media import MediaCancelled, MonteurMediaError
     from monteur.montage import plan_from_dict
 
@@ -844,6 +845,9 @@ def _run_preview_job(job: dict, payload: dict) -> None:
         plan = plan_from_dict(payload.get("plan_json") or {})  # bad -> ValueError
         if not plan.entries:
             raise ValueError("the plan has no entries — nothing to preview")
+        # the same colour grade the export bakes, so the preview MATCHES it
+        _grade_payload = payload.get("grade")
+        grade = grade_from_dict(_grade_payload) if _grade_payload else None
         audio = payload.get("audio") or ("music" if plan.music_path else "original")
         if not plan.music_path and audio != "original":
             raise ValueError(f"the plan has no music; audio mode {audio!r} needs a song")
@@ -866,7 +870,7 @@ def _run_preview_job(job: dict, payload: dict) -> None:
         out_path = os.path.join(directory, f"{token}.mp4")
         result = render_preview(
             plan, out_path, width=width, audio=audio, progress=progress,
-            cancel=job["cancel"],
+            grade=grade, cancel=job["cancel"],
         )
         # Cap the directory at THE latest preview: the fresh file replaces
         # every older one (best-effort — a locked file loses us nothing).
