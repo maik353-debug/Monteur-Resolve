@@ -1136,6 +1136,20 @@ class TestWizardStepsUi:
         assert "music enters|music window" in html
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_rebuild_draft_survives_navigation(self):
+        # a running build is remembered and reattached, so leaving the
+        # storyboard (or reloading) never orphans the build
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert "function attachBuildJob" in html
+        assert "function reattachBuildJob" in html
+        # startBuild persists the job with kind "build"
+        assert 'kind: "build"' in html
+        # every terminal build handler and the reattach paths reuse the store
+        assert "reattachBuildJob()" in html  # wired into creShowStep(storyboard)
+        # the reload path recovers a build too (not only a scan)
+        assert 'rec.kind === "build"' in html
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_color_is_its_own_page(self):
         html = _APP_HTML.read_text(encoding="utf-8")
         step4 = _step4_html(html)
@@ -6437,6 +6451,10 @@ class TestProUiStatic:
             "body.grade = gradeDict",
             "options.grade = gradeToDict",
             "restoreGrade",
+            # the grade also rides onto the storyboard thumbnails, and is
+            # re-stamped on back-navigation (creShowStep -> applyGradeToBoard)
+            "function applyGradeToBoard",
+            "img.style.filter = gradeCss(cre.grade)",
         ):
             assert needle in source, needle
         # all six looks are wired

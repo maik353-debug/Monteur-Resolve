@@ -6019,7 +6019,11 @@ function creShowStep(n, focusHeading) {
     poPause();        // ...and so does the playout — never play off-screen
     closeMiniPlayer();
   }
-  if (step.key === "storyboard" && $("cre-arrange-tools").open) arrRender();
+  if (step.key === "storyboard") {
+    if ($("cre-arrange-tools").open) arrRender();
+    applyGradeToBoard();  // reflect the current Look & color grade on the board
+    reattachBuildJob();   // a rebuild started here keeps running across nav
+  }
   if (step.key === "options") syncContinueHint(); // fresh look at "would this click rebuild?"
   if (step.key === "color") applyGradePreview(); // reflect the grade on the controls
   if (focusHeading) $("cre-h" + n).focus();
@@ -6804,7 +6808,15 @@ function attachScanJob(jobId) {
    user never left. No stored record → nothing happens (startup is unchanged). */
 function reattachActiveJob() {
   var rec = loadActiveJob();
-  if (!rec || rec.kind !== "scan") return;
+  if (!rec) return;
+  if (rec.kind === "build") {
+    // navigate to the storyboard; creShowStep's reattachBuildJob re-wires the
+    // poll (it fetches the job state and attaches, or clears a dead record)
+    setView("create");
+    creShowStep(creStepIndex("storyboard"));
+    return;
+  }
+  if (rec.kind !== "scan") return;
   api("/api/jobs/" + rec.jobId).then(function (job) {
     if (job.state === "running" || job.state === "done") {
       // running: restore the footage step and re-wire the live poll.
@@ -7820,44 +7832,78 @@ function startBuild(andThen) {
   cre.buildFp = null;
   setBuildBusy(true);
   api("/api/create/build", { method: "POST", body: body }).then(function (data) {
-    buildPanel.start(data.job, {
-      onDone: function (result) {
-        setBuildBusy(false);
-        cre.result = { data: result, format: body.format, body: body, kind: "build" };
-        // the options this draft was built with — until one changes, going
-        // options -> storyboard just navigates instead of rebuilding
-        cre.buildFp = buildFingerprintOf(body);
-        // a fresh build seeds the revision loop with its full plan
-        rev.planJson = (result && result.plan_json) || null;
-        rev.pins = [];
-        rev.lastBody = null;
-        saveProject(); // persist this build into the project (always-saved)
-        $("cre-rev-rationale").hidden = true;
-        $("cre-rev-msg").hidden = true;
-        creUpdatePages(); // a working draft exists — light the Storyboard tick
-        renderStoryboard();
-        resetDirectorNotes(); // a fresh cut makes any previous review stale
-        resetPreview();       // ...and any previous preview shows the old cut
-        renderCreResult(result);
-        $("cre-result-title").focus();
-        if (andThen) andThen(result);
-      },
-      onCancelled: function () {
-        setBuildBusy(false);
-        creNote("cre-build-msg", "Build cancelled — nothing was written. Build again whenever you're ready.");
-        $("cre-build-btn").focus();
-      },
-      onError: function (message) {
-        setBuildBusy(false);
-        creNote("cre-build-msg", message, true);
-        toast(message, "error");
-      }
-    });
+    // remember the running build so navigating away (or a reload) can
+    // reattach — the server keeps building either way
+    saveActiveJob({ jobId: data.job, kind: "build", body: body });
+    attachBuildJob(data.job, body, andThen);
   }).catch(function (err) {
+    clearActiveJob();
     setBuildBusy(false);
     var message = err && err.message ? err.message : String(err);
     creNote("cre-build-msg", message, true);
     toast(message, "error");
+  });
+}
+
+/* Wire the build panel's handlers to a job id — shared by the fresh-start
+   path (startBuild) and the reattach paths (nav + reload) so the handler
+   logic lives once. Every terminal state clears the stored record so a
+   finished build never reattaches again. */
+function attachBuildJob(jobId, body, andThen) {
+  buildPanel.start(jobId, {
+    onDone: function (result) {
+      clearActiveJob();
+      setBuildBusy(false);
+      cre.result = { data: result, format: body.format, body: body, kind: "build" };
+      // the options this draft was built with — until one changes, going
+      // options -> storyboard just navigates instead of rebuilding
+      cre.buildFp = buildFingerprintOf(body);
+      // a fresh build seeds the revision loop with its full plan
+      rev.planJson = (result && result.plan_json) || null;
+      rev.pins = [];
+      rev.lastBody = null;
+      saveProject(); // persist this build into the project (always-saved)
+      $("cre-rev-rationale").hidden = true;
+      $("cre-rev-msg").hidden = true;
+      creUpdatePages(); // a working draft exists — light the Storyboard tick
+      renderStoryboard();
+      resetDirectorNotes(); // a fresh cut makes any previous review stale
+      resetPreview();       // ...and any previous preview shows the old cut
+      renderCreResult(result);
+      $("cre-result-title").focus();
+      if (andThen) andThen(result);
+    },
+    onCancelled: function () {
+      clearActiveJob();
+      setBuildBusy(false);
+      creNote("cre-build-msg", "Build cancelled — nothing was written. Build again whenever you're ready.");
+      $("cre-build-btn").focus();
+    },
+    onError: function (message) {
+      clearActiveJob();
+      setBuildBusy(false);
+      creNote("cre-build-msg", message, true);
+      toast(message, "error");
+    }
+  });
+}
+
+/* Return to the Storyboard mid-build: the poll loop was stopped on the way
+   out (pages own their loops), but the server job is still running — re-wire
+   the live poll so progress + the eventual draft land as if we never left. */
+function reattachBuildJob() {
+  if (buildPanel.running()) return; // already watching
+  var rec = loadActiveJob();
+  if (!rec || rec.kind !== "build") return;
+  api("/api/jobs/" + rec.jobId).then(function (job) {
+    if (job.state === "running" || job.state === "done") {
+      setBuildBusy(true);
+      attachBuildJob(rec.jobId, rec.body || creBuildBody(), null);
+    } else {
+      clearActiveJob(); // cancelled / error while away — nothing to reattach
+    }
+  }).catch(function () {
+    clearActiveJob(); // 404 (job gone / server restarted) — clear silently
   });
 }
 $("cre-build-btn").addEventListener("click", function () { startBuild(null); });
@@ -9175,6 +9221,7 @@ function sbEntryCard(entry, i, noPin) {
   var url = sbThumbUrl(entry);
   if (sbObserver) { img.dataset.src = url; sbObserver.observe(img); }
   else { img.src = url; }
+  img.style.filter = gradeCss(cre.grade); // reflect the Look & color grade
   wrap.appendChild(img);
   wrap.appendChild(el("span", "sb-badge sb-slot", String(i + 1)));
   var length = (entry.record_end || 0) - (entry.record_start || 0);
@@ -9266,6 +9313,16 @@ function renderStoryboard() {
   renderMissingHook(); // the step-1 coverage result, collapsed by the board
   if ($("cre-arrange-tools").open) arrRender(); // the lane mirrors the board
   poRebuild(); // the playout plan follows every build/revise/apply/adjust
+}
+
+/* re-stamp the current Look & color grade onto the already-built board
+   thumbnails (used on back-navigation, when the board DOM is reused). */
+function applyGradeToBoard() {
+  var css = gradeCss(cre.grade);
+  Array.prototype.forEach.call(
+    document.querySelectorAll("#cre-sb-board .sb-thumb"),
+    function (img) { img.style.filter = css; }
+  );
 }
 
 /* ---- step 3: preview player (monteur.preview — Sehen ohne Resolve) ----
@@ -11456,6 +11513,7 @@ function applyGradePreview() {
     chip.setAttribute("aria-pressed", String(chip.dataset.look === g.look));
   });
   renderGradeLane(); // keep the timeline's Grade layer in sync with the controls
+  applyGradeToBoard(); // keep the storyboard thumbnails in sync too
 }
 function setGradeLook(name) {
   var base = COLOR_LOOKS[name] || COLOR_LOOKS.neutral;
