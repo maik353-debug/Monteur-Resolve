@@ -2885,8 +2885,18 @@ def _aim_start(
     if peak is None or peak < 0 or item.consumed > _EPS:
         return None
     hi = moment.end - slot_len
-    if drop and item.slack_end > moment.end + _EPS:
+    known_slack = item.slack_end > moment.end + _EPS
+    if drop and known_slack:
         hi = max(hi, item.slack_end - slot_len)
+    elif known_slack and hi < moment.start - _EPS:
+        # A non-drop HOLD longer than its (short) moment — the establishing
+        # opener, the outro closer — would otherwise pin to the head and land
+        # its picture peak LATE (the very defect peak-on-beat exists to remove).
+        # Widen the ceiling into the SAME vetted slack the drop hold uses (the
+        # enclosing usable segment, capped by the next same-clip moment), so
+        # the peak lands on the beat and the hold extends past the short moment
+        # through good footage — no unvetted frames.
+        hi = item.slack_end - slot_len
     hi = max(moment.start, hi)
     desired = min(max(peak - lead, moment.start), hi)
     if desired <= moment.start + _EPS:

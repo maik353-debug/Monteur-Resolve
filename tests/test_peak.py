@@ -170,6 +170,21 @@ def test_aim_start_clamps_and_neutrality():
     assert _aim_start(used, 1.0, CUT_LEAD) is None
 
 
+def test_aim_start_syncs_a_non_drop_hold_longer_than_its_moment():
+    # a HOLD longer than its short moment (an establishing opener / outro
+    # closer) used to pin to the head and land its peak LATE. With known
+    # vetted slack it now aims like a drop hold: the peak lands on the beat
+    # and the shot extends past the short moment through good footage.
+    hold = _PoolItem("/c.mp4", 30.0, peaked_moment(2.0, 3.0, 2.8), slack_end=8.0)
+    aim = _aim_start(hold, 2.0, CUT_LEAD)  # 2s slot over a 1s moment
+    assert aim is not None
+    # the peak sits CUT_LEAD after the slot start (on the beat)
+    assert aim == pytest.approx(2.8 - CUT_LEAD)
+    # ...but only with known slack — unknown slack keeps the old head behaviour
+    no_slack = _PoolItem("/c.mp4", 30.0, peaked_moment(2.0, 3.0, 2.8), slack_end=0.0)
+    assert _aim_start(no_slack, 2.0, CUT_LEAD) is None
+
+
 def test_zero_repeat_survives_the_aim_and_heads_are_not_burnt():
     # One 10 s moment, a 12 s request, repeats OFF: the cap makes it a 10 s
     # cut that must use EVERY second exactly once. The aim skips ~6 s of

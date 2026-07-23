@@ -42,10 +42,12 @@ from monteur.montage import (
 from monteur.music import MusicAnalysis, MusicSection
 from monteur.preview import _LOUDNORM_I, render_export
 from monteur.refine import refine_plan
-from monteur.sift import ClipReport, Moment
+from monteur.sift import USABLE, ClipReport, ClipSegment, Moment
 
 # Reuse the Wave-1 peak fixtures and the independent coincidence measure.
-from test_peak import CUT_LEAD, TOL, coincidence_rate, make_music, make_peaked_reports
+from test_peak import (
+    CUT_LEAD, TOL, coincidence_rate, make_music, make_peaked_reports, peaked_moment,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -198,9 +200,21 @@ def test_render_export_omits_lufs_when_measurement_failed(monkeypatch, tmp_path)
 
 
 def _weak_inputs():
-    """4 s peaked moments + a slow starting pace: long slots can't aim the
-    peak inside the short moment, so the first plan's coincidence is poor."""
-    return make_peaked_reports(80), make_music(40.0)
+    """4 s peaked moments whose slack is CAPPED at the moment end (a usable
+    segment spanning exactly the moment), plus a slow starting pace: a long
+    slot cannot aim the peak — not even into slack — so the first plan's
+    coincidence is poor, and refine's DENSER pace (short slots that fit inside
+    the moment) is what fixes it."""
+    reports = [
+        ClipReport(
+            path=f"/footage/p{i:02d}.mp4",
+            duration=30.0,
+            moments=[peaked_moment(2.0, 6.0, 3.5)],
+            segments=[ClipSegment(2.0, 6.0, USABLE, 0.9)],
+        )
+        for i in range(80)
+    ]
+    return reports, make_music(40.0)
 
 
 def test_refine_improves_a_weak_plan():
