@@ -40,6 +40,31 @@ Visual intelligence:
 - [x] Audio-based sift signals: wind noise, clipping, on-set silence
 - [x] Highlight detection from audio (laughter, cheers, action peaks)
 
+Local signal refinements (offline, no API — they feed the composer's dossier):
+- [x] Separate subject motion from camera pan (`FrameMetric.residual`): the
+      action bonus and the cut-on-action peak key off in-frame action, so a
+      pure camera swing no longer reads as "something happens".
+- [x] Hard-cut detection inside a clip (`find_scene_cuts` /
+      `ClipReport.scene_cuts`): moments never straddle a scene change.
+- [x] Perceptual-hash near-duplicate detection (`FrameMetric.phash` +
+      `media.phash_distance`): a local scene-similarity signal that dedupes
+      the vision selection so the same shot is not analysed or composed twice.
+- [x] Exposure/grading safety (`FrameMetric.clipped`/`crushed`): blown or
+      crushed moments are down-weighted in scoring.
+- [x] Cut-on-action aims at the subject-action peak (residual envelope).
+- [ ] Speech + audio-onset detection: don't cut mid-sentence; cut on
+      diegetic hits (a rev, a door slam). Onset is feasible at the current
+      0.5 s window; speech needs a finer envelope for syllabic modulation,
+      and both need planner integration to change where cuts land.
+- [ ] Cross-clip sharpness normalisation: an absolute focus measure so the
+      global best-moment selection and hero casting compare fairly across
+      clips (sharpness is only clip-relative today).
+- [ ] Colour continuity + match-cut candidates: per-moment average colour
+      (hue/warmth) for smoother transitions and seamless match cuts.
+- [ ] Optional local face/subject detection (OpenCV): has-face/size/count to
+      weight heroes, avoid cutting mid-expression, place faces on emotional
+      beats.
+
 Craft templates:
 - [x] Montage structures per use case: travel film, wedding,
       music video, trailer — each a pacing arc (opening/build/climax/outro),
