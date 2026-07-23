@@ -88,8 +88,12 @@ Craft templates:
       (line-accurate dialogue matching via transcripts = follow-up)
 - [ ] Learn from the editor: diff the editor's corrections against
       Monteur's plan and adapt scoring preferences per project
-- [ ] Watch mode: new footage auto-sifted overnight, report ready in the
-      morning
+- [x] Watch mode: new footage auto-sifted overnight, report ready in the
+      morning. `monteur watch <folder>` (`--once` for cron) scans on an
+      interval, sifts any clip it hasn't triaged (tracked by path+mtime in
+      `.monteur-watch.json`) and appends the verdict — usable % + dark/blurry/
+      shaky flags — to `monteur-watch-report.md`. `monteur/watch.py`; the sift
+      is injected so the scan/state/report logic is fully tested offline.
 - [x] Change list between versions for sound/VFX handoffs. `monteur/changelist.py`
       diffs two plan snapshots into added / removed / re-trimmed / retimed /
       transition-flipped shots plus length + tempo (matching shots by clip +

@@ -1588,6 +1588,18 @@ def cmd_ui(args: argparse.Namespace) -> None:
         _fail(f"could not start Monteur Studio on port {args.port}: {exc}")
 
 
+def cmd_watch(args: argparse.Namespace) -> None:
+    from monteur.watch import watch
+
+    target = Path(args.folder)
+    if not target.is_dir():
+        _fail(f"not a folder: {target}")
+    try:
+        watch(target, interval=args.interval, once=args.once)
+    except KeyboardInterrupt:
+        print("\nWatch stopped.")
+
+
 def cmd_changes(args: argparse.Namespace) -> None:
     import json
 
@@ -2271,6 +2283,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="open in a native desktop window instead of a browser "
                         "(needs the [app] extra: pip install 'monteur[app]')")
     p.set_defaults(func=cmd_ui)
+
+    p = sub.add_parser("watch", help="auto-sift new footage in a folder, keep a triage report")
+    p.add_argument("folder", help="footage folder to watch")
+    p.add_argument("--interval", type=float, default=300.0, help="seconds between scans (default 300)")
+    p.add_argument("--once", action="store_true", help="run one pass and exit (e.g. from cron)")
+    p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("changes", help="change list between two saved plans (for sound/VFX handoff)")
     p.add_argument("old", help="the earlier plan JSON (e.g. --save-plan output)")
