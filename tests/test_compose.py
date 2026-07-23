@@ -213,23 +213,32 @@ def test_prompt_carries_grammar_brief_slots_dips_and_inventory(monkeypatch):
     assert any(s.get("after_dip") for s in context["slots"])
 
 
-def test_compose_streams_the_answer_through_on_text(monkeypatch):
-    # the storyboard build passes on_text so it can show the cut being written
-    # live — compose must forward it to ai.complete's on_delta, verbatim
+def test_compose_streams_the_answer_and_reasoning(monkeypatch):
+    # the storyboard build passes on_text + on_thinking so it can show the cut
+    # being reasoned through and written live — compose must forward BOTH to
+    # ai.complete (on_delta / on_thinking), verbatim
     captured: dict = {}
 
-    def _complete(prompt, *, system="", json_schema=None, on_delta=None, **kwargs):
+    def _complete(prompt, *, system="", json_schema=None,
+                  on_delta=None, on_thinking=None, **kwargs):
         captured["on_delta"] = on_delta
+        captured["on_thinking"] = on_thinking
+        if on_thinking is not None:
+            on_thinking("weighing the ")
+            on_thinking("hero beat…")
         if on_delta is not None:
             on_delta("story so f")
             on_delta("ar…")
         return json.dumps(empty_reply())
 
     monkeypatch.setattr(ai, "complete", _complete)
-    seen: list[str] = []
-    compose_montage(make_reports(), make_music(), on_text=seen.append, cut_lead=0.0)
-    assert captured["on_delta"] is not None  # forwarded, not dropped
-    assert seen == ["story so f", "ar…"]  # streamed straight through
+    text: list[str] = []
+    think: list[str] = []
+    compose_montage(make_reports(), make_music(),
+                    on_text=text.append, on_thinking=think.append, cut_lead=0.0)
+    assert captured["on_delta"] is not None and captured["on_thinking"] is not None
+    assert text == ["story so f", "ar…"]  # the answer streamed through
+    assert think == ["weighing the ", "hero beat…"]  # ...and the reasoning
 
 
 def test_prompt_says_when_vision_is_missing_and_notes_recommend_it(monkeypatch):

@@ -324,6 +324,7 @@ def _complete_cli(
     effort: str | None,
     json_schema: dict | None,
     on_delta: Callable[[str], None] | None = None,
+    on_thinking: Callable[[str], None] | None = None,
 ) -> str:
     """The Claude Code CLI backend: one headless, tool-less completion, STREAMED.
 
@@ -448,12 +449,23 @@ def _complete_cli(
             inner = evt.get("event") or {}
             if inner.get("type") == "content_block_delta":
                 delta = inner.get("delta") or {}
-                if delta.get("type") == "text_delta":
+                dtype = delta.get("type")
+                if dtype == "text_delta" and on_delta is not None:
                     chunk = delta.get("text") or ""
-                    if chunk and on_delta is not None:
+                    if chunk:
                         try:
                             on_delta(chunk)
                         except Exception:  # a UI callback must never kill a build
+                            pass
+                elif dtype == "thinking_delta" and on_thinking is not None:
+                    # the model reasons BEFORE it writes the answer — often the
+                    # bulk of a compose. Forwarding it means the build shows live
+                    # motion from the first second, not a frozen "thinking" wait.
+                    chunk = delta.get("thinking") or ""
+                    if chunk:
+                        try:
+                            on_thinking(chunk)
+                        except Exception:
                             pass
         elif etype == "result":
             if evt.get("is_error") or evt.get("subtype") not in (None, "success"):
@@ -489,6 +501,7 @@ def complete(
     effort: str | None = None,
     json_schema: dict | None = None,
     on_delta: Callable[[str], None] | None = None,
+    on_thinking: Callable[[str], None] | None = None,
 ) -> str:
     """One Claude text completion through the selected backend.
 
@@ -505,9 +518,12 @@ def complete(
 
     ``on_delta`` (optional) receives the answer's text in the chunks the
     model streams it — so a long completion (a storyboard compose) can show
-    live progress instead of a frozen spinner. It is best-effort: an
-    exception from the callback never fails the completion, and a backend
-    with nothing to stream simply never calls it.
+    live progress instead of a frozen spinner. ``on_thinking`` likewise
+    receives the model's reasoning tokens as they stream: on the CLI backend
+    a compose spends much of its time THINKING before it writes the answer,
+    so this is what keeps the build moving from the first second. Both are
+    best-effort: a callback exception never fails the completion, and a
+    backend with nothing to stream simply never calls it.
 
     Raises :class:`MonteurAIError` when no backend is available or the
     request fails; a safety refusal on the API path raises too, while on
@@ -530,6 +546,7 @@ def complete(
         effort=effort,
         json_schema=json_schema,
         on_delta=on_delta,
+        on_thinking=on_thinking,
     )
 
 

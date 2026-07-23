@@ -1105,6 +1105,8 @@ svg text.axis {
   font-family: var(--mono); font-size: 11.5px; line-height: 1.5; color: var(--ink-2);
   white-space: pre-wrap; word-break: break-word;
 }
+/* the reasoning phase reads dimmer + italic — clearly "thinking", not the cut */
+.bstage-script.thinking { color: var(--ink-muted); font-style: italic; border-style: dashed; }
 @keyframes bCapIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) {
   .bstage-shot { transition: opacity 0.2s; transform: none; }
@@ -5859,6 +5861,21 @@ function makeJobPanel(hostId, texts) {
       bar.setAttribute("aria-valuenow", String(renderPct));
       bar.setAttribute("aria-label", texts.working + " " + renderPct + "% done");
     }
+    // No percent to show (compose has none — Claude reports no % done). Make the
+    // bar a proper indeterminate SWEEP so it reads as "working", not frozen: the
+    // start pinned the fill to width 0%, which had been hiding the .indet
+    // animation entirely (an empty bar that looked stuck). Clearing the inline
+    // width lets the CSS sweep run; the streamed reasoning/script carries the
+    // real detail.
+    var determinate = total > 0
+      || (previewProg && previewProg.total > 0)
+      || renderPct !== null;
+    if (!determinate) {
+      bar.classList.add("indet");
+      fill.style.width = "";  // hand width back to the .indet CSS (the sweep)
+      bar.removeAttribute("aria-valuenow");
+      if (last && last.stage === "compose") count.textContent = "";
+    }
     clear(log);
     lines.forEach(function (line) { log.appendChild(el("li", null, line)); });
     log.scrollTop = log.scrollHeight;
@@ -8139,14 +8156,12 @@ function renderCreResult(data) {
 }
 
 /* ================= Build stage: live feedback during the build =========
-   The build's slow part is Claude composing the cut — one blocking ~90s
-   call with no finer progress to report. The build panel's log alone left
-   that stretch silent, so this overlay keeps the REAL material on screen
-   (clip thumbnails), shows which phase the build is in (reading the clips
-   -> hearing the music -> Claude composing), and rotates a living caption.
-   It's driven by the job's real progress stages (cache / music / compose);
-   client-side motion is used ONLY across the single blocking compose tick,
-   where the server has nothing finer to give. */
+   The build's slow part is Claude composing the cut. This overlay keeps the
+   real MATERIAL on screen — the MOMENTS the sift pulled (each its own frame),
+   the ones Claude is actually casting — shows which phase the build is in
+   (reading the moments -> hearing the music -> Claude composing), and streams
+   Claude's reasoning + the cut it writes so there is honest motion the whole
+   time. Driven by the job's real progress stages (cache / music / compose). */
 var buildStage = { timers: [], capTimer: 0, considerTimer: 0, phase: "", capIndex: 0 };
 
 var BUILD_COMPOSE_CAPTIONS = [
@@ -8159,12 +8174,26 @@ var BUILD_COMPOSE_CAPTIONS = [
   "Timing every cut to the music"
 ];
 
-function buildStageShotPaths() {
-  // the real material: prefer the analyzed clips, fall back to the pool
-  var paths = [];
-  (cre.clips || []).forEach(function (c) { if (c && c.path) paths.push(c.path); });
-  if (!paths.length) (cre.poolClips || []).forEach(function (c) { if (c && c.path) paths.push(c.path); });
-  return paths.slice(0, 12);
+function buildStageShots() {
+  // the real material at MOMENT grain: each moment's own frame (thumbnail at
+  // its start), so the strip shows the stretches Claude actually casts — not
+  // whole clips. Falls back to clip heads if a scan carried no moment list.
+  var shots = [];
+  (cre.clips || []).forEach(function (c) {
+    if (!c || !c.path) return;
+    var moments = c.moments || [];
+    if (moments.length) {
+      moments.forEach(function (m) {
+        shots.push({ path: c.path, t: (m && typeof m.start === "number") ? m.start : 0 });
+      });
+    } else {
+      shots.push({ path: c.path, t: 0 });
+    }
+  });
+  if (!shots.length) {
+    (cre.poolClips || []).forEach(function (c) { if (c && c.path) shots.push({ path: c.path, t: 0 }); });
+  }
+  return shots.slice(0, 16);
 }
 
 function clearBuildStageTimers() {
@@ -8184,7 +8213,7 @@ function startBuildStage() {
   // the phase rail: original-audio builds have no song step, so drop it
   var rail = $("bstage-rail");
   clear(rail);
-  var phases = [["read", "Reading your clips"], ["music", "Hearing the music"], ["compose", "Claude composing the cut"]];
+  var phases = [["read", "Reading your moments"], ["music", "Hearing the music"], ["compose", "Claude composing the cut"]];
   if (cre.audio === "original") phases = [phases[0], phases[2]];
   phases.forEach(function (p) {
     var chip = el("div", "bstage-phase");
@@ -8193,23 +8222,23 @@ function startBuildStage() {
     chip.appendChild(el("span", null, p[1]));
     rail.appendChild(chip);
   });
-  // the real material, revealed one shot at a time
+  // the real material — the MOMENTS — revealed one at a time
   var film = $("bstage-film");
   clear(film);
-  var shotPaths = buildStageShotPaths();
-  shotPaths.forEach(function (path, i) {
+  var shots = buildStageShots();
+  shots.forEach(function (s, i) {
     var shot = el("div", "bstage-shot");
     var img = document.createElement("img");
     img.loading = "lazy";
     img.alt = "";
-    img.src = thumbUrl(path, 160);
+    img.src = thumbUrl(s.path, 160) + "&t=" + encodeURIComponent(String(s.t || 0));
     shot.appendChild(img);
     film.appendChild(shot);
-    buildStage.timers.push(window.setTimeout(function () { shot.classList.add("in"); }, 90 + i * 120));
+    buildStage.timers.push(window.setTimeout(function () { shot.classList.add("in"); }, 90 + i * 90));
   });
   var script = $("bstage-script");
-  if (script) { script.hidden = true; script.textContent = ""; }
-  setBuildCaption("Reading your analyzed clips…", false);
+  if (script) { script.hidden = true; script.textContent = ""; script.classList.remove("thinking"); }
+  setBuildCaption("Reading your analyzed moments…", false);
   setBuildPhase("read");
 }
 
@@ -8278,12 +8307,30 @@ function showComposeScript(text, chars) {
   startConsidering();
   var box = $("bstage-script");
   if (box) {
+    box.classList.remove("thinking");
     box.hidden = false;
     box.textContent = String(text || "");
     box.scrollTop = box.scrollHeight;
   }
   var n = Number(chars || 0);
   setBuildCaption("Claude is writing your cut — " + n.toLocaleString() + " characters", false);
+}
+
+/* before the answer lands Claude REASONS — on the CLI backend that's most of
+   the wait. Stream its thinking so there's honest motion from the first
+   second (dimmed, marked as reasoning), then hand over to the script. */
+function showComposeThinking(text, chars) {
+  stopComposeCaptions();
+  startConsidering();
+  var box = $("bstage-script");
+  if (box) {
+    box.classList.add("thinking");
+    box.hidden = false;
+    box.textContent = String(text || "");
+    box.scrollTop = box.scrollHeight;
+  }
+  var n = Number(chars || 0);
+  setBuildCaption("Claude is thinking through your cut — " + n.toLocaleString() + " characters", false);
 }
 
 /* onProgress handler: advance the visible phase from the job's real stages.
@@ -8297,9 +8344,13 @@ function animateBuildProgress(progress) {
   (progress || []).forEach(function (p) { if (p && p.stage) stages[p.stage] = p; });
   if (stages.compose) {
     setBuildPhase("compose");
-    // real streamed script once Claude starts writing; placeholder before that
-    if (stages.compose.chars > 0 && stages.compose.script) {
-      showComposeScript(stages.compose.script, stages.compose.chars);
+    var c = stages.compose;
+    // the answer once Claude starts writing; its reasoning before that; the
+    // placeholder only until the very first token arrives
+    if (c.chars > 0 && c.script) {
+      showComposeScript(c.script, c.chars);
+    } else if (c.thinking_chars > 0 && c.thinking) {
+      showComposeThinking(c.thinking, c.thinking_chars);
     } else {
       startComposeCaptions();
     }

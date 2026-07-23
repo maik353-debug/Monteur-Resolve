@@ -2038,9 +2038,11 @@ def _plan_from_payload(job: dict, payload: dict):
                 "stage": "compose",
                 "name": "Claude is composing the cut",
                 "chars": 0,
+                "thinking_chars": 0,
             }
             job["progress"].append(compose_entry)
         _script_chunks: list[str] = []
+        _think_chunks: list[str] = []
 
         def _on_compose_text(chunk: str) -> None:
             _script_chunks.append(chunk)
@@ -2049,12 +2051,22 @@ def _plan_from_payload(job: dict, payload: dict):
                 compose_entry["chars"] = len(text)
                 compose_entry["script"] = text[-4000:]  # a live tail, capped
 
+        def _on_compose_thinking(chunk: str) -> None:
+            # the reasoning phase (often the bulk on the CLI backend): its live
+            # tail is the build's honest motion before the answer starts landing
+            _think_chunks.append(chunk)
+            text = "".join(_think_chunks)
+            with _JOBS_LOCK:
+                compose_entry["thinking_chars"] = len(text)
+                compose_entry["thinking"] = text[-2000:]
+
         plan = compose_montage(
             reports,
             music,
             brief=str(payload.get("brief") or ""),
             strict=True,
             on_text=_on_compose_text,
+            on_thinking=_on_compose_thinking,
             **plan_kwargs,
         )
     else:

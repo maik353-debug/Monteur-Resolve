@@ -887,6 +887,7 @@ def compose_montage(
     brief: str = "",
     strict: bool = False,
     on_text=None,
+    on_thinking=None,
     **plan_kwargs,
 ) -> MontagePlan:
     """Plan a montage with Claude as the cutter (see the module docstring).
@@ -938,10 +939,12 @@ def compose_montage(
     )
     prompt = _build_prompt(context, style, brief)
     try:
-        # on_text streams Claude's answer as it is written, so the storyboard
-        # build can show the cut being composed live instead of a frozen wait.
+        # on_text streams Claude's answer as it is written and on_thinking its
+        # reasoning before that, so the storyboard build shows the cut being
+        # thought through and composed live instead of a frozen wait.
         raw = ai.complete(
-            prompt, system=_SYSTEM, json_schema=COMPOSE_SCHEMA, on_delta=on_text
+            prompt, system=_SYSTEM, json_schema=COMPOSE_SCHEMA,
+            on_delta=on_text, on_thinking=on_thinking,
         )
     except ai.MonteurAIError as exc:
         if strict:

@@ -1282,20 +1282,27 @@ class TestWizardStepsUi:
             "startBuildStage(); // live feedback from the first moment",
             "onProgress: function (pr) { animateBuildProgress(pr); }",
             'BUILD_COMPOSE_CAPTIONS',
-            # the film strip pulls the REAL analyzed material
-            "function buildStageShotPaths",
-            "thumbUrl(path, 160)",
+            # the film strip pulls the REAL analyzed material at MOMENT grain
+            # (each moment's own frame, via /api/thumb?t=)
+            "function buildStageShots",
+            'thumbUrl(s.path, 160) + "&t=" + encodeURIComponent(String(s.t',
+            "shots.push({ path: c.path, t:",
             # terminal states always tear the overlay down
             "stopBuildStage();",
             # the panel status line also names the compose phase
             'status.textContent = "Claude is composing your cut…"',
             ".bstage-shot.considering",
             "@keyframes bEq",
-            # the REAL progress: Claude's compose answer streaming in live
+            # the REAL progress: Claude's reasoning, then the cut, streaming live
             'id="bstage-script"',
             "function showComposeScript",
-            "stages.compose.chars > 0 && stages.compose.script",
+            "function showComposeThinking",
+            "c.chars > 0 && c.script",
+            "c.thinking_chars > 0 && c.thinking",
             "Claude is writing your cut — ",
+            "Claude is thinking through your cut — ",
+            # compose has no percent — the bar sweeps (indeterminate), not frozen
+            'fill.style.width = "";  // hand width back to the .indet CSS',
         ):
             assert needle in html, needle
 
