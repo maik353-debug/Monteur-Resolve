@@ -2334,6 +2334,48 @@ class TestIncrementalAnalysis:
         saved = {r.path for r in projects.load_reports(projects.load_project(project.id))}
         assert saved == {clips[0], clips[1]}
 
+    def test_analyze_runs_the_time_of_day_and_shot_passes(self, tmp_path, monkeypatch):
+        # the Footage-tab analyze must fill Moment.daylight / shot_size (the
+        # offline context passes), so the composer's coherence laws get their
+        # signal — not only the legacy folder scan
+        import threading
+
+        import monteur.sift as sift_mod
+        from monteur import projects
+        from monteur.sift import ClipReport, ClipSegment, Moment
+        from monteur.web import server as srv
+
+        clip = str(tmp_path / "night.mp4")
+        open(clip, "wb").write(b"x")
+        project = projects.create_project(
+            "tod", media_pool=[{"path": clip, "kind": "file"}]
+        )
+
+        def fake_analyze(path, cancel=None):
+            return ClipReport(
+                path=path, duration=5.0,
+                segments=[ClipSegment(0.0, 2.0, "usable", 0.9)],
+                moments=[Moment(start=0.0, end=1.0, score=0.9)],
+                usable_ratio=0.8, media_start=0.0,
+            )
+
+        def fake_annotate(reports):
+            for r in reports:
+                for m in r.moments:
+                    m.daylight = "night"
+                    m.shot_size = "wide"
+
+        monkeypatch.setattr(sift_mod, "analyze_clip", fake_analyze)
+        monkeypatch.setattr(sift_mod, "annotate_context", fake_annotate)
+
+        job = {"progress": [], "cancel": threading.Event()}
+        srv._analyze_selected(job, [clip], project.id)
+
+        saved = projects.load_reports(projects.load_project(project.id))
+        assert saved and saved[0].moments
+        assert saved[0].moments[0].daylight == "night"
+        assert saved[0].moments[0].shot_size == "wide"
+
 
 class TestVisionApi:
     DEMO = TestCreateApi.DEMO

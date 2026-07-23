@@ -764,6 +764,20 @@ def _annotate_spatial(reports: list[ClipReport]) -> None:
         pass
 
 
+def annotate_context(reports: list[ClipReport]) -> None:
+    """Run the offline context passes (time-of-day + shot grammar) in place.
+
+    The pair the composer's coherence laws read: ``Moment.daylight``
+    (day/golden/night) and ``Moment.shot_size``/focus. Both are offline,
+    cached next to the footage, per-moment independent and best-effort — so
+    any surface that produces reports (the folder scan AND the staged
+    Footage-tab analyze) can call this to give the montage planner the same
+    time-of-day and picture-coherence signal. Never raises.
+    """
+    _annotate_daylight(reports)
+    _annotate_spatial(reports)
+
+
 def sift_directory(
     directory: str, progress=None, cancel: threading.Event | None = None
 ) -> list[ClipReport]:
@@ -862,8 +876,7 @@ def sift_directory(
         # cancelled run never returns partial reports or annotates a None.
         if _cancelled():
             raise SiftCancelled("sift cancelled")
-        _annotate_daylight(results)
-        _annotate_spatial(results)
+        annotate_context(results)
         return results
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = []
@@ -878,8 +891,7 @@ def sift_directory(
         results = [f.result() for f in futures]
     if _cancelled():
         raise SiftCancelled("sift cancelled")
-    _annotate_daylight(results)
-    _annotate_spatial(results)
+    annotate_context(results)
     return results
 
 

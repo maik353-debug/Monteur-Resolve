@@ -1587,7 +1587,7 @@ def _analyze_selected(job: dict, clips: list, project_id: str = "") -> list:
     finishes — INCREMENTALLY — so cancelling partway keeps every clip analyzed
     so far (and the pool greens up one clip at a time), instead of an all-or-
     nothing write at the end."""
-    from monteur.sift import analyze_clip
+    from monteur.sift import analyze_clip, annotate_context
 
     reports = []
     total = len(clips)
@@ -1598,6 +1598,11 @@ def _analyze_selected(job: dict, clips: list, project_id: str = "") -> list:
                 {"index": index, "total": total, "name": name, "stage": "start"}
             )
         report = analyze_clip(str(path), cancel=job["cancel"])
+        # the offline context passes (time-of-day + shot grammar) — the same
+        # ones the folder scan runs, so the composer's coherence laws (a
+        # day->night arc, no daylight POV mid-night, no re-cut of one scene)
+        # get their signal from the Footage tab too. Best-effort, per moment.
+        annotate_context([report])
         reports.append(report)
         _remember_clip_reports([report])          # sidecar + memory, per clip
         _save_project_analysis(project_id, [report])  # project store, incremental
@@ -1684,7 +1689,7 @@ def _run_see_job(job: dict, clips: list, project_id: str = "") -> None:
     IN the project. Same result shape + panel plumbing as the analyze/scan
     jobs."""
     from monteur.media import MediaCancelled, MonteurMediaError
-    from monteur.sift import SiftCancelled, analyze_clip
+    from monteur.sift import SiftCancelled, analyze_clip, annotate_context
 
     try:
         reports = []
@@ -1695,6 +1700,9 @@ def _run_see_job(job: dict, clips: list, project_id: str = "") -> None:
             if report is None:
                 report = analyze_clip(str(path), cancel=job["cancel"])
             reports.append(report)
+        # time-of-day + shot grammar (cached/idempotent — a report that was
+        # already analyzed keeps its classes; a freshly sifted one gains them)
+        annotate_context(reports)
         _remember_clip_reports(reports)
         result: dict = {}
         notes, error = _apply_vision(job, reports)
