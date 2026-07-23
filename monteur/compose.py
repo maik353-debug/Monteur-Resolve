@@ -154,6 +154,31 @@ COMPOSE_SCHEMA: dict = {
                 "required": ["slot"],
             },
         },
+        # Optional: base tempo PER ARC PHASE, when the cut's speed should
+        # VARY across its length — a trailer that opens on long 6-7s scenes,
+        # RACES at the climax, then settles back to long shots at the end.
+        # A single `pace` makes the whole cut one speed (which flattens that
+        # arc); this sets a different seconds-per-shot for each phase. Any
+        # phase omitted falls back to `pace`, then to the engine's default.
+        # The timeline still never moves — each phase just holds fewer,
+        # longer (or more, shorter) shots over its own stretch.
+        "pace_by_phase": {
+            "type": "object",
+            "description": (
+                "optional per-phase seconds-per-shot for a cut whose speed "
+                "varies across the arc (e.g. slow opening 6, fast climax 1, "
+                "slow outro 6). Each phase omitted falls back to `pace`."
+            ),
+            "properties": {
+                "opening": {"type": "number"},
+                "build": {"type": "number"},
+                "climax": {"type": "number"},
+                "outro": {"type": "number"},
+                "hook": {"type": "number"},
+                "punch": {"type": "number"},
+                "loop": {"type": "number"},
+            },
+        },
         "why": {
             "type": "array",
             "items": {"type": "string"},
@@ -249,9 +274,13 @@ _SYSTEM = (
     "landscape or nature trailer, a mood piece, a cinematic teaser must breathe "
     "throughout, and a couple of long shots among fast ones fool no one. Read "
     "the brief and the footage and decide: set `pace` (base seconds per shot) "
-    "to the tempo the CONTENT wants — small for energy, large (4-6s) for calm — "
-    "and mark specific slots in `holds` to linger even longer (a hero, the shot "
-    "on the drop, the resolving closer). A slower pace means fewer, longer "
+    "to the tempo the CONTENT wants — small for energy, large (4-6s) for calm. "
+    "When the speed should VARY across the cut — a trailer that opens on long "
+    "6-7s scenes, RACES at the climax, then slows to long shots at the end — "
+    "set `pace_by_phase` instead (a different seconds-per-shot per arc phase: "
+    "opening, build, climax, outro), and the arc stays crisp. On top of the "
+    "base, mark specific slots in `holds` to linger even longer (a hero, the "
+    "shot on the drop, the resolving closer). A slower pace means fewer, longer "
     "shots over the same length — the cut never gets longer. Tell ONE story "
     "across the whole cut; every act must escalate or breathe on purpose. Use "
     "only clips and windows from the inventory — never invent material. Write "
@@ -554,7 +583,12 @@ def _build_prompt(context: dict, style: str, brief: str) -> str:
         "nature / mood / cinematic cut that should breathe THROUGHOUT (do not "
         "leave such a piece on the fast default — a few long shots among fast "
         "ones is not enough). Omit `pace` only when the fast default is genuinely "
-        "right. Then, ON TOP of the base, use `holds` for the FEW slots that "
+        "right. When the tempo should CHANGE across the arc — e.g. a trailer "
+        "that opens on long 6-7s scenes, RACES at the climax, then settles back "
+        "to long shots at the outro — use `pace_by_phase` instead of one flat "
+        "`pace`: give each phase its own seconds-per-shot (opening 6, build 2.5, "
+        "climax 1, outro 6); any phase you leave out falls back to `pace`. "
+        "Then, ON TOP of the base, use `holds` for the FEW slots that "
         "should linger even longer — an establishing opener, the hero on the "
         "drop, the resolving closer (each a `slot` + optional `seconds`). Both "
         "levers only ever GROW a shot by absorbing the quick shots after it, so "
@@ -729,51 +763,89 @@ def _enforce_no_reuse(
     return resourced, stuck
 
 
-def _apply_pacing(plan: MontagePlan, pace, holds, locked=frozenset()) -> None:
+def _apply_pacing(
+    plan: MontagePlan, pace, holds, locked=frozenset(), pace_by_phase=None
+) -> None:
     """Re-pace a composed cut to the composer's own tempo — in place.
 
-    Two levers, one mechanism (a shot GROWS by absorbing the quick shots right
-    after it, so the timeline never moves — total duration, the beat grid, the
-    music sync, the dips and the SFX all stay put; a slower feel means FEWER,
-    longer shots over the same length, not a longer cut):
+    Three levers, one mechanism (a shot GROWS by absorbing the quick shots
+    right after it, so the timeline never moves — total duration, the beat
+    grid, the music sync, the dips and the SFX all stay put; a slower feel
+    means FEWER, longer shots over the same length, not a longer cut):
 
     * ``pace`` (seconds) sets the WHOLE cut's base shot length. Fast cuts to
       music suit energetic montages; a landscape / nature / cinematic piece
       must breathe throughout, and one or two long shots among fast ones do
       nothing — so the composer, which knows the brief, can slow EVERY shot.
       ``None`` keeps the engine's fast default.
+    * ``pace_by_phase`` (a ``{phase: seconds}`` map) sets a DIFFERENT base per
+      arc phase, for a cut whose speed varies across its length — a trailer
+      that opens on long 6-7s scenes, RACES at the climax, then settles back
+      to long shots at the outro. A phase not in the map falls back to
+      ``pace``. Merging never crosses a phase boundary, so the arc stays
+      crisp (a slow opening never bleeds a long shot into the fast build).
     * ``holds`` names specific slots to hold even longer on top of the base
       (a hero, the shot on the drop, the resolving closer).
 
-    Safe by construction: a shot that would cross a black dip, a locked
-    (arrangement) slot, the ``montage._MAX_CUT_SECONDS`` ceiling, or the source
-    clip's own available footage simply absorbs fewer shots (or none). A
-    ``None`` pace with no holds is a pure no-op.
+    Safe by construction: a shot that would cross a black dip, a phase
+    boundary, a locked (arrangement) slot, the ``montage._MAX_CUT_SECONDS``
+    ceiling, or the source clip's own available footage simply absorbs fewer
+    shots (or none). A ``None`` pace with no phase map and no holds is a pure
+    no-op.
     """
     entries = plan.entries
     n = len(entries)
     if n < 2:
         return
     dip_starts = [d[0] for d in (plan.dips or [])]
+    phases = plan.phases or []
 
     def _dip_at(t: float) -> bool:
         return any(abs(t - ds) <= _DROP_MATCH for ds in dip_starts)
 
+    def _phase_of(i: int) -> str:
+        return _montage._phase_label_at(phases, entries[i].record_start) or ""
+
     def _clamp(sec: float) -> float:
         return max(_BREATHE_MIN, min(_montage._MAX_CUT_SECONDS, sec))
 
-    # the per-slot target length: the base pace on every slot, then holds
-    # override with their (usually longer) target.
-    targets: dict[int, float] = {}
+    def _clamp_pace(sec: float) -> float:
+        # a pace target is NOT floored at _BREATHE_MIN: a fast phase (e.g. a 1s
+        # climax) is meant to STAY fast — a target under the current shot
+        # length just yields no merge — while a holds floor would wrongly bump
+        # it up to 2s and slow the peak. Only the ceiling matters.
+        return max(0.1, min(_montage._MAX_CUT_SECONDS, sec))
+
+    # a clean {phase: seconds} view of pace_by_phase (bad entries dropped).
+    phase_pace: dict[str, float] = {}
+    if isinstance(pace_by_phase, dict):
+        for label, raw in pace_by_phase.items():
+            if raw is None:
+                continue
+            try:
+                phase_pace[str(label)] = _clamp_pace(float(raw))
+            except (TypeError, ValueError):
+                continue
+
+    base = None
     if pace is not None:
         try:
-            base = _clamp(float(pace))
+            base = _clamp_pace(float(pace))
         except (TypeError, ValueError):
             base = None
-        if base is not None:
-            for i in range(n):
-                if i not in locked:
-                    targets[i] = base
+
+    # the per-slot target length: each slot's phase pace (if any) else the
+    # base pace, then holds override with their (usually longer) target.
+    targets: dict[int, float] = {}
+    if phase_pace or base is not None:
+        for i in range(n):
+            if i in locked:
+                continue
+            t = phase_pace.get(_phase_of(i)) if phase_pace else None
+            if t is None:
+                t = base
+            if t is not None:
+                targets[i] = t
     for h in holds or []:
         if not isinstance(h, dict):
             continue
@@ -807,6 +879,7 @@ def _apply_pacing(plan: MontagePlan, pace, holds, locked=frozenset()) -> None:
                 and j < n
                 and j not in locked
                 and not _dip_at(entries[j - 1].record_end)  # don't swallow a dip
+                and _phase_of(j) == _phase_of(i)  # never merge across the arc
                 and (entries[j].record_end - e.record_start)
                 <= _montage._MAX_CUT_SECONDS + _EPS
                 and (entries[j].record_end - e.record_start) <= avail + _EPS
@@ -826,11 +899,13 @@ def _apply_pacing(plan: MontagePlan, pace, holds, locked=frozenset()) -> None:
 
     if held:
         plan.entries = merged
-        note = (
-            f"pacing: cut re-paced to ~{float(pace):g}s shots"
-            if pace is not None
-            else f"breathing: {held} shot{'s' if held != 1 else ''} held long"
-        )
+        if phase_pace:
+            arc = ", ".join(f"{k} ~{v:g}s" for k, v in phase_pace.items())
+            note = f"pacing: tempo varies by phase ({arc})"
+        elif pace is not None:
+            note = f"pacing: cut re-paced to ~{float(pace):g}s shots"
+        else:
+            note = f"breathing: {held} shot{'s' if held != 1 else ''} held long"
         plan.notes.append(note)
 
 
@@ -1169,9 +1244,17 @@ def compose_montage(
     )
     # re-pace after the cast: the composer sets the whole cut's base tempo
     # (fast for energy, slow for a landscape / cinematic piece — it knows the
-    # brief) and marks specific shots to hold even longer. Runs on the cast
-    # entries (original slot indices); the timeline length never moves.
-    _apply_pacing(plan, data.get("pace"), data.get("holds") or [], locked)
+    # brief), varies it per phase when the arc should speed up and slow down
+    # (a 6s-open / fast-climax / 6s-outro trailer), and marks specific shots
+    # to hold even longer. Runs on the cast entries (original slot indices);
+    # the timeline length never moves.
+    _apply_pacing(
+        plan,
+        data.get("pace"),
+        data.get("holds") or [],
+        locked,
+        pace_by_phase=data.get("pace_by_phase"),
+    )
     if not context.get("vision"):
         plan.notes.append(
             'no vision labels — run "Let Claude watch your clips" '

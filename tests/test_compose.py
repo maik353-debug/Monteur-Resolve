@@ -726,27 +726,31 @@ def test_prompt_and_schema_offer_breathing_holds():
 
     assert "holds" in COMPOSE_SCHEMA["properties"]
     assert "pace" in COMPOSE_SCHEMA["properties"]
+    assert "pace_by_phase" in COMPOSE_SCHEMA["properties"]
     reports = make_reports()
     plan = plan_montage(reports, make_music(), cut_lead=0.0)
     prompt = _build_prompt(compose_context(plan, reports, make_music()), "auto", "")
     assert "PACING" in prompt and "hold" in prompt.lower()
+    assert "pace_by_phase" in prompt  # the variable-speed lever is offered
 
 
 def test_compose_forwards_the_composers_pace_and_holds(monkeypatch):
     captured: dict = {}
     monkeypatch.setattr(
         "monteur.compose._apply_pacing",
-        lambda plan, pace, holds, locked=frozenset(): captured.update(
-            {"pace": pace, "holds": holds}
+        lambda plan, pace, holds, locked=frozenset(), pace_by_phase=None: captured.update(
+            {"pace": pace, "holds": holds, "pace_by_phase": pace_by_phase}
         ),
     )
     reply = empty_reply()
     reply["pace"] = 4.0
     reply["holds"] = [{"slot": 2, "seconds": 6.0}]
+    reply["pace_by_phase"] = {"opening": 6.0, "climax": 1.0}
     monkeypatch.setattr(ai, "complete", fake_complete(reply))
     compose_montage(make_reports(), make_music(), cut_lead=0.0)
     assert captured["pace"] == 4.0
     assert captured["holds"] == [{"slot": 2, "seconds": 6.0}]
+    assert captured["pace_by_phase"] == {"opening": 6.0, "climax": 1.0}
 
 
 def test_apply_pacing_slows_the_whole_cut_keeping_total_length():
@@ -772,6 +776,46 @@ def test_apply_pacing_holds_extend_beyond_the_base_pace():
     # slot 0 holds 4s (its own hold), the rest fall on the 2s base
     assert plan.entries[0].record_end == pytest.approx(4.0)
     assert plan.entries[1].record_end - plan.entries[1].record_start == pytest.approx(2.0)
+
+
+def test_apply_pacing_varies_speed_by_phase_slow_fast_slow():
+    # Maik's trailer: long 4s opening scenes -> a fast 1s climax -> long 4s
+    # outro, all from per-phase pace. The arc stays crisp — a long opening
+    # shot never bleeds across the boundary into the fast climax.
+    from monteur.compose import _apply_pacing
+
+    plan = _hold_plan(12)  # twelve 1s shots, total 12s
+    plan.phases = [(0.0, 4.0, "opening"), (4.0, 8.0, "climax"), (8.0, 12.0, "outro")]
+    _apply_pacing(
+        plan, None, [], pace_by_phase={"opening": 4.0, "climax": 1.0, "outro": 4.0}
+    )
+    # opening: four 1s shots -> one 4s shot; climax: four fast 1s shots stay;
+    # outro: four 1s shots -> one 4s shot => 6 entries.
+    assert len(plan.entries) == 6
+    assert plan.entries[0].record_start == 0.0 and plan.entries[0].record_end == 4.0
+    fast = plan.entries[1:5]
+    assert all(
+        e.record_end - e.record_start == pytest.approx(1.0) for e in fast
+    )  # the climax races
+    assert plan.entries[-1].record_start == 8.0 and plan.entries[-1].record_end == 12.0
+    assert plan.entries[-1].record_end == 12.0  # total length unchanged
+    for a, b in zip(plan.entries, plan.entries[1:]):
+        assert a.record_end == pytest.approx(b.record_start)  # still contiguous
+    assert any("varies by phase" in n for n in plan.notes)
+
+
+def test_apply_pacing_by_phase_falls_back_to_pace_for_omitted_phases():
+    # a phase not named in pace_by_phase uses the flat `pace`.
+    from monteur.compose import _apply_pacing
+
+    plan = _hold_plan(12)
+    plan.phases = [(0.0, 4.0, "opening"), (4.0, 8.0, "climax"), (8.0, 12.0, "outro")]
+    # only the climax is named fast; opening + outro fall back to a 4s base
+    _apply_pacing(plan, 4.0, [], pace_by_phase={"climax": 1.0})
+    assert plan.entries[0].record_end == 4.0  # opening slowed by the base pace
+    climax = [e for e in plan.entries if 4.0 <= e.record_start < 8.0]
+    assert all(e.record_end - e.record_start == pytest.approx(1.0) for e in climax)
+    assert plan.entries[-1].record_end == 12.0
 
 
 def test_prompt_has_no_daylight_lines_without_classes(monkeypatch):
