@@ -1077,7 +1077,7 @@ class TestWizardStepsUi:
                  ("footage", "options", "storyboard", "color", "cut")]
         assert order == sorted(order), "WIZ_STEPS out of order"
         for label in ('"Footage"', '"Options"', '"Storyboard"',
-                      '"Look & colour"', '"Your cut"'):
+                      '"Look & color"', '"Your cut"'):
             assert label in html, label
         # the bar is RENDERED from the list, not hardcoded spans
         assert "function renderWizBar" in html
@@ -1118,7 +1118,7 @@ class TestWizardStepsUi:
             'id="cre-dir-apply"',
             # the path onward — the storyboard now leads to the Color page
             'id="cre-next-3"',
-            "Continue to colour",
+            "Continue to color",
         ):
             assert needle in step3, needle
         # harvest controls do NOT live in the storyboard
@@ -1141,7 +1141,7 @@ class TestWizardStepsUi:
         step4 = _step4_html(html)
         for needle in (
             'id="cre-h4"',
-            "Look &amp; colour",
+            "Look &amp; color",
             # the grade controls live here now
             'id="cre-color"',
             'id="cre-look-chips"',
@@ -1184,7 +1184,7 @@ class TestWizardStepsUi:
             'id="cre-draft-name"',
             # the way back — to the Color page
             'id="cre-back-5"',
-            "Back to colour",
+            "Back to color",
         ):
             assert needle in step5, needle
         # NO storyboard, NO revise, NO director block, NO grade in the harvest
