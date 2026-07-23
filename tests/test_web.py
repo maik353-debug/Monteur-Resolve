@@ -1152,6 +1152,19 @@ class TestWizardStepsUi:
     """
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_options_changes_autosave(self):
+        # every Options control autosaves — not just folder/music. The bug was
+        # that "All saved" showed while length/brief/audio/etc. never persisted.
+        html = _APP_HTML.read_text(encoding="utf-8")
+        # a delegated listener on the Options section covers native fields
+        # (change/input) AND the card selectors (click)
+        assert 'var opts = $("cre-step-2");' in html
+        assert '["change", "input", "click"].forEach' in html
+        assert "opts.addEventListener(evt, scheduleProjectSave)" in html
+        # leaving a project flushes any pending debounced save
+        assert "function flushProjectSave" in html
+        assert "flushProjectSave(); // never lose" in html
+
     def test_step_strip_is_data_driven(self):
         html = _APP_HTML.read_text(encoding="utf-8")
         # the single source of truth: the WIZ_STEPS list, in order

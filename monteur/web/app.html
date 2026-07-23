@@ -8586,6 +8586,14 @@ function scheduleProjectSave() {
   if (projectSaveTimer) clearTimeout(projectSaveTimer);
   projectSaveTimer = setTimeout(function () { projectSaveTimer = null; saveProject(); }, 800);
 }
+/* write any pending debounced save NOW — call before leaving a project so a
+   change made within the debounce window is never lost on the way out. */
+function flushProjectSave() {
+  if (!projectSaveTimer) return Promise.resolve(null);
+  clearTimeout(projectSaveTimer);
+  projectSaveTimer = null;
+  return saveProject();
+}
 
 $("cre-save-draft").addEventListener("click", function () {
   if (!cre.result || !rev.planJson) return;
@@ -8604,6 +8612,18 @@ $("cre-draft-name").addEventListener("keydown", function (e) {
 /* footage/music edits autosave into the project (debounced) */
 $("cre-folder").addEventListener("input", scheduleProjectSave);
 $("cre-music").addEventListener("input", scheduleProjectSave);
+
+/* EVERY options change autosaves (the reason "All saved" could still lose an
+   edit): the Options page's native fields fire change/input, and its card
+   selectors (audio / canvas / style / pace / transitions / order) fire click
+   — all delegated here so no single control has to remember to save. */
+(function () {
+  var opts = $("cre-step-2");
+  if (!opts) return;
+  ["change", "input", "click"].forEach(function (evt) {
+    opts.addEventListener(evt, scheduleProjectSave);
+  });
+})();
 
 /* canvas key -> the wizard's shape + resolution controls (see CANVAS_KEYS) */
 var CANVAS_TO_SHAPE = {
@@ -8742,6 +8762,7 @@ function restoreGrade(gradeDict) {
 
 function openProject(id, btn) {
   if (buildPanel.running() || revisePanel.running() || directPanel.running()) return;
+  flushProjectSave(); // never lose the current project's pending edit on the way out
   busy(btn, function () {
     return api("/api/projects/" + encodeURIComponent(String(id))).then(function (project) {
       if (!project || !project.id) throw new Error("This project could not be opened.");
