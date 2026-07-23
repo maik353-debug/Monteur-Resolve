@@ -2666,6 +2666,9 @@ class TestVisionApi:
         assert {p["name"] for p in vision_entries} == {
             "clip_A.mp4", "clip_B.mp4", "clip_C.mp4", "clip_D.mp4",
         }
+        # the sub-phase is carried through, so the UI can tell local frame prep
+        # (free) apart from the actual Claude calls — a 2nd 1/N is not a re-run
+        assert all(p["phase"] == "vision" for p in vision_entries)
 
     def test_scan_with_see_vision_error_still_succeeds(self, server, monkeypatch):
         fake = _fake_vision(fail_with="anthropic package is not installed")

@@ -1432,7 +1432,15 @@ def _apply_vision(job: dict, reports: list) -> tuple[list, str]:
     """
 
     def progress(index, total, name, stage):
-        entry = {"stage": "vision", "index": index, "total": total, "name": name}
+        # vision runs TWO passes over the same moments: "frames" (local keyframe
+        # extraction — no API, no tokens) then "vision" (the actual Claude
+        # calls). Keep the job-level stage "vision" (status line + grouping), but
+        # carry the real sub-phase so the UI can label them distinctly — a
+        # second 1/N..N/N counter is the frame prep, NOT a wasteful re-run.
+        entry = {
+            "stage": "vision", "phase": stage,
+            "index": index, "total": total, "name": name,
+        }
         with _JOBS_LOCK:
             job["progress"].append(entry)
 

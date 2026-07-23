@@ -5840,7 +5840,12 @@ function makeJobPanel(hostId, texts) {
       } else if (p.stage === "music") {
         lines.push("♪ " + String(p.name || "music") + " — reading the beat");
       } else if (p.stage === "vision") {
-        var vtext = "Claude · watching moment";
+        // two passes over the same moments: local frame prep (free), then
+        // Claude's calls. Label them apart so the second 1/N isn't mistaken
+        // for a wasteful re-run.
+        var vtext = p.phase === "frames" ? "Reading frames"
+          : p.phase === "cache" ? "From your previous check"
+          : "Claude · watching moment";
         if (typeof p.index === "number" && typeof p.total === "number" && p.total > 0) {
           vtext += " " + p.index + "/" + p.total;
         }
@@ -5887,7 +5892,7 @@ function makeJobPanel(hostId, texts) {
     var last = progress.length ? progress[progress.length - 1] : null;
     if (last && last.stage === "start") status.textContent = "Watching " + String(last.name || "clip") + "…";
     else if (last && last.stage === "music") status.textContent = "Listening to the song…";
-    else if (last && last.stage === "vision") status.textContent = "Claude is watching your clips…";
+    else if (last && last.stage === "vision") status.textContent = last.phase === "frames" ? "Reading the moments’ frames…" : "Claude is watching your moments…";
     else if (last && last.stage === "song") status.textContent = "Listening to your songs…";
     else if (last && last.stage === "elements") status.textContent = "Rating your sound elements…";
     else if (last && last.stage === "kit") status.textContent = "Writing the publish kit…";
@@ -7073,6 +7078,17 @@ function animateScanProgress(progress) {
       wrap.appendChild(strip);
       // reveal on the next frame so the CSS transition runs
       requestAnimationFrame(function () { card.classList.add("seg-in"); });
+      // flip the status chip THE MOMENT this clip finishes — not "Not analyzed"
+      // until the whole batch ends. The server stored this clip's report already
+      // (incremental save), so its info is live too; loadPool at onDone reconciles
+      // (adds "Claude-checked" etc.).
+      var badges = card.querySelector(".pool-badges");
+      if (badges && !badges.querySelector(".pool-chip.done")) {
+        clear(badges);
+        var an = el("span", "pool-chip done", "Analyzed");
+        an.title = "Analyzed — Monteur found the usable parts and the good moments";
+        badges.appendChild(an);
+      }
     }
   });
 }
