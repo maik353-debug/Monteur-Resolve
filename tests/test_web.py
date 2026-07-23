@@ -1085,6 +1085,46 @@ class TestPlanAdjustSurgery:
             )
         assert exc.value.code == 400
 
+    def test_sfx_add_update_delete(self, server):
+        pj = self._plan_with_sfx()  # ambience@0, impact@8
+        # add a whoosh
+        added = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": pj, "sfx": {"action": "add", "time": 2.0,
+                                      "kind": "whoosh", "query": "swoosh"}},
+        )["plan_json"]
+        assert any(c["kind"] == "whoosh" and c["time"] == 2.0 for c in added["sfx"])
+        # update cue index 0 (ambience) query
+        updated = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": added, "sfx": {"action": "update", "index": 0,
+                                         "query": "deep bed"}},
+        )["plan_json"]
+        assert sorted(updated["sfx"], key=lambda c: c["time"])[0]["query"] == "deep bed"
+        # delete cue index 0
+        deleted = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": updated, "sfx": {"action": "delete", "index": 0}},
+        )["plan_json"]
+        assert len(deleted["sfx"]) == len(updated["sfx"]) - 1
+
+    def test_sfx_bad_action_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(
+                f"{server}/api/plan/adjust",
+                {"plan_json": self._plan_with_sfx(), "sfx": {"action": "nope"}},
+            )
+        assert exc.value.code == 400
+
+    def test_sfx_bad_index_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(
+                f"{server}/api/plan/adjust",
+                {"plan_json": self._plan_with_sfx(),
+                 "sfx": {"action": "delete", "index": 99}},
+            )
+        assert exc.value.code == 400
+
 
 def _step3_html(html):
     """The Storyboard step's markup (between its section tag and step 4's)."""
@@ -1188,6 +1228,28 @@ class TestWizardStepsUi:
         assert "resync_audio: true" in html
         # it is only revealed when the plan carries an SFX layer
         assert 'resyncBtn.hidden = !((plan.sfx || []).length)' in html
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_sfx_inspector_editing_is_wired(self):
+        # SFX markers are editable in the inspector (kind/query/time/length +
+        # delete), and a "+ Sound" button adds a cue via the sfx adjust mode
+        html = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            'id="cre-insp-sfxblock"',
+            'id="cre-insp-sfx-kind"',
+            'id="cre-insp-sfx-query"',
+            'id="cre-insp-sfx-time"',
+            'id="cre-insp-sfx-save"',
+            'id="cre-insp-sfx-delete"',
+            'id="tl-add-sfx"',
+            "function selectSfx",
+            "function renderSfxInspector",
+            "function applySfxEdit",
+            'action: "add"',
+            'action: "delete"',
+            'action: "update"',
+        ):
+            assert needle in html, needle
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_rebuild_draft_survives_navigation(self):

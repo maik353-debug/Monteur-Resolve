@@ -2568,6 +2568,71 @@ class TestResyncAudio:
         assert any(n.startswith("resync:") for n in resynced.notes)
 
 
+class TestSfxCueSurgery:
+    def test_add_appends_and_keeps_sorted(self):
+        from monteur.montage import add_sfx_cue
+
+        plan = _sfx_plan()  # ambience@0, impact@4
+        adjusted = add_sfx_cue(plan, 2.0, 0.4, "whoosh", "swoosh", "fast cut")
+        times = [c.time for c in adjusted.sfx]
+        assert times == sorted(times)
+        assert any(c.kind == "whoosh" and c.time == 2.0 for c in adjusted.sfx)
+        assert len(plan.sfx) == 2  # original untouched
+        assert any(n.startswith("sfx: added") for n in adjusted.notes)
+
+    def test_add_clamps_time_into_the_cut(self):
+        from monteur.montage import add_sfx_cue
+
+        plan = _sfx_plan()  # 6s
+        adjusted = add_sfx_cue(plan, 99.0, kind="impact")
+        added = [c for c in adjusted.sfx if c.note == "added by hand"][0]
+        assert added.time == pytest.approx(6.0)  # clamped to duration
+
+    def test_add_rejects_unknown_kind(self):
+        from monteur.montage import add_sfx_cue
+
+        with pytest.raises(ValueError, match="kind must be one of"):
+            add_sfx_cue(_sfx_plan(), 1.0, kind="boom")
+
+    def test_update_edits_the_indexed_cue(self):
+        from monteur.montage import update_sfx_cue
+
+        plan = _sfx_plan()  # index 0 = ambience@0
+        adjusted = update_sfx_cue(plan, 0, query="new ambience", duration=3.0)
+        assert adjusted.sfx[0].query == "new ambience"
+        assert adjusted.sfx[0].duration == pytest.approx(3.0)
+        assert plan.sfx[0].query == "amb"  # original untouched
+
+    def test_update_time_change_re_sorts(self):
+        from monteur.montage import update_sfx_cue
+
+        plan = _sfx_plan()  # ambience@0, impact@4
+        adjusted = update_sfx_cue(plan, 0, time=5.0)  # push ambience past impact
+        assert [c.time for c in adjusted.sfx] == [4.0, 5.0]
+        assert adjusted.sfx[1].kind == "ambience"
+
+    def test_update_out_of_range_raises(self):
+        from monteur.montage import update_sfx_cue
+
+        with pytest.raises(ValueError, match="not in this plan"):
+            update_sfx_cue(_sfx_plan(), 9, query="x")
+
+    def test_delete_removes_the_indexed_cue(self):
+        from monteur.montage import delete_sfx_cue
+
+        plan = _sfx_plan()
+        adjusted = delete_sfx_cue(plan, 0)  # drop the ambience
+        assert [c.kind for c in adjusted.sfx] == ["impact"]
+        assert len(plan.sfx) == 2  # original untouched
+        assert any(n.startswith("sfx: removed") for n in adjusted.notes)
+
+    def test_delete_out_of_range_raises(self):
+        from monteur.montage import delete_sfx_cue
+
+        with pytest.raises(ValueError, match="not in this plan"):
+            delete_sfx_cue(_sfx_plan(), -1)
+
+
 # --- time-of-day coherence (Moment.daylight) -----------------------------------
 
 

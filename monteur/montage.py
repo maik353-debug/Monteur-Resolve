@@ -7129,6 +7129,112 @@ def resync_audio(plan: MontagePlan) -> MontagePlan:
     return adjusted
 
 
+SFX_KINDS = ("riser", "impact", "whoosh", "sub-drop", "ambience")
+
+
+def _sfx_sorted(cues: list[SfxCue]) -> list[SfxCue]:
+    """The SFX layer in time order (the invariant the planner keeps)."""
+    return sorted(cues, key=lambda c: c.time)
+
+
+def add_sfx_cue(
+    plan: MontagePlan,
+    time: float,
+    duration: float = 0.5,
+    kind: str = "impact",
+    query: str = "",
+    note: str = "",
+) -> MontagePlan:
+    """Add one SFX cue to the plan — pure plan surgery (never in place).
+
+    ``time`` is the cue's record second (clamped into the cut), ``kind`` one
+    of :data:`SFX_KINDS`. The new layer is kept time-sorted. The original
+    plan is untouched; the returned plan carries an ``sfx:`` note.
+    """
+    kind = str(kind)
+    if kind not in SFX_KINDS:
+        raise ValueError(f"kind must be one of: {', '.join(SFX_KINDS)}")
+    try:
+        time = max(0.0, min(float(time), plan.duration))
+        duration = max(0.0, float(duration))
+    except (TypeError, ValueError):
+        raise ValueError("time and duration must be numbers")
+    cue = SfxCue(
+        time=time, duration=duration, kind=kind,
+        query=str(query or ""), note=str(note or "added by hand"),
+    )
+    cues = _sfx_sorted(list(plan.sfx) + [cue])
+    return replace(plan, sfx=cues, notes=list(plan.notes) + [
+        f"sfx: added a {kind} cue at {time:.1f}s"
+    ])
+
+
+def update_sfx_cue(
+    plan: MontagePlan, index: int, **fields: object
+) -> MontagePlan:
+    """Edit ONE SFX cue's fields — pure plan surgery (never in place).
+
+    ``index`` is the 0-based position in the TIME-SORTED layer. Recognised
+    ``fields``: ``time``, ``duration``, ``kind``, ``query``, ``note``. The
+    layer is re-sorted after the edit (a time change can reorder it). Raises
+    ValueError for a bad index or an unknown kind.
+    """
+    cues = _sfx_sorted(list(plan.sfx))
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        raise ValueError("index must be a cue index (0-based)")
+    if index < 0 or index >= len(cues):
+        raise ValueError(
+            f"cue {index + 1} is not in this plan (it has {len(cues)} cues)"
+        )
+    cur = cues[index]
+    kind = str(fields.get("kind", cur.kind))
+    if kind not in SFX_KINDS:
+        raise ValueError(f"kind must be one of: {', '.join(SFX_KINDS)}")
+    try:
+        time = (
+            max(0.0, min(float(fields["time"]), plan.duration))
+            if "time" in fields else cur.time
+        )
+        duration = (
+            max(0.0, float(fields["duration"]))
+            if "duration" in fields else cur.duration
+        )
+    except (TypeError, ValueError):
+        raise ValueError("time and duration must be numbers")
+    cues[index] = replace(
+        cur, time=time, duration=duration, kind=kind,
+        query=str(fields.get("query", cur.query)),
+        note=str(fields.get("note", cur.note)),
+    )
+    return replace(plan, sfx=_sfx_sorted(cues), notes=list(plan.notes) + [
+        f"sfx: edited cue {index + 1} ({kind})"
+    ])
+
+
+def delete_sfx_cue(plan: MontagePlan, index: int) -> MontagePlan:
+    """Remove ONE SFX cue — pure plan surgery (never in place).
+
+    ``index`` is the 0-based position in the TIME-SORTED layer. Raises
+    ValueError for an out-of-range index.
+    """
+    cues = _sfx_sorted(list(plan.sfx))
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        raise ValueError("index must be a cue index (0-based)")
+    if index < 0 or index >= len(cues):
+        raise ValueError(
+            f"cue {index + 1} is not in this plan (it has {len(cues)} cues)"
+        )
+    kind = cues[index].kind
+    del cues[index]
+    return replace(plan, sfx=cues, notes=list(plan.notes) + [
+        f"sfx: removed cue {index + 1} ({kind})"
+    ])
+
+
 def pin_entry(plan: MontagePlan, entry: MontageEntry) -> None:
     """Force ``entry`` into the plan verbatim — the revision pinning hook.
 

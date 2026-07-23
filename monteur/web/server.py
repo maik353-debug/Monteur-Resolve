@@ -4534,6 +4534,9 @@ class MonteurHandler(BaseHTTPRequestHandler):
         if "title" in payload or "dip" in payload:
             self._plan_adjust_title(payload)
             return
+        if isinstance(payload.get("sfx"), dict):
+            self._plan_adjust_sfx(payload)
+            return
         if payload.get("resync_audio"):
             # re-lay the SFX layer onto the CURRENT cut (after a delete/move
             # the sounds no longer land on the drops) — pure plan surgery
@@ -4650,6 +4653,57 @@ class MonteurHandler(BaseHTTPRequestHandler):
         ]
         _persist_plan_edit(payload, plan, "retitle")
         self._send_json(_plan_export_result(plan, payload))
+
+    def _plan_adjust_sfx(self, payload: dict) -> None:
+        """The SFX mode of /api/plan/adjust — pure sound-cue surgery.
+
+        ``payload["sfx"]`` is ``{"action": "add"|"update"|"delete", ...}``:
+
+        * add — ``{time[, duration, kind, query, note]}`` appends a cue.
+        * update — ``{index[, time, duration, kind, query, note]}`` edits one.
+        * delete — ``{index}`` removes one.
+
+        The index is into the TIME-SORTED SFX layer (what the UI shows).
+        Engine ValueErrors (bad index/kind/number) surface as 400s. Renders
+        like an export and persists into the project like every other edit.
+        """
+        from monteur.montage import (
+            add_sfx_cue,
+            delete_sfx_cue,
+            plan_from_dict,
+            update_sfx_cue,
+        )
+
+        spec = payload["sfx"]
+        action = str(spec.get("action") or "")
+        plan = plan_from_dict(payload["plan_json"])  # bad -> ValueError -> 400
+        try:
+            if action == "add":
+                adjusted = add_sfx_cue(
+                    plan,
+                    time=spec.get("time", 0.0),
+                    duration=spec.get("duration", 0.5),
+                    kind=str(spec.get("kind", "impact")),
+                    query=str(spec.get("query", "")),
+                    note=str(spec.get("note", "")),
+                )
+            elif action == "update":
+                fields = {
+                    k: spec[k]
+                    for k in ("time", "duration", "kind", "query", "note")
+                    if k in spec
+                }
+                adjusted = update_sfx_cue(plan, spec.get("index"), **fields)
+            elif action == "delete":
+                adjusted = delete_sfx_cue(plan, spec.get("index"))
+            else:
+                raise ApiError(
+                    400, "'sfx.action' must be one of: add, update, delete"
+                )
+        except ValueError as exc:
+            raise ApiError(400, str(exc))
+        _persist_plan_edit(payload, adjusted, "sfx")
+        self._send_json(_plan_export_result(adjusted, payload))
 
     # -- "Sehen ohne Resolve": thumbnails + preview player -------------------
 

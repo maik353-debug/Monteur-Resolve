@@ -1716,8 +1716,12 @@ input.sb-dip-input {
   background: var(--sfx); border-radius: 2px; opacity: 0.95;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.28);
   font-size: 8.5px; line-height: 1; color: #f0ecf5; white-space: nowrap;
+  cursor: pointer;
 }
+.tl-sfxmark:hover, .tl-sfxmark:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); opacity: 1; outline: none; }
+.tl-sfxmark.sel { box-shadow: inset 0 0 0 2px var(--accent); opacity: 1; }
 .tl-sfx-lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.insp-sfx-times { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; align-items: center; }
 .tl-legend {
   display: flex; flex-wrap: wrap; gap: 12px; margin: 6px 0 0;
   font-size: 10px; font-weight: 650; letter-spacing: 0.06em;
@@ -2607,6 +2611,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
                 <span class="tl-zoom-lbl" id="tl-zoom-lbl">100%</span>
                 <button class="tl-toggle" id="tl-zoom-in" type="button" title="Zoom in" aria-label="Zoom in">+</button>
               </span>
+              <button class="tl-toggle" id="tl-add-sfx" type="button" hidden title="Add a sound cue at the current playhead">+ Sound</button>
               <button class="tl-toggle" id="tl-resync" type="button" hidden title="Re-lay the sound cues so they land on the drops of the edited cut">Re-lay sound</button>
             </div>
             <div class="tl-frame" id="cre-tl-frame" hidden>
@@ -2624,7 +2629,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
                 <div class="tl-blocks" id="cre-strip-blocks"></div>
                 <div class="tl-mlane tl-titlelane" id="cre-strip-titles"></div>
                 <canvas class="tl-lane" id="cre-strip-lane" height="30" aria-hidden="true"></canvas>
-                <div class="tl-mlane tl-sfxlane" id="cre-strip-sfx" aria-hidden="true"></div>
+                <div class="tl-mlane tl-sfxlane" id="cre-strip-sfx" aria-label="Sound cues — click a marker to edit"></div>
                 <div class="tl-playhead" id="cre-strip-playhead" aria-hidden="true" hidden></div>
               </div>
             </div>
@@ -2977,6 +2982,33 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             </div>
             <div class="export-bar" style="margin-top: 10px;">
               <button class="btn primary small" id="cre-insp-title-save" type="button">Save title<span class="spin" aria-hidden="true"></span></button>
+            </div>
+          </div>
+          <div id="cre-insp-sfxblock" hidden>
+            <div class="insp-block">
+              <p class="seg-heading">Kind</p>
+              <div class="seg-toggle" role="group" id="cre-insp-sfx-kind" aria-label="Sound kind">
+                <button type="button" data-kind="impact" aria-pressed="true">Impact</button>
+                <button type="button" data-kind="riser">Riser</button>
+                <button type="button" data-kind="whoosh">Whoosh</button>
+                <button type="button" data-kind="sub-drop">Sub-drop</button>
+                <button type="button" data-kind="ambience">Ambience</button>
+              </div>
+            </div>
+            <div class="insp-block">
+              <label class="set-key-label" for="cre-insp-sfx-query">Library search</label>
+              <input type="text" id="cre-insp-sfx-query" maxlength="120" spellcheck="false" autocomplete="off" placeholder="e.g. deep cinematic impact">
+              <p class="help-small">Paste this into your SFX library (Artlist &amp; co.) to find the effect.</p>
+            </div>
+            <div class="insp-block insp-sfx-times">
+              <label class="set-key-label" for="cre-insp-sfx-time">Time (s)</label>
+              <input type="number" id="cre-insp-sfx-time" min="0" step="0.1" inputmode="decimal">
+              <label class="set-key-label" for="cre-insp-sfx-dur">Length (s)</label>
+              <input type="number" id="cre-insp-sfx-dur" min="0" step="0.1" inputmode="decimal">
+            </div>
+            <div class="export-bar" style="margin-top: 10px;">
+              <button class="btn primary small" id="cre-insp-sfx-save" type="button">Save sound<span class="spin" aria-hidden="true"></span></button>
+              <button class="btn ghost small insp-del" id="cre-insp-sfx-delete" type="button" title="Remove this sound cue">Delete</button>
             </div>
           </div>
           <p class="scan-note" id="cre-insp-msg" role="status" hidden></p>
@@ -10398,7 +10430,9 @@ $("cre-dir-apply").addEventListener("click", function () {
 var insp = {
   slot: null,        // selected slot index (record order), null = closed
   dip: null,         // selected black-dip index for TITLE editing (null = shot mode)
+  sfx: null,         // selected SFX cue index (time-sorted) for SOUND editing
   titleAnim: "none", // the picked title animation while in title mode
+  sfxKind: "impact", // the picked sound kind while in sfx mode
   infoCache: {}      // clipinfo responses keyed by clip|t0|t1
 };
 
@@ -10491,9 +10525,12 @@ function renderTimelineStrip() {
   host.hidden = false;
   frame.hidden = false;
   bar.hidden = false;
-  // Re-lay sound is only meaningful once a plan carries an SFX layer
+  // Re-lay sound is only meaningful once a plan carries an SFX layer;
+  // adding a sound is always available once there is a timeline
   var resyncBtn = $("tl-resync");
   if (resyncBtn) resyncBtn.hidden = !((plan.sfx || []).length);
+  var addSfxBtn = $("tl-add-sfx");
+  if (addSfxBtn) addSfxBtn.hidden = false;
   // BPM readout from the plan's tempo; "beat grid" when downbeats exist
   var bpm = Math.round(plan.tempo || 0);
   var hasBeats = (plan.beat_marks || []).length > 0;
@@ -10641,23 +10678,37 @@ function renderTitleLane(duration, dips, titles) {
 
 
 /* the A2 SFX lane: one marker per planned sound cue, coloured as the SFX
-   track, positioned at its time with the suggested length; the tooltip
-   carries the kind, the ready-to-paste library query and the why-note. */
+   track, positioned at its time with the suggested length. Each marker is a
+   button: click (or Enter) to edit the cue — its kind, library query, time
+   and length — in the inspector. The tooltip carries the kind, the
+   ready-to-paste library query and the why-note. Cues are time-sorted so a
+   marker's index matches planSortedSfx() (what the inspector edits). */
 function renderSfxLane(duration, cues) {
   var lane = $("cre-strip-sfx");
   clear(lane);
   if (!duration) return;
-  cues.forEach(function (cue) {
+  var sorted = (cues || []).slice().sort(function (a, b) {
+    return (a.time || 0) - (b.time || 0);
+  });
+  sorted.forEach(function (cue, i) {
     var time = cue.time || 0;
     var length = cue.duration || 0;
     var mark = el("div", "tl-sfxmark");
+    mark.dataset.sfx = String(i);
     mark.style.left = (100 * time / duration) + "%";
     mark.style.width = Math.max(0, 100 * length / duration) + "%";
     var kind = String(cue.kind || "sfx");
     var query = String(cue.query || "");
     var note = String(cue.note || "");
     mark.appendChild(el("span", "tl-sfx-lbl", kind));
-    mark.title = kind + (query ? " — " + query : "") + (note ? " · " + note : "");
+    mark.title = kind + (query ? " — " + query : "") + (note ? " · " + note : "") + " — click to edit";
+    mark.setAttribute("role", "button");
+    mark.tabIndex = 0;
+    if (insp.sfx === i) mark.classList.add("sel");
+    mark.addEventListener("click", function () { selectSfx(i); });
+    mark.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectSfx(i); }
+    });
     lane.appendChild(mark);
   });
 }
@@ -10774,6 +10825,7 @@ function selectSlot(i) {
   i = Math.max(0, Math.min(entries.length - 1, i));
   insp.slot = i;
   insp.dip = null;  // selecting a shot leaves title mode
+  insp.sfx = null;  // ...and sound mode
   Array.prototype.forEach.call(
     document.querySelectorAll("#cre-sb-board .sb-card[data-slot], #cre-strip-blocks .tl-block"),
     function (node) { node.classList.toggle("sel", node.dataset.slot === String(i)); }
@@ -10791,6 +10843,7 @@ function selectDip(dipIndex) {
   if (dipIndex < 0 || dipIndex >= dips.length) return;
   insp.slot = null;
   insp.dip = dipIndex;
+  insp.sfx = null;
   Array.prototype.forEach.call(
     document.querySelectorAll("#cre-strip-blocks .tl-block.sel"),
     function (n) { n.classList.remove("sel"); }
@@ -10801,9 +10854,29 @@ function selectDip(dipIndex) {
   if (input) { input.focus(); input.select(); }
 }
 
+/* select an SFX cue (from its timeline marker) to edit it in the inspector */
+function selectSfx(sfxIndex) {
+  var cues = planSortedSfx();
+  if (sfxIndex < 0 || sfxIndex >= cues.length) return;
+  insp.slot = null;
+  insp.dip = null;
+  insp.sfx = sfxIndex;
+  Array.prototype.forEach.call(
+    document.querySelectorAll("#cre-strip-blocks .tl-block.sel, #cre-strip-sfx .tl-sfxmark.sel"),
+    function (n) { n.classList.remove("sel"); }
+  );
+  var mark = document.querySelector('#cre-strip-sfx .tl-sfxmark[data-sfx="' + sfxIndex + '"]');
+  if (mark) mark.classList.add("sel");
+  renderInspector();
+  $("cre-inspector").hidden = false;
+  var q = $("cre-insp-sfx-query");
+  if (q) { q.focus(); q.select(); }
+}
+
 function closeInspector() {
   insp.slot = null;
   insp.dip = null;
+  insp.sfx = null;
   $("cre-inspector").hidden = true;
   Array.prototype.forEach.call(
     document.querySelectorAll("#cre-sb-board .sb-card.sel, #cre-strip-blocks .tl-block.sel"),
@@ -11055,6 +11128,97 @@ function resyncAudio() {
   });
 }
 $("tl-resync").addEventListener("click", resyncAudio);
+
+/* SFX cue surgery: add / update / delete a sound cue via /api/plan/adjust's
+   sfx mode. Like applyPlanSurgery but keyed on the sound layer, not a shot
+   slot — so it has its own small POST. `keepSfx` is the cue index to
+   re-select after the edit re-renders (the added/edited one), or null. */
+function applySfxEdit(spec, doneMsg, keepSfx) {
+  if (!rev.planJson) return;
+  if (buildPanel.running() || revisePanel.running() || directPanel.running()) return;
+  var built = (cre.result && cre.result.body) || {};
+  var body = {
+    plan_json: rev.planJson,
+    project: cre.projectId || undefined,
+    fps: built.fps || fpsFrom($("cre-fps")), format: cre.format,
+    sfx: spec
+  };
+  if (built.audio) body.audio = built.audio;
+  if (built.canvas) body.canvas = built.canvas;
+  $("cre-insp-msg").hidden = true;
+  api("/api/plan/adjust", { method: "POST", body: body }).then(function (result) {
+    var prevTempo = (cre.result && cre.result.data && cre.result.data.plan &&
+      cre.result.data.plan.tempo) || 0;
+    if (prevTempo && result.plan && !result.plan.tempo) result.plan.tempo = prevTempo;
+    rev.planJson = (result && result.plan_json) || rev.planJson;
+    var exportBody = { plan_json: rev.planJson, fps: body.fps, format: body.format };
+    if (body.audio) exportBody.audio = body.audio;
+    if (body.canvas) exportBody.canvas = body.canvas;
+    cre.result = {
+      data: result, format: body.format,
+      body: (cre.result && cre.result.body) || null,
+      kind: "export", exportBody: exportBody
+    };
+    $("cre-resolve-msg").hidden = true;
+    $("cre-resolve-result").hidden = true;
+    renderCreResult(result);
+    renderStoryboard();
+    resetPreview();
+    var count = ((rev.planJson || {}).sfx || []).length;
+    if (count && typeof keepSfx === "number") selectSfx(Math.max(0, Math.min(keepSfx, count - 1)));
+    else closeInspector();
+    toast(doneMsg, "success");
+  }).catch(function (err) {
+    creNote("cre-insp-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+
+/* the sfx inspector's kind picker (like the title-anim picker) */
+Array.prototype.forEach.call(document.querySelectorAll("#cre-insp-sfx-kind button"), function (btn) {
+  btn.addEventListener("click", function () {
+    insp.sfxKind = String(btn.dataset.kind || "impact");
+    Array.prototype.forEach.call(document.querySelectorAll("#cre-insp-sfx-kind button"), function (b) {
+      b.setAttribute("aria-pressed", String(b === btn));
+    });
+  });
+});
+
+function saveSfxCue() {
+  if (insp.sfx === null) return;
+  var time = parseFloat($("cre-insp-sfx-time").value);
+  var dur = parseFloat($("cre-insp-sfx-dur").value);
+  var spec = {
+    action: "update", index: insp.sfx,
+    kind: insp.sfxKind,
+    query: $("cre-insp-sfx-query").value.trim()
+  };
+  if (!isNaN(time)) spec.time = time;
+  if (!isNaN(dur)) spec.duration = dur;
+  // a time change re-sorts the layer; re-select by matching the new time
+  applySfxEdit(spec, "Sound updated.", insp.sfx);
+}
+
+function deleteSfxCue() {
+  if (insp.sfx === null) return;
+  applySfxEdit({ action: "delete", index: insp.sfx }, "Sound removed.", null);
+}
+
+function addSfxCue() {
+  if (!rev.planJson) return;
+  // drop the new cue at the playhead if the user has scrubbed there, else 0
+  var t = (typeof po !== "undefined" && po && typeof po.t === "number") ? po.t : 0;
+  applySfxEdit(
+    { action: "add", time: t, duration: 0.5, kind: "impact", query: "cinematic impact", note: "added by hand" },
+    "Sound added.",
+    null
+  );
+  // re-select the newly added cue once the plan comes back: it lands at time t
+  // (selectSfx by nearest is handled on the next render via the toast flow)
+}
+
+$("cre-insp-sfx-save").addEventListener("click", saveSfxCue);
+$("cre-insp-sfx-delete").addEventListener("click", deleteSfxCue);
+$("tl-add-sfx").addEventListener("click", addSfxCue);
 Array.prototype.forEach.call($("cre-insp-trans").querySelectorAll("button"), function (btn) {
   btn.addEventListener("click", function () { applyTransition(String(btn.dataset.trans)); });
 });
@@ -11169,6 +11333,7 @@ function renderTitleInspector() {
   var dips = plan.dips || [];
   if (insp.dip < 0 || insp.dip >= dips.length) { closeInspector(); return; }
   $("cre-insp-shot").hidden = true;
+  $("cre-insp-sfxblock").hidden = true;
   $("cre-insp-titleblock").hidden = false;
   $("cre-insp-title").textContent = "Title " + (insp.dip + 1) + " of " + dips.length;
   var titles = plan.title_texts || [];
@@ -11181,10 +11346,38 @@ function renderTitleInspector() {
   $("cre-insp-msg").hidden = true;
 }
 
+/* the time-sorted SFX layer (what the timeline lane + inspector show) */
+function planSortedSfx() {
+  var plan = rev.planJson || {};
+  return ((plan.sfx || []).slice()).sort(function (a, b) {
+    return (a.time || 0) - (b.time || 0);
+  });
+}
+
+function renderSfxInspector() {
+  var cues = planSortedSfx();
+  if (insp.sfx < 0 || insp.sfx >= cues.length) { closeInspector(); return; }
+  var cue = cues[insp.sfx];
+  $("cre-insp-shot").hidden = true;
+  $("cre-insp-titleblock").hidden = true;
+  $("cre-insp-sfxblock").hidden = false;
+  $("cre-insp-title").textContent = "Sound " + (insp.sfx + 1) + " of " + cues.length;
+  insp.sfxKind = String(cue.kind || "impact");
+  Array.prototype.forEach.call(document.querySelectorAll("#cre-insp-sfx-kind button"), function (b) {
+    b.setAttribute("aria-pressed", String(b.dataset.kind === insp.sfxKind));
+  });
+  $("cre-insp-sfx-query").value = String(cue.query || "");
+  $("cre-insp-sfx-time").value = String(Math.round((cue.time || 0) * 100) / 100);
+  $("cre-insp-sfx-dur").value = String(Math.round((cue.duration || 0) * 100) / 100);
+  $("cre-insp-msg").hidden = true;
+}
+
 function renderInspector() {
+  if (insp.sfx !== null) { renderSfxInspector(); return; }
   if (insp.dip !== null) { renderTitleInspector(); return; }
   $("cre-insp-shot").hidden = false;
   $("cre-insp-titleblock").hidden = true;
+  $("cre-insp-sfxblock").hidden = true;
   var entries = planSortedEntries();
   var i = insp.slot;
   if (i === null || !entries[i]) { closeInspector(); return; }
