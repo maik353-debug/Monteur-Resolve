@@ -1230,6 +1230,32 @@ class TestWizardStepsUi:
         assert 'resyncBtn.hidden = !((plan.sfx || []).length)' in html
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_folder_favorites_are_wired(self):
+        # the footage explorer carries a persistent folder-favorites rail
+        html = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            'id="cre-faves"',
+            'id="cre-fav-add"',
+            'id="cre-fav-list"',
+            'FOLDER_FAVES_KEY = "monteur:folderFaves"',
+            "function loadFolderFaves",
+            "function saveFolderFaves",
+            "function addFolderFave",
+            "function removeFolderFave",
+            "function renderFolderFaves",
+        ):
+            assert needle in html, needle
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_wizard_is_full_width(self):
+        # every wizard step spans the window like the footage page (no narrow
+        # centered column)
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert "#create { max-width: none;" in html
+        # the old narrow cap is gone
+        assert "#create { max-width: 920px;" not in html
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_sfx_inspector_editing_is_wired(self):
         # SFX markers are editable in the inspector (kind/query/time/length +
         # delete), and a "+ Sound" button adds a cue via the sfx adjust mode

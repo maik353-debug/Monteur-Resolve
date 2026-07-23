@@ -880,7 +880,10 @@ svg text.axis {
 .pm-empty { color: var(--ink-muted); font-size: 12.5px; padding: 6px 0; }
 
 /* ---------- create wizard ---------- */
-#create { max-width: 920px; margin: 0 auto; padding: 18px 22px 48px; }
+/* full-window like the footage workspace — every step spans the width (the
+   footage page always did via .ws-mode; the rest now match it). Inner leads,
+   hints and forms keep their own max-widths, so text stays readable. */
+#create { max-width: none; margin: 0 auto; padding: 18px 22px 48px; }
 .wiz-progress {
   font-size: 10.5px; font-weight: 650; letter-spacing: 0.09em; text-transform: uppercase;
   color: var(--ink-muted); margin-bottom: 6px;
@@ -1129,6 +1132,24 @@ svg text.axis {
 .ws-crumb .seg:hover { color: var(--ink); text-decoration: underline; }
 .ws-crumb .cur { color: var(--ink); }
 .ws-crumb .sep { color: var(--faint); }
+/* favorites rail: a compact, capped list of saved folders above the browser */
+.ws-faves { flex: none; display: flex; flex-direction: column; border-bottom: 1px solid var(--line); background: var(--panel); }
+.ws-faves-head {
+  display: flex; align-items: center; gap: 8px; flex: none; height: 26px; padding: 0 10px;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint);
+}
+.ws-favelist { display: flex; flex-direction: column; max-height: 132px; overflow: auto; padding: 2px 4px 4px; }
+.ws-favelist:empty::after { content: "No favorites yet — open a folder and press ★ Add."; padding: 2px 6px 4px; font-size: 10.5px; color: var(--faint); }
+.ws-faverow { display: flex; align-items: center; gap: 7px; padding: 4px 7px; border-radius: 5px; cursor: pointer; }
+.ws-faverow:hover { background: var(--panel-2); }
+.ws-faverow .ws-fav-star { color: var(--ember); flex: none; font-size: 11px; }
+.ws-faverow .ws-fav-nm { flex: 1; color: var(--dim); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-faverow .ws-fav-x {
+  flex: none; width: 18px; height: 18px; border: 0; background: transparent; color: var(--faint);
+  cursor: pointer; font-size: 13px; line-height: 1; border-radius: 4px; display: none;
+}
+.ws-faverow:hover .ws-fav-x { display: inline-flex; align-items: center; justify-content: center; }
+.ws-faverow .ws-fav-x:hover { color: var(--ember); }
 .ws-browselist { flex: 1; overflow: auto; padding: 4px; min-height: 0; }
 .ws-row { display: flex; align-items: center; gap: 8px; padding: 5px 7px; border-radius: 5px; cursor: pointer; }
 .ws-row:hover { background: var(--panel-2); }
@@ -2280,6 +2301,12 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             <div class="ws-col ws-explorer">
               <div class="ws-panelhead">Explorer<span class="ws-spacer"></span>
                 <button class="ws-iconbtn small" id="cre-browse-folder" type="button" title="Add a folder to the pool">Add folder&hellip;</button>
+              </div>
+              <div class="ws-faves" id="cre-faves">
+                <div class="ws-faves-head">Favorites<span class="ws-spacer"></span>
+                  <button class="ws-iconbtn small" id="cre-fav-add" type="button" title="Save the current folder to favorites">&#9733; Add</button>
+                </div>
+                <div class="ws-favelist" id="cre-fav-list"></div>
               </div>
               <div class="ws-crumb" id="cre-explorer-crumb"></div>
               <div class="ws-browselist" id="cre-explorer-list"></div>
@@ -6042,6 +6069,7 @@ function creShowStep(n, focusHeading) {
   if (createEl) createEl.classList.toggle("ws-mode", step.key === "footage");
   if (step.key === "footage") {
     if (!wsExplorer.loaded) wsExplorerLoad("");  // first visit: list the home dir
+    renderFolderFaves();  // reflect saved favorites whenever the page opens
   } else {
     wsPause();  // never play the workspace clip off-screen
   }
@@ -6110,6 +6138,9 @@ $("cre-browse-folder").addEventListener("click", function () {
     hideBrowseButtons(); // headless — the paste-a-path input still works
   }).then(function () { btn.disabled = false; });
 });
+
+$("cre-fav-add").addEventListener("click", function () { addFolderFave(wsExplorer.path); });
+renderFolderFaves(); // paint any saved favorites on load
 
 /* ================= the media pool (Increment B, staged) =================
    The Footage page is a bin of REFERENCED clips. The user picks a SUBSET,
@@ -6391,6 +6422,68 @@ $("cre-pool-path").addEventListener("keydown", function (e) {
    into the Media Pool (also double-click / the ＋ button to reference a
    clip; ＋ on a folder references the whole folder). */
 var wsExplorer = { path: "", loaded: false };
+
+/* ===== folder favorites (left rail) ==================================
+   Save folders you use often so you can jump back with one click. Pure
+   client state, persisted in localStorage (guarded, private-mode safe),
+   mirroring the monteur:* key pattern. A favorite is just a folder path;
+   clicking one navigates the Explorer there via /api/browse/list. */
+var FOLDER_FAVES_KEY = "monteur:folderFaves";
+function loadFolderFaves() {
+  try {
+    var raw = window.localStorage.getItem(FOLDER_FAVES_KEY);
+    if (!raw) return [];
+    var arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr.filter(function (p) { return typeof p === "string" && p; });
+  } catch (e) { return []; }
+}
+function saveFolderFaves(arr) {
+  try { window.localStorage.setItem(FOLDER_FAVES_KEY, JSON.stringify(arr)); } catch (e) { /* private mode */ }
+}
+function addFolderFave(path) {
+  path = String(path || "").trim();
+  if (!path) { toast("Open a folder first, then ★ Add it to favorites."); return; }
+  var faves = loadFolderFaves();
+  if (faves.indexOf(path) >= 0) { toast("Already a favorite."); return; }
+  faves.push(path);
+  saveFolderFaves(faves);
+  renderFolderFaves();
+  toast("Folder added to favorites.", "success");
+}
+function removeFolderFave(path) {
+  var faves = loadFolderFaves().filter(function (p) { return p !== path; });
+  saveFolderFaves(faves);
+  renderFolderFaves();
+}
+function folderFaveName(path) {
+  var segs = wsPathSegments(path);
+  return segs.length ? segs[segs.length - 1].name : path;
+}
+function renderFolderFaves() {
+  var list = $("cre-fav-list");
+  if (!list) return;
+  clear(list);
+  loadFolderFaves().forEach(function (path) {
+    var row = el("div", "ws-faverow");
+    row.title = path;
+    row.appendChild(el("span", "ws-fav-star", "★"));
+    row.appendChild(el("span", "ws-fav-nm", folderFaveName(path)));
+    var x = el("button", "ws-fav-x", "×");
+    x.type = "button";
+    x.title = "Remove from favorites";
+    x.setAttribute("aria-label", "Remove " + folderFaveName(path) + " from favorites");
+    x.addEventListener("click", function (e) { e.stopPropagation(); removeFolderFave(path); });
+    row.appendChild(x);
+    row.setAttribute("role", "button");
+    row.tabIndex = 0;
+    row.addEventListener("click", function () { wsExplorerLoad(path); });
+    row.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); wsExplorerLoad(path); }
+    });
+    list.appendChild(row);
+  });
+}
 
 function wsIcon(kind) {
   var span = el("span", "ws-ic");
