@@ -331,6 +331,24 @@ class TestMigration:
         assert [p.name for p in created] == ["two"]
         assert len(list_projects()) == 2
 
+    def test_autosave_slot_is_never_migrated(self, tmp_path, monkeypatch):
+        # the autosave slot is a resume buffer, not a saved draft — migrating it
+        # would mint a phantom empty project that comes back after every delete
+        monkeypatch.setenv("MONTEUR_DRAFTS_PATH", str(tmp_path / "drafts.json"))
+        from monteur import drafts
+
+        drafts.save_draft({
+            "autosave": True,
+            "folder": "/footage/trip",
+            "plan_json": _plan_json(),
+        })
+        assert migrate_drafts() == []          # nothing migrated
+        assert list_projects() == []           # no phantom project
+        # a genuine named draft alongside it still migrates (and only it)
+        self._draft(tmp_path, monkeypatch, name="real")
+        created = migrate_drafts()
+        assert [p.name for p in created] == ["real"]
+
     def test_drafts_file_is_never_mutated(self, tmp_path, monkeypatch):
         self._draft(tmp_path, monkeypatch)
         drafts_path = tmp_path / "drafts.json"

@@ -798,6 +798,13 @@ def migrate_drafts() -> list[Project]:
     ``settings`` as the project ``options``, and its saved ``plan_json`` as
     the project plan.
 
+    The transient AUTOSAVE slot is NEVER migrated: it is a reload-resume buffer
+    that the wizard rewrites on every build, not a cut the user chose to keep.
+    Migrating it would mint a phantom "Auto-saved cut" project — and because the
+    idempotency key lives in the project, deleting that project let the slot
+    re-migrate into a fresh empty project on the next projects-list. Only
+    genuine NAMED drafts ("Save draft" clicks) become projects.
+
     IDEMPOTENT and LOSSLESS: each new project records
     ``migrated_from_draft: <draft id>``, and a re-run skips every draft whose
     id already appears there — so calling this repeatedly adds nothing new.
@@ -811,6 +818,9 @@ def migrate_drafts() -> list[Project]:
     for summary in drafts_mod.list_drafts():
         draft_id = str(summary.get("id") or "").strip()
         if not draft_id or draft_id in already:
+            continue
+        # the autosave slot is a resume buffer, not a saved draft — never a project
+        if summary.get("autosave") or draft_id == drafts_mod.AUTOSAVE_ID:
             continue
         record = drafts_mod.load_draft(draft_id)
         if not isinstance(record, dict):
