@@ -70,6 +70,15 @@ from monteur.sift import ClipReport, Moment
 
 _EPS = 1e-6
 
+#: Reasoning depth for the compose completion. The compose is a structured
+#: casting/story task over a dossier that is ALREADY fully analysed — no video
+#: is read here — so it does not need a model's deepest extended thinking. On
+#: the CLI backend the default is high, which can spend many MINUTES reasoning
+#: (and, when that CLI bills, real money); capping it to "medium" cuts the wait
+#: and cost sharply while keeping the reasoning that makes the cut good. (The
+#: API structured path carries no thinking at all, so this only affects the CLI.)
+COMPOSE_EFFORT = "medium"
+
 #: Tolerance (seconds) when matching a slot's start against a drop time —
 #: the cut-ahead lead shifts cuts slightly before their beat, and the
 #: finishing pass uses the same 0.25 s window for its dip matching.
@@ -941,10 +950,12 @@ def compose_montage(
     try:
         # on_text streams Claude's answer as it is written and on_thinking its
         # reasoning before that, so the storyboard build shows the cut being
-        # thought through and composed live instead of a frozen wait.
+        # thought through and composed live instead of a frozen wait. effort is
+        # capped (COMPOSE_EFFORT) so the CLI backend does not reason for minutes
+        # on a task that only reads the finished dossier.
         raw = ai.complete(
             prompt, system=_SYSTEM, json_schema=COMPOSE_SCHEMA,
-            on_delta=on_text, on_thinking=on_thinking,
+            effort=COMPOSE_EFFORT, on_delta=on_text, on_thinking=on_thinking,
         )
     except ai.MonteurAIError as exc:
         if strict:
