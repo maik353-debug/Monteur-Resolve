@@ -34,12 +34,14 @@ except ImportError:
     HAVE_FFMPEG = False
 
 
-def make_metrics(brightness, sharpness, motion, step=0.5, residual=None):
+def make_metrics(brightness, sharpness, motion, step=0.5, residual=None,
+                 clipped=None, crushed=None):
     """Build a synthetic clip from per-sample value lists (2 samples/sec).
 
     ``residual`` (subject motion) defaults to mirroring ``motion`` — with no
     camera pan the residual equals the total motion, which is the case these
-    synthetic clips model unless a test says otherwise.
+    synthetic clips model unless a test says otherwise. ``clipped``/``crushed``
+    (blown/dead pixel fractions) default to 0.
     """
     n = max(len(brightness), len(sharpness), len(motion))
     if residual is None:
@@ -47,6 +49,9 @@ def make_metrics(brightness, sharpness, motion, step=0.5, residual=None):
 
     def pick(values, i):
         return values[i] if i < len(values) else values[-1]
+
+    def pick0(values, i):
+        return 0.0 if values is None else pick(values, i)
 
     out = []
     for i in range(n):
@@ -57,6 +62,8 @@ def make_metrics(brightness, sharpness, motion, step=0.5, residual=None):
                 sharpness=pick(sharpness, i),
                 motion=0.0 if i == 0 else pick(motion, i),
                 residual=0.0 if i == 0 else pick(residual, i),
+                clipped=pick0(clipped, i),
+                crushed=pick0(crushed, i),
             )
         )
     return out
@@ -205,6 +212,19 @@ def test_moments_prefer_moderate_motion_over_static():
     moving = [m for m in moments if m.start >= 6.0]
     assert moving and static
     assert min(m.score for m in moving) > max(m.score for m in static)
+
+
+def test_exposure_penalty_downweights_blown_and_crushed_moments():
+    # two usable halves, identical sharpness/motion; the second half is badly
+    # blown out (60% clipped) -> its moments must score below the clean half's
+    clipped = [0.0] * 12 + [0.6] * 12
+    metrics = make_metrics([120] * 24, [300] * 24, [2] * 24, clipped=clipped)
+    segments = classify_metrics(metrics, 12.0)
+    moments = find_moments(segments, metrics, min_length=1.0)
+    clean = [m for m in moments if m.end <= 6.0]
+    blown = [m for m in moments if m.start >= 6.0]
+    assert clean and blown
+    assert min(m.score for m in clean) > max(m.score for m in blown)
 
 
 def test_find_scene_cuts_flags_isolated_discontinuity():

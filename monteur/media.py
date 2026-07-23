@@ -212,6 +212,8 @@ class FrameMetric:
     dy: float = 0.0  # global vertical motion (px/sample, + = content moves down)
     residual: float = 0.0  # motion the camera pan does NOT explain (subject action)
     phash: int = 0  # 64-bit perceptual (difference) hash of the frame
+    clipped: float = 0.0  # fraction of pixels at/near pure white (blown highlights)
+    crushed: float = 0.0  # fraction of pixels at/near pure black (crushed shadows)
 
 
 # Phase-correlation tuning (see _phase_shift): a correlation peak weaker than
@@ -328,6 +330,12 @@ def _metrics_from_frames(frames, times) -> list[FrameMetric]:
         frame = frames[i].astype(np.float32)
         gy, gx = np.gradient(frame)
         sharpness = float((gx**2 + gy**2).mean())
+        # exposure safety: how much of the frame is unrecoverably blown
+        # (>= ~250) or crushed (<= ~5) — a moment full of clipped highlights or
+        # dead blacks grades badly no matter the look, so the sift can penalise it
+        size = frame.size or 1
+        clipped = float((frame >= 250.0).sum()) / size
+        crushed = float((frame <= 5.0).sum()) / size
         motion = float(np.abs(frame - previous).mean()) if previous is not None else 0.0
         dx, dy = _phase_shift(previous, frame) if previous is not None else (0.0, 0.0)
         # residual (subject) motion: align previous to the current frame by the
@@ -349,6 +357,8 @@ def _metrics_from_frames(frames, times) -> list[FrameMetric]:
                 dy=dy,
                 residual=residual,
                 phash=_dhash(frame, np),
+                clipped=clipped,
+                crushed=crushed,
             )
         )
         previous = frame

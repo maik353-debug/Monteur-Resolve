@@ -118,6 +118,10 @@ _BRIGHT_FULL = 120.0  # brightness at (or above) this = fully adequate
 _MODERATE_MOTION_BAND = (0.5, 2.5)  # x clip median: "something happens"
 _MOMENT_MOTION_BONUS = 0.25  # weight of the moderate-motion bonus
 _MAX_MOMENTS = 12  # cap per clip
+# Exposure penalty: a moment's score is scaled by (1 - this x the mean
+# blown+crushed pixel fraction), so a window ~66% clipped/crushed drops to
+# zero while a clean frame is untouched.
+_EXPOSURE_SENSITIVITY = 1.5
 # Hard-cut detection (find_scene_cuts): a scene change is an ISOLATED
 # frame-to-frame discontinuity — a motion spike that towers over BOTH its
 # neighbours (so sustained shake/action is not a cut) and the clip, paired
@@ -519,11 +523,17 @@ def find_moments(
                     ) / len(idx)
                 else:
                     moderate = 0.0
+                # exposure safety: a window full of blown highlights or dead
+                # blacks grades badly, so scale the score down by the damage
+                damage = sum(
+                    metrics[j].clipped + metrics[j].crushed for j in idx
+                ) / len(idx)
+                exposure_ok = max(0.0, 1.0 - _EXPOSURE_SENSITIVITY * damage)
                 score = min(
                     1.0,
                     (1 - _MOMENT_MOTION_BONUS) * mean_rank
                     + _MOMENT_MOTION_BONUS * moderate,
-                )
+                ) * exposure_ok
                 envelope = [
                     (
                         metrics[j].t,
