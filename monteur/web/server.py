@@ -36,8 +36,10 @@ API (all JSON):
   "canvas"?, "format"?}                                         -> build-result shape
 * ``GET  /api/clipinfo?clip=&folder=&t0=&t1=``                   -> probe facts + vision
 * ``POST /api/alternatives`` {"plan_json", "folder", "slot"}    -> {"slot", "alternatives"}
-* ``POST /api/plan/adjust`` {"plan_json", "slot", "transition",
-  "fps"?, "audio"?, "canvas"?, "format"?}                       -> build-result shape
+* ``POST /api/plan/adjust`` {"plan_json", + one of:
+  {"slot", "transition"} | {"dip", "title"} | {"delete": slot} |
+  {"move": slot, "to": index}; "fps"?, "audio"?, "canvas"?,
+  "format"?}                                                     -> build-result shape
 * ``GET  /api/thumb?clip=&t=&w=``                                -> JPEG bytes
 * ``GET  /api/media?path=<abs>``                                 -> media bytes (Range-capable;
   serves the playback proxy when fresh, else the original file)
@@ -4398,7 +4400,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
     def _plan_adjust(self) -> None:
         """POST /api/plan/adjust — one plan tweak, rendered like export.
 
-        Two modes, both pure plan surgery (no re-plan, no sift), both
+        Four modes, all pure plan surgery (no re-plan, no sift), all
         rendered through the same plan -> file path as /api/create/export
         so the response is the standard build-result shape:
 
@@ -4409,10 +4411,17 @@ class MonteurHandler(BaseHTTPRequestHandler):
         * title — ``{"dip", "title"}``: edits ``plan.title_texts[dip]``
           (the text on that black dip's title card) in place — padded to
           the dips so the alignment invariant holds, "" clears the title.
+        * delete — ``{"delete": <slot>}``: monteur.montage.delete_entry
+          removes that entry and re-flows the record grid contiguously.
+        * move — ``{"move": <slot>, "to": <index>}``:
+          monteur.montage.move_entry reorders the entry and re-flows the
+          grid. Engine ValueErrors (bad index, empty result) are 400s.
         """
         from monteur.montage import (
             ARRANGEMENT_TRANSITIONS,
             adjust_entry_boundary,
+            delete_entry,
+            move_entry,
             plan_from_dict,
         )
 
@@ -4423,6 +4432,27 @@ class MonteurHandler(BaseHTTPRequestHandler):
             )
         if "title" in payload or "dip" in payload:
             self._plan_adjust_title(payload)
+            return
+        if "delete" in payload:
+            try:
+                slot = int(payload.get("delete"))
+            except (TypeError, ValueError):
+                raise ApiError(400, "'delete' must be an entry index (0-based)")
+            plan = plan_from_dict(payload["plan_json"])  # bad -> ValueError -> 400
+            # The engine's own validation (bad slot, deleting the last
+            # entry) raises ValueError -> the dispatcher's 400.
+            self._send_json(_plan_export_result(delete_entry(plan, slot), payload))
+            return
+        if "move" in payload:
+            try:
+                slot = int(payload.get("move"))
+                to = int(payload.get("to"))
+            except (TypeError, ValueError):
+                raise ApiError(
+                    400, "'move' and 'to' must be entry indices (0-based)"
+                )
+            plan = plan_from_dict(payload["plan_json"])  # bad -> ValueError -> 400
+            self._send_json(_plan_export_result(move_entry(plan, slot, to), payload))
             return
         transition = str(payload.get("transition") or "")
         if transition not in ARRANGEMENT_TRANSITIONS:

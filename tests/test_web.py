@@ -918,6 +918,56 @@ class TestPreferences:
         )
 
 
+class TestPlanAdjustSurgery:
+    """/api/plan/adjust delete + move modes — pure plan surgery, rendered."""
+
+    def test_delete_drops_the_entry(self, server):
+        result = _post(
+            f"{server}/api/create/export",
+            {"plan_json": _tiny_plan_json(), "fps": 25, "format": "fcpxml"},
+        )
+        # sanity: two entries before the surgery
+        assert len(result["plan_json"]["entries"]) == 2
+        deleted = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": _tiny_plan_json(), "delete": 0},
+        )
+        entries = deleted["plan_json"]["entries"]
+        assert len(entries) == 1
+        assert entries[0]["clip_path"] == "b.mp4"  # the survivor
+        assert entries[0]["record_start"] == 0.0  # re-flowed to the top
+        assert any(n.startswith("delete: removed slot 1") for n in deleted["plan_json"]["notes"])
+
+    def test_move_reorders_the_entries(self, server):
+        moved = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": _tiny_plan_json(), "move": 0, "to": 1},
+        )
+        entries = moved["plan_json"]["entries"]
+        assert [e["clip_path"] for e in entries] == ["b.mp4", "a.mp4"]
+        # the moved shot kept its source window, only its record slot changed
+        assert (entries[1]["source_start"], entries[1]["source_end"]) == (0.0, 2.0)
+        assert entries[0]["record_start"] == 0.0
+        assert entries[1]["record_start"] == 2.0
+        assert any(n.startswith("move: slot 1 -> position 2") for n in moved["plan_json"]["notes"])
+
+    def test_delete_out_of_range_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(
+                f"{server}/api/plan/adjust",
+                {"plan_json": _tiny_plan_json(), "delete": 9},
+            )
+        assert exc.value.code == 400
+
+    def test_move_bad_index_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(
+                f"{server}/api/plan/adjust",
+                {"plan_json": _tiny_plan_json(), "move": 0, "to": "x"},
+            )
+        assert exc.value.code == 400
+
+
 def _step3_html(html):
     """The Storyboard step's markup (between its section tag and step 4's)."""
     return html.split('id="cre-step-3"', 1)[1].split('id="cre-step-4"', 1)[0]

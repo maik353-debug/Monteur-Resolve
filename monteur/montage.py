@@ -6878,6 +6878,165 @@ def adjust_entry_boundary(
     return adjusted
 
 
+def _resequence_entries(
+    plan: MontagePlan, order: list[int], note: str
+) -> MontagePlan:
+    """Rebuild the record grid from a new entry order — the surgery core.
+
+    ``order`` is a list of ORIGINAL ``plan.entries`` indices in the desired
+    record order (a delete drops one index, a move reorders them). The
+    entries are re-laid contiguously from record 0, each keeping its own
+    record DURATION (``record_end - record_start``) and its source window
+    verbatim — only ``record_start``/``record_end`` and the order change.
+
+    Black dips ride with the shot they smash out of: a dip whose start sits
+    on an entry's ``record_end`` (within :data:`_BOUNDARY_EPS`) is re-placed
+    after that shot in the new grid, carrying its aligned ``title_texts``
+    slot. A dip whose shot was deleted — or that would trail the LAST shot
+    in the new order — is orphaned and dropped (its title with it), so the
+    dips/titles alignment invariant holds. ``duration`` shrinks by exactly
+    the record span the surgery removed (unchanged for a pure reorder).
+
+    The original plan is never modified; the returned plan carries ``note``.
+    """
+    orig = plan.entries
+    titles = list(plan.title_texts)
+    had_titles = bool(titles)
+
+    # Attach each dip to the ORIGINAL entry it smashes out of (its start
+    # sits on that entry's record_end). A dip matched to no surviving
+    # boundary is already orphaned and simply never re-emitted.
+    dip_after: dict[int, list[tuple[float, str]]] = {}
+    for k, (d_start, d_len) in enumerate(plan.dips):
+        title = titles[k] if k < len(titles) else ""
+        oi = next(
+            (
+                i
+                for i, e in enumerate(orig)
+                if abs(e.record_end - d_start) <= _BOUNDARY_EPS + _EPS
+            ),
+            None,
+        )
+        if oi is not None:
+            dip_after.setdefault(oi, []).append((d_len, title))
+
+    new_entries: list[MontageEntry] = []
+    new_dips: list[tuple[float, float]] = []
+    new_titles: list[str] = []
+    cursor = 0.0
+    last = len(order) - 1
+    for pos, oi in enumerate(order):
+        entry = replace(orig[oi])
+        span = entry.record_end - entry.record_start
+        entry.record_start = cursor
+        entry.record_end = cursor + span
+        cursor = entry.record_end
+        new_entries.append(entry)
+        # A dip only survives between two shots — one trailing the last
+        # shot in the new order has no incoming cut and is dropped.
+        if pos < last:
+            for d_len, title in dip_after.get(oi, []):
+                new_dips.append((cursor, d_len))
+                new_titles.append(title)
+                cursor += d_len
+
+    old_span = max(
+        [e.record_end for e in orig] + [ds + dl for ds, dl in plan.dips],
+        default=0.0,
+    )
+    new_duration = max(0.0, plan.duration - (old_span - cursor))
+
+    adjusted = replace(
+        plan,
+        entries=new_entries,
+        dips=new_dips,
+        title_texts=new_titles if had_titles else [],
+        duration=new_duration,
+        notes=list(plan.notes) + [note],
+        sfx=list(plan.sfx),
+        phases=list(plan.phases),
+        music_energy=list(plan.music_energy),
+        beat_marks=list(plan.beat_marks),
+        drop_marks=list(plan.drop_marks),
+        music_gaps=list(plan.music_gaps),
+    )
+    # A dip that moved (or vanished) takes its deliberate silence with it —
+    # a gap without its dip is exactly the accidental silence the guard
+    # forbids. Surgery never plans a new carrier cue.
+    _prune_music_gaps(adjusted)
+    return adjusted
+
+
+def delete_entry(plan: MontagePlan, slot: int) -> MontagePlan:
+    """Remove ONE entry and re-flow the record grid — pure plan surgery.
+
+    ``slot`` is the 0-based index into ``plan.entries`` (record order). The
+    entry is dropped and every later shot slides earlier so the timeline
+    stays contiguous from record 0; each surviving shot keeps its source
+    window and record LENGTH verbatim (only its record position moves). A
+    black dip that smashed out of the removed shot is orphaned and dropped
+    with its title card; ``music_path``, ``sfx``, ``notes`` and the rest
+    ride along. ``duration`` shrinks by the removed span. The original plan
+    is never modified; the returned plan carries a ``delete:`` note.
+
+    Raises ValueError for a slot outside the plan, a non-integer slot, or a
+    delete that would leave the plan with no entries at all.
+    """
+    try:
+        slot = int(slot)
+    except (TypeError, ValueError):
+        raise ValueError("slot must be an entry index (0-based)")
+    if slot < 0 or slot >= len(plan.entries):
+        raise ValueError(
+            f"slot {slot + 1} is not in this plan (it has {len(plan.entries)} entries)"
+        )
+    if len(plan.entries) <= 1:
+        raise ValueError(
+            "cannot delete the last entry — a plan needs at least one shot"
+        )
+    name = PurePath(plan.entries[slot].clip_path).name
+    order = [i for i in range(len(plan.entries)) if i != slot]
+    return _resequence_entries(
+        plan, order, f"delete: removed slot {slot + 1} ({name})"
+    )
+
+
+def move_entry(plan: MontagePlan, slot: int, to: int) -> MontagePlan:
+    """Reorder ONE entry and re-flow the record grid — pure plan surgery.
+
+    The entry at ``slot`` is lifted out and re-inserted at index ``to``
+    (both 0-based into ``plan.entries``, record order); every shot is then
+    re-laid contiguously from record 0. Source windows and record LENGTHS
+    are kept verbatim — only order and record positions change. A black dip
+    rides with the shot it smashes out of (dropped only if that puts it
+    after the last shot); ``music_path``, ``sfx``, ``notes`` ride along.
+    ``duration`` is unchanged (a pure reorder). A no-op move (``slot ==
+    to``) returns an equivalent plan, not an error. The original plan is
+    never modified; the returned plan carries a ``move:`` note.
+
+    Raises ValueError for a non-integer or out-of-range ``slot``/``to``.
+    """
+    try:
+        slot = int(slot)
+        to = int(to)
+    except (TypeError, ValueError):
+        raise ValueError("slot and to must be entry indices (0-based)")
+    n = len(plan.entries)
+    if slot < 0 or slot >= n:
+        raise ValueError(
+            f"slot {slot + 1} is not in this plan (it has {n} entries)"
+        )
+    if to < 0 or to >= n:
+        raise ValueError(
+            f"position {to + 1} is not in this plan (it has {n} entries)"
+        )
+    order = list(range(n))
+    order.insert(to, order.pop(slot))
+    return _resequence_entries(
+        plan, order, f"move: slot {slot + 1} -> position {to + 1}"
+    )
+
+
 def pin_entry(plan: MontagePlan, entry: MontageEntry) -> None:
     """Force ``entry`` into the plan verbatim — the revision pinning hook.
 

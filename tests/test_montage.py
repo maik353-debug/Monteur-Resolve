@@ -2355,6 +2355,157 @@ class TestAdjustEntryBoundary:
             adjust_entry_boundary(plan, 0, "dissolve")
 
 
+def _record_grid_is_contiguous(entries, dips):
+    """The re-flow invariant: first shot at 0, every shot butts the
+    previous shot's out (plus any black dip that sits between them)."""
+    from monteur.montage import _BOUNDARY_EPS, _EPS
+
+    assert entries[0].record_start == pytest.approx(0.0)
+    starts = sorted(ds for ds, _ in dips)
+    lengths = {round(ds, 6): dl for ds, dl in dips}
+    for prev, cur in zip(entries, entries[1:]):
+        gap = 0.0
+        # a dip sitting exactly on the previous shot's out extends the seam
+        for ds in starts:
+            if abs(ds - prev.record_end) <= _BOUNDARY_EPS + _EPS:
+                gap = lengths[round(ds, 6)]
+        assert cur.record_start == pytest.approx(prev.record_end + gap)
+        assert cur.record_end >= cur.record_start
+
+
+class TestDeleteEntry:
+    def test_removes_the_slot_and_reflows(self):
+        from monteur.montage import delete_entry
+
+        plan = make_boundary_plan()
+        adjusted = delete_entry(plan, 1)
+        assert len(adjusted.entries) == 2
+        assert len(plan.entries) == 3  # the original is untouched
+        # the two survivors are shots a and c, in order
+        assert [e.clip_path for e in adjusted.entries] == [
+            "/footage/a.mp4",
+            "/footage/a.mp4",
+        ]
+        _record_grid_is_contiguous(adjusted.entries, adjusted.dips)
+        assert any(n.startswith("delete: removed slot 2") for n in adjusted.notes)
+
+    def test_source_windows_are_preserved(self):
+        from monteur.montage import delete_entry
+
+        plan = make_boundary_plan()
+        adjusted = delete_entry(plan, 0)
+        # shot c kept its exact source window, only its record slot moved
+        kept = adjusted.entries[-1]
+        assert (kept.source_start, kept.source_end) == (20.0, 22.0)
+        assert kept.record_start == pytest.approx(2.0)
+        assert kept.record_end == pytest.approx(4.0)
+
+    def test_duration_shrinks_by_the_removed_span(self):
+        from monteur.montage import delete_entry
+
+        plan = make_boundary_plan()
+        adjusted = delete_entry(plan, 2)  # drops the 2s tail shot
+        assert adjusted.duration == pytest.approx(4.0)
+
+    def test_orphaned_dip_and_title_are_dropped(self):
+        from monteur.montage import delete_entry
+
+        plan = make_boundary_plan()
+        # shot a smashes to black into shot b; act title on that dip
+        plan.dips = [(1.6, 0.4)]
+        plan.title_texts = ["ACT ONE"]
+        plan.entries[0].record_end = 1.6
+        plan.entries[0].source_end = 11.6
+        plan.entries[1].record_start = 2.0  # the dip fills 1.6 -> 2.0
+        adjusted = delete_entry(plan, 0)  # remove the shot the dip rode on
+        assert adjusted.dips == []
+        assert adjusted.title_texts == []
+        _record_grid_is_contiguous(adjusted.entries, adjusted.dips)
+
+    def test_out_of_range_raises(self):
+        from monteur.montage import delete_entry
+
+        plan = make_boundary_plan()
+        with pytest.raises(ValueError, match="not in this plan"):
+            delete_entry(plan, 3)
+        with pytest.raises(ValueError, match="not in this plan"):
+            delete_entry(plan, -1)
+        with pytest.raises(ValueError, match="entry index"):
+            delete_entry(plan, "x")
+
+    def test_deleting_the_last_entry_raises(self):
+        from dataclasses import replace
+
+        from monteur.montage import delete_entry
+
+        plan = make_boundary_plan()
+        plan = replace(plan, entries=plan.entries[:1])
+        with pytest.raises(ValueError, match="last entry"):
+            delete_entry(plan, 0)
+
+
+class TestMoveEntry:
+    def test_reorders_and_reflows(self):
+        from monteur.montage import move_entry
+
+        plan = make_boundary_plan()
+        adjusted = move_entry(plan, 0, 2)  # first shot to the end
+        assert [e.clip_path for e in adjusted.entries] == [
+            "/footage/b.mp4",
+            "/footage/a.mp4",
+            "/footage/a.mp4",
+        ]
+        # the moved shot kept its source window
+        assert (adjusted.entries[-1].source_start, adjusted.entries[-1].source_end) == (
+            10.0,
+            12.0,
+        )
+        assert len(plan.entries) == 3  # the original is untouched
+        _record_grid_is_contiguous(adjusted.entries, adjusted.dips)
+        assert adjusted.duration == pytest.approx(plan.duration)
+        assert any(n.startswith("move: slot 1 -> position 3") for n in adjusted.notes)
+
+    def test_move_earlier_preserves_every_source_window(self):
+        from monteur.montage import move_entry
+
+        plan = make_boundary_plan()
+        before = [(e.source_start, e.source_end) for e in plan.entries]
+        adjusted = move_entry(plan, 2, 0)  # last shot to the front
+        after = [(e.source_start, e.source_end) for e in adjusted.entries]
+        assert after == [before[2], before[0], before[1]]
+        _record_grid_is_contiguous(adjusted.entries, adjusted.dips)
+
+    def test_noop_move_is_an_equivalent_plan(self):
+        from monteur.montage import move_entry
+
+        plan = make_boundary_plan()
+        adjusted = move_entry(plan, 1, 1)
+        assert [e.clip_path for e in adjusted.entries] == [
+            e.clip_path for e in plan.entries
+        ]
+        assert [
+            (e.record_start, e.record_end, e.source_start, e.source_end)
+            for e in adjusted.entries
+        ] == [
+            (e.record_start, e.record_end, e.source_start, e.source_end)
+            for e in plan.entries
+        ]
+        _record_grid_is_contiguous(adjusted.entries, adjusted.dips)
+
+    def test_out_of_range_raises(self):
+        from monteur.montage import move_entry
+
+        plan = make_boundary_plan()
+        with pytest.raises(ValueError, match="not in this plan"):
+            move_entry(plan, 3, 0)
+        with pytest.raises(ValueError, match="not in this plan"):
+            move_entry(plan, 0, 3)
+        with pytest.raises(ValueError, match="not in this plan"):
+            move_entry(plan, -1, 0)
+        with pytest.raises(ValueError, match="entry indices"):
+            move_entry(plan, "x", 0)
+
+
 # --- time-of-day coherence (Moment.daylight) -----------------------------------
 
 
