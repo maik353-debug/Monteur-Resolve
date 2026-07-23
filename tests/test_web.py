@@ -110,6 +110,38 @@ def _edl_payload(**extra):
     }
 
 
+class TestSiftPersistenceReuse:
+    """A re-opened project (empty in-memory cache) must reuse the disk sift."""
+
+    def test_cached_clip_report_falls_back_to_disk(self, tmp_path, monkeypatch):
+        from monteur.sift import SIFT_CACHE_FILENAME, ClipReport, ClipSegment
+        from monteur.web import server
+
+        monkeypatch.setenv("MONTEUR_SIFT_CACHE", "1")  # persistence under test here
+
+        clip = tmp_path / "a.mp4"
+        clip.write_bytes(b"video")
+        report = ClipReport(path=str(clip), duration=5.0,
+                            segments=[ClipSegment(0.0, 2.0, "usable", 0.9)], usable_ratio=0.8)
+
+        # analysing persists it (memory + disk sidecar)
+        server._remember_clip_reports([report])
+        assert (tmp_path / SIFT_CACHE_FILENAME).is_file()
+
+        # simulate re-opening the project: wipe every in-memory cache
+        with server._CLIP_CACHE_LOCK:
+            server._CLIP_CACHE.clear()
+        with server._SCAN_CACHE_LOCK:
+            server._SCAN_CACHE.clear()
+
+        # the report still resolves — from the disk sidecar, no re-sift
+        recalled = server._cached_clip_report(str(clip))
+        assert recalled is not None
+        assert recalled.usable_ratio == 0.8
+        # and it was promoted back into the in-memory cache
+        assert os.path.abspath(str(clip)) in server._CLIP_CACHE
+
+
 class TestCacheApi:
     """The proxy-cache size + clear endpoints (Settings → Storage)."""
 

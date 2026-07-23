@@ -9,3 +9,6 @@ venv/
 .DS_Store
 *.html.report
 tests/.demo-footage/
+
+# Monteur analysis sidecars (written next to footage, never committed)
+.monteur-*.json

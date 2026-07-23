@@ -688,7 +688,12 @@ _CLIP_CACHE_LOCK = threading.Lock()
 
 
 def _remember_clip_reports(reports: list) -> None:
-    """Cache each clip's report keyed by absolute path + mtime (subset-safe)."""
+    """Cache each clip's report in memory AND on disk (subset-safe).
+
+    The disk sidecar (``.monteur-sift.json`` next to the footage) is what makes
+    re-opening a project skip the sift entirely — the in-memory cache alone is
+    lost when the process exits.
+    """
     with _CLIP_CACHE_LOCK:
         for report in reports:
             try:
@@ -696,21 +701,44 @@ def _remember_clip_reports(reports: list) -> None:
                 _CLIP_CACHE[path] = (os.path.getmtime(path), report)
             except (OSError, AttributeError):
                 continue  # a vanished clip is simply not remembered
+    try:
+        from monteur import sift
+
+        sift.remember_reports(reports)  # persist next to the footage (best-effort)
+    except Exception:  # noqa: BLE001 — persistence is an upgrade, never a gate
+        pass
 
 
 def _cached_clip_report(path: str):
-    """The cached report for one clip, or None unless present AND mtime-fresh."""
+    """The cached report for one clip, or None unless present AND mtime-fresh.
+
+    Two tiers: the in-memory cache first, then the on-disk sidecar
+    (``.monteur-sift.json``) — so a project re-opened in a fresh process reuses
+    the sift instead of re-crunching. A disk hit is promoted into memory.
+    """
     ab = os.path.abspath(path)
     with _CLIP_CACHE_LOCK:
         entry = _CLIP_CACHE.get(ab)
-    if not entry:
-        return None
-    mtime, report = entry
-    try:
-        if os.path.getmtime(ab) != mtime:
+    if entry:
+        mtime, report = entry
+        try:
+            if os.path.getmtime(ab) == mtime:
+                return report
+        except OSError:
             return None
-    except OSError:
-        return None
+    # in-memory miss (or stale) -> the persisted sidecar
+    try:
+        from monteur import sift
+
+        report = sift.recall_report(ab)
+    except Exception:  # noqa: BLE001
+        report = None
+    if report is not None:
+        try:
+            with _CLIP_CACHE_LOCK:
+                _CLIP_CACHE[ab] = (os.path.getmtime(ab), report)
+        except OSError:
+            pass
     return report
 
 # One native file dialog at a time; Tk lives entirely inside a dedicated thread.

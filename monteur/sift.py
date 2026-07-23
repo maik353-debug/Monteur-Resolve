@@ -68,12 +68,13 @@ signal (flat envelope, hand-built reports) plans exactly as before.
 
 from __future__ import annotations
 
+import json
 import os
 import statistics
 import threading
 from bisect import bisect_left, bisect_right
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from monteur.media import (
@@ -880,3 +881,164 @@ def sift_directory(
     _annotate_daylight(results)
     _annotate_spatial(results)
     return results
+
+
+# --- persistent report cache (never re-sift a clip already analysed) ----------
+#
+# Sift is expensive (one ffmpeg pass per clip). Its reports are written to a
+# ``.monteur-sift.json`` sidecar next to the footage — the same
+# analysed-once-reused-forever discipline as the Claude vision cache
+# (``.monteur-vision.json``) and the spatial/daylight caches, so re-opening a
+# project never re-crunches. Keyed by ``abspath|mtime`` so an edited or
+# re-exported clip is re-analysed and an unchanged one never is. Everything here
+# is best-effort: a read-only or missing footage folder degrades to the
+# in-memory cache, never an error — persistence is an upgrade, not a gate.
+
+SIFT_CACHE_FILENAME = ".monteur-sift.json"
+
+
+def _persistence_enabled() -> bool:
+    """On by default; ``MONTEUR_SIFT_CACHE=0`` turns the disk sidecar off.
+
+    Production keeps it on (re-opened projects reuse the sift); the test suite
+    disables it so tests that assert a *fresh* sift aren't served a sidecar an
+    earlier test left in shared footage.
+    """
+    val = os.environ.get("MONTEUR_SIFT_CACHE")
+    return val is None or val.strip().lower() not in ("0", "off", "false", "no")
+
+
+def _sift_key(path: str) -> str:
+    ab = os.path.abspath(path)
+    return f"{ab}|{os.path.getmtime(ab)}"
+
+
+def report_to_dict(report: ClipReport) -> dict:
+    """A ClipReport as a JSON-safe dict (tuples become lists)."""
+    return asdict(report)
+
+
+def _tuple2(value, default=(0.0, 0.0)):
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return (float(value[0]), float(value[1]))
+    return default
+
+
+def _tuple2_or_none(value):
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return (float(value[0]), float(value[1]))
+    return None
+
+
+def _moment_from_dict(m: dict) -> Moment:
+    return Moment(
+        start=float(m.get("start", 0.0)),
+        end=float(m.get("end", 0.0)),
+        score=float(m.get("score", 0.0)),
+        entry_motion=_tuple2(m.get("entry_motion")),
+        exit_motion=_tuple2(m.get("exit_motion")),
+        highlight=float(m.get("highlight", 0.0)),
+        envelope=[_tuple2(p) for p in (m.get("envelope") or [])],
+        peak_time=float(m.get("peak_time", -1.0)),
+        frame_quality=[_tuple2(p) for p in (m.get("frame_quality") or [])],
+        label=str(m.get("label", "")),
+        tags=[str(t) for t in (m.get("tags") or [])],
+        role=str(m.get("role", "")),
+        hero=float(m.get("hero", 0.0)),
+        group=str(m.get("group", "")),
+        daylight=str(m.get("daylight", "")),
+        shot_size=str(m.get("shot_size", "")),
+        entry_focus=_tuple2_or_none(m.get("entry_focus")),
+        exit_focus=_tuple2_or_none(m.get("exit_focus")),
+    )
+
+
+def report_from_dict(d: dict) -> ClipReport:
+    """Rebuild a ClipReport from :func:`report_to_dict` output."""
+    segments = [
+        ClipSegment(start=float(s.get("start", 0.0)), end=float(s.get("end", 0.0)),
+                    label=str(s.get("label", "")), score=float(s.get("score", 0.0)))
+        for s in (d.get("segments") or []) if isinstance(s, dict)
+    ]
+    moments = [_moment_from_dict(m) for m in (d.get("moments") or []) if isinstance(m, dict)]
+    return ClipReport(
+        path=str(d.get("path", "")),
+        duration=float(d.get("duration", 0.0)),
+        segments=segments,
+        moments=moments,
+        usable_ratio=float(d.get("usable_ratio", 0.0)),
+        notes=[str(n) for n in (d.get("notes") or [])],
+        media_start=float(d.get("media_start", 0.0)),
+    )
+
+
+def load_reports(folder: str | Path) -> dict:
+    """Every fresh cached report in ``folder``'s sidecar, ``{abspath: ClipReport}``.
+
+    Entries whose clip is gone or whose mtime changed are skipped as stale.
+    A missing or unreadable sidecar is just ``{}``.
+    """
+    if not _persistence_enabled():
+        return {}
+    path = Path(folder) / SIFT_CACHE_FILENAME
+    try:
+        cache = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(cache, dict):
+        return {}
+    out: dict = {}
+    for key, rd in cache.items():
+        ab, _, mtime = str(key).rpartition("|")
+        if not ab or not isinstance(rd, dict):
+            continue
+        try:
+            if os.path.getmtime(ab) != float(mtime):
+                continue  # edited/re-exported -> stale
+        except (OSError, ValueError):
+            continue  # clip gone
+        try:
+            out[ab] = report_from_dict(rd)
+        except Exception:  # noqa: BLE001 — one bad entry must not poison the cache
+            continue
+    return out
+
+
+def recall_report(clip_path: str | Path):
+    """The fresh persisted report for one clip, or ``None``."""
+    ab = os.path.abspath(str(clip_path))
+    return load_reports(os.path.dirname(ab)).get(ab)
+
+
+def remember_reports(reports: list) -> None:
+    """Persist ``reports`` into per-folder sidecars, merging with what's there.
+
+    Best-effort: an unwritable footage folder is silently skipped (the caller
+    keeps its in-memory cache). Merging means analysing a subset never drops
+    the reports for clips analysed earlier.
+    """
+    if not _persistence_enabled():
+        return
+    by_folder: dict = {}
+    for report in reports:
+        try:
+            folder = os.path.dirname(os.path.abspath(report.path))
+            key = _sift_key(report.path)
+        except OSError:
+            continue
+        by_folder.setdefault(folder, {})[key] = report_to_dict(report)
+    for folder, entries in by_folder.items():
+        path = Path(folder) / SIFT_CACHE_FILENAME
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(existing, dict):
+                existing = {}
+        except (OSError, ValueError):
+            existing = {}
+        existing.update(entries)
+        try:
+            tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+            tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            continue  # read-only footage folder — degrade to in-memory only
