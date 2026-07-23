@@ -2935,6 +2935,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           <button class="btn ghost small insp-close" id="cre-insp-close" type="button" aria-label="Close the inspector (Esc)" title="Close (Esc)">×</button>
         </div>
         <div class="insp-body">
+          <div id="cre-insp-shot">
           <img class="insp-thumb" id="cre-insp-thumb" alt="">
           <dl class="insp-facts" id="cre-insp-facts"></dl>
           <div id="cre-insp-issues"></div>
@@ -2958,6 +2959,24 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             <p class="help-small">The strongest unused moments — same clip or scene first. A swap changes only this shot&rsquo;s source; the grid stays.</p>
             <button class="btn small" id="cre-insp-alts-btn" type="button">Show alternatives<span class="spin" aria-hidden="true"></span></button>
             <div class="insp-alts" id="cre-insp-alts"></div>
+          </div>
+          </div><!-- /cre-insp-shot -->
+          <div id="cre-insp-titleblock" hidden>
+            <label class="sr-only" for="cre-insp-title-text">Title text for this black dip</label>
+            <input type="text" id="cre-insp-title-text" maxlength="80" spellcheck="false" autocomplete="off" placeholder="Title text — empty = a plain black dip">
+            <div class="insp-block">
+              <p class="seg-heading">Animation</p>
+              <div class="seg-toggle" role="group" id="cre-insp-title-anim" aria-label="Title animation">
+                <button type="button" data-anim="none" aria-pressed="true">None</button>
+                <button type="button" data-anim="fade">Fade</button>
+                <button type="button" data-anim="slide">Slide</button>
+                <button type="button" data-anim="type">Typewriter</button>
+              </div>
+              <p class="help-small" id="cre-insp-anim-hint">How the title appears over the black dip.</p>
+            </div>
+            <div class="export-bar" style="margin-top: 10px;">
+              <button class="btn primary small" id="cre-insp-title-save" type="button">Save title<span class="spin" aria-hidden="true"></span></button>
+            </div>
           </div>
           <p class="scan-note" id="cre-insp-msg" role="status" hidden></p>
         </div>
@@ -9104,7 +9123,7 @@ function startDipTitleEdit(btn, dipIndex, current) {
   input.select();
 }
 
-function applyDipTitle(dipIndex, text) {
+function applyDipTitle(dipIndex, text, anim) {
   if (!rev.planJson) return;
   var built = (cre.result && cre.result.body) || {};
   var body = {
@@ -9112,6 +9131,7 @@ function applyDipTitle(dipIndex, text) {
     project: cre.projectId || undefined,  // persist the edit into the timeline
     fps: built.fps || fpsFrom($("cre-fps")), format: cre.format
   };
+  if (anim) body.title_anim = String(anim);  // "none" | "fade" | "slide" | "type"
   if (built.audio) body.audio = built.audio;
   if (built.canvas) body.canvas = built.canvas;
   api("/api/plan/adjust", { method: "POST", body: body }).then(function (result) {
@@ -10318,8 +10338,10 @@ $("cre-dir-apply").addEventListener("click", function () {
    grid never moves). Keyboard: Esc closes, ← → move, P pins. */
 
 var insp = {
-  slot: null,     // selected slot index (record order), null = closed
-  infoCache: {}   // clipinfo responses keyed by clip|t0|t1
+  slot: null,        // selected slot index (record order), null = closed
+  dip: null,         // selected black-dip index for TITLE editing (null = shot mode)
+  titleAnim: "none", // the picked title animation while in title mode
+  infoCache: {}      // clipinfo responses keyed by clip|t0|t1
 };
 
 function planSortedEntries() {
@@ -10544,51 +10566,18 @@ function renderTitleLane(duration, dips, titles) {
     var text = String((titles && titles[i]) || "").trim();
     mark.textContent = text || "black";
     mark.title = (text ? "Title: “" + text + "”" : "Dip to black") +
-      " · " + fmt1(length) + "s · click to edit";
-    // the title lane is editable now: click a mark to retitle that black dip
-    // (persists via applyDipTitle -> /api/plan/adjust). This is what lets the
-    // timeline replace the board's title editing.
+      " · " + fmt1(length) + "s · click to edit in the inspector";
+    // click a title mark to edit its text + animation in the inspector (right)
     mark.setAttribute("role", "button");
     mark.tabIndex = 0;
-    mark.addEventListener("click", function () { editTitleMark(mark, lane, i, text); });
+    mark.addEventListener("click", function () { selectDip(i); });
     mark.addEventListener("keydown", function (e) {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); editTitleMark(mark, lane, i, text); }
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectDip(i); }
     });
     lane.appendChild(mark);
   });
 }
 
-/* inline title editor overlaid on a timeline title mark — same applyDipTitle
-   surgery the board used, but positioned over the absolute mark. */
-function editTitleMark(mark, lane, dipIndex, current) {
-  if (buildPanel.running() || revisePanel.running() || directPanel.running()) return;
-  var input = el("input", "tl-title-input");
-  input.type = "text";
-  input.value = current;
-  input.maxLength = 80;
-  input.style.left = mark.style.left;
-  input.style.width = mark.style.width;
-  input.setAttribute("aria-label", "Title text for black dip " + (dipIndex + 1));
-  var done = false;
-  function finish(commit) {
-    if (done) return;
-    done = true;
-    var text = input.value.trim();
-    input.remove();
-    mark.hidden = false;
-    if (commit && text !== current) applyDipTitle(dipIndex, text);
-  }
-  input.addEventListener("keydown", function (e) {
-    e.stopPropagation();  // the inspector's ←→/Esc shortcuts must not fire mid-edit
-    if (e.key === "Enter") { e.preventDefault(); finish(true); }
-    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
-  });
-  input.addEventListener("blur", function () { finish(true); });
-  mark.hidden = true;
-  lane.appendChild(input);
-  input.focus();
-  input.select();
-}
 
 /* the A2 SFX lane: one marker per planned sound cue, coloured as the SFX
    track, positioned at its time with the suggested length; the tooltip
@@ -10723,6 +10712,7 @@ function selectSlot(i) {
   if (!entries.length) return;
   i = Math.max(0, Math.min(entries.length - 1, i));
   insp.slot = i;
+  insp.dip = null;  // selecting a shot leaves title mode
   Array.prototype.forEach.call(
     document.querySelectorAll("#cre-sb-board .sb-card[data-slot], #cre-strip-blocks .tl-block"),
     function (node) { node.classList.toggle("sel", node.dataset.slot === String(i)); }
@@ -10733,8 +10723,26 @@ function selectSlot(i) {
   $("cre-inspector").hidden = false;
 }
 
+/* select a black dip to edit its title (+ animation) in the inspector — the
+   timeline title lane's markers open this instead of an inline field. */
+function selectDip(dipIndex) {
+  var dips = (rev.planJson || {}).dips || [];
+  if (dipIndex < 0 || dipIndex >= dips.length) return;
+  insp.slot = null;
+  insp.dip = dipIndex;
+  Array.prototype.forEach.call(
+    document.querySelectorAll("#cre-strip-blocks .tl-block.sel"),
+    function (n) { n.classList.remove("sel"); }
+  );
+  renderInspector();
+  $("cre-inspector").hidden = false;
+  var input = $("cre-insp-title-text");
+  if (input) { input.focus(); input.select(); }
+}
+
 function closeInspector() {
   insp.slot = null;
+  insp.dip = null;
   $("cre-inspector").hidden = true;
   Array.prototype.forEach.call(
     document.querySelectorAll("#cre-sb-board .sb-card.sel, #cre-strip-blocks .tl-block.sel"),
@@ -10944,6 +10952,24 @@ $("cre-insp-move-right").addEventListener("click", function () { moveShot(1); })
 Array.prototype.forEach.call($("cre-insp-trans").querySelectorAll("button"), function (btn) {
   btn.addEventListener("click", function () { applyTransition(String(btn.dataset.trans)); });
 });
+/* title mode: the animation picker + save (persists text + animation on the dip) */
+Array.prototype.forEach.call($("cre-insp-title-anim").querySelectorAll("button"), function (btn) {
+  btn.addEventListener("click", function () {
+    insp.titleAnim = String(btn.dataset.anim || "none");
+    Array.prototype.forEach.call($("cre-insp-title-anim").querySelectorAll("button"), function (o) {
+      o.setAttribute("aria-pressed", String(o === btn));
+    });
+  });
+});
+function saveInspTitle() {
+  if (insp.dip === null || !rev.planJson) return;
+  applyDipTitle(insp.dip, $("cre-insp-title-text").value.trim(), insp.titleAnim);
+}
+$("cre-insp-title-save").addEventListener("click", saveInspTitle);
+$("cre-insp-title-text").addEventListener("keydown", function (e) {
+  e.stopPropagation();  // don't let the inspector's ←→/Esc shortcuts fire mid-edit
+  if (e.key === "Enter") { e.preventDefault(); saveInspTitle(); }
+});
 
 function renderAlternatives(alternatives) {
   var host = $("cre-insp-alts");
@@ -11032,7 +11058,27 @@ function swapTo(alt) {
   startDirectApply(body, function () { selectSlot(i); });
 }
 
+function renderTitleInspector() {
+  var plan = rev.planJson || {};
+  var dips = plan.dips || [];
+  if (insp.dip < 0 || insp.dip >= dips.length) { closeInspector(); return; }
+  $("cre-insp-shot").hidden = true;
+  $("cre-insp-titleblock").hidden = false;
+  $("cre-insp-title").textContent = "Title " + (insp.dip + 1) + " of " + dips.length;
+  var titles = plan.title_texts || [];
+  $("cre-insp-title-text").value = String(titles[insp.dip] || "");
+  var anims = plan.title_anims || [];
+  insp.titleAnim = String(anims[insp.dip] || "none") || "none";
+  Array.prototype.forEach.call(document.querySelectorAll("#cre-insp-title-anim button"), function (b) {
+    b.setAttribute("aria-pressed", String(b.dataset.anim === insp.titleAnim));
+  });
+  $("cre-insp-msg").hidden = true;
+}
+
 function renderInspector() {
+  if (insp.dip !== null) { renderTitleInspector(); return; }
+  $("cre-insp-shot").hidden = false;
+  $("cre-insp-titleblock").hidden = true;
   var entries = planSortedEntries();
   var i = insp.slot;
   if (i === null || !entries[i]) { closeInspector(); return; }

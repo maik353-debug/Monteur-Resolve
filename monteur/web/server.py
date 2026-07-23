@@ -4616,6 +4616,19 @@ class MonteurHandler(BaseHTTPRequestHandler):
             titles.append("")
         titles[dip] = title.strip()
         plan.title_texts = titles
+        # optional per-dip animation, aligned with the dips like the titles are
+        _VALID_ANIMS = ("none", "fade", "slide", "type")
+        if "title_anim" in payload:
+            anim = str(payload.get("title_anim") or "none").strip().lower()
+            if anim not in _VALID_ANIMS:
+                raise ApiError(
+                    400, f"'title_anim' must be one of: {', '.join(_VALID_ANIMS)}"
+                )
+            anims = [str(a or "none") for a in plan.title_anims]
+            while len(anims) < len(plan.dips):
+                anims.append("none")
+            anims[dip] = anim
+            plan.title_anims = anims
         plan.notes = list(plan.notes) + [
             f"title: dip {dip + 1} reads {titles[dip]!r}"
             if titles[dip]

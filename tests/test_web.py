@@ -990,6 +990,58 @@ class TestPlanAdjustSurgery:
         )
         assert [e["clip_path"] for e in r["plan_json"]["entries"]] == ["b.mp4", "a.mp4"]
 
+    def _plan_with_dip(self):
+        from monteur.montage import MontageEntry, MontagePlan, plan_to_dict
+
+        return plan_to_dict(MontagePlan(
+            music_path=None, duration=8.5,
+            entries=[
+                MontageEntry("a.mp4", 0.0, 4.0, 0.0, 4.0, 0.9),
+                MontageEntry("b.mp4", 0.0, 4.0, 4.5, 8.5, 0.8),
+            ],
+            dips=[(4.0, 0.5)], title_texts=["Act Two"],
+        ))
+
+    def test_title_animation_persists_on_the_dip(self, server):
+        r = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": self._plan_with_dip(), "dip": 0,
+             "title": "Act Two", "title_anim": "slide"},
+        )
+        assert r["plan_json"]["title_texts"] == ["Act Two"]
+        assert r["plan_json"]["title_anims"] == ["slide"]
+
+    def test_title_animation_rejects_junk(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(
+                f"{server}/api/plan/adjust",
+                {"plan_json": self._plan_with_dip(), "dip": 0,
+                 "title": "x", "title_anim": "spin"},
+            )
+        assert exc.value.code == 400
+
+    def test_delete_keeps_titles_and_anims_aligned(self, server):
+        # a plan with two dips, each animated; deleting a shot re-flows the dips
+        # and their titles/anims must stay in lockstep
+        from monteur.montage import MontageEntry, MontagePlan, plan_to_dict
+
+        pj = plan_to_dict(MontagePlan(
+            music_path=None, duration=13.0,
+            entries=[
+                MontageEntry("a.mp4", 0.0, 4.0, 0.0, 4.0, 0.9),
+                MontageEntry("b.mp4", 0.0, 4.0, 4.5, 8.5, 0.8),
+                MontageEntry("c.mp4", 0.0, 4.0, 9.0, 13.0, 0.7),
+            ],
+            dips=[(4.0, 0.5), (8.5, 0.5)],
+            title_texts=["One", "Two"], title_anims=["fade", "slide"],
+        ))
+        r = _post(f"{server}/api/plan/adjust", {"plan_json": pj, "delete": 0})
+        out = r["plan_json"]
+        # shot a (and the dip after it) are gone; the second dip's title+anim
+        # survive together
+        assert out["title_texts"] == ["Two"]
+        assert out["title_anims"] == ["slide"]
+
 
 def _step3_html(html):
     """The Storyboard step's markup (between its section tag and step 4's)."""
@@ -6439,9 +6491,15 @@ class TestProUiStatic:
             "function deleteShot",
             "function moveShot",
             "function applyPlanSurgery",
-            # the timeline title lane is editable now (re-homed from the board)
-            "function editTitleMark",
-            "editTitleMark(mark, lane, i, text)",
+            # titles are edited in the inspector (text + animation), opened by
+            # clicking a timeline title marker
+            'id="cre-insp-titleblock"',
+            'id="cre-insp-title-text"',
+            'id="cre-insp-title-anim"',
+            'id="cre-insp-title-save"',
+            "function selectDip",
+            "function renderTitleInspector",
+            'data-anim="fade"',
             # the endpoints the inspector rides on
             "/api/clipinfo",
             "/api/alternatives",

@@ -1205,6 +1205,12 @@ class MontagePlan:
     # the cut; :func:`monteur.resolve.titles_from_plan` prefers these over
     # its derived texts. Empty list (the default) = no override anywhere.
     title_texts: list[str] = field(default_factory=list)
+    # Per-dip title animation, aligned with title_texts/dips by index: one of
+    # "none"/"fade"/"slide"/"type" ("" also means none). Set from the inspector
+    # (/api/plan/adjust title mode). Empty list = every title appears plain.
+    # Additive + tolerant like title_texts; serialized only when a non-"none"
+    # value exists, so old/plain plans round-trip byte-identically.
+    title_anims: list[str] = field(default_factory=list)
     # --- timeline-strip metadata (all additive; empty = not available) -----
     # The story-arc phase spans in RECORD time: (start, end, label) with
     # label one of "opening"/"build"/"climax"/"outro". Filled by
@@ -6630,6 +6636,10 @@ def plan_to_dict(plan: MontagePlan) -> dict:
     }
     if plan.title_texts:
         data["title_texts"] = [str(text) for text in plan.title_texts]
+    # Title animations: only when at least one dip animates (keeps plain plans
+    # byte-identical), tolerant like title_texts.
+    if any(str(a or "").strip() not in ("", "none") for a in plan.title_anims):
+        data["title_anims"] = [str(a or "none") for a in plan.title_anims]
     # The adaptive music window is written only when set (tolerant like
     # title_texts): full-length plans serialize exactly as before.
     if plan.music_in > 0:
@@ -6691,6 +6701,7 @@ def plan_from_dict(data: dict) -> MontagePlan:
             # Version-tolerant: plans saved before the composer existed (and
             # plans without composed titles) simply have no such key.
             title_texts=[str(text) for text in data.get("title_texts", [])],
+            title_anims=[str(a) for a in data.get("title_anims", [])],
             # Same tolerance for the timeline-strip metadata: plans saved
             # before the strip existed simply have none of these keys.
             phases=[
@@ -6901,14 +6912,18 @@ def _resequence_entries(
     """
     orig = plan.entries
     titles = list(plan.title_texts)
+    anims = list(plan.title_anims)
     had_titles = bool(titles)
+    had_anims = bool(anims)
 
     # Attach each dip to the ORIGINAL entry it smashes out of (its start
     # sits on that entry's record_end). A dip matched to no surviving
-    # boundary is already orphaned and simply never re-emitted.
-    dip_after: dict[int, list[tuple[float, str]]] = {}
+    # boundary is already orphaned and simply never re-emitted. Each dip
+    # carries its aligned title AND its title animation.
+    dip_after: dict[int, list[tuple[float, str, str]]] = {}
     for k, (d_start, d_len) in enumerate(plan.dips):
         title = titles[k] if k < len(titles) else ""
+        anim = anims[k] if k < len(anims) else "none"
         oi = next(
             (
                 i
@@ -6918,11 +6933,12 @@ def _resequence_entries(
             None,
         )
         if oi is not None:
-            dip_after.setdefault(oi, []).append((d_len, title))
+            dip_after.setdefault(oi, []).append((d_len, title, anim))
 
     new_entries: list[MontageEntry] = []
     new_dips: list[tuple[float, float]] = []
     new_titles: list[str] = []
+    new_anims: list[str] = []
     cursor = 0.0
     last = len(order) - 1
     for pos, oi in enumerate(order):
@@ -6935,9 +6951,10 @@ def _resequence_entries(
         # A dip only survives between two shots — one trailing the last
         # shot in the new order has no incoming cut and is dropped.
         if pos < last:
-            for d_len, title in dip_after.get(oi, []):
+            for d_len, title, anim in dip_after.get(oi, []):
                 new_dips.append((cursor, d_len))
                 new_titles.append(title)
+                new_anims.append(anim)
                 cursor += d_len
 
     old_span = max(
@@ -6951,6 +6968,7 @@ def _resequence_entries(
         entries=new_entries,
         dips=new_dips,
         title_texts=new_titles if had_titles else [],
+        title_anims=new_anims if had_anims else [],
         duration=new_duration,
         notes=list(plan.notes) + [note],
         sfx=list(plan.sfx),
