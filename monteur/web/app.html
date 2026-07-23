@@ -1171,8 +1171,35 @@ svg text.axis {
 .ws-add input { flex: 1; min-width: 0; padding: 5px 9px; border: 1px solid var(--border); border-radius: 4px; background: var(--input-bg); color: var(--ink); font-size: 11.5px; }
 /* player + inspector */
 .ws-viewer { flex: none; aspect-ratio: 16 / 9; background: #000; position: relative; display: flex; align-items: center; justify-content: center; border-bottom: 1px solid #000; }
-#ws-video { width: 100%; height: 100%; object-fit: contain; background: #000; display: block; }
+#ws-video { width: 100%; height: 100%; object-fit: contain; background: #000; display: block; cursor: pointer; }
 .ws-viewer-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--faint); font-size: 12px; pointer-events: none; }
+/* click-to-pause badge: a soft play/pause glyph that pops on state change + hover */
+.ws-play-badge {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(0.8);
+  width: 54px; height: 54px; border-radius: 50%; background: rgba(16,16,20,0.55);
+  display: flex; align-items: center; justify-content: center; color: #fff; font-size: 20px;
+  pointer-events: none; opacity: 0; transition: opacity 0.18s, transform 0.18s; z-index: 3;
+}
+.ws-play-badge span { line-height: 1; } /* glyph text is set from JS (▶ / ❚❚) */
+.ws-viewer.is-paused .ws-play-badge { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+.ws-viewer:hover .ws-play-badge { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+/* scrub timeline along the bottom — fades in on hover, seek by click/drag */
+.ws-scrub {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 26px; z-index: 4; cursor: pointer;
+  display: flex; align-items: flex-end; opacity: 0; transition: opacity 0.18s;
+  background: linear-gradient(to top, rgba(0,0,0,0.55), transparent);
+}
+.ws-viewer:hover .ws-scrub, .ws-scrub.dragging { opacity: 1; }
+.ws-scrub-buf, .ws-scrub-fill {
+  position: absolute; left: 0; bottom: 8px; height: 4px; border-radius: 2px;
+}
+.ws-scrub-buf { right: 8px; left: 8px; background: rgba(255,255,255,0.22); }
+.ws-scrub-fill { left: 8px; width: 0; background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.ws-scrub:hover .ws-scrub-fill, .ws-scrub.dragging .ws-scrub-fill { height: 5px; bottom: 7.5px; }
+.ws-scrub-time {
+  position: absolute; right: 8px; bottom: 8px; font-family: var(--mono); font-size: 10px;
+  color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.7);
+}
 .ws-inspector { flex: 1; overflow: auto; padding: 11px; min-height: 0; }
 .ws-pfld { margin-bottom: 10px; }
 .ws-pfld label { font-family: var(--mono); font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); display: block; margin-bottom: 4px; }
@@ -2259,9 +2286,15 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             <!-- RIGHT: MINI-PLAYER + INSPECTOR -->
             <div class="ws-col ws-playercol">
               <div class="ws-panelhead">Player</div>
-              <div class="ws-viewer">
+              <div class="ws-viewer" id="ws-viewer">
                 <video id="ws-video" playsinline preload="auto"></video>
                 <div class="ws-viewer-empty" id="ws-viewer-empty">Click a clip to watch it here</div>
+                <div class="ws-play-badge" id="ws-play-badge" aria-hidden="true"><span>▶</span></div>
+                <div class="ws-scrub" id="ws-scrub" role="slider" aria-label="Seek" tabindex="-1" hidden>
+                  <div class="ws-scrub-buf"></div>
+                  <div class="ws-scrub-fill" id="ws-scrub-fill"></div>
+                  <div class="ws-scrub-time" id="ws-scrub-time">0:00</div>
+                </div>
               </div>
               <div class="ws-inspector">
                 <div class="ws-pfld"><label>Clip</label><div class="v" id="ws-insp-name">&mdash;</div></div>
@@ -2341,16 +2374,6 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
               <button type="button" id="plat-custom" aria-pressed="true">Custom</button>
             </div>
             <p class="help-small" id="cre-platform-info" aria-live="polite">Your own mix &mdash; shape, length and style stay exactly as you set them below.</p>
-          </div>
-          <div>
-            <h3 class="fgroup-title">How many videos?</h3>
-            <div class="seg-toggle" role="group" aria-label="How many videos" id="cre-series-row">
-              <button type="button" id="series-1" aria-pressed="true">One cut</button>
-              <button type="button" id="series-2" aria-pressed="false">2 Shorts</button>
-              <button type="button" id="series-3" aria-pressed="false">3</button>
-              <button type="button" id="series-4" aria-pressed="false">4</button>
-            </div>
-            <p class="help-small" id="cre-series-info" aria-live="polite">One cut from your footage. Pick 2&ndash;4 to turn a single tour into that many distinct vertical Shorts &mdash; no moment repeats.</p>
           </div>
         </div>
         <div class="wiz-cols">
@@ -6106,10 +6129,20 @@ function renderPool(data) {
       card.appendChild(el("p", "clip-meta",
         fmtClock(clip.duration || 0) + " · " + Math.round((clip.usable_ratio || 0) * 100) + "% usable"));
     }
+    // Two states the user actually cares about: is it analyzed, and has Claude
+    // watched it. (The proxy transcode is an internal playback optimization —
+    // not surfaced here.) Both carry a tooltip so the words are unambiguous.
     var badges = el("div", "pool-badges");
-    badges.appendChild(poolChip("sifted", clip.sifted));
-    badges.appendChild(poolChip("proxy ready", clip.proxy_fresh));
-    badges.appendChild(poolChip("labeled", clip.labeled));
+    var an = poolChip("Analyzed", clip.sifted);
+    an.title = clip.sifted
+      ? "Analyzed — Monteur found the usable parts and the good moments"
+      : "Not analyzed yet — select it and press Analyze";
+    badges.appendChild(an);
+    var cl = poolChip("Claude-checked", clip.labeled);
+    cl.title = clip.labeled
+      ? "Claude watched this clip and labeled its moments"
+      : "Not checked by Claude yet — analyze, then Claude-check";
+    badges.appendChild(cl);
     card.appendChild(badges);
 
     // click the card to WATCH it in the right-hand mini-player (checkbox/remove
@@ -6143,8 +6176,8 @@ function wsUpdateStatus() {
   var total = $("ws-pool-total");
   if (total) total.textContent = n + " in pool";
   var bar = $("ws-status");
-  if (bar) bar.textContent = n + " in pool · " + sifted + " sifted · " +
-    proxied + " proxies · " + labeled + " rated by Claude";
+  if (bar) bar.textContent = n + " in pool · " + sifted + " analyzed · " +
+    labeled + " Claude-checked";
 }
 
 function poolToggle(path, on) {
@@ -6406,6 +6439,8 @@ function wsLoadClip(path, name) {
   if (v) {
     var url = mediaUrl(path);
     if (v.dataset.url !== url) { v.dataset.url = url; v.src = url; v.load(); }
+    var scrub = $("ws-scrub");
+    if (scrub) scrub.hidden = false;  // reveal the seek bar once a clip is loaded
     var p = v.play();
     if (p && p.catch) p.catch(function () { /* autoplay veto / undecodable — fine */ });
   }
@@ -6428,6 +6463,61 @@ function wsLoadClip(path, name) {
 }
 
 function wsPause() { var v = $("ws-video"); if (v) { try { v.pause(); } catch (e) { /* nothing loaded */ } } }
+
+/* the mini-player's own transport: click the frame to play/pause (with a badge
+   that pops), a scrub bar along the bottom that fills with playback and seeks
+   on click or drag, and a running clock. Native controls stay off so the
+   viewer reads like an NLE monitor, not a browser video. */
+(function wsPlayer() {
+  var v = $("ws-video"), viewer = $("ws-viewer"), scrub = $("ws-scrub");
+  var fill = $("ws-scrub-fill"), timeEl = $("ws-scrub-time"), badge = $("ws-play-badge");
+  if (!v || !viewer || !scrub) return;
+
+  var glyph = badge ? badge.querySelector("span") : null;
+  function setBadge() {
+    viewer.classList.toggle("is-paused", v.paused);
+    if (glyph) glyph.textContent = v.paused ? "▶" : "❚❚";
+  }
+  function refresh() {
+    var d = v.duration;
+    if (isFinite(d) && d > 0) {
+      var pct = Math.max(0, Math.min(1, (v.currentTime || 0) / d));
+      if (fill) fill.style.width = "calc((100% - 16px) * " + pct + ")";
+      if (timeEl) timeEl.textContent = fmtClock(v.currentTime || 0) + " / " + fmtClock(d);
+    }
+  }
+  function seekTo(clientX) {
+    var d = v.duration;
+    if (!isFinite(d) || d <= 0) return;
+    var r = scrub.getBoundingClientRect();
+    if (r.width <= 16) return;  // not laid out yet — never seek on a bogus rect
+    var x = Math.max(0, Math.min(1, (clientX - r.left - 8) / (r.width - 16)));
+    try { v.currentTime = x * d; } catch (e) { /* not seekable yet */ }
+    refresh();
+  }
+
+  // click the frame to toggle — but not when the click is a drag on the scrub
+  v.addEventListener("click", function () {
+    if (v.paused) { var p = v.play(); if (p && p.catch) p.catch(function () {}); }
+    else v.pause();
+  });
+  v.addEventListener("play", setBadge);
+  v.addEventListener("pause", setBadge);
+  v.addEventListener("timeupdate", refresh);
+  v.addEventListener("loadedmetadata", function () { refresh(); setBadge(); });
+  v.addEventListener("ended", setBadge);
+
+  var dragging = false;
+  scrub.addEventListener("pointerdown", function (e) {
+    dragging = true; scrub.classList.add("dragging");
+    try { scrub.setPointerCapture(e.pointerId); } catch (x) {}
+    seekTo(e.clientX); e.preventDefault();
+  });
+  scrub.addEventListener("pointermove", function (e) { if (dragging) seekTo(e.clientX); });
+  function endDrag() { dragging = false; scrub.classList.remove("dragging"); }
+  scrub.addEventListener("pointerup", endDrag);
+  scrub.addEventListener("pointercancel", endDrag);
+})();
 
 /* ===== the toolbar: grid/list view + icon size ====================== */
 var wsView = { mode: "grid", tile: 132 };
