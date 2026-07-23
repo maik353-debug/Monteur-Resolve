@@ -1009,7 +1009,36 @@ svg text.axis {
   width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 3px;
   background: var(--row-wash); display: block; margin-bottom: 8px;
 }
-.pool-thumb-wrap { position: relative; }
+.pool-thumb-wrap { position: relative; overflow: hidden; border-radius: 3px; }
+/* --- analysis animation: scan beam + filmstrip segment reveal --------------- */
+.scan-beam {
+  position: absolute; left: 0; right: 0; top: 0; height: 3px; z-index: 3; pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--ember) 45%, var(--ember) 55%, transparent);
+  box-shadow: 0 0 10px 1px var(--ember);
+  animation: poolScan 1.05s ease-in-out infinite;
+}
+.pool-card.scanning .pool-thumb { filter: brightness(1.08) saturate(0.75); transition: filter 0.2s; }
+@keyframes poolScan {
+  0% { top: 0; opacity: 0; }
+  12% { opacity: 1; }
+  88% { opacity: 1; }
+  100% { top: calc(100% - 8px); opacity: 0; }
+}
+.seg-strip {
+  position: absolute; left: 0; right: 0; bottom: 8px; height: 5px; z-index: 3; display: flex;
+  transform: scaleX(0); transform-origin: left; transition: transform 0.5s cubic-bezier(.2,.7,.3,1);
+}
+.pool-card.seg-in .seg-strip { transform: scaleX(1); }
+.seg-strip .seg { height: 100%; flex-grow: 0; flex-shrink: 0; }
+.seg-strip .seg.good { background: var(--good); }
+.seg-strip .seg.warn { background: var(--warning); }
+.pool-card.analyzed .pool-thumb { animation: poolPop 0.5s ease; }
+@keyframes poolPop { 0% { filter: brightness(1.5); } 100% { filter: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .scan-beam { animation: none; opacity: 0.9; }
+  .seg-strip { transition: none; }
+  .pool-card.analyzed .pool-thumb { animation: none; }
+}
 .pool-play {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   opacity: 0; transition: opacity 0.12s; pointer-events: none; margin-bottom: 8px;
@@ -5576,6 +5605,7 @@ function makeJobPanel(hostId, texts) {
       api("/api/jobs/" + jobId).then(function (job) {
         if (run.stopped) return;
         renderProgress(job.progress || []);
+        if (handlers.onProgress) handlers.onProgress(job.progress || []);
         if (job.state === "running") run.timer = window.setTimeout(tick, 600);
         else if (job.state === "done") finish("done", job.result || {});
         else if (job.state === "cancelled") finish("cancelled");
@@ -5982,6 +6012,7 @@ function renderPool(data) {
   clear(grid);
   cre.poolClips.forEach(function (clip) {
     var card = el("div", "clip-card pool-card");
+    card.dataset.name = clip.name;  // matched to sift progress for the scan animation
     if (cre.poolSel[clip.path]) card.classList.add("selected");
     card.setAttribute("role", "button");
     card.setAttribute("tabindex", "0");
@@ -6439,8 +6470,48 @@ function loadActiveJob() {
    (scanFolder) and the reload reattach path so the handler logic lives once.
    Every terminal state clears the stored record so a finished job never
    reattaches again. */
+/* The analysis animation: as sift reports each clip, sweep a scan beam over its
+   thumbnail; when it's done, wipe in a filmstrip segment bar (usable green vs
+   problem amber) — you SEE the footage being analysed and split. Driven live by
+   the job's per-clip progress, so it's honest, not decorative. */
+function animateScanProgress(progress) {
+  var grid = $("cre-pool-grid");
+  if (!grid) return;
+  var byName = {};
+  Array.prototype.forEach.call(grid.querySelectorAll(".pool-card"), function (c) {
+    if (c.dataset.name) byName[c.dataset.name] = c;
+  });
+  (progress || []).forEach(function (p) {
+    var card = p && p.name ? byName[p.name] : null;
+    if (!card) return;
+    var wrap = card.querySelector(".pool-thumb-wrap");
+    if (!wrap) return;
+    if (p.stage === "start" && !card.classList.contains("analyzed")) {
+      card.classList.add("scanning");
+      if (!wrap.querySelector(".scan-beam")) wrap.appendChild(el("div", "scan-beam"));
+    } else if ((p.stage === "done" || p.stage === "cache") && !card.classList.contains("analyzed")) {
+      card.classList.remove("scanning");
+      card.classList.add("analyzed");
+      var beam = wrap.querySelector(".scan-beam");
+      if (beam) beam.remove();
+      var ratio = typeof p.usable_ratio === "number" ? Math.max(0, Math.min(1, p.usable_ratio)) : 1;
+      var strip = el("div", "seg-strip");
+      var good = el("div", "seg good"); good.style.flexBasis = Math.round(ratio * 100) + "%";
+      var warn = el("div", "seg warn"); warn.style.flexBasis = Math.round((1 - ratio) * 100) + "%";
+      strip.appendChild(good); strip.appendChild(warn);
+      wrap.appendChild(strip);
+      // reveal on the next frame so the CSS transition runs
+      requestAnimationFrame(function () { card.classList.add("seg-in"); });
+    }
+  });
+}
+
+// test seam (like window.monteurHistory): drive the scan animation directly
+window.monteurScanAnim = function (progress) { animateScanProgress(progress); };
+
 function attachScanJob(jobId) {
   scanPanel.start(jobId, {
+    onProgress: function (pr) { animateScanProgress(pr); },
     onDone: function (result) {
       clearActiveJob();
       setScanBusy(false);
