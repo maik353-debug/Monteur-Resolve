@@ -1351,6 +1351,34 @@ def _plan_export_result(plan, payload: dict) -> dict:
     }
 
 
+def _persist_plan_edit(payload: dict, plan, label: str) -> None:
+    """Persist a timeline edit back into its project — the durable timeline.
+
+    The timeline (plan) is the project's asset: every editor edit (delete,
+    move, trim, retitle) writes it to ``project.plan`` and snapshots the prior
+    cut as a version, so the change survives a re-open and stays undoable.
+    Best-effort and keyed off ``payload["project"]``; no project id (or an
+    unknown project) is a no-op — the browser still receives the adjusted plan
+    either way, so a persistence hiccup never blocks the edit.
+    """
+    pid = str(payload.get("project") or "")
+    if not pid:
+        return
+    try:
+        from monteur import projects
+        from monteur.montage import plan_to_dict
+
+        project = projects.load_project(pid)
+        if project is None:
+            return
+        if project.has_plan:
+            projects.add_version(project, project.plan, label=f"before {label}")
+        project.plan = plan_to_dict(plan)
+        projects.save_project(project)
+    except Exception:  # noqa: BLE001 — persistence must never fail the edit
+        pass
+
+
 def _apply_vision(job: dict, reports: list) -> tuple[list, str]:
     """Let Claude vision annotate ``reports`` IN PLACE; soft-fail by contract.
 
@@ -1821,6 +1849,7 @@ def _plan_from_payload(job: dict, payload: dict):
     # media pool here (that is the Footage tab's job). Labels are baked into the
     # stored reports, so there is no re-watch. Nothing analyzed -> a clear "go
     # analyze first" message, not a scan.
+    project = None
     project_id = str(payload.get("project") or "")
     if project_id:
         from monteur import projects
@@ -1850,13 +1879,22 @@ def _plan_from_payload(job: dict, payload: dict):
 
     music = None
     if music_path:
-        from monteur.music import analyze_music
+        if project is not None:
+            from monteur import projects
 
-        with _JOBS_LOCK:
-            job["progress"].append(
-                {"stage": "music", "name": Path(music_path).name}
-            )
-        music = analyze_music(music_path)
+            music = projects.load_music(project, music_path)  # no re-listen
+        if music is None:
+            from monteur.music import analyze_music
+
+            with _JOBS_LOCK:
+                job["progress"].append(
+                    {"stage": "music", "name": Path(music_path).name}
+                )
+            music = analyze_music(music_path)
+            if project is not None:
+                from monteur import projects
+
+                projects.save_music(project, music)  # persist for build + director
     if job["cancel"].is_set():
         raise SiftCancelled("cancelled")
 
@@ -2594,29 +2632,59 @@ def _run_direct_job(job: dict, payload: dict) -> None:
         if not plan.entries:
             raise ValueError("the plan has no entries — nothing to review")
 
-        # One folder (the Create card) or several (the Movie card sends
-        # every assigned scene folder): sift each once, concatenate the
-        # reports — the dossier needs all clips the plan cuts from.
-        folders = [
-            str(f).strip() for f in (payload.get("folders") or []) if str(f).strip()
-        ] or [payload.get("folder", "")]
-        reports = []
-        for folder in dict.fromkeys(folders):  # de-duped, order kept
-            folder_reports, _cached = _sift_or_cached(job, folder)
-            reports.extend(folder_reports)
-            if job["cancel"].is_set():
-                raise SiftCancelled("cancelled")
+        # Director's notes analyzes the TIMELINE as built — it reads the
+        # project's stored analysis (the sift + Claude labels saved when you
+        # analyzed the pool) and its persisted music, so it NEVER re-sifts the
+        # footage or re-listens to the song. The legacy/CLI path (no project)
+        # still sifts the folder(s).
+        project = None
+        project_id = str(payload.get("project") or "")
+        if project_id:
+            from monteur import projects
 
+            project = projects.load_project(project_id)
+
+        if project is not None:
+            reports = projects.load_reports(project)
+            if not reports:
+                raise ValueError(
+                    "no analyzed footage yet — analyze your clips in the "
+                    "Footage tab, then ask for director's notes"
+                )
+            with _JOBS_LOCK:
+                job["progress"].append(
+                    {"stage": "cache", "name": f"reading {len(reports)} analyzed clips"}
+                )
+        else:
+            # One folder (the Create card) or several (the Movie card sends
+            # every assigned scene folder): sift each once, concatenate.
+            folders = [
+                str(f).strip() for f in (payload.get("folders") or []) if str(f).strip()
+            ] or [payload.get("folder", "")]
+            reports = []
+            for folder in dict.fromkeys(folders):  # de-duped, order kept
+                folder_reports, _cached = _sift_or_cached(job, folder)
+                reports.extend(folder_reports)
+                if job["cancel"].is_set():
+                    raise SiftCancelled("cancelled")
+
+        # Music: reuse the project's persisted analysis (no re-listen); on a
+        # miss, analyze once and persist it into the project.
         music = None
         music_path = payload.get("music") or plan.music_path
         if music_path:
-            from monteur.music import analyze_music
+            if project is not None:
+                music = projects.load_music(project, music_path)
+            if music is None:
+                from monteur.music import analyze_music
 
-            with _JOBS_LOCK:
-                job["progress"].append(
-                    {"stage": "music", "name": Path(music_path).name}
-                )
-            music = analyze_music(music_path)
+                with _JOBS_LOCK:
+                    job["progress"].append(
+                        {"stage": "music", "name": Path(music_path).name}
+                    )
+                music = analyze_music(music_path)
+                if project is not None:
+                    projects.save_music(project, music)
         if job["cancel"].is_set():
             raise SiftCancelled("cancelled")
 
@@ -4165,8 +4233,10 @@ class MonteurHandler(BaseHTTPRequestHandler):
             raise ApiError(
                 400, "'folders' must be a non-empty list of footage folders"
             )
-        if not payload.get("folder") and not folders:
-            raise ApiError(400, "missing 'folder' (path to your footage)")
+        # director's notes reads a PROJECT's stored analysis; a bare folder is
+        # the legacy/CLI path. One of the two must be present.
+        if not payload.get("project") and not payload.get("folder") and not folders:
+            raise ApiError(400, "missing 'project' (or 'folder') to review from")
         if not isinstance(payload.get("plan_json"), dict):
             raise ApiError(
                 400, "missing 'plan_json' (the plan a build result carries)"
@@ -4441,7 +4511,9 @@ class MonteurHandler(BaseHTTPRequestHandler):
             plan = plan_from_dict(payload["plan_json"])  # bad -> ValueError -> 400
             # The engine's own validation (bad slot, deleting the last
             # entry) raises ValueError -> the dispatcher's 400.
-            self._send_json(_plan_export_result(delete_entry(plan, slot), payload))
+            adjusted = delete_entry(plan, slot)
+            _persist_plan_edit(payload, adjusted, "delete")
+            self._send_json(_plan_export_result(adjusted, payload))
             return
         if "move" in payload:
             try:
@@ -4452,7 +4524,9 @@ class MonteurHandler(BaseHTTPRequestHandler):
                     400, "'move' and 'to' must be entry indices (0-based)"
                 )
             plan = plan_from_dict(payload["plan_json"])  # bad -> ValueError -> 400
-            self._send_json(_plan_export_result(move_entry(plan, slot, to), payload))
+            adjusted = move_entry(plan, slot, to)
+            _persist_plan_edit(payload, adjusted, "move")
+            self._send_json(_plan_export_result(adjusted, payload))
             return
         transition = str(payload.get("transition") or "")
         if transition not in ARRANGEMENT_TRANSITIONS:
@@ -4478,6 +4552,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
                 self._learn_signal("transition", "*", "cut")
             elif transition == "dissolve" and not was_dissolve:
                 self._learn_signal("transition", "*", "dissolve")
+        _persist_plan_edit(payload, adjusted, "transition")
         self._send_json(_plan_export_result(adjusted, payload))
 
     def _plan_adjust_title(self, payload: dict) -> None:
@@ -4519,6 +4594,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             if titles[dip]
             else f"title: dip {dip + 1} cleared"
         ]
+        _persist_plan_edit(payload, plan, "retitle")
         self._send_json(_plan_export_result(plan, payload))
 
     # -- "Sehen ohne Resolve": thumbnails + preview player -------------------

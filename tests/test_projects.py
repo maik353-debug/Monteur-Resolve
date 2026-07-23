@@ -486,3 +486,95 @@ class TestAnalysisStore:
         project = create_project("p")
         (project.root / "analysis.json").write_text("{not json", encoding="utf-8")
         assert projects.load_reports(project) == []
+
+
+class TestMusicStore:
+    """The song's beat/energy analysis lives IN the project (music.json), so a
+    re-opened project builds from its own stored grid and never re-runs the DSP."""
+
+    def _song(self, tmp_path, name="song.mp3"):
+        p = tmp_path / name
+        p.write_bytes(b"ID3 not really audio")
+        return p
+
+    def _music(self, path):
+        from monteur.music import MusicAnalysis, MusicSection
+
+        return MusicAnalysis(
+            path=str(path), duration=30.0, tempo=120.0,
+            beats=[0.5, 1.0, 1.5, 2.0],
+            sections=[
+                MusicSection(0.0, 10.0, 0.3, "low"),
+                MusicSection(10.0, 30.0, 0.9, "high"),
+            ],
+            downbeats=[0.5, 2.5],
+            phrases=[0.5],
+            drops=[10.0],
+            low_energy=[0.2, 0.8],
+        )
+
+    def test_save_then_load_round_trips_all_fields(self, tmp_path):
+        song = self._song(tmp_path)
+        project = create_project("p", media_pool=[str(song)])
+        projects.save_music(project, self._music(song))
+
+        loaded = projects.load_music(project, str(song))
+        assert loaded is not None
+        assert loaded.path == str(song)
+        assert loaded.duration == 30.0
+        assert loaded.tempo == 120.0
+        assert loaded.beats == [0.5, 1.0, 1.5, 2.0]
+        assert loaded.downbeats == [0.5, 2.5]
+        assert loaded.phrases == [0.5]
+        assert loaded.drops == [10.0]
+        assert loaded.low_energy == [0.2, 0.8]
+        assert len(loaded.sections) == 2
+        assert loaded.sections[0].label == "low"
+        assert loaded.sections[1].energy == 0.9
+        assert (project.root / "music.json").is_file()
+
+    def test_fresh_load_from_reopened_project(self, tmp_path):
+        song = self._song(tmp_path)
+        project = create_project("p", media_pool=[str(song)])
+        projects.save_music(project, self._music(song))
+
+        reopened = load_project(project.id)
+        loaded = projects.load_music(reopened, str(song))
+        assert loaded is not None
+        assert loaded.tempo == 120.0
+        assert len(loaded.sections) == 2
+
+    def test_load_skips_a_stale_song(self, tmp_path):
+        import os
+        import time
+
+        song = self._song(tmp_path)
+        project = create_project("p", media_pool=[str(song)])
+        projects.save_music(project, self._music(song))
+        future = time.time() + 10
+        os.utime(song, (future, future))  # a re-export -> mtime changed
+        assert projects.load_music(project, str(song)) is None
+
+    def test_load_different_song_is_none(self, tmp_path):
+        song = self._song(tmp_path)
+        other = self._song(tmp_path, "other.mp3")
+        project = create_project("p", media_pool=[str(song)])
+        projects.save_music(project, self._music(song))
+        assert projects.load_music(project, str(other)) is None
+
+    def test_none_when_nothing_saved(self, tmp_path):
+        song = self._song(tmp_path)
+        project = create_project("p", media_pool=[str(song)])
+        assert projects.load_music(project, str(song)) is None
+
+    def test_save_none_is_noop(self, tmp_path):
+        song = self._song(tmp_path)
+        project = create_project("p")
+        projects.save_music(project, None)
+        assert not (project.root / "music.json").exists()
+
+    def test_corrupt_store_degrades_to_none(self, tmp_path):
+        song = self._song(tmp_path)
+        project = create_project("p")
+        (project.root / "music.json").write_text("{not json", encoding="utf-8")
+        assert projects.load_music(project, str(song)) is None

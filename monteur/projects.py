@@ -624,6 +624,116 @@ def analyzed_count(project: Project) -> int:
     return len(load_reports(project))
 
 
+# --- music store: the song's beat/energy analysis lives IN the project -------
+#
+# Music analysis (tempo, beats, energy sections — the grid montage cuts to) is
+# part of the PROJECT, not a loose sidecar next to the song. It lives in
+# ``<root>/music.json`` keyed by the song's ``abspath`` + ``mtime``, so a
+# re-opened project builds from its OWN stored analysis and never re-runs the
+# DSP. A re-exported song (mtime changed) drops out as stale — analyse it again.
+# There is ONE song per project, so this store holds a single analysis, unlike
+# the per-clip analysis store above.
+
+#: The music store filename inside a bundle.
+_MUSIC_NAME = "music.json"
+
+#: Music store schema version.
+MUSIC_FORMAT_VERSION = 1
+
+
+def _music_path(project: Project) -> Path:
+    return project.root / _MUSIC_NAME
+
+
+def save_music(project: Project, music) -> None:
+    """Persist the project's ONE music analysis to ``music.json``.
+
+    Best-effort and atomic (temp file + ``os.replace``), keyed by the song's
+    ``abspath`` + ``mtime``: a re-analysed song replaces the old entry, a song
+    we cannot stat is skipped, and ``music is None`` is a no-op. This is what
+    makes the music grid part of the project — the build reads it back with
+    :func:`load_music` and never re-runs the DSP.
+    """
+    from dataclasses import asdict
+
+    if music is None:
+        return
+    try:
+        ab = os.path.abspath(music.path)
+        mtime = os.path.getmtime(ab)
+    except OSError:
+        return  # a song we cannot stat is skipped, never a crash
+    root = project.root
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        path = _music_path(project)
+        tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+        tmp.write_text(
+            json.dumps(
+                {
+                    "monteur_music": MUSIC_FORMAT_VERSION,
+                    "path": ab,
+                    "mtime": mtime,
+                    "analysis": asdict(music),
+                },
+                ensure_ascii=False, indent=1,
+            ) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+    except OSError:
+        pass  # a store we cannot write degrades to "not analysed", never a crash
+
+
+def load_music(project: Project, music_path):
+    """The project's stored music analysis for ``music_path`` (mtime-checked).
+
+    Returns the persisted :class:`~monteur.music.MusicAnalysis` ONLY when the
+    stored path matches ``os.path.abspath(music_path)`` AND the stored mtime
+    equals the song's current mtime; a re-exported song (mtime changed) is
+    stale and yields ``None``. Missing, corrupt or mismatched → ``None`` — the
+    build then re-analyses the song instead of crashing.
+    """
+    from monteur.music import MusicAnalysis, MusicSection
+
+    try:
+        data = json.loads(_music_path(project).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("monteur_music") != MUSIC_FORMAT_VERSION:
+        return None
+    ab = os.path.abspath(str(music_path))
+    if str(data.get("path")) != ab:
+        return None  # a different song → not ours
+    try:
+        if os.path.getmtime(ab) != float(data.get("mtime")):
+            return None  # a re-export (mtime changed) → stale
+    except (OSError, TypeError, ValueError):
+        return None
+    analysis = data.get("analysis")
+    if not isinstance(analysis, dict):
+        return None
+    try:
+        sections = [
+            MusicSection(**s)
+            for s in (analysis.get("sections") or [])
+            if isinstance(s, dict)
+        ]
+        return MusicAnalysis(
+            path=str(analysis.get("path") or ab),
+            duration=float(analysis.get("duration") or 0.0),
+            tempo=float(analysis.get("tempo") or 0.0),
+            beats=list(analysis.get("beats") or []),
+            sections=sections,
+            downbeats=list(analysis.get("downbeats") or []),
+            phrases=list(analysis.get("phrases") or []),
+            drops=list(analysis.get("drops") or []),
+            low_energy=list(analysis.get("low_energy") or []),
+        )
+    except (TypeError, ValueError):
+        return None  # a corrupt analysis degrades to "not analysed"
+
+
 # --- migration from drafts ---------------------------------------------------
 
 

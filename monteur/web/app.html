@@ -9089,6 +9089,7 @@ function applyDipTitle(dipIndex, text) {
   var built = (cre.result && cre.result.body) || {};
   var body = {
     plan_json: rev.planJson, dip: dipIndex, title: text,
+    project: cre.projectId || undefined,  // persist the edit into the timeline
     fps: built.fps || fpsFrom($("cre-fps")), format: cre.format
   };
   if (built.audio) body.audio = built.audio;
@@ -10166,6 +10167,9 @@ $("cre-dir-btn").addEventListener("click", function () {
   var built = (cre.result && cre.result.body) || {};
   var body = {
     plan_json: rev.planJson,
+    // director's notes reads the project's stored analysis (no re-sift, no
+    // re-listen) — the folder stays only for the legacy/CLI path
+    project: cre.projectId || undefined,
     folder: built.folder || $("cre-folder").value.trim(),
     // step 2's "What is this video?" text is the default review context;
     // anything typed here wins over it
@@ -10754,6 +10758,7 @@ function applyTransition(trans) {
   var built = (cre.result && cre.result.body) || {};
   var body = {
     plan_json: rev.planJson, slot: i, transition: trans,
+    project: cre.projectId || undefined,  // persist the edit into the timeline
     fps: built.fps || fpsFrom($("cre-fps")), format: cre.format
   };
   if (built.audio) body.audio = built.audio;

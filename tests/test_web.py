@@ -967,6 +967,29 @@ class TestPlanAdjustSurgery:
             )
         assert exc.value.code == 400
 
+    def test_edit_persists_into_the_project(self, server):
+        # the timeline is the project's durable asset: an editor edit writes
+        # project.plan and snapshots the prior cut as a version
+        from monteur import projects
+
+        project = projects.create_project("edit me", plan=_tiny_plan_json())
+        assert len(project.versions) == 0
+        _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": _tiny_plan_json(), "delete": 0, "project": project.id},
+        )
+        reloaded = projects.load_project(project.id)
+        assert len(reloaded.plan["entries"]) == 1       # the edit landed
+        assert len(reloaded.versions) == 1              # prior cut snapshotted
+
+    def test_edit_without_project_persists_nothing(self, server):
+        # no project id -> pure surgery, the browser keeps the result
+        r = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": _tiny_plan_json(), "move": 0, "to": 1},
+        )
+        assert [e["clip_path"] for e in r["plan_json"]["entries"]] == ["b.mp4", "a.mp4"]
+
 
 def _step3_html(html):
     """The Storyboard step's markup (between its section tag and step 4's)."""
@@ -3139,6 +3162,72 @@ class TestDirectorApi:
         # the help copy explains the no-extra-cost angle and the vision link
         assert "no extra API cost" in html
         assert "Let Claude watch your clips" in html
+
+
+class TestDirectorFromProject:
+    """Director's notes reads the project's STORED analysis — no re-sift of the
+    footage, no re-listen to the song — when a project is given (demo-free)."""
+
+    def test_direct_uses_stored_reports_and_music(self, server, tmp_path, monkeypatch):
+        from monteur import director, projects
+        from monteur.music import MusicAnalysis, MusicSection
+        from monteur.sift import ClipReport, ClipSegment, Moment
+
+        clip = tmp_path / "a.mp4"; clip.write_bytes(b"x")
+        song = tmp_path / "song.wav"; song.write_bytes(b"x")
+        project = projects.create_project(
+            "dir", media_pool=[{"path": str(clip), "kind": "file"}]
+        )
+        projects.save_reports(project, [ClipReport(
+            path=str(clip), duration=180.0,
+            segments=[ClipSegment(0.0, 4.0, "usable", 0.9)],
+            moments=[Moment(20.0, 24.0, 0.9, label="tunnel")],
+            usable_ratio=0.8, media_start=0.0,
+        )])
+        projects.save_music(project, MusicAnalysis(
+            path=str(song), duration=12.0, tempo=120.0, beats=[0.0, 0.5],
+            sections=[MusicSection(0.0, 12.0, 0.5, "mid")],
+        ))
+
+        seen = {}
+        def fake_direct(plan, reports, music, notes=""):
+            seen["reports"] = reports
+            seen["music"] = music
+            return {"summary": "ok", "issues": [], "praise": []}
+        monkeypatch.setattr(director, "direct_cut", fake_direct)
+
+        plan_json = _tiny_plan_json()
+        plan_json["music_path"] = str(song)
+        data = _post(
+            f"{server}/api/create/direct",
+            {"plan_json": plan_json, "project": project.id},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done", job.get("message")
+        # the review got the STORED report + STORED music — not a fresh sift/listen
+        assert len(seen["reports"]) == 1
+        assert seen["music"] is not None and seen["music"].tempo == 120.0
+        stages = [p.get("stage") for p in job["progress"]]
+        assert "vision" not in stages and "start" not in stages  # no re-sift
+        assert any(
+            p.get("stage") == "cache" and "analyzed clips" in str(p.get("name"))
+            for p in job["progress"]
+        )
+
+    def test_direct_errors_when_project_has_no_analysis(self, server, tmp_path):
+        from monteur import projects
+
+        clip = tmp_path / "a.mp4"; clip.write_bytes(b"x")
+        project = projects.create_project(
+            "empty", media_pool=[{"path": str(clip), "kind": "file"}]
+        )
+        data = _post(
+            f"{server}/api/create/direct",
+            {"plan_json": _tiny_plan_json(), "project": project.id},
+        )
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "error"
+        assert "analyze" in job["message"].lower()
 
 
 class TestCoverageApi:
