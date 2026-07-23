@@ -2267,6 +2267,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
               <div class="ws-poolwrap pool-grid-view" id="cre-pool-drop">
                 <div class="clip-grid pool-grid" id="cre-pool-grid"></div>
                 <p class="pool-empty" id="cre-pool-empty">Drag videos in from the Explorer.</p>
+                <p class="hint-small" id="cre-pool-guide" hidden>Pick the clips you want, then <strong>Analyze selected</strong> — Monteur watches only those and finds the good parts. Click a clip to watch it in the player.</p>
                 <div class="ws-dropzone" id="cre-pool-dropzone" hidden>Drop into the Media Pool</div>
               </div>
               <div class="ws-poolfoot">
@@ -2302,47 +2303,10 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
                 <div class="ws-pfld"><label>Analysis</label><div class="v" id="ws-insp-analysis">Not analyzed yet</div></div>
                 <div class="ws-pfld"><label>Claude sees</label><div class="ws-pchips" id="ws-insp-labels"><span class="ws-dim">&mdash;</span></div></div>
 
-                <details class="fine-tune rank-details" id="cre-find">
-                  <summary>Search your footage — what did Claude see?</summary>
-                  <div class="rank-body">
-                    <label class="sr-only" for="cre-find-query">Search query</label>
-                    <div class="path-row">
-                      <input type="text" id="cre-find-query" placeholder="curves, sunset, hero&hellip;" spellcheck="false" autocomplete="off">
-                      <button class="btn" id="cre-find-btn" type="button">Search<span class="spin" aria-hidden="true"></span></button>
-                    </div>
-                    <p class="help-small">Searches the labels Claude wrote during a &ldquo;Let Claude watch&rdquo; scan — offline and instant, no API call. Try &ldquo;hero&rdquo; for the money shots.</p>
-                    <p class="scan-note" id="cre-find-msg" role="status" hidden></p>
-                    <div id="cre-find-results"></div>
-                  </div>
-                </details>
-                <details class="fine-tune rank-details" id="cre-coverage">
-                  <summary>Shot list — what's still missing?</summary>
-                  <div class="rank-body">
-                    <label class="sr-only" for="cre-cov-brief">What should this video become?</label>
-                    <div class="path-row">
-                      <input type="text" id="cre-cov-brief" placeholder="What should this video become? e.g. &ldquo;epic alps trailer, end on the summit&rdquo;" spellcheck="false" autocomplete="off">
-                      <button class="btn" id="cre-cov-btn" type="button">Check my coverage<span class="spin" aria-hidden="true"></span></button>
-                    </div>
-                    <p class="help-small">Claude reads your scan and lists the shots you still need to film — before you cut anything. Style and target length come from step 2; the description here and step 2&rsquo;s &ldquo;What is this video?&rdquo; are the same text. Runs over your Claude connection (with Claude Code: no extra cost) — sharpest after &ldquo;Let Claude watch your clips&rdquo;.</p>
-                    <div id="cre-cov-panel"></div>
-                    <p class="scan-note" id="cre-cov-msg" role="status" hidden></p>
-                    <div id="cre-cov-results"></div>
-                  </div>
-                </details>
-                <details class="fine-tune rank-details" id="cre-analysis-report">
-                  <summary>Full analysis report</summary>
-                  <div class="rank-body">
-                    <p class="hint-small" id="cre-pool-guide" hidden>Pick the clips you want, then <strong>Analyze selected</strong> — Monteur watches only those and finds the good parts. Click a clip to watch it first.</p>
-                    <div class="clip-grid" id="cre-clips"></div>
-                    <div class="vision-notes" id="cre-vision-notes" hidden></div>
-                    <div class="legend" id="cre-legend" hidden>
-                      <span class="key"><span class="swatch" style="background:var(--series-1)"></span>Usable</span>
-                      <span class="key"><span class="swatch" style="background:var(--seg-dark)"></span>Too dark</span>
-                      <span class="key"><span class="swatch" style="background:var(--seg-blurry)"></span>Blurry</span>
-                      <span class="key"><span class="swatch" style="background:var(--seg-shaky)"></span>Shaky</span>
-                    </div>
-                  </div>
-                </details>
+                <!-- Search moved to Storyboard; the shot-list + full report
+                     boxes were removed (the pool cards already carry per-clip
+                     status). The pool guide hint lives by the pool now. -->
+
               </div>
             </div>
           </div>
@@ -2631,6 +2595,19 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             <div class="sb-board" id="cre-sb-board"></div>
             <p class="help-small">One card per shot in record order, grouped by act; the black cards are dips to black &mdash; click their text to edit the title. Click a shot &mdash; in the strip above or on its card &mdash; to open the inspector: swap its source, change its boundary, pin it. Pinned shots survive every revision exactly where they are.</p>
           </div>
+          <details class="fine-tune rank-details" id="cre-find" style="margin-top: 14px;">
+            <summary>Search your footage — what did Claude see?</summary>
+            <div class="rank-body">
+              <label class="sr-only" for="cre-find-query">Search query</label>
+              <div class="path-row">
+                <input type="text" id="cre-find-query" placeholder="curves, sunset, hero&hellip;" spellcheck="false" autocomplete="off">
+                <button class="btn" id="cre-find-btn" type="button">Search<span class="spin" aria-hidden="true"></span></button>
+              </div>
+              <p class="help-small">Searches the labels Claude wrote during a &ldquo;Let Claude watch&rdquo; scan &mdash; offline and instant, no API call. Find a beat here, then add it to your order below. Try &ldquo;hero&rdquo; for the money shots.</p>
+              <p class="scan-note" id="cre-find-msg" role="status" hidden></p>
+              <div id="cre-find-results"></div>
+            </div>
+          </details>
           <details class="fine-tune" id="cre-arrange-tools" style="margin-top: 14px;">
             <summary>Add / reorder scenes</summary>
             <div class="rank-body">
@@ -2650,10 +2627,6 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
               <div class="sb-board arr-palette" id="cre-arr-palette"></div>
               <p class="scan-note" id="cre-arr-palette-msg" role="status" hidden></p>
             </div>
-          </details>
-          <details class="fine-tune" id="cre-missing" style="margin-top: 14px;">
-            <summary id="cre-missing-summary">What&rsquo;s still missing</summary>
-            <div class="rank-body" id="cre-missing-body"></div>
           </details>
           <div class="kit-block" id="cre-revise" hidden>
             <p class="seg-heading">Revise this cut</p>
@@ -3476,7 +3449,7 @@ function svgEl(tag, attrs) {
   if (attrs) for (var k in attrs) node.setAttribute(k, attrs[k]);
   return node;
 }
-function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+function clear(node) { if (!node) return; while (node.firstChild) node.removeChild(node.firstChild); }
 
 /* ================= toasts ================= */
 
@@ -5491,6 +5464,12 @@ function baseName(path) {
    lets the poll loop observe the "cancelled" state. */
 
 function makeJobPanel(hostId, texts) {
+  // A panel whose host was removed from the page (e.g. the retired coverage
+  // box) returns a harmless no-op with the same interface, so callers and
+  // top-level wiring never crash.
+  if (!$(hostId)) {
+    return { start: function () {}, stop: function () {}, running: function () { return false; } };
+  }
   var root = el("div", "job-panel");
   root.hidden = true;
   var top = el("div", "job-top");
@@ -5772,9 +5751,11 @@ function setDirectBusy(on) {
 }
 function setCoverageBusy(on) {
   var btn = $("cre-cov-btn");
+  if (!btn) return;  // coverage box removed from the footage page
   btn.classList.toggle("busy", on);
   btn.disabled = on;
-  $("cre-cov-brief").disabled = on;
+  var brief = $("cre-cov-brief");
+  if (brief) brief.disabled = on;
 }
 function setDirectApplyBusy(on) {
   var btn = $("cre-dir-apply");
@@ -6580,10 +6561,12 @@ function scanHasVision(clips) {
    notice when Claude could not watch (the scan itself still worked) */
 function renderVisionExtras(result) {
   var notesBox = $("cre-vision-notes");
-  clear(notesBox);
-  var notes = (result && result.vision_notes) || [];
-  notes.forEach(function (note) { notesBox.appendChild(el("p", null, String(note))); });
-  notesBox.hidden = notes.length === 0;
+  if (notesBox) {  // the full-report box was removed; vision errors still toast below
+    clear(notesBox);
+    var notes = (result && result.vision_notes) || [];
+    notes.forEach(function (note) { notesBox.appendChild(el("p", null, String(note))); });
+    notesBox.hidden = notes.length === 0;
+  }
   if (result && result.vision_error) {
     creNote("cre-vision-msg", "Claude couldn't watch the clips: " + String(result.vision_error) + " The scan still worked.");
   }
@@ -6729,7 +6712,6 @@ function runStagedAnalysis(endpoint, opts) {
   if (!cre.projectId) { toast("Add footage to the pool first."); return; }
   $("cre-scan-msg").hidden = true;
   $("cre-vision-msg").hidden = true;
-  $("cre-vision-notes").hidden = true;
   startProxyWatch(null); // fresh analysis restarts the proxy status line
   cre.clips = null;
   cre.result = null;  // footage knowledge changed — any previous build is stale
@@ -6741,9 +6723,6 @@ function runStagedAnalysis(endpoint, opts) {
   $("cre-result").hidden = true;
   $("cre-find-msg").hidden = true;
   clear($("cre-find-results"));
-  clear($("cre-clips"));
-  clear($("cre-vision-notes"));
-  $("cre-legend").hidden = true;
   $("cre-next-1").hidden = true;
   updateSuggestion();
   // the derived folder still feeds build/storyboard downstream
@@ -6841,9 +6820,13 @@ function qualityStrip(clip) {
 }
 
 function renderClips() {
-  var grid = $("cre-clips");
-  clear(grid);
   var clips = cre.clips || [];
+  // the "Full analysis report" grid was removed (the pool cards carry per-clip
+  // status now); only the Continue gating below remains essential.
+  $("cre-next-1").hidden = clips.length === 0;
+  var grid = $("cre-clips");
+  if (!grid) return;
+  clear(grid);
   clips.forEach(function (clip) {
     var card = el("div", "clip-card");
     card.appendChild(el("p", "clip-name", baseName(clip.path)));
@@ -6882,8 +6865,6 @@ function renderClips() {
     });
     grid.appendChild(card);
   });
-  $("cre-legend").hidden = clips.length === 0;
-  $("cre-next-1").hidden = clips.length === 0;
 }
 
 /* ---- step 2: music, audio mode, length, style ---- */
@@ -7545,8 +7526,7 @@ function creBuildBody() {
   // the "What are you making?" chip: the server re-resolves the preset
   // (canvas forced, length capped, style unless explicitly overridden)
   if (cre.platform && cre.platform !== "custom") body.platform = cre.platform;
-  // a Series of N Shorts (only sent when chosen; the single build ignores it)
-  if ((cre.seriesCount || 1) > 1) body.series = cre.seriesCount;
+  // (Shorts are their own tool now — the Create build always makes one cut)
   if (seeEnabled()) body.see = true;
   var music = $("cre-music").value.trim();
   if (cre.audio !== "original" && music) body.music = music;
@@ -7695,9 +7675,6 @@ function renderCreResult(data) {
 
 function startBuild(andThen) {
   if (buildPanel.running()) return;
-  // a series of Shorts takes its own path (N plans, not one)
-  if ((cre.seriesCount || 1) > 1) { startSeriesBuild(andThen); return; }
-  cre.series = null; // a single build clears any prior series
   var body = creBuildBody();
   if (!body.folder) { toast("Add your footage folder in step 1 first."); creShowStep(1, true); return; }
   if (cre.audio !== "original" && !body.music) { toast("Add the path to your song in step 2 first."); creShowStep(2, true); return; }
@@ -8717,10 +8694,10 @@ $("cre-find-query").addEventListener("keydown", function (e) {
    input is a mirror, synced both ways. */
 function setBriefText(text) {
   $("cre-brief").value = text;
-  $("cre-cov-brief").value = text;
+  var cov = $("cre-cov-brief");
+  if (cov) cov.value = text;  // coverage box retired — mirror only if present
 }
-$("cre-brief").addEventListener("input", function () { $("cre-cov-brief").value = this.value; });
-$("cre-cov-brief").addEventListener("input", function () { $("cre-brief").value = this.value; });
+// (the coverage brief mirror is gone with the coverage box)
 
 /* the last coverage result — step 3's "what's missing" hook re-shows it */
 var covState = { last: null };
@@ -8749,24 +8726,10 @@ function covMissingCards(missing) {
    the board — or a calm pointer back to step 1 when none ran yet */
 function renderMissingHook() {
   var body = $("cre-missing-body");
+  if (!body) return;  // the coverage "what's missing" hook was retired
   clear(body);
   var cov = covState.last;
-  if (!cov) {
-    $("cre-missing-summary").textContent = "What’s still missing";
-    var hint = el("p", "help-small");
-    hint.appendChild(document.createTextNode("No shot list yet — run "));
-    var link = el("button", "link-btn", "Check my coverage in step 1");
-    link.type = "button";
-    link.addEventListener("click", function () {
-      creShowStep(1, false);
-      $("cre-coverage").open = true;
-      $("cre-cov-brief").focus();
-    });
-    hint.appendChild(link);
-    hint.appendChild(document.createTextNode(" — Claude lists the shots your footage still needs, before you cut anything."));
-    body.appendChild(hint);
-    return;
-  }
+  if (!cov) return;
   var missing = cov.missing || [];
   $("cre-missing-summary").textContent = missing.length
     ? "What’s still missing — " + missing.length + (missing.length === 1 ? " shot" : " shots")
@@ -8865,10 +8828,14 @@ function checkCoverage() {
     creNote("cre-cov-msg", err && err.message ? err.message : String(err), true);
   });
 }
-$("cre-cov-btn").addEventListener("click", checkCoverage);
-$("cre-cov-brief").addEventListener("keydown", function (e) {
-  if (e.key === "Enter") { e.preventDefault(); checkCoverage(); }
-});
+// coverage box retired from the footage page — wire only if it's present
+(function wireCoverage() {
+  var btn = $("cre-cov-btn"), brief = $("cre-cov-brief");
+  if (btn) btn.addEventListener("click", checkCoverage);
+  if (brief) brief.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); checkCoverage(); }
+  });
+})();
 
 /* ---- step 3: the revision loop (monteur.revise) ----------------------
    The build result carries the FULL plan as plan_json; one sentence plus

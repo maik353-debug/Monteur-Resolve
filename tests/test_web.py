@@ -983,10 +983,10 @@ class TestWizardStepsUi:
             # the strip and the board
             'id="cre-strip"',
             'id="cre-sb-board"',
-            # the order editor and the coverage hook
+            # the order editor + the relocated footage search
             'id="cre-arrange-tools"',
             "Add / reorder scenes",
-            'id="cre-missing"',
+            'id="cre-find"',
             # revise + director's notes iterate the draft here
             'id="cre-rev-brief"',
             'id="cre-dir-btn"',
@@ -1106,12 +1106,14 @@ class TestWizardStepsUi:
             assert needle in html, needle
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
-    def test_missing_hook_reads_the_step_1_coverage_result(self):
+    def test_footage_page_fine_tune_boxes_are_retired(self):
         html = _APP_HTML.read_text(encoding="utf-8")
-        assert "covState.last = cov" in html
-        assert "function renderMissingHook" in html
-        # no coverage yet -> a calm pointer back to step 1
-        assert "Check my coverage in step 1" in html
+        # the shot-list (coverage) box + full-report + step-3 missing hook are gone
+        for gone in ('id="cre-coverage"', 'id="cre-analysis-report"', 'id="cre-missing"'):
+            assert gone not in html, gone
+        # search your footage survives, relocated into the storyboard step
+        assert 'id="cre-find"' in html
+        assert 'id="cre-find"' in _step3_html(html)
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_resume_lands_in_the_storyboard(self):
@@ -3182,26 +3184,8 @@ class TestCoverageApi:
         assert job["state"] == "error"
         assert "target" in job["message"]
 
-    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
-    def test_app_has_the_coverage_block(self):
-        html = _APP_HTML.read_text(encoding="utf-8")
-        assert 'id="cre-coverage"' in html
-        assert "Shot list — what's still missing?" in html
-        assert 'id="cre-cov-brief"' in html
-        assert 'id="cre-cov-btn"' in html
-        assert "/api/coverage" in html
-        # the MUST/NICE cards and the badge accents
-        assert "cov-card must" in html
-        assert "cov-card nice" in html
-        assert "cov-badge must" in html
-        assert "cov-badge nice" in html
-        # one brief, two homes: the coverage input mirrors #cre-brief
-        assert "setBriefText" in html
-        # the calm after-the-list line pointing back at the rescan
-        assert "Add the new clips to the same folder, then " in html
-        # the help copy: runs over the Claude connection, sharpest with vision
-        assert "no extra cost" in html
-        assert "Let Claude watch your clips" in html
+    # The coverage UI block was retired from the footage page (the /api/coverage
+    # endpoint stays, exercised by the tests above); its markup test is gone.
 
 
 class TestAiCutApi:
@@ -6214,27 +6198,31 @@ class TestProUiStatic:
             assert look in source, look
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
-    def test_series_in_create_markup_and_wiring(self):
+    def test_shorts_is_its_own_tool_not_a_create_option(self):
         source = _APP_HTML.read_text(encoding="utf-8")
+        # Shorts is a first-class suite tool: a Home card + its own view + wiring
         for needle in (
-            # the "How many videos?" control in Options + the Short picker
-            'id="cre-series-row"',
-            'id="series-1"',
-            'id="series-2"',
-            'id="cre-series-strip"',
-            "function setSeriesCount",
-            "function startSeriesBuild",
-            "function loadSeriesShort",
-            "function renderSeriesStrip",
-            # a series posts to its own endpoint; the single build branches
-            "/api/create/series",
-            "startSeriesBuild(andThen); return;",
-            "body.series = cre.seriesCount",
-            # the whole set persists in the project options
-            "options.series_shorts = cre.series.shorts",
-            "series_active",
+            'id="pm-shorts"',              # the Home tool card
+            'id="shorts"',                 # the standalone view
+            'id="shorts-projects"',        # pick-a-cut grid
+            'id="shorts-build"',
+            'id="shorts-save"',
+            "function openShortsTool",
+            "function startShortsBuild",
+            "function renderShortsList",
+            '/series',                     # posts to the project's series endpoint
+            '/series/save',
         ):
             assert needle in source, needle
+        # and it is NO LONGER a Create option: the "How many videos?" toggle
+        # and its Create-embedded wiring are gone from the wizard
+        for gone in (
+            'id="cre-series-row"',
+            'id="series-1"',
+            'id="cre-shorts-card"',        # the retired Your-cut card
+            "body.series = cre.seriesCount",
+        ):
+            assert gone not in source, gone
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_inspector_markup_and_wiring(self):
