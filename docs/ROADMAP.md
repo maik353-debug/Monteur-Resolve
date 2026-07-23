@@ -70,9 +70,11 @@ Craft templates:
       signal in `monteur find`** — spoken lines from `<clip>.json` transcript
       sidecars are searched alongside the vision cache (either signal alone
       works), and spoken hits are flagged (`find.load_spoken`, `[spoken]` in the
-      CLI). OPEN: speech-aware cutting (don't cut mid-sentence, spoken moments
-      as protected slots, duck-the-music in mix mode) and a transcribe button in
-      Studio.
+      CLI). ALSO DONE: a **Transcribe button** in the Media Pool
+      (`POST /api/create/transcribe` → `<clip>.json` sidecars via whisper; the
+      CLI `monteur transcribe` too). OPEN: speech-aware CUTTING (don't cut
+      mid-sentence, spoken moments as protected slots, duck-the-music in mix
+      mode) — the hard montage-engine integration.
 - [x] Movie creator stage 1 (`monteur movie new`): idea + constraints ->
       Claude drafts the blueprint — Fountain screenplay (assembly-ready),
       scene list with concrete shooting tips, sound notes, cut intents,

@@ -318,6 +318,58 @@ class TestApi:
         assert "Monteur Studio" in body
 
 
+class TestTranscribeApi:
+    """POST /api/create/transcribe — whisper is always monkeypatched away."""
+
+    def test_transcribe_writes_sidecars(self, server, tmp_path, monkeypatch):
+        from dataclasses import dataclass
+
+        clip = tmp_path / "talk.mp4"
+        clip.write_bytes(b"video")
+
+        @dataclass
+        class _Seg:
+            start: float
+            end: float
+            text: str
+
+        @dataclass
+        class _Tr:
+            segments: list
+            language: str
+
+        def fake_dir(path, **kw):
+            return {str(clip): _Tr(segments=[_Seg(0.0, 2.0, "die Kurve")], language="de")}
+
+        monkeypatch.setattr("monteur.transcribe.transcribe_directory", fake_dir)
+        started = _post(f"{server}/api/create/transcribe", {"folder": str(tmp_path)})
+        job = _wait_for_job(server, started["job"])
+        assert job["state"] == "done"
+        assert job["result"] == {"transcribed": 1, "written": 1}
+        sidecar = clip.with_suffix(".json")
+        assert sidecar.is_file()
+        data = json.loads(sidecar.read_text())
+        assert data["language"] == "de"
+        assert data["segments"][0]["text"] == "die Kurve"
+
+    def test_transcribe_without_whisper_errors_softly(self, server, tmp_path, monkeypatch):
+        from monteur.transcribe import MonteurTranscribeError
+
+        def boom(path, **kw):
+            raise MonteurTranscribeError("install openai-whisper or whisper.cpp")
+
+        monkeypatch.setattr("monteur.transcribe.transcribe_directory", boom)
+        started = _post(f"{server}/api/create/transcribe", {"folder": str(tmp_path)})
+        job = _wait_for_job(server, started["job"])
+        assert job["state"] == "error"
+        assert "whisper" in job["message"]
+
+    def test_transcribe_needs_a_folder(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(f"{server}/api/create/transcribe", {})
+        assert exc.value.code == 400
+
+
 class TestAssemblyApi:
     def _payload(self):
         demo = Path(__file__).parent.parent / "examples" / "demo"

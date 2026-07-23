@@ -2112,6 +2112,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
             <button class="ws-iconbtn" id="ws-size-up" type="button" title="Larger icons" aria-label="Larger icons">+</button>
             <button class="btn" id="cre-scan-btn" type="button" disabled>Analyze selected<span class="spin" aria-hidden="true"></span></button>
             <button class="btn" id="cre-see-btn" type="button" disabled>Check with Claude<span class="spin" aria-hidden="true"></span></button>
+            <button class="btn" id="cre-transcribe-btn" type="button" title="Transcribe speech (whisper) so you can search spoken words">Transcribe<span class="spin" aria-hidden="true"></span></button>
             <button class="btn primary" id="cre-next-1" type="button" hidden>Continue to options &rarr;</button>
           </div>
 
@@ -6521,6 +6522,35 @@ function seeSelected() { runStagedAnalysis("see", {}); }
 function scanFolder() { analyzeSelected(); }
 $("cre-scan-btn").addEventListener("click", analyzeSelected);
 $("cre-see-btn").addEventListener("click", seeSelected);
+/* Transcribe the pool's folder (whisper -> <clip>.json), so spoken words are
+   searchable. A light flow of its own — it does NOT touch the build/plan. */
+function transcribeFolder() {
+  var folder = poolScanFolder();
+  if (!folder) { toast("Add footage to the pool first."); return; }
+  var btn = $("cre-transcribe-btn");
+  if (btn.classList.contains("busy")) return;
+  btn.classList.add("busy"); btn.disabled = true;
+  $("cre-scan-msg").hidden = true;
+  creNote("cre-scan-msg", "Transcribing speech… (needs whisper installed)");
+  api("/api/create/transcribe", { method: "POST", body: { folder: folder } }).then(function (data) {
+    (function poll() {
+      api("/api/jobs/" + data.job).then(function (job) {
+        if (job.state === "running") { setTimeout(poll, 900); return; }
+        btn.classList.remove("busy"); btn.disabled = false;
+        if (job.state === "error") { creNote("cre-scan-msg", job.message || "Transcription failed.", true); return; }
+        var r = job.result || {};
+        creNote("cre-scan-msg", "Transcribed " + (r.transcribed || 0) + " clip" + ((r.transcribed === 1) ? "" : "s") + " — you can now search spoken words in the storyboard.");
+      }).catch(function (err) {
+        btn.classList.remove("busy"); btn.disabled = false;
+        creNote("cre-scan-msg", err && err.message ? err.message : String(err), true);
+      });
+    })();
+  }).catch(function (err) {
+    btn.classList.remove("busy"); btn.disabled = false;
+    creNote("cre-scan-msg", err && err.message ? err.message : String(err), true);
+  });
+}
+$("cre-transcribe-btn").addEventListener("click", transcribeFolder);
 $("cre-pool-path").addEventListener("keydown", function (e) {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); analyzeSelected(); }
 });

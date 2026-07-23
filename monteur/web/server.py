@@ -1397,6 +1397,42 @@ def _run_scan_job(job: dict, folder: str, see: bool = False) -> None:
         job["state"] = "error"
 
 
+def _run_transcribe_job(job: dict, folder: str) -> None:
+    """Daemon-thread body for POST /api/create/transcribe.
+
+    Transcribes every clip in ``folder`` (whisper), writing a ``<clip>.json``
+    sidecar next to each — the same signal ``monteur find`` searches as spoken
+    words. Needs a whisper backend installed; without one, transcribe raises a
+    MonteurTranscribeError whose message says how to install it, surfaced to the
+    UI verbatim.
+    """
+    from dataclasses import asdict
+
+    from monteur.transcribe import MonteurTranscribeError, transcribe_directory
+
+    try:
+        results = transcribe_directory(folder)
+        written = 0
+        for media, transcript in results.items():
+            out = Path(media).with_suffix(".json")
+            if out.exists():
+                continue
+            payload = {
+                "segments": [asdict(s) | {"start": s.start, "end": s.end} for s in transcript.segments],
+                "language": transcript.language,
+            }
+            out.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            written += 1
+        job["result"] = {"transcribed": len(results), "written": written}
+        job["state"] = "done"
+    except (MonteurTranscribeError, FileNotFoundError, ValueError) as exc:
+        job["message"] = str(exc)
+        job["state"] = "error"
+    except Exception as exc:  # noqa: BLE001 — a job thread must never die silently
+        job["message"] = f"internal error: {exc}"
+        job["state"] = "error"
+
+
 def _start_clip_proxies_job(clips: list) -> dict:
     """Kick a background proxies job for a SPECIFIC list of clips; return it.
 
@@ -3464,6 +3500,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/assembly/plan"): self._assembly_plan,
             ("POST", "/api/assembly/export"): self._assembly_export,
             ("POST", "/api/create/scan"): self._create_scan,
+            ("POST", "/api/create/transcribe"): self._create_transcribe,
             ("POST", "/api/create/build"): self._create_build,
             ("POST", "/api/create/series"): self._create_series,
             ("POST", "/api/create/pick"): self._create_pick,
@@ -3767,6 +3804,21 @@ class MonteurHandler(BaseHTTPRequestHandler):
             target=_run_scan_job,
             args=(job, folder, bool(payload.get("see"))),
             name=f"monteur-scan-{job['id']}",
+            daemon=True,
+        ).start()
+        self._send_json({"job": job["id"]})
+
+    def _create_transcribe(self) -> None:
+        """POST /api/create/transcribe — whisper the folder into <clip>.json sidecars."""
+        payload = self._read_json()
+        folder = payload.get("folder", "")
+        if not folder:
+            raise ApiError(400, "missing 'folder' (path to your footage)")
+        job = _new_job("transcribe")
+        threading.Thread(
+            target=_run_transcribe_job,
+            args=(job, folder),
+            name=f"monteur-transcribe-{job['id']}",
             daemon=True,
         ).start()
         self._send_json({"job": job["id"]})
