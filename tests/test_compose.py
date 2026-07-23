@@ -704,6 +704,18 @@ def test_apply_holds_respects_the_source_footage():
     assert len(plan.entries) == 6  # can't stretch past the clip -> no-op
 
 
+def test_apply_holds_when_clip_duration_is_unknown():
+    from monteur.compose import _apply_pacing
+
+    # unknown source length (0.0) is PERMISSIVE — matches the planner's own
+    # extension rule — so a hold still lands instead of being silently blocked
+    plan = _hold_plan(6, clip_dur=0.0)
+    _apply_pacing(plan, None, [{"slot": 1, "seconds": 3.0}])
+    held = plan.entries[1]
+    assert held.record_end - held.record_start == pytest.approx(3.0)
+    assert plan.entries[-1].record_end == 6.0  # total length still unchanged
+
+
 def test_apply_holds_never_touches_a_locked_slot():
     from monteur.compose import _apply_pacing
 
@@ -924,6 +936,31 @@ def test_self_critique_keeps_the_first_cast_when_a_revision_is_no_better(monkeyp
     assert len(calls) == 2  # the pass ran (budget allowed it)
     note = next((n for n in plan.notes if n.startswith("self-critique:")), None)
     assert note is not None and "best effort kept" in note  # honest: not met
+
+
+def test_supersedes_prefers_acceptance_over_a_higher_aggregate():
+    from monteur.critique import Metric, Scorecard, supersedes
+
+    def card(coin_rate, coin_pass, gram_rate):
+        return Scorecard(metrics={
+            "coincidence": Metric(
+                name="coincidence", value=coin_rate, passed=coin_pass,
+                unit="rate", culprits=[], hard=True, sample=5),
+            "grammar": Metric(
+                name="grammar", value=gram_rate, passed=gram_rate == 0.0,
+                unit="rate", culprits=[], hard=False, sample=5),
+        })
+
+    # a plan that MEETS the hard gate but has ugly grammar (low aggregate)
+    passing = card(0.80, True, 1.0)
+    # ...vs one that FAILS the gate but has perfect grammar (higher aggregate)
+    failing = card(0.79, False, 0.0)
+    assert passing.passed() and not failing.passed()
+    assert passing.aggregate() < failing.aggregate()  # the trap the old loop fell for
+    # acceptance-first: the passing plan wins despite the lower aggregate
+    assert supersedes(passing, passing.aggregate(), failing, failing.aggregate())
+    # ...and a failing plan never displaces a passing incumbent
+    assert not supersedes(failing, failing.aggregate(), passing, passing.aggregate())
 
 
 def test_merge_cast_overrides_by_slot_and_keeps_the_rest():

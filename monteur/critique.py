@@ -152,6 +152,22 @@ class Scorecard:
         }
 
 
+def supersedes(card: "Scorecard", agg: float, best: "Scorecard", best_agg: float) -> bool:
+    """True when ``(card, agg)`` should replace ``(best, best_agg)`` as the winner.
+
+    Acceptance FIRST: a plan whose HARD metrics all pass always outranks one
+    that fails a hard gate. Selecting on the raw aggregate alone could crown a
+    gate-failing plan over the one plan that actually passed — the coincidence
+    gate contributes only its continuous rate, so a plan at 0.79 (fails the
+    0.80 bar) plus a good soft metric can out-aggregate a plan at 0.80 that
+    passes. Within the same acceptance status, a strictly higher aggregate
+    wins; ties keep the incumbent (determinism — the earlier pass).
+    """
+    if card.passed() != best.passed():
+        return card.passed()
+    return agg > best_agg + _EPS
+
+
 def _metric_score(m: Metric) -> float:
     """A metric's contribution to the aggregate, in ``[0, 1]``."""
     if m.name == "coincidence" or m.name == "drops":

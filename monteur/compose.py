@@ -61,7 +61,7 @@ from pathlib import Path
 
 from monteur import ai
 from monteur import montage as _montage
-from monteur.critique import Scorecard, critique
+from monteur.critique import Scorecard, critique, supersedes
 from monteur.montage import (
     MontagePlan,
     _shares_material,  # the shared zero-repeat overlap rule
@@ -880,6 +880,12 @@ def _apply_pacing(
         e = entries[i]
         target = targets.get(i)
         if target is not None and (e.record_end - e.record_start) < target - _EPS:
+            # Source-footage guard: only when the clip duration is KNOWN. An
+            # unknown duration (0.0) is treated as unbounded — same as the
+            # planner's own extension rule (montage: "if prev.clip_duration >
+            # eps and ...") — otherwise avail goes negative and every merge is
+            # wrongly blocked, silently no-op'ing pace/holds on those slots.
+            known_dur = (e.clip_duration or 0.0) > _EPS
             avail = (e.clip_duration or 0.0) - e.source_start
             new_end = e.record_end
             j = i + 1
@@ -891,7 +897,10 @@ def _apply_pacing(
                 and _phase_of(j) == _phase_of(i)  # never merge across the arc
                 and (entries[j].record_end - e.record_start)
                 <= _montage._MAX_CUT_SECONDS + _EPS
-                and (entries[j].record_end - e.record_start) <= avail + _EPS
+                and (
+                    not known_dur
+                    or (entries[j].record_end - e.record_start) <= avail + _EPS
+                )
             ):
                 new_end = entries[j].record_end
                 j += 1
@@ -1409,6 +1418,7 @@ def compose_montage(
     )
     best_data = data
     first_card = best_card
+    best_agg = best_card.aggregate()
     passes = 0
     budget = COMPOSE_CRITIQUE_PASSES if critique_passes is None else max(0, critique_passes)
 
@@ -1440,9 +1450,12 @@ def compose_montage(
         plan_i, card_i = _compose_pass(
             grid, merged, reports, locked, music_in_candidates, allow_repeats
         )
-        # keep the better card; ties keep the earlier winner (no churn).
-        if card_i.aggregate() > best_card.aggregate() + _EPS:
-            best_plan, best_card, best_data = plan_i, card_i, merged
+        # keep the better cast — acceptance first (a cut that meets the bar
+        # always beats one that misses it), then higher aggregate; ties keep
+        # the earlier winner (no churn).
+        agg_i = card_i.aggregate()
+        if supersedes(card_i, agg_i, best_card, best_agg):
+            best_plan, best_card, best_data, best_agg = plan_i, card_i, merged, agg_i
 
     # Pace the WINNING cast once: the composer's base tempo (fast for energy,
     # slow for a landscape / cinematic piece), varied per phase when the arc

@@ -34,7 +34,7 @@ byte-identical default; refine is strictly opt-in (a flag, the Studio's
 
 from __future__ import annotations
 
-from monteur.critique import Scorecard, critique
+from monteur.critique import Scorecard, critique, supersedes
 from monteur.montage import (
     MIN_CUT_INTERVAL,
     CastingBias,
@@ -179,8 +179,9 @@ def refine_plan(
                 "scorecard": card.as_dict(),
             }
         )
-        # Keep the best; ties keep the earlier winner (determinism).
-        if agg > best_agg + _EPS:
+        # Keep the best — acceptance first (a passing plan always beats a
+        # failing one), then higher aggregate; ties keep the earlier winner.
+        if supersedes(card, agg, best_card, best_agg):
             best_plan, best_agg, best_card = plan, agg, card
         passes += 1
 
