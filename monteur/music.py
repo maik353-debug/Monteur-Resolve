@@ -194,11 +194,10 @@ def _pick_tempo_lag(env: np.ndarray, frame_period: float) -> float:
     """Beat period in frames from the onset-envelope autocorrelation.
 
     Searches 60..200 BPM with HARMONIC scoring: a candidate lag is scored by
-    its own autocorrelation plus _HARMONIC_WEIGHT x the autocorrelation at
-    its double and half lag (a true beat period is supported by its bar and
-    half-beat structure; a spurious bar-level peak is not supported below).
-    Candidates inside the 90..150 BPM octave get a mild _OCTAVE_BONUS.
-    Returns 0.0 when no periodicity is found.
+    its own autocorrelation plus _HARMONIC_WEIGHTS x the autocorrelation at
+    its integer multiples (2x the bar, 3x — a true beat period is supported by
+    its bar structure; a spurious bar-level peak is not). Candidates inside the
+    90..150 BPM octave get a mild prior. Returns 0.0 when no periodicity found.
     """
     # ceil, not floor: a lag one frame short of the 200 BPM period is a
     # 206+ BPM grid — eighth-note territory — and must stay out of range.
@@ -207,8 +206,12 @@ def _pick_tempo_lag(env: np.ndarray, frame_period: float) -> float:
     if env.size < 2 * lag_min + 2 or lag_max <= lag_min:
         return 0.0
 
-    # Compute out to 2*lag_max so every candidate's double lag is scored.
-    acf = _autocorrelate(env, min(2 * lag_max, env.size - 1))
+    # Compute out to max_mult*lag_max so EVERY candidate's harmonics are scored
+    # against the same set. Sizing only to 2*lag_max dropped the 3x term for
+    # slow candidates (60..90 BPM, where 3*lag > 2*lag_max) while crediting it
+    # for faster ones — a systematic bias toward the double-time octave.
+    max_mult = max((mult for mult, _ in _HARMONIC_WEIGHTS), default=1)
+    acf = _autocorrelate(env, min(max_mult * lag_max, env.size - 1))
     if acf.size <= lag_min:
         return 0.0
 
