@@ -1525,38 +1525,12 @@ svg text.axis {
   overflow: hidden;
 }
 .sb-pin { align-self: flex-start; margin-top: auto; padding: 1px 8px; font-size: 10.5px; }
-.sb-dip {
-  width: 52px; display: flex; flex-direction: column; align-items: center;
-  justify-content: center; gap: 4px; padding: 6px 5px; text-align: center;
-  background: #000; border: 1px solid var(--border); border-radius: 3px;
-  color: #d3d4dc;
-}
-.sb-dip-title {
-  font-size: 9.5px; line-height: 1.3; font-weight: 600;
-  letter-spacing: 0.04em; overflow-wrap: anywhere;
-  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.sb-dip-dur { font-family: var(--mono); font-size: 9px; color: #8a8b95; }
 .sb-act {
   align-self: stretch; display: flex; align-items: center; padding: 4px 3px;
   writing-mode: vertical-rl; transform: rotate(180deg);
   border-right: 2px solid var(--accent); color: var(--ink-2);
   font-size: 9.5px; font-weight: 700; letter-spacing: 0.08em;
   text-transform: uppercase; max-height: 116px; overflow: hidden;
-}
-
-/* step 3 (Storyboard): act section headers group the board's cards */
-.sb-act-head {
-  flex-basis: 100%; display: flex; align-items: baseline; gap: 10px;
-  margin: 6px 0 0; padding: 2px 0 3px; border-bottom: 1px solid var(--grid);
-  color: var(--accent); font-size: 10px; font-weight: 700;
-  letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;
-}
-.sb-act-head .act-intent {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis;
-  color: var(--ink-2); font-size: 11.5px; font-weight: 500;
-  letter-spacing: 0; text-transform: none;
 }
 
 /* the music-entry note under the story line */
@@ -1566,19 +1540,6 @@ svg text.axis {
   overflow-wrap: anywhere;
 }
 
-/* editable dip titles (the black title cards) */
-button.sb-dip-title {
-  background: none; border: 0; padding: 0; margin: 0; cursor: text;
-  color: inherit; font: inherit; text-align: center; max-width: 100%;
-}
-button.sb-dip-title:hover, button.sb-dip-title:focus-visible {
-  color: var(--accent-soft);
-}
-input.sb-dip-input {
-  width: 100%; padding: 1px 2px; border: 1px solid var(--axis);
-  border-radius: 2px; background: #131316; color: #e8e9ee;
-  font-size: 9.5px; line-height: 1.3; text-align: center;
-}
 
 /* ===== multi-lane timeline (Resolve idiom) ==========================
    A fixed-width track-header gutter (V1 / TITLE / A1 / A2) beside the time
@@ -1679,6 +1640,26 @@ input.sb-dip-input {
 :root[data-theme="light"] .tl-block-lbl {
   color: rgba(20, 20, 24, 0.82); text-shadow: 0 1px 1px rgba(255, 255, 255, 0.5);
 }
+/* the ▶ watch affordance on a clip block — hidden until hover/focus, and
+   only where the block is wide enough to show it without crowding */
+.tl-play {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: 18px; height: 18px; border-radius: 50%; display: none;
+  align-items: center; justify-content: center; z-index: 3; cursor: pointer;
+  background: rgba(0, 0, 0, 0.55); color: #fff; font-size: 8px; line-height: 1;
+  padding-left: 1px;
+}
+.tl-block:hover .tl-play, .tl-block:focus-within .tl-play, .tl-play:focus-visible { display: inline-flex; }
+.tl-play:hover { background: var(--accent); }
+/* build reveal: each clip drops into the timeline in record order (staggered
+   by JS via animation-delay), so you SEE the cut assemble left-to-right */
+@keyframes tlBlockIn {
+  0% { opacity: 0; transform: translateY(-9px) scaleX(0.55); }
+  60% { opacity: 1; }
+  100% { opacity: 1; transform: translateY(0) scaleX(1); }
+}
+.tl-block.tl-anim-in { animation: tlBlockIn 0.34s cubic-bezier(0.2, 0.8, 0.3, 1) both; transform-origin: left center; }
+@media (prefers-reduced-motion: reduce) { .tl-block.tl-anim-in { animation: none; } }
 .tl-block.ph-opening, .tl-legend i.ph-opening { background: var(--phase-opening); }
 .tl-block.ph-build, .tl-legend i.ph-build { background: var(--phase-build); }
 .tl-block.ph-climax, .tl-legend i.ph-climax { background: var(--phase-climax); }
@@ -1754,13 +1735,7 @@ input.sb-dip-input {
 }
 
 /* storyboard extras: click-to-inspect selection + inline finding badges */
-#cre-sb-board .sb-card[data-slot] { cursor: pointer; }
 .sb-card.sel { outline: 2px solid var(--accent); outline-offset: -1px; }
-.sb-flag {
-  position: absolute; top: 3px; right: 3px; width: 9px; height: 9px;
-  border-radius: 50%; background: var(--warning);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5); pointer-events: none;
-}
 
 /* shot inspector: a fixed right drawer in the Resolve idiom (not a modal) */
 .inspector {
@@ -2661,8 +2636,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
               </div>
             </div>
             <p class="tl-legend" id="cre-strip-legend" hidden></p>
-            <div class="sb-board" id="cre-sb-board"></div>
-            <p class="help-small">One card per shot in record order, grouped by act; the black cards are dips to black &mdash; click their text to edit the title. Click a shot &mdash; in the strip above or on its card &mdash; to open the inspector: swap its source, change its boundary, pin it. Pinned shots survive every revision exactly where they are.</p>
+            <p class="help-small">Your cut as one timeline. Click a clip to open the inspector (swap its source, move it, change its boundary, delete or pin it); the ▶ on a clip watches just that moment; the Title lane edits act titles; the A2 lane edits sound. Pinned shots survive every revision exactly where they are.</p>
           </div>
           <details class="fine-tune rank-details" id="cre-find" style="margin-top: 14px;">
             <summary>Search your footage — what did Claude see?</summary>
@@ -7993,6 +7967,7 @@ function attachBuildJob(jobId, body, andThen) {
       $("cre-rev-msg").hidden = true;
       creUpdatePages(); // a working draft exists — light the Storyboard tick
       renderStoryboard();
+      animateTimelineBuild(); // a fresh build assembles into the timeline
       resetDirectorNotes(); // a fresh cut makes any previous review stale
       resetPreview();       // ...and any previous preview shows the old cut
       renderCreResult(result);
@@ -9158,7 +9133,6 @@ function creResetRevise() {
   $("cre-tl-frame").hidden = true;
   $("cre-tl-bar").hidden = true;
   var seriesStrip = $("cre-series-strip"); if (seriesStrip) { clear(seriesStrip); seriesStrip.hidden = true; }
-  clear($("cre-sb-board"));
   $("cre-storyboard").hidden = true;
   $("cre-sb-story").hidden = true;
   $("cre-sb-music").hidden = true;
@@ -9236,64 +9210,12 @@ function sbMusicLine(notes) {
 }
 
 /* an act section header: the board groups its cards under these */
-function sbActHeader(number, text) {
-  var head = el("div", "sb-act-head");
-  head.appendChild(el("span", null, "Act " + number));
-  if (text) head.appendChild(el("span", "act-intent", text));
-  head.title = "Act " + number + (text ? ": " + text : "");
-  return head;
-}
-
-function sbDipCard(dipIndex, dip, titles) {
-  var card = el("div", "sb-dip");
-  var title = String((titles && titles[dipIndex]) || "").trim();
-  var btn = el("button", "sb-dip-title", title || "to black");
-  btn.type = "button";
-  btn.setAttribute("aria-label", "Edit the title on black dip " + (dipIndex + 1) +
-    (title ? " — currently “" + title + "”" : ""));
-  btn.addEventListener("click", function () {
-    startDipTitleEdit(btn, dipIndex, title);
-  });
-  card.appendChild(btn);
-  card.appendChild(el("span", "sb-dip-dur", fmt1(dip[1] || 0) + "s"));
-  card.title = title
-    ? "Title card: “" + title + "” — click the text to edit it"
-    : "Dip to black — click the text to add a title";
-  return card;
-}
-
 /* ---- step 3: dip titles are editable text (pure plan surgery) ----------
-   Clicking a dip card's text swaps it for a tiny input; Enter/blur sends
-   {plan_json, dip, title} to POST /api/plan/adjust — the boundary
-   control's endpoint grew a title mode: title_texts surgery only, no
-   re-plan, rendered like an export so the plan replaces in place. */
-
-function startDipTitleEdit(btn, dipIndex, current) {
-  if (buildPanel.running() || revisePanel.running() || directPanel.running()) return;
-  var input = document.createElement("input");
-  input.type = "text";
-  input.className = "sb-dip-input";
-  input.value = current;
-  input.maxLength = 80;
-  input.setAttribute("aria-label", "Title text for black dip " + (dipIndex + 1));
-  var done = false;
-  function finish(commit) {
-    if (done) return;
-    done = true;
-    var text = input.value.trim();
-    input.replaceWith(btn);
-    if (commit && text !== current) applyDipTitle(dipIndex, text);
-  }
-  input.addEventListener("keydown", function (e) {
-    e.stopPropagation(); // the inspector's shortcuts must not fire mid-edit
-    if (e.key === "Enter") { e.preventDefault(); finish(true); }
-    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
-  });
-  input.addEventListener("blur", function () { finish(true); });
-  btn.replaceWith(input);
-  input.focus();
-  input.select();
-}
+   The timeline's Title lane markers open the inspector (selectDip ->
+   renderTitleInspector); saving sends {plan_json, dip, title, title_anim}
+   to POST /api/plan/adjust — the boundary control's endpoint grew a title
+   mode: title_texts surgery only, no re-plan, rendered like an export so
+   the plan replaces in place. */
 
 function applyDipTitle(dipIndex, text, anim) {
   if (!rev.planJson) return;
@@ -9394,14 +9316,13 @@ function sbEntryCard(entry, i, noPin) {
 }
 
 function renderStoryboard() {
-  var board = $("cre-sb-board");
-  clear(board);
+  // ONE timeline is the storyboard now (blueprint declutter): the proportional
+  // strip carries every shot — click a block to select it (inspector: swap /
+  // move / delete / pin), the ▶ to watch it, the title lane to edit act
+  // titles, the SFX lane to edit sound. No separate card board anymore.
   var plan = rev.planJson || {};
   var entries = ((plan.entries || []).slice()).sort(function (a, b) {
     return (a.record_start || 0) - (b.record_start || 0);
-  });
-  var dips = ((plan.dips || []).slice()).sort(function (a, b) {
-    return (a[0] || 0) - (b[0] || 0);
   });
   var notes = plan.notes || [];
   var story = sbStoryLine(notes);
@@ -9410,34 +9331,14 @@ function renderStoryboard() {
   var musicNote = sbMusicLine(notes);
   $("cre-sb-music").textContent = musicNote ? "♪ " + musicNote : "";
   $("cre-sb-music").hidden = !musicNote;
-  var acts = sbActTitles(notes);
-  var act = 1;
-  // the board groups by act where acts exist: full-width section headers
-  if (entries.length && acts[act]) board.appendChild(sbActHeader(act, acts[act]));
-  var dipIndex = 0;
-  entries.forEach(function (entry, i) {
-    // dips are record gaps — every dip starting at/before this entry's
-    // start sits between the previous card and this one
-    while (dipIndex < dips.length && (dips[dipIndex][0] || 0) <= (entry.record_start || 0) + 0.001) {
-      board.appendChild(sbDipCard(dipIndex, dips[dipIndex], plan.title_texts));
-      dipIndex += 1;
-      act += 1;
-      if (acts[act]) board.appendChild(sbActHeader(act, acts[act]));
-    }
-    board.appendChild(sbEntryCard(entry, i));
-  });
-  for (; dipIndex < dips.length; dipIndex++) {
-    board.appendChild(sbDipCard(dipIndex, dips[dipIndex], plan.title_texts));
-  }
   $("cre-storyboard").hidden = entries.length === 0;
   $("cre-revise").hidden = entries.length === 0;
   $("cre-direct").hidden = entries.length === 0;
-  // the proportional strip mirrors the board (shared selection + badges)
   if (insp.slot !== null && insp.slot >= entries.length) closeInspector();
   renderTimelineStrip();
   if (insp.slot !== null) renderInspector();
-  renderMissingHook(); // the step-1 coverage result, collapsed by the board
-  if ($("cre-arrange-tools").open) arrRender(); // the lane mirrors the board
+  renderMissingHook(); // the step-1 coverage result
+  if ($("cre-arrange-tools").open) arrRender(); // the add-a-scene lane
   poRebuild(); // the playout plan follows every build/revise/apply/adjust
 }
 
@@ -10577,21 +10478,15 @@ function findingsBySlot() {
   return map;
 }
 
-/* (re)decorate storyboard cards + strip blocks with amber finding dots */
+/* (re)decorate the timeline blocks with amber finding dots */
 function applyFindingBadges() {
   Array.prototype.forEach.call(
-    document.querySelectorAll("#cre-sb-board .sb-flag, #cre-strip-blocks .tl-flag"),
+    document.querySelectorAll("#cre-strip-blocks .tl-flag"),
     function (node) { node.remove(); }
   );
   var map = findingsBySlot();
   Object.keys(map).forEach(function (key) {
     var texts = map[key].join("\n");
-    var card = document.querySelector('#cre-sb-board .sb-card[data-slot="' + key + '"] .sb-thumb-wrap');
-    if (card) {
-      var dot = el("span", "sb-badge sb-flag");
-      dot.title = texts;
-      card.appendChild(dot);
-    }
     var block = document.querySelector('#cre-strip-blocks .tl-block[data-slot="' + key + '"]');
     if (block) {
       block.appendChild(el("span", "tl-flag"));
@@ -10603,6 +10498,25 @@ function applyFindingBadges() {
 function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
+
+/* Build reveal: after a fresh build paints the strip, drop each clip into
+   the timeline in record order (staggered), so you SEE the cut assemble —
+   the sibling of the analysis scan animation. Re-adds the class on the next
+   frame so the CSS animation restarts; capped delay keeps a long cut snappy. */
+function animateTimelineBuild() {
+  var blocks = document.querySelectorAll("#cre-strip-blocks .tl-block");
+  Array.prototype.forEach.call(blocks, function (block, i) {
+    block.classList.remove("tl-anim-in");
+    block.style.animationDelay = Math.min(i * 55, 1200) + "ms";
+  });
+  requestAnimationFrame(function () {
+    Array.prototype.forEach.call(blocks, function (block) {
+      block.classList.add("tl-anim-in");
+    });
+  });
+}
+// test seam (like window.monteurScanAnim): drive the build reveal directly
+window.monteurBuildAnim = function () { animateTimelineBuild(); };
 
 function renderTimelineStrip() {
   var host = $("cre-strip");
@@ -10665,6 +10579,20 @@ function renderTimelineStrip() {
     block.appendChild(el("span", "tl-block-lbl",
       String(i + 1) + (onDrop ? " · drop" : "")));
     block.addEventListener("click", function () { selectSlot(i); });
+    // a ▶ affordance to watch just this shot's segment in the mini-player —
+    // its click is isolated so the block body still opens the inspector
+    var play = el("span", "tl-play sb-play", "▶");
+    play.setAttribute("role", "button");
+    play.tabIndex = 0;
+    play.title = "Watch this moment";
+    play.setAttribute("aria-label", "Watch shot " + (i + 1));
+    var pClip = entry.clip_path, pS = entry.source_start || 0, pE = entry.source_end || 0;
+    var pLbl = "Shot " + (i + 1) + " — " + baseName(entry.clip_path);
+    play.addEventListener("click", function (e) { e.stopPropagation(); openMiniPlayer(pClip, pS, pE, pLbl); });
+    play.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); openMiniPlayer(pClip, pS, pE, pLbl); }
+    });
+    block.appendChild(play);
     blocks.appendChild(block);
   });
   for (; dipIndex < dips.length; dipIndex++) addDip(dips[dipIndex]);
@@ -10920,11 +10848,11 @@ function selectSlot(i) {
   insp.dip = null;  // selecting a shot leaves title mode
   insp.sfx = null;  // ...and sound mode
   Array.prototype.forEach.call(
-    document.querySelectorAll("#cre-sb-board .sb-card[data-slot], #cre-strip-blocks .tl-block"),
+    document.querySelectorAll("#cre-strip-blocks .tl-block"),
     function (node) { node.classList.toggle("sel", node.dataset.slot === String(i)); }
   );
-  var card = document.querySelector('#cre-sb-board .sb-card[data-slot="' + i + '"]');
-  if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest", inline: "nearest" });
+  var block = document.querySelector('#cre-strip-blocks .tl-block[data-slot="' + i + '"]');
+  if (block && block.scrollIntoView) block.scrollIntoView({ block: "nearest", inline: "nearest" });
   renderInspector();
   $("cre-inspector").hidden = false;
 }
@@ -10972,7 +10900,7 @@ function closeInspector() {
   insp.sfx = null;
   $("cre-inspector").hidden = true;
   Array.prototype.forEach.call(
-    document.querySelectorAll("#cre-sb-board .sb-card.sel, #cre-strip-blocks .tl-block.sel"),
+    document.querySelectorAll("#cre-strip-blocks .tl-block.sel"),
     function (node) { node.classList.remove("sel"); }
   );
 }
@@ -11039,9 +10967,6 @@ function syncInspPin() {
 
 $("cre-insp-pin").addEventListener("click", function () {
   if (insp.slot === null) return;
-  var card = document.querySelector('#cre-sb-board .sb-card[data-slot="' + insp.slot + '"]');
-  var pin = card && card.querySelector(".sb-pin");
-  if (pin) { pin.click(); return; } // one pin state, one toggle path
   var entries = planSortedEntries();
   var entry = entries[insp.slot];
   if (!entry) return;

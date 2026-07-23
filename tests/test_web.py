@@ -1188,9 +1188,9 @@ class TestWizardStepsUi:
             'id="cre-sb-story"',
             'id="cre-sb-music"',
             'id="cre-preview-btn"',
-            # the strip and the board
+            # ONE timeline is the storyboard now (no separate card board)
             'id="cre-strip"',
-            'id="cre-sb-board"',
+            'id="cre-strip-blocks"',
             # the order editor + the relocated footage search
             'id="cre-arrange-tools"',
             "Add / reorder scenes",
@@ -1212,6 +1212,7 @@ class TestWizardStepsUi:
             'id="cre-kit-btn"',
             'id="cre-save-draft"',
             'id="yt-x-block"',
+            'id="cre-sb-board"',  # the redundant card board was retired
         ):
             assert absent not in step3, absent
         # the music-entry note comes from the plan notes
@@ -1228,6 +1229,21 @@ class TestWizardStepsUi:
         assert "resync_audio: true" in html
         # it is only revealed when the plan carries an SFX layer
         assert 'resyncBtn.hidden = !((plan.sfx || []).length)' in html
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_build_reveal_animation_is_wired(self):
+        # a fresh build staggers the clips into the timeline (the sibling of
+        # the analysis scan animation), with a test seam and reduced-motion
+        html = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            "function animateTimelineBuild",
+            "window.monteurBuildAnim",
+            "@keyframes tlBlockIn",
+            "tl-anim-in",
+            "animateTimelineBuild(); // a fresh build assembles into the timeline",
+            "prefers-reduced-motion: reduce",
+        ):
+            assert needle in html, needle
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_folder_favorites_are_wired(self):
@@ -1376,15 +1392,21 @@ class TestWizardStepsUi:
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_dip_titles_are_editable(self):
+        # dip titles are edited in the inspector now (the timeline's Title lane
+        # marker opens it), not an inline card field
         html = _APP_HTML.read_text(encoding="utf-8")
         for needle in (
-            "function startDipTitleEdit",
+            "function selectDip",
+            "function renderTitleInspector",
             "function applyDipTitle",
-            "sb-dip-input",
+            'id="cre-insp-title-text"',
             "dip: dipIndex, title: text",
             '"/api/plan/adjust"',
         ):
             assert needle in html, needle
+        # the old inline dip-card editor is gone
+        assert "function startDipTitleEdit" not in html
+        assert "sb-dip-input" not in html
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_footage_page_fine_tune_boxes_are_retired(self):
@@ -5015,17 +5037,20 @@ class TestStoryboardAndPreviewUi:
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_app_has_the_storyboard(self):
         source = _APP_HTML.read_text(encoding="utf-8")
+        # the storyboard IS the timeline now (one strip, no card board)
         for needle in (
             'id="cre-storyboard"',
-            'id="cre-sb-board"',
+            'id="cre-strip"',
+            'id="cre-strip-blocks"',   # the V1 clip blocks — the shots
             'id="cre-sb-story"',
-            "/api/thumb?clip=",       # storyboard thumbs come from the API
-            'loading = "lazy"',       # thumbs lazy-load as cards scroll in
-            "pin-btn sb-pin",         # THE pin toggle lives on the card
-            "sb-dip",                 # dip markers render between cards
-            "sbActTitles",            # composer act labels degrade gracefully
+            "function renderTimelineStrip",
+            "tl-play",                 # ▶ watch affordance re-homed onto blocks
+            "openMiniPlayer",          # ...opens the shared mini-player
+            "sbActTitles",             # composer act labels degrade gracefully
         ):
             assert needle in source, needle
+        # the redundant card board is gone
+        assert 'id="cre-sb-board"' not in source
         # the storyboard replaced the old revise pin list completely
         assert "cre-rev-entries" not in source
         assert "renderReviseEntries" not in source
@@ -6680,8 +6705,7 @@ class TestProUiStatic:
         for needle in (
             "function findingsBySlot",
             "function applyFindingBadges",
-            "sb-flag",
-            "tl-flag",
+            "tl-flag",  # finding dots land on the timeline blocks now
             # issues[].slots from the review, plus parseable engine notes
             "(issue.slots || []).forEach",
             "arrangement: scenes (",
@@ -7143,7 +7167,7 @@ class TestPlayoutAcceptance:
             page.fill("#cre-maxlen", "12")
             page.click("#cre-next-2")  # entering the storyboard builds
             page.wait_for_selector(
-                "#cre-sb-board .sb-card", state="visible", timeout=180_000
+                "#cre-strip-blocks .tl-block", state="visible", timeout=180_000
             )
             page.wait_for_selector("#cre-playout", state="visible")
             duration = page.evaluate(po + ".duration")
@@ -7187,9 +7211,14 @@ class TestPlayoutAcceptance:
             readout = page.text_content("#po-time")
             assert not readout.startswith("0:00 /")  # the readout jumped too
 
-            # ---- moment player: click a board card's thumbnail -------------
+            # ---- moment player: the timeline block's ▶ affordance ----------
             entry = page.evaluate("window.monteurPlayout.entries()[0]")
-            page.click("#cre-sb-board .sb-card[data-slot='0'] .sb-thumb-wrap")
+            # the ▶ reveals on hover; on a narrow block a coordinate click is
+            # unreliable, so fire its click handler directly (same as a user's
+            # click on the affordance — it opens the shared mini-player)
+            play = page.query_selector("#cre-strip-blocks .tl-block[data-slot='0'] .tl-play")
+            assert play is not None, "the timeline block must carry a ▶ affordance"
+            play.evaluate("el => el.click()")
             page.wait_for_selector("#mini-player", state="visible")
             title = page.text_content("#mini-title")
             assert Path(str(entry["clip_path"])).name in title
@@ -7324,7 +7353,7 @@ class TestPlayoutAcceptance:
             page.fill("#cre-maxlen", "12")
             page.click("#cre-next-2")
             page.wait_for_selector(
-                "#cre-sb-board .sb-card", state="visible", timeout=180_000
+                "#cre-strip-blocks .tl-block", state="visible", timeout=180_000
             )
             page.wait_for_selector("#cre-playout", state="visible")
             assert page.evaluate(po + '.audioMode') == "music"
@@ -7491,7 +7520,7 @@ class TestNoRebuildOnCleanReturn:
             page.fill("#cre-maxlen", "12")
             page.click("#cre-next-2")
             page.wait_for_selector(
-                "#cre-sb-board .sb-card", state="visible", timeout=180_000
+                "#cre-strip-blocks .tl-block", state="visible", timeout=180_000
             )
             assert len(build_posts) == 1
             board_1 = page.evaluate(board_js)
@@ -7504,7 +7533,7 @@ class TestNoRebuildOnCleanReturn:
             page.locator("#cre-next-2").scroll_into_view_if_needed()
             page.screenshot(path=str(shots / "norebuild-02-options-clean.png"))
             page.click("#cre-next-2")
-            page.wait_for_selector("#cre-sb-board .sb-card", state="visible")
+            page.wait_for_selector("#cre-strip-blocks .tl-block", state="visible")
             page.wait_for_timeout(800)  # a rebuild would POST immediately
             assert len(build_posts) == 1, "clean navigation must never rebuild"
             assert page.evaluate(board_js) == board_1  # the board is identical
@@ -7524,7 +7553,7 @@ class TestNoRebuildOnCleanReturn:
             ):
                 page.click("#cre-next-2")
             page.wait_for_selector(
-                "#cre-sb-board .sb-card", state="visible", timeout=180_000
+                "#cre-strip-blocks .tl-block", state="visible", timeout=180_000
             )
             assert len(build_posts) == 2
 
@@ -7544,7 +7573,7 @@ class TestNoRebuildOnCleanReturn:
             page.wait_for_selector("#cre-step-2", state="visible")
             assert page.is_hidden("#cre-next-2-hint")  # a revise is NOT dirty
             page.click("#cre-next-2")
-            page.wait_for_selector("#cre-sb-board .sb-card", state="visible")
+            page.wait_for_selector("#cre-strip-blocks .tl-block", state="visible")
             page.wait_for_timeout(800)
             assert len(build_posts) == 2, "a revise must not re-arm the build"
             assert page.evaluate(plan_js) == revised  # the revision is intact
@@ -7560,7 +7589,7 @@ class TestNoRebuildOnCleanReturn:
             )
             page.click("#pm-recents .pm-card")
             page.wait_for_selector(
-                "#cre-sb-board .sb-card", state="visible", timeout=120_000
+                "#cre-strip-blocks .tl-block", state="visible", timeout=120_000
             )
             resumed = page.evaluate(plan_js)
             assert "revision:" in resumed  # the autosave carried the revised cut
@@ -7568,7 +7597,7 @@ class TestNoRebuildOnCleanReturn:
             page.wait_for_selector("#cre-step-2", state="visible")
             assert page.is_hidden("#cre-next-2-hint")  # resume seeds a clean fp
             page.click("#cre-next-2")
-            page.wait_for_selector("#cre-sb-board .sb-card", state="visible")
+            page.wait_for_selector("#cre-strip-blocks .tl-block", state="visible")
             page.wait_for_timeout(800)
             assert len(build_posts) == 2, (
                 "resume -> options -> storyboard must not rebuild"
@@ -8040,7 +8069,7 @@ class TestPlayoutMusicFreeRun:
             page.fill("#cre-maxlen", "12")
             page.click("#cre-next-2")
             page.wait_for_selector(
-                "#cre-sb-board .sb-card", state="visible", timeout=180_000
+                "#cre-strip-blocks .tl-block", state="visible", timeout=180_000
             )
             page.wait_for_selector("#cre-playout", state="visible")
             # Auto sends the exact default payload: no pace key, transitions
