@@ -11918,6 +11918,35 @@ function renderSfxLane(duration, cues) {
 }
 
 /* the beat/energy lane: canvas, redrawn on resize and theme switch */
+/* The music lane's waveform. Fetched once per (song, window, resolution) and
+   cached, so redraws — zoom, theme flip, resize — are free. The lane draws
+   without it and simply gains the peaks when they land; a song that cannot be
+   decoded just never gets any, and the energy shape carries the lane alone. */
+var tlWaveCache = { key: null, peaks: null, pending: false };
+
+function tlWaveFor(plan) {
+  var song = plan.music_path || "";
+  if (!song || !plan.duration) return null;
+  // resolution follows the zoom: more pixels, more buckets (capped server-side)
+  var buckets = Math.max(400, Math.min(4000, Math.round(600 * (tlZoom || 1))));
+  var key = song + "|" + (plan.music_start || 0) + "|" + plan.duration + "|" + buckets;
+  if (tlWaveCache.key === key) return tlWaveCache.peaks;
+  if (tlWaveCache.pending) return tlWaveCache.key ? tlWaveCache.peaks : null;
+  tlWaveCache.pending = true;
+  api("/api/waveform?path=" + encodeURIComponent(song) +
+      "&start=" + encodeURIComponent(String(plan.music_start || 0)) +
+      "&duration=" + encodeURIComponent(String(plan.duration)) +
+      "&buckets=" + buckets)
+    .then(function (d) {
+      tlWaveCache = { key: key, peaks: (d && d.peaks) || [], pending: false };
+      drawStripLane();  // one redraw, now with the peaks
+    })
+    .catch(function () {
+      tlWaveCache = { key: key, peaks: [], pending: false };
+    });
+  return tlWaveCache.peaks;  // whatever we had (or null on the first pass)
+}
+
 function drawStripLane() {
   var canvas = $("cre-strip-lane");
   var plan = rev.planJson || {};
@@ -11936,6 +11965,23 @@ function drawStripLane() {
   function x(t) { return t / duration * cssWidth; }
   var accent = cssVar("--accent");
   var music = cssVar("--music") || accent;
+  // THE WAVEFORM — the amplitude envelope, symmetric around the lane's centre.
+  // Section energy alone (2 samples/s, below) is a shape, not a waveform: at
+  // that resolution a beat is invisible and the lane reads as one block. This
+  // is what you line a cut up against.
+  var wave = tlWaveFor(plan);
+  if (wave && wave.length) {
+    var mid = laneHeight / 2;
+    var half = mid - 2;
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = music;
+    var step = cssWidth / wave.length;
+    for (var wi = 0; wi < wave.length; wi++) {
+      var h = Math.max(0.5, wave[wi] * half);
+      ctx.fillRect(wi * step, mid - h, Math.max(0.6, step - 0.15), h * 2);
+    }
+    ctx.globalAlpha = 1;
+  }
   // energy area fill (plan.music_energy: 2 samples per second), in the A1
   // music colour so the lane reads as the music track (the drop stays ember)
   var energy = plan.music_energy || [];

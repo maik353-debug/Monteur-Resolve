@@ -4073,6 +4073,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/cache/clear"): self._cache_clear,
             ("GET", "/api/jobs"): self._jobs_list,
             ("GET", "/api/sfx/library"): self._sfx_library,
+            ("GET", "/api/waveform"): self._waveform,
         }
         if (method, path) in routes:
             return routes[(method, path)]
@@ -5934,6 +5935,40 @@ class MonteurHandler(BaseHTTPRequestHandler):
         order = {"impact": 0, "whoosh": 1, "riser": 2, "braam": 3, "other": 4}
         elements.sort(key=lambda e: (order.get(e["kind"], 9), e["name"].lower()))
         self._send_json({"folder": folder, "elements": elements})
+
+    def _waveform(self) -> None:
+        """GET /api/waveform?path=&start=&duration=&buckets= — the music lane.
+
+        The amplitude envelope the timeline draws so the BEATS are visible: the
+        lane used to show only section energy at 2 samples/s, which reads as one
+        block. Values are 0..1, normalised to the loudest peak in the window.
+        Decoding is cached per file, so zooming re-slices instead of re-reading.
+        A missing/undecodable song returns an empty list with a reason rather
+        than an error — the lane just falls back to the energy shape."""
+        from urllib.parse import parse_qs, urlsplit
+
+        query = parse_qs(urlsplit(self.path).query)
+
+        def arg(name: str, default: str = "") -> str:
+            return (query.get(name) or [default])[0].strip()
+
+        path = arg("path")
+        if not path:
+            raise ApiError(400, "missing 'path' (the song to draw)")
+        try:
+            start = float(arg("start", "0") or 0)
+            duration = float(arg("duration", "0") or 0)
+            buckets = int(float(arg("buckets", "1200") or 1200))
+        except ValueError:
+            raise ApiError(400, "'start', 'duration' and 'buckets' must be numbers")
+        try:
+            from monteur.waveform import peaks
+
+            values = peaks(path, start=start, duration=duration, buckets=buckets)
+        except Exception as exc:  # noqa: BLE001 — a drawing aid never 500s
+            self._send_json({"peaks": [], "error": str(exc)})
+            return
+        self._send_json({"peaks": values})
 
     def _jobs_cancel(self, job_id: str) -> None:
         # Setting the event on a finished job is a harmless no-op — the

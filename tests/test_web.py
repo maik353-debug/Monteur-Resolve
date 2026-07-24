@@ -1284,6 +1284,17 @@ class TestPlanAdjustSurgery:
         cue0 = sorted(updated["sfx"], key=lambda c: c["time"])[0]
         assert cue0["file"] == "/sfx/my_boom.wav"
 
+    def test_waveform_missing_path_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(f"{server}/api/waveform")
+        assert exc.value.code == 400
+
+    def test_waveform_undecodable_song_is_soft(self, server):
+        # a drawing aid must never 500: the lane falls back to the energy shape
+        data = _get(f"{server}/api/waveform?path=/no/such/song.wav&duration=5")
+        assert data["peaks"] == []
+        assert data["error"]
+
     def test_sfx_library_no_folder_is_empty(self, server):
         data = _get(f"{server}/api/sfx/library")
         assert data == {"folder": "", "elements": []}
@@ -7531,6 +7542,23 @@ class TestProUiStatic:
         # click both seek AND select is gone, because it made dragging impossible
         assert "if (ruler) ruler.addEventListener(\"pointerdown\", startScrub);" in source
         assert 'strip.addEventListener("pointerdown", function (e) {\n    if ($("cre-playout").hidden' not in source
+
+    def test_music_lane_draws_a_waveform(self):
+        # section energy alone is 2 samples/s — a shape, not a waveform. At that
+        # resolution a beat is invisible and the lane reads as one block, which
+        # is useless for lining a cut up against the music.
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            "function tlWaveFor",
+            "tlWaveCache",
+            "/api/waveform?path=",
+            "var wave = tlWaveFor(plan);",
+            "ctx.fillRect(wi * step",      # the symmetric envelope bars
+        ):
+            assert needle in source, needle
+        # resolution follows the zoom, and one fetch serves every redraw
+        assert "600 * (tlZoom || 1)" in source
+        assert "if (tlWaveCache.key === key) return tlWaveCache.peaks;" in source
 
     def test_both_removes_exist_with_their_keys(self):
         # Del leaves the gap (a short black pause is an editorial choice),
