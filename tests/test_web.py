@@ -1986,16 +1986,20 @@ class TestWizardStepsUi:
         assert 'sec: "cre-step-clips"' in html
         assert "var sec = $(s.sec);" in html
         assert "$(step.head).focus()" in html
-        # the review is MOMENT-grained now: a card per moment (thumbnail at the
-        # moment's frame + Claude's per-moment read + a per-moment note)
+        # the review is MOMENT-grained, and it is a flat sortable DETAIL LIST:
+        # grouping by clip could not answer "every hero shot" or "the longest
+        # holds", which is what you actually go to this page for
         for needle in (
             'id="cre-step-clips"',
             'id="cre-clips-grid"',
             "function renderClipsReview",
-            "function momentCard",
-            "function clipMomentsGroup",
-            # each moment card shows the frame at that moment's start
-            '"&t=" + encodeURIComponent(String(m.start',
+            "function flattenMoments",
+            "function renderMomentList",
+            "function momentRow",
+            "var MOMENT_COLUMNS",
+            "function sortMomentRows",
+            # each row shows the frame at that moment's start
+            '"&t=" + encodeURIComponent(String(row.start))',
             # the tab is labelled Moments, and renders on navigation
             'label: "Moments"',
             'if (step.key === "clips") renderClipsReview();',
@@ -2008,11 +2012,42 @@ class TestWizardStepsUi:
             'id="mi-stars"',
             'id="mi-exclude"',
             'id="mi-play"',
-            # clicking a card opens the inspector; leaving the step closes it
-            "openMomentInspector(clipPath, m, card)",
+            # clicking a row opens the inspector; leaving the step closes it
+            "openMomentInspector(row.clip, row._m, node, row)",
             "else closeMomentInspector();",
         ):
             assert needle in html, needle
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_the_moment_list_is_shared_by_both_of_its_homes(self):
+        # ONE list component: the Moments page reviews with it, the storyboard
+        # shelf drags out of it. Two sort states, so each home keeps its view.
+        html = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            "state: momentSort.review",
+            "state: momentSort.shelf",
+            "compact: true",
+            "draggable: true",
+            # a moment DRAGS onto a lane: the lane picks the track, x the time
+            "function tlDragStartMoment",
+            "function tlDropTime",
+            "function tlWireDropTargets",
+            'lane.addEventListener("dragover"',
+            'lane.addEventListener("drop"',
+            "insertMoment(row, at, lane.dataset.track",
+            # and the drop is visible before you commit it
+            "function tlShowDropHint",
+            "tl-dropmark",
+            "droptarget",
+            # the lanes are rebuilt on every render, so they are re-armed there
+            "tlWireDropTargets(); // the lanes are new elements",
+        ):
+            assert needle in html, needle
+        # the retired card view left nothing behind
+        for gone in ("function momentCard", "function clipMomentsGroup",
+                     "function shelfCard", "moments-grid", ".clips-grid",
+                     "mc-badge", "clips-empty"):
+            assert gone not in html, gone
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_build_payload_and_drafts_carry_the_arrangement(self):

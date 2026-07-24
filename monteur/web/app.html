@@ -1349,46 +1349,103 @@ svg text.axis {
 .ws-statusbar .mono { font-family: var(--mono); font-size: 10px; }
 
 .wiz-nav { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
-/* Clips review step: a card per analyzed clip with Claude's read + a note box */
-.clips-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; margin: 4px 0 8px; }
+/* Cards that still carry a clip's read: the footage pool and the coverage hook */
 .clip-card { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
 .clip-card .cc-head { display: flex; align-items: baseline; gap: 8px; }
 .clip-card .cc-name { font-weight: 650; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .clip-card .cc-dur { font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-left: auto; flex: none; }
 .clip-card .cc-label { font-size: 12px; color: var(--ink-2); }
 .clip-card .cc-label.none { color: var(--faint); font-style: italic; }
-.clip-card .cc-meta { display: flex; flex-wrap: wrap; gap: 5px; }
-.clip-card .cc-chip { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.04em; text-transform: uppercase; padding: 2px 6px; border-radius: 999px; background: var(--panel-2); color: var(--dim); }
-.clip-card .cc-chip.role { color: var(--accent); }
-.clip-card .cc-chip.hero { color: var(--ember); }
-.clip-card .cc-tags { font-size: 11px; color: var(--faint); overflow-wrap: anywhere; }
+/* the read chips are shared by the pool cards, the moment list and the
+   moment inspector — the class name is specific enough to stand alone */
+.cc-meta { display: flex; flex-wrap: wrap; gap: 5px; }
+.cc-chip { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.04em; text-transform: uppercase; padding: 2px 6px; border-radius: 999px; background: var(--panel-2); color: var(--dim); }
+.cc-chip.role { color: var(--accent); }
+.cc-chip.hero { color: var(--ember); }
+.cc-tags { font-size: 11px; color: var(--faint); overflow-wrap: anywhere; }
 .clip-card .cc-note { width: 100%; min-height: 46px; resize: vertical; padding: 6px 8px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--surface); color: var(--ink); font: inherit; font-size: 12px; }
 .clip-card .cc-note:focus { border-color: var(--accent); outline: none; }
 .clip-card .cc-note-lbl { font-size: 10.5px; color: var(--faint); }
 .clip-card.has-note { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
-.clips-empty { padding: 24px 12px; color: var(--faint); font-size: 12.5px; text-align: center; }
-/* Moments review: one group per clip, a card per moment (thumbnail + read + note) */
-.moment-group { margin: 0 0 18px; }
-.moment-group .mg-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
-.moment-group .mg-head .cc-name { font-weight: 650; font-size: 13px; }
-.moment-group .mg-count { font-size: 11px; color: var(--faint); }
-.moment-group .mg-unlabeled { margin-left: auto; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--warning); }
-.moments-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-.moment-card { padding: 0; overflow: hidden; gap: 0; }
-.moment-card .mc-thumb { position: relative; aspect-ratio: 16 / 9; background: var(--panel-2); overflow: hidden; }
-.moment-card .mc-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.moment-card .mc-time { position: absolute; left: 6px; bottom: 6px; font-family: var(--mono); font-size: 10px; padding: 2px 6px; border-radius: 999px; background: rgba(20, 20, 24, 0.72); color: #fff; }
-.moment-card { text-align: left; cursor: pointer; color: inherit; font: inherit; transition: border-color 0.12s, box-shadow 0.12s, opacity 0.12s; }
-.moment-card:hover { border-color: var(--accent); }
-.moment-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.moment-card .mc-body { display: flex; flex-direction: column; gap: 7px; padding: 10px 11px; }
-.moment-card.has-note { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
-.moment-card.excluded { opacity: 0.5; }
-.moment-card.excluded .mc-thumb img { filter: grayscale(1); }
-.moment-card .mc-badges { position: absolute; right: 6px; top: 6px; display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
-.mc-badge { font-family: var(--mono); font-size: 9px; letter-spacing: 0.03em; text-transform: uppercase; padding: 2px 6px; border-radius: 999px; background: rgba(20, 20, 24, 0.72); color: #fff; }
-.mc-badge.star { background: var(--ember); color: #1b1b1e; }
-.mc-badge.excl { background: var(--warning); color: #1b1b1e; }
+/* ---- the moment LIST: one shared detail list, two homes ----------------
+   The Moments page reviews with it; the storyboard shelf drags out of it.
+   A CSS grid with one shared column template, so the header and every row
+   line up without a <table>'s layout quirks inside a flex/scroll host. */
+.mlist { --mlist-cols: 64px minmax(120px, 1.1fr) 92px 56px minmax(160px, 2fr) minmax(90px, 0.9fr) 70px; }
+.mlist-head, .mrow {
+  display: grid; grid-template-columns: var(--mlist-cols);
+  gap: 10px; align-items: center;
+}
+.mlist-head {
+  position: sticky; top: 0; z-index: 2;
+  padding: 0 10px 6px; margin-bottom: 2px;
+  background: var(--surface); border-bottom: 1px solid var(--line);
+}
+.mlist-head button {
+  display: flex; align-items: center; gap: 4px;
+  padding: 4px 0; border: 0; background: none; cursor: pointer;
+  font: inherit; font-family: var(--mono); font-size: 9.5px;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint);
+  text-align: left;
+}
+.mlist-head button:hover { color: var(--ink-2); }
+.mlist-head button[aria-sort="ascending"],
+.mlist-head button[aria-sort="descending"] { color: var(--accent); }
+.mlist-head button::after { content: ""; font-size: 8px; }
+.mlist-head button[aria-sort="ascending"]::after { content: "▲"; }
+.mlist-head button[aria-sort="descending"]::after { content: "▼"; }
+.mlist-head .mh-plain {
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--faint);
+}
+.mrow {
+  width: 100%; padding: 6px 10px; border: 1px solid transparent;
+  border-radius: 6px; background: none; color: inherit; font: inherit;
+  text-align: left; cursor: pointer;
+  transition: background-color 0.12s, border-color 0.12s, opacity 0.12s;
+}
+.mrow + .mrow { border-top: 1px solid var(--line); border-top-color: color-mix(in srgb, var(--line) 60%, transparent); }
+.mrow:hover { background: var(--panel-2); border-color: var(--line-2); }
+.mrow:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.mrow.excluded { opacity: 0.45; }
+.mrow.excluded .mr-thumb img { filter: grayscale(1); }
+.mrow.has-note { border-left-color: var(--accent); box-shadow: inset 2px 0 0 var(--accent); }
+.mrow.dragging { opacity: 0.4; }
+.mr-thumb {
+  position: relative; width: 64px; aspect-ratio: 16 / 9; flex: none;
+  overflow: hidden; border-radius: 3px; background: var(--panel-2);
+}
+.mr-thumb .sb-play { font-size: 12px; }
+.mr-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.mr-clip { overflow: hidden; }
+.mr-name { display: block; font-size: 12px; font-weight: 620; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mr-time, .mr-dur, .mr-hero {
+  font-family: var(--mono); font-size: 10.5px; color: var(--dim); white-space: nowrap;
+}
+.mr-label { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mr-label.none { color: var(--faint); font-style: italic; }
+.mr-read { display: flex; flex-wrap: wrap; gap: 4px; overflow: hidden; }
+.mr-marks { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+.mlist .cc-chip {
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.04em;
+  text-transform: uppercase; padding: 1px 6px; border-radius: 999px;
+  background: var(--panel-2); color: var(--dim); white-space: nowrap;
+}
+.mlist .cc-chip.role { color: var(--accent); }
+.mlist .cc-chip.hero { color: var(--ember); }
+.mlist-empty { padding: 22px 12px; color: var(--faint); font-size: 12.5px; text-align: center; }
+.mlist-count { font-size: 11px; color: var(--faint); margin: 0 0 6px; }
+/* the shelf's copy: draggable, denser, and the marks are read-only badges */
+.mlist.compact { --mlist-cols: 52px minmax(96px, 1fr) 78px 48px minmax(140px, 2fr) minmax(80px, 0.8fr) 58px; }
+.mlist.compact .mrow { cursor: grab; padding: 4px 8px; }
+.mlist.compact .mrow:active { cursor: grabbing; }
+.mlist.compact .mr-thumb { width: 52px; }
+/* where a dragged moment would land */
+.tl-tracklane.droptarget { box-shadow: inset 0 0 0 2px var(--accent); }
+.tl-dropmark {
+  position: absolute; top: 0; bottom: 0; width: 2px; z-index: 6;
+  background: var(--accent); pointer-events: none;
+}
 /* the moment inspector: a right-side drawer over the Moments grid */
 .moment-insp {
   position: fixed; top: 0; right: 0; bottom: 0; width: min(380px, 92vw); z-index: 60;
@@ -2647,11 +2704,12 @@ window.__MONTEUR_PREFS__ = {};
           <span class="step-chip" aria-hidden="true">2</span>
           <div>
             <h1 id="cre-hclips" tabindex="-1">Your moments</h1>
-            <p class="wiz-lead">The moments Monteur pulled from your footage &mdash; the stretches that actually land in the cut &mdash; grouped by clip, each with the frame Claude saw and what it read there. Add your own note on any moment: what it is, how you want it used, what to skip. Claude weighs your note above its own labels when it composes the cut.</p>
+            <p class="wiz-lead">The moments Monteur pulled from your footage &mdash; the stretches that actually land in the cut &mdash; one row each, with the frame Claude saw and what it read there. Sort by any column to find what you need: every hero shot, the longest holds, what you rated. Click a row to preview it, rate it, exclude it, or write your own note &mdash; Claude weighs your note above its own labels when it composes the cut.</p>
           </div>
         </div>
         <p class="scan-note" id="cre-clips-msg" role="status" hidden></p>
-        <div class="clips-grid" id="cre-clips-grid"></div>
+        <p class="mlist-count" id="cre-clips-count" role="status" hidden></p>
+        <div class="mlist" id="cre-clips-grid"></div>
         <aside class="moment-insp" id="cre-moment-insp" hidden aria-label="Moment inspector">
           <div class="mi-head">
             <span class="mi-title" id="mi-title">Moment</span>
@@ -2981,7 +3039,7 @@ window.__MONTEUR_PREFS__ = {};
               </div>
               <div class="sb-board tl-shelf-board" id="tl-shelf-board"></div>
               <p class="scan-note" id="tl-shelf-msg" role="status" hidden></p>
-              <p class="help-small">Click a moment to drop it on the timeline at the playhead &mdash; it plays at its own length and nothing else moves. Scrub the ruler to choose where; pick a video track to lay cutaways over your main line.</p>
+              <p class="help-small">Drag a row onto the timeline &mdash; the lane you drop on picks the track, the x position picks the time (snapped to the beat while Snap is on). Or click a row to drop it at the playhead on the track chosen here. The moment plays at its own length and nothing else moves. Sort by any column to find what you need; the &#9654; on a frame watches it first.</p>
             </div>
             <p class="help-small">Your cut as one timeline. Click a clip to open the inspector (swap its source, move it, change its boundary, delete or pin it); the ▶ on a clip watches just that moment; the Title lane edits act titles; the A2 lane edits sound. Pinned shots survive every revision exactly where they are.</p>
           </div>
@@ -7984,71 +8042,203 @@ function creNavTo(n) {
    / note). Clicking a card opens the inspector (a side panel) to preview it,
    rate it, exclude it, or write the note — all saved to /moment-mark and read
    by the composer. Works on a re-opened project (it reads the PROJECT store). */
-function momentStateBadges(card, m) {
-  // reflect the editor's marks on the card face (recomputed on every change)
-  var badges = card.querySelector(".mc-badges");
-  clear(badges);
-  card.classList.toggle("excluded", !!m.exclude);
-  card.classList.toggle("has-note", !!(m.note && m.note.trim()));
-  card.classList.toggle("rated", !!m.rating);
-  if (m.exclude) badges.appendChild(el("span", "mc-badge excl", "excluded"));
-  if (m.rating) badges.appendChild(el("span", "mc-badge star", "★ " + m.rating));
-  if (m.note && m.note.trim()) badges.appendChild(el("span", "mc-badge note", "note"));
+/* Reflect the editor's marks on a row (recomputed after every change, so a
+   rating set in the inspector shows up without a refetch). The rank cell
+   reads the rating when there is one and Claude's hero score otherwise —
+   your judgement outranks the machine's. */
+function momentStateBadges(row, m, data) {
+  var marks = row.querySelector(".mr-marks");
+  if (!marks) return;
+  clear(marks);
+  row.classList.toggle("excluded", !!m.exclude);
+  row.classList.toggle("has-note", !!(m.note && m.note.trim()));
+  row.classList.toggle("rated", !!m.rating);
+  if (m.rating) marks.appendChild(el("span", "cc-chip hero", "★ " + m.rating));
+  else if ((data ? data.hero : m.hero || 0) >= 0.6) {
+    marks.appendChild(el("span", "cc-chip hero",
+      "hero " + Number(data ? data.hero : m.hero).toFixed(1)));
+  }
+  if (m.exclude) marks.appendChild(el("span", "cc-chip", "excl"));
+  if (m.note && m.note.trim()) marks.appendChild(el("span", "cc-chip role", "note"));
 }
 
-function momentCard(clipPath, m) {
-  var card = el("button", "clip-card moment-card");
-  card.type = "button";
-  var thumb = el("div", "mc-thumb");
+/* ---- the moment list: ONE component, two homes -------------------------
+   The Moments page reviews with it (click a row → the inspector) and the
+   storyboard shelf drags out of it. Grouping by clip was pretty but it
+   made the useful questions unanswerable: "every hero moment", "the
+   longest ones", "what did I rate". A flat sortable list answers them. */
+
+/* every moment of every clip as one flat row list. `_m` is the LIVE moment
+   object, so an inspector edit shows on the row without a refetch. */
+function flattenMoments(clips) {
+  var rows = [];
+  (clips || []).forEach(function (c) {
+    if (!c) return;
+    (c.moments || []).forEach(function (m) {
+      if (!m) return;
+      rows.push({
+        clip: String(c.path || ""),
+        clipName: String(c.name || baseName(c.path || "")),
+        labeled: c.labeled !== false,
+        start: m.start || 0, end: m.end || 0,
+        label: String(m.label || ""), role: String(m.role || ""),
+        tags: Array.isArray(m.tags) ? m.tags.map(String) : [],
+        hero: typeof m.hero === "number" ? m.hero : 0,
+        daylight: String(m.daylight || ""), shot_size: String(m.shot_size || ""),
+        _m: m
+      });
+    });
+  });
+  return rows;
+}
+
+/* the column model — `sort` is the key function, null = not sortable */
+var MOMENT_COLUMNS = [
+  { key: "thumb", label: "", sort: null },
+  { key: "clip", label: "Clip", sort: function (r) { return r.clipName.toLowerCase(); } },
+  { key: "time", label: "In–out", sort: function (r) { return r.start; } },
+  { key: "dur", label: "Length", sort: function (r) { return r.end - r.start; } },
+  { key: "label", label: "Claude’s read", sort: function (r) { return r.label.toLowerCase(); } },
+  { key: "read", label: "Tags", sort: null },
+  { key: "rank", label: "Rank", sort: function (r) { return r._m.rating || r.hero; } }
+];
+
+/* one sort state per list, so the two homes remember their own view */
+var momentSort = {
+  review: { key: "clip", dir: 1 },
+  shelf: { key: "clip", dir: 1 }
+};
+
+function sortMomentRows(rows, state) {
+  var col = MOMENT_COLUMNS.filter(function (c) { return c.key === state.key; })[0];
+  var keyOf = (col && col.sort) || function (r) { return r.clipName.toLowerCase(); };
+  return rows.slice().sort(function (a, b) {
+    var ka = keyOf(a), kb = keyOf(b);
+    if (ka < kb) return -state.dir;
+    if (ka > kb) return state.dir;
+    // one clip's moments always read in play order, whatever the sort
+    return (a.start - b.start) || a.clipName.localeCompare(b.clipName);
+  });
+}
+
+function momentListHead(state, onSort) {
+  var head = el("div", "mlist-head");
+  MOMENT_COLUMNS.forEach(function (col) {
+    if (!col.sort) {
+      head.appendChild(el("span", "mh-plain", col.label));
+      return;
+    }
+    var btn = el("button", null, col.label);
+    btn.type = "button";
+    var active = state.key === col.key;
+    btn.setAttribute("aria-sort",
+      active ? (state.dir > 0 ? "ascending" : "descending") : "none");
+    btn.addEventListener("click", function () {
+      // same column flips the direction; a new column starts ascending,
+      // except Rank, where "best first" is the only sane opening move
+      if (active) state.dir = -state.dir;
+      else { state.key = col.key; state.dir = col.key === "rank" ? -1 : 1; }
+      onSort();
+    });
+    head.appendChild(btn);
+  });
+  return head;
+}
+
+function momentRow(row, opts) {
+  var m = row._m;
+  var el_ = el("button", "mrow");
+  el_.type = "button";
+  el_.dataset.clip = row.clip;
+  el_.dataset.start = String(row.start);
+  el_.setAttribute("aria-label",
+    row.clipName + " " + fmt1(row.start) + " to " + fmt1(row.end) + " seconds"
+    + (row.label ? " — " + row.label : ""));
+
+  var thumb = el("div", "mr-thumb sb-thumb-wrap");
   var img = document.createElement("img");
   img.loading = "lazy";
   img.alt = "";
-  img.src = thumbUrl(clipPath, 240) + "&t=" + encodeURIComponent(String(m.start || 0));
+  img.src = thumbUrl(row.clip, 160) + "&t=" + encodeURIComponent(String(row.start));
   thumb.appendChild(img);
-  thumb.appendChild(el("span", "mc-time", fmt1(m.start) + "–" + fmt1(m.end) + "s"));
-  thumb.appendChild(el("div", "mc-badges"));
-  card.appendChild(thumb);
-  var body = el("div", "mc-body");
-  var labelText = m.label || (m.role || m.tags && m.tags.length
-    ? "—" : "Not Claude-checked yet — “Let Claude check” on Footage");
-  body.appendChild(el("div", "cc-label" + (m.label ? "" : " none"), labelText));
-  var meta = el("div", "cc-meta");
-  if (m.role) meta.appendChild(el("span", "cc-chip role", m.role));
-  if ((m.hero || 0) >= 0.6) meta.appendChild(el("span", "cc-chip hero", "hero " + Number(m.hero).toFixed(1)));
-  if (m.daylight) meta.appendChild(el("span", "cc-chip", m.daylight));
-  if (m.shot_size) meta.appendChild(el("span", "cc-chip", m.shot_size));
-  if (meta.children.length) body.appendChild(meta);
-  card.appendChild(body);
-  momentStateBadges(card, m);
-  card.addEventListener("click", function () { openMomentInspector(clipPath, m, card); });
-  return card;
+  // the frame plays the moment; the rest of the row does the row's job
+  attachMomentPlayer(thumb, row.clip, row.start, row.end,
+    row.label || row.clipName);
+  el_.appendChild(thumb);
+
+  var clip = el("div", "mr-clip");
+  clip.appendChild(el("span", "mr-name", row.clipName));
+  clip.title = row.clip;
+  el_.appendChild(clip);
+
+  el_.appendChild(el("span", "mr-time", fmt1(row.start) + "–" + fmt1(row.end) + "s"));
+  el_.appendChild(el("span", "mr-dur", fmt1(row.end - row.start) + "s"));
+
+  var labelText = row.label || (row.labeled ? "—" : "not Claude-checked");
+  el_.appendChild(el("span", "mr-label" + (row.label ? "" : " none"), labelText));
+
+  var read = el("div", "mr-read");
+  if (row.role) read.appendChild(el("span", "cc-chip role", row.role));
+  if (row.shot_size) read.appendChild(el("span", "cc-chip", row.shot_size));
+  if (row.daylight) read.appendChild(el("span", "cc-chip", row.daylight));
+  el_.appendChild(read);
+
+  var marks = el("div", "mr-marks");
+  marks.className = "mr-marks";
+  el_.appendChild(marks);
+  momentStateBadges(el_, m, row);
+
+  if (opts && opts.draggable) {
+    el_.draggable = true;
+    el_.addEventListener("dragstart", function (e) { tlDragStartMoment(e, row, el_); });
+    el_.addEventListener("dragend", function () {
+      el_.classList.remove("dragging");
+      tlClearDropHints();
+    });
+  }
+  if (opts && opts.onPick) {
+    el_.addEventListener("click", function () { opts.onPick(row, el_); });
+  }
+  return el_;
 }
 
-function clipMomentsGroup(c) {
-  var group = el("div", "moment-group");
-  var head = el("div", "mg-head");
-  head.appendChild(el("span", "cc-name", c.name || "clip"));
-  var n = (c.moments || []).length;
-  head.appendChild(el("span", "mg-count",
-    n + " moment" + (n === 1 ? "" : "s")
-    + (c.duration ? " · " + fmt1(c.duration) + "s clip" : "")));
-  if (!c.labeled) head.appendChild(el("span", "mg-unlabeled", "not Claude-checked"));
-  group.appendChild(head);
-  var grid = el("div", "moments-grid");
-  if (!n) {
-    grid.appendChild(el("div", "clips-empty", "No usable moments in this clip."));
-  } else {
-    (c.moments || []).forEach(function (m) { grid.appendChild(momentCard(c.path, m)); });
+// test seam: drive the moment list without a scan/build round-trip
+window.monteurMoments = {
+  flatten: function (clips) { return flattenMoments(clips); },
+  render: function (host, rows, opts) { return renderMomentList(host, rows, opts); },
+  sort: function () { return momentSort; },
+  setCache: function (clips) {
+    cre.momentsCache = clips;
+    cre.momentsCache.forProject = cre.projectId;
   }
-  group.appendChild(grid);
-  return group;
+};
+
+/* Render `rows` into `host`. `opts`: {state, compact, draggable, onPick,
+   emptyText, countText}. Returns the number of rows drawn. */
+function renderMomentList(host, rows, opts) {
+  opts = opts || {};
+  clear(host);
+  host.className = "mlist" + (opts.compact ? " compact" : "");
+  var state = opts.state || momentSort.review;
+  host.appendChild(momentListHead(state, function () {
+    renderMomentList(host, rows, opts);
+  }));
+  if (!rows.length) {
+    host.appendChild(el("div", "mlist-empty",
+      opts.emptyText || "Nothing here yet."));
+    return 0;
+  }
+  sortMomentRows(rows, state).forEach(function (row) {
+    host.appendChild(momentRow(row, opts));
+  });
+  return rows.length;
 }
 
 /* ---- the moment inspector (side panel): preview, rate, exclude, note ---- */
-var momentInsp = { clipPath: "", m: null, card: null };
+var momentInsp = { clipPath: "", m: null, card: null, row: null };
 
-function openMomentInspector(clipPath, m, card) {
-  momentInsp = { clipPath: clipPath, m: m, card: card };
+function openMomentInspector(clipPath, m, card, row) {
+  momentInsp = { clipPath: clipPath, m: m, card: card, row: row || null };
   var panel = $("cre-moment-insp");
   if (!panel) return;
   $("mi-title").textContent = baseName(clipPath) + " · " + fmt1(m.start) + "–" + fmt1(m.end) + "s";
@@ -8114,7 +8304,7 @@ function setMomentMark(patch) {
       if ("rating" in patch) { m.rating = res.rating; renderMomentStars(m.rating || 0); }
       if ("exclude" in patch) m.exclude = res.exclude;
       if ("note" in patch) m.note = res.note;
-      if (momentInsp.card) momentStateBadges(momentInsp.card, m);
+      if (momentInsp.card) momentStateBadges(momentInsp.card, m, momentInsp.row);
     })
     .catch(function (err) { toast(err && err.message ? err.message : String(err), "error"); });
 }
@@ -8135,22 +8325,36 @@ function renderClipsReview() {
   if (!grid) return;
   $("cre-clips-msg").hidden = true;
   if (!cre.projectId) {
-    clear(grid);
-    grid.appendChild(el("div", "clips-empty",
-      "No project yet — add footage on the Footage page and analyze it first."));
+    $("cre-clips-count").hidden = true;
+    renderMomentList(grid, [], {
+      state: momentSort.review,
+      emptyText: "No project yet — add footage on the Footage page and analyze it first."
+    });
     return;
   }
   api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/clips")
     .then(function (data) {
-      clear(grid);
       var clips = (data && data.clips) || [];
-      if (!clips.length) {
-        grid.appendChild(el("div", "clips-empty",
-          "No analyzed clips yet — go back to Footage, add clips to the pool "
-          + "and analyze them (Let Claude check for the richest notes)."));
-        return;
-      }
-      clips.forEach(function (c) { grid.appendChild(clipMomentsGroup(c)); });
+      cre.momentsCache = clips;              // the shelf reads the same fetch
+      cre.momentsCache.forProject = cre.projectId;
+      var rows = flattenMoments(clips);
+      var count = $("cre-clips-count");
+      count.textContent = rows.length
+        ? rows.length + " moment" + (rows.length === 1 ? "" : "s")
+          + " from " + clips.length + " clip" + (clips.length === 1 ? "" : "s")
+          + " — click a row to preview, rate, exclude or annotate it"
+        : "";
+      count.hidden = !rows.length;
+      renderMomentList(grid, rows, {
+        state: momentSort.review,
+        onPick: function (row, node) {
+          openMomentInspector(row.clip, row._m, node, row);
+        },
+        emptyText: clips.length
+          ? "No usable moments in these clips."
+          : "No analyzed clips yet — go back to Footage, add clips to the pool "
+            + "and analyze them (Let Claude check for the richest notes)."
+      });
     })
     .catch(function (err) {
       creNote("cre-clips-msg", err && err.message ? err.message : String(err), true);
@@ -12013,6 +12217,7 @@ function renderTimelineStrip() {
   renderSfxLane(duration, plan.sfx || []);
   drawStripLane();
   applyFindingBadges();
+  tlWireDropTargets(); // the lanes are new elements — re-arm them as drop zones
 }
 
 /* the Grade adjustment layer: one bar over the whole cut showing the
@@ -12576,26 +12781,14 @@ function rebuildNote(result) {
    pick. Together with "Clear picture" it makes an empty timeline a real
    starting point instead of a dead end. */
 
-/* The moments to offer: this session's scan when there is one, otherwise the
-   project's stored analysis (a reopened project has no in-memory scan). An
-   empty array is TRUTHY in JS, so pick by length. */
+/* The moments to offer: the project's stored analysis when there is one (it
+   carries your ratings and notes), otherwise this session's scan. An empty
+   array is TRUTHY in JS, so pick by length. */
 function shelfMoments() {
-  if (cre.clips && cre.clips.length) return arrMoments();
   var cached = cre.momentsCache;
-  if (!(cached && cached.length)) return [];
-  var out = [];
-  cached.forEach(function (clip) {
-    (clip.moments || []).forEach(function (m) {
-      if (!m) return;
-      out.push({
-        clip: String(clip.path || ""), start: m.start || 0, end: m.end || 0,
-        label: String(m.label || ""), role: String(m.role || ""),
-        tags: Array.isArray(m.tags) ? m.tags.map(String) : [],
-        hero: typeof m.hero === "number" ? m.hero : 0
-      });
-    });
-  });
-  return out;
+  if (cached && cached.length) return flattenMoments(cached);
+  if (cre.clips && cre.clips.length) return flattenMoments(cre.clips);
+  return [];
 }
 
 /* The video track a dropped shot lands on — the shelf's own picker, which
@@ -12627,58 +12820,123 @@ function renderShelf() {
   var board = $("tl-shelf-board");
   if (!board) return;
   renderShelfTracks();
-  clear(board);
-  var moments = shelfMoments();
+  var all = shelfMoments();
   var query = $("tl-shelf-filter").value.trim();
-  var shown = 0;
-  moments.forEach(function (moment) {
-    if (!arrMatches(moment, query)) return;
-    board.appendChild(shelfCard(moment));
-    shown += 1;
+  var moments = all.filter(function (row) { return arrMatches(row, query); });
+  renderMomentList(board, moments, {
+    state: momentSort.shelf,
+    compact: true,
+    draggable: true,
+    onPick: function (row) { insertMoment(row); },
+    emptyText: "Nothing to drop here."
   });
-  if (!moments.length) {
+  if (!all.length) {
     creNote("tl-shelf-msg", "No analyzed moments yet — run a scan on the Footage page and they appear here.");
-  } else if (!shown) {
-    creNote("tl-shelf-msg", "No moment matches “" + query + "” — clear the filter to see all " + moments.length + ".");
+  } else if (!moments.length) {
+    creNote("tl-shelf-msg", "No moment matches “" + query + "” — clear the filter to see all " + all.length + ".");
   } else {
     $("tl-shelf-msg").hidden = true;
   }
 }
 
-function shelfCard(moment) {
-  var card = document.createElement("button");
-  card.type = "button";
-  card.className = "sb-card arr-pick";
-  card.setAttribute("aria-label", "Drop onto the timeline: " + baseName(moment.clip) +
-    (moment.label ? " — " + moment.label : ""));
-  var wrap = el("div", "sb-thumb-wrap");
-  wrap.appendChild(arrThumb(moment.clip, moment.start, moment.end,
-    "Moment from " + baseName(moment.clip)));
-  wrap.appendChild(el("span", "sb-badge sb-dur", fmt1(moment.end - moment.start) + "s"));
-  if (moment.hero >= 0.7) wrap.appendChild(el("span", "sb-badge sb-hero", "hero"));
-  attachMomentPlayer(wrap, moment.clip, moment.start, moment.end);
-  card.appendChild(wrap);
-  var meta = el("div", "sb-meta");
-  meta.appendChild(el("span", "sb-name", baseName(moment.clip)));
-  if (moment.label) meta.appendChild(el("span", "sb-label", moment.label));
-  card.appendChild(meta);
-  card.addEventListener("click", function () { insertMoment(moment); });
-  return card;
+/* ---- dragging a moment out of the shelf onto the timeline --------------
+   HTML5 drag-and-drop, deliberately NOT the pointer machinery the blocks
+   use: a shelf row travels between two scroll containers, which is exactly
+   what the native protocol is for (and it gives the drag image for free).
+   The lanes are the drop targets, so the LANE decides the track and the
+   x position decides the time — the same reading a block drag uses. */
+var tlDropMoment = null;
+
+function tlDragStartMoment(e, row, node) {
+  tlDropMoment = row;
+  node.classList.add("dragging");
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = "copy";
+    // some browsers refuse a drag that carries no data at all
+    try { e.dataTransfer.setData("text/plain", row.clip); } catch (err) { /* ok */ }
+  }
 }
 
-/* Drop one moment on the timeline at the playhead. The engine refuses an
-   overlap or a position past the end and says why — that error reaches the
-   editor as a toast, so a refused drop is never silent. */
-function insertMoment(moment) {
+/* record seconds under the pointer, snapped like every other drop */
+function tlDropTime(e) {
+  var strip = $("cre-strip");
+  var plan = rev.planJson || {};
+  var duration = plan.duration || 0;
+  if (!duration) return 0;
+  var rect = strip.getBoundingClientRect();
+  var x = Math.max(rect.left, Math.min(rect.right, e.clientX));
+  return tlSnapDrop((x - rect.left) / Math.max(1, rect.width) * duration);
+}
+
+function tlClearDropHints() {
+  Array.prototype.forEach.call(
+    document.querySelectorAll(".tl-tracklane.droptarget"),
+    function (lane) { lane.classList.remove("droptarget"); }
+  );
+  var mark = document.querySelector(".tl-dropmark");
+  if (mark) mark.remove();
+}
+
+/* Show WHERE the shot would land: the lane lights up and a line marks the
+   in-point. A drop you cannot read is a drop you cannot aim. */
+function tlShowDropHint(lane, e) {
+  tlClearDropHints();
+  lane.classList.add("droptarget");
+  var plan = rev.planJson || {};
+  var duration = plan.duration || 0;
+  if (!duration || !tlDropMoment) return;
+  var at = tlDropTime(e);
+  var mark = el("div", "tl-dropmark");
+  mark.style.left = (100 * at / duration) + "%";
+  var span = tlDropMoment.end - tlDropMoment.start;
+  mark.style.width = Math.max(2, 100 * span / duration) + "%";
+  mark.style.opacity = "0.45";
+  lane.appendChild(mark);
+}
+
+/* Wire the lanes as drop targets. Called after every strip render, because
+   renderTimelineStrip rebuilds the lane elements from scratch. */
+function tlWireDropTargets() {
+  Array.prototype.forEach.call(
+    document.querySelectorAll("#cre-strip-blocks .tl-tracklane"),
+    function (lane) {
+      lane.addEventListener("dragover", function (e) {
+        if (!tlDropMoment) return;
+        e.preventDefault();                       // this is what allows a drop
+        if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+        tlShowDropHint(lane, e);
+      });
+      lane.addEventListener("dragleave", function (e) {
+        if (e.target === lane) lane.classList.remove("droptarget");
+      });
+      lane.addEventListener("drop", function (e) {
+        if (!tlDropMoment) return;
+        e.preventDefault();
+        var row = tlDropMoment;
+        var at = tlDropTime(e);
+        tlDropMoment = null;
+        tlClearDropHints();
+        insertMoment(row, at, lane.dataset.track || TL_MAIN_TRACK);
+      });
+    }
+  );
+}
+
+/* Put one moment on the timeline. A DRAG says where and onto which lane;
+   a CLICK has neither, so it falls back to the playhead and the shelf's
+   track picker. The engine refuses an overlap or a position past the end
+   and says why — that error reaches the editor as a toast, so a refused
+   drop is never silent. */
+function insertMoment(moment, at, track) {
   if (!rev.planJson) return;
-  var at = tlSnapDrop(po.t || 0);
+  if (typeof at !== "number") at = tlSnapDrop(po.t || 0);
   applyPlanSurgery({
     insert: {
       clip_path: moment.clip,
       source_start: moment.start,
       source_end: moment.end,
       start: at,
-      track: shelfTrack(),
+      track: track || shelfTrack(),
       label: moment.label || ""
     }
   }, baseName(moment.clip) + " dropped at " + fmtClock(at) + ".", null);
