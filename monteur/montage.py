@@ -2006,6 +2006,36 @@ def _enforce_phase_floor(
     return changed
 
 
+def _place_structural_cut(
+    cuts: list[float], t: float, protect: int, *, required: bool = False
+) -> bool:
+    """Add a STRUCTURAL cut (a phase boundary, or the montage end) without
+    letting it strobe.
+
+    The in-phase rhythm honours :data:`MIN_CUT_INTERVAL`, but a structural cut
+    lands where the STRUCTURE says, not where the rhythm does — so it can fall
+    a sliver after the last rhythmic cut and flash for a frame or two (at 400
+    bpm the boundary landed 0.10 s after its neighbour). The structure wins — a
+    phase has to open on a cut — so the sliver is closed from the other side:
+    the rhythmic cuts crowding it are ABSORBED into it. Their intervals merge,
+    so what remains is always at least the floor.
+
+    ``protect`` is the index of the newest cut that must survive (the phase's
+    own opening, itself structural), so absorption can never eat a boundary.
+    With nothing left to absorb the cut is dropped instead — a sub-floor flash
+    is never worth it — unless ``required`` (the montage end, which has to
+    terminate the grid), where a short tail beats no ending at all.
+
+    Returns True when ``t`` was appended.
+    """
+    while len(cuts) - 1 > protect and t - cuts[-1] < MIN_CUT_INTERVAL - _EPS:
+        cuts.pop()  # absorb the crowding rhythmic cut into the structural one
+    if not required and t - cuts[-1] < MIN_CUT_INTERVAL - _EPS:
+        return False
+    cuts.append(t)
+    return True
+
+
 def _build_style_grid(
     music: MusicAnalysis, length: float, style: MontageStyle
 ) -> tuple[list[float], list[tuple[float, float, str]], list[str]]:
@@ -2102,6 +2132,7 @@ def _build_style_grid(
     pulse = beats or downs  # graceful: no beats -> walk downbeats instead
     cuts = [0.0]
     downbeat_cuts = 0
+    last_boundary = 0  # index of the newest STRUCTURAL cut (never absorbed)
     if not pulse:
         notes.append(
             f"no beats detected; falling back to a fixed {FALLBACK_INTERVAL:g}s grid"
@@ -2162,10 +2193,14 @@ def _build_style_grid(
                     downbeat_cuts += 1
                 cur = nxt
             if p_end < length - _EPS and p_end > cuts[-1] + _EPS:
-                cuts.append(p_end)  # the phase boundary itself is a cut
+                # the phase boundary itself is a cut (strobe-free: it absorbs
+                # any rhythmic cut crowding it, never a previous boundary)
+                if _place_structural_cut(cuts, p_end, last_boundary):
+                    last_boundary = len(cuts) - 1
         if rhythm_note:
             notes.append(rhythm_note)
-    cuts.append(length)
+    # the montage end closes the grid — required, so it is never dropped
+    _place_structural_cut(cuts, length, last_boundary, required=True)
 
     if snapped and snapped_to:
         notes.append(f"{snapped} phase boundaries snapped to {snapped_to}")

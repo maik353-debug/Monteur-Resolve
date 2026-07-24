@@ -106,6 +106,60 @@ def coincidence_rate(plan: MontagePlan, peaks: dict[str, float]) -> float:
     return hits / len(plan.entries)
 
 
+# --- 1.1: sub-sample peak location ----------------------------------------------
+
+
+def _env(values, dt=0.5):
+    """An envelope sampled on a uniform ``dt`` grid."""
+    return [(i * dt, v) for i, v in enumerate(values)]
+
+
+def test_envelope_peak_interpolates_between_samples():
+    from monteur.sift import _envelope_peak
+
+    # a peak skewed toward the LATER neighbour lands after its own sample...
+    assert _envelope_peak(_env([0.2, 1.0, 0.8])) > 0.5
+    # ...and one skewed earlier lands before it
+    assert _envelope_peak(_env([0.8, 1.0, 0.2])) < 0.5
+    # a symmetric peak has nothing to correct: the sample time stands
+    assert _envelope_peak(_env([0.5, 1.0, 0.5])) == pytest.approx(0.5)
+    # and the vertex never escapes its own bracket
+    for vals in ([0.2, 1.0, 0.8], [0.8, 1.0, 0.2], [0.99, 1.0, 0.01]):
+        assert 0.0 < _envelope_peak(_env(vals)) < 1.0
+
+
+def test_envelope_peak_beats_the_raw_sample_on_a_known_peak():
+    # THE point of the refinement: the envelope is sampled at ~2/s, so the raw
+    # maximum can sit a quarter-second off — the entire peak-on-beat tolerance.
+    # Fitting the vertex must land materially closer to the true peak.
+    import math
+
+    from monteur.sift import _envelope_peak
+
+    true_t = 1.17
+    envelope = [
+        (i * 0.5, math.exp(-((i * 0.5 - true_t) ** 2) / (2 * 0.35**2)))
+        for i in range(6)
+    ]
+    raw = max(envelope, key=lambda p: p[1])[0]
+    refined = _envelope_peak(envelope)
+    assert abs(refined - true_t) < abs(raw - true_t) / 2.0
+    assert abs(refined - true_t) < 0.1  # well inside the ±0.25 s promise
+
+
+def test_envelope_peak_degenerate_cases_are_unchanged():
+    from monteur.sift import _envelope_peak
+
+    assert _envelope_peak([]) == -1.0
+    assert _envelope_peak(_env([0.0, 0.0, 0.0])) == -1.0  # no signal at all
+    assert _envelope_peak(_env([0.5, 0.5, 0.5])) == pytest.approx(0.0)  # ties earliest
+    # an EDGE maximum has no bracket: its raw sample time stands
+    assert _envelope_peak(_env([1.0, 0.5, 0.2])) == pytest.approx(0.0)
+    assert _envelope_peak(_env([0.2, 0.5, 1.0])) == pytest.approx(1.0)
+    # a single sample is its own peak
+    assert _envelope_peak([(2.0, 0.7)]) == pytest.approx(2.0)
+
+
 # --- 1.1: coincidence rate (the blueprint's headline metric) --------------------
 
 

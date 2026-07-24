@@ -2085,6 +2085,7 @@ def test_rhythm_holds_capped_in_absolute_seconds():
     from monteur.montage import (
         _MAX_CUT_SECONDS,
         _MAX_HOLD_SECONDS,
+        MIN_CUT_INTERVAL,
         _apply_pace,
         _build_style_grid,
         STYLES,
@@ -2109,7 +2110,45 @@ def test_rhythm_holds_capped_in_absolute_seconds():
     assert gaps[0] <= opening_base_s + 4 * beat + 1e-6
     assert gaps[0] < 10.0  # nothing balloons toward the old 16s hold
     assert max(gaps) <= opening_base_s + 4 * beat + 1e-6  # downbeat slack
-    assert len(cuts) >= 8  # a 36s trailer is not 5 shots
+    assert len(cuts) >= 7  # a 36s trailer is not 5 shots
+    # ...and none of them strobes: this fixture used to emit a cut at 23.607
+    # right before the drop-pinned climax boundary at 24.0 — a 0.39 s flash on
+    # the most important moment in the cut. Structural cuts absorb such slivers.
+    assert min(gaps) >= MIN_CUT_INTERVAL - 1e-6
+
+
+def test_structural_cuts_never_strobe_at_any_tempo():
+    # The in-phase rhythm always honoured MIN_CUT_INTERVAL, but the STRUCTURAL
+    # cuts (a phase boundary, the montage end) were appended unchecked — so a
+    # boundary could land a sliver after the last rhythmic cut. At 400 BPM that
+    # was a 0.10 s flash. Sweep the realistic tempo range and assert the floor
+    # holds everywhere, while the grid still spans 0..length and every phase
+    # boundary is still a cut.
+    from monteur.montage import MIN_CUT_INTERVAL, STYLES, _build_style_grid
+
+    for style_name in ("trailer", "travel", "wedding", "music_video"):
+        for tempo in (90.0, 120.0, 180.0, 240.0, 400.0):
+            for length in (12.0, 40.0):
+                beat = 60.0 / tempo
+                beats = [i * beat for i in range(int(length / beat) + 2)]
+                music = MusicAnalysis(
+                    path="/m/song.wav", duration=length, tempo=tempo, beats=beats,
+                    sections=[MusicSection(0.0, length, 0.9, "high")],
+                )
+                cuts, phases, _notes = _build_style_grid(
+                    music, length, STYLES[style_name]
+                )
+                where = f"{style_name} @{tempo:g}bpm / {length:g}s"
+                gaps = [b - a for a, b in zip(cuts, cuts[1:])]
+                assert min(gaps) >= MIN_CUT_INTERVAL - 1e-6, f"strobe in {where}"
+                # the grid still spans the whole montage, in order...
+                assert cuts[0] == 0.0 and cuts[-1] == pytest.approx(length), where
+                assert cuts == sorted(cuts), where
+                # ...and absorption never ate a phase boundary
+                placed = {round(c, 6) for c in cuts}
+                for _start, end, _label in phases:
+                    if 1e-9 < end < length - 1e-9:
+                        assert round(end, 6) in placed, f"boundary lost in {where}"
 
 
 # --- timeline-strip metadata (phases / music_energy / beat_marks / drop_marks) --

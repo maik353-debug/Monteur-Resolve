@@ -427,12 +427,42 @@ def _envelope_peak(envelope: list[tuple[float, float]]) -> float:
     A flat/empty envelope carries no peak information — the sentinel keeps
     the montage planner's behavior byte-identical to before the envelope
     existed (blueprint 1.1's neutral degradation).
+
+    SUB-SAMPLE: the envelope is sampled coarsely (motion ~2/s, audio 0.5 s
+    windows), so the peak's true time usually falls BETWEEN two samples. Taking
+    the maximum sample alone quantizes it onto that grid — an error of up to
+    half a step (~0.25 s), which is the whole peak-on-beat tolerance the planner
+    aims within. So the maximum is refined by fitting a parabola through it and
+    its two neighbours and taking the vertex: the classic three-point estimator,
+    exact for a locally quadratic peak and always strictly inside the bracket.
+    A peak at either end of the envelope, or a degenerate (flat/linear) triple,
+    keeps the raw sample time — there is nothing to interpolate from.
     """
-    best_t, best_v = -1.0, 0.0
-    for t, v in envelope:
+    best_i, best_v = -1, 0.0
+    for i, (_t, v) in enumerate(envelope):
         if v > best_v + 1e-12:
-            best_t, best_v = t, v
-    return best_t
+            best_i, best_v = i, v
+    if best_i < 0:
+        return -1.0
+    peak_t = envelope[best_i][0]
+    if best_i == 0 or best_i == len(envelope) - 1:
+        return peak_t  # an edge maximum has no bracket to interpolate in
+    t_prev, v_prev = envelope[best_i - 1]
+    t_next, v_next = envelope[best_i + 1]
+    # Parabola vertex offset in SAMPLES: 0.5 * (v- - v+) / (v- - 2v0 + v+).
+    # The denominator is negative at a real peak; ~0 means flat or linear
+    # (no curvature to locate a vertex with), so leave the sample time alone.
+    denom = v_prev - 2.0 * best_v + v_next
+    if denom >= -1e-12:
+        return peak_t
+    offset = 0.5 * (v_prev - v_next) / denom
+    # |offset| <= 0.5 whenever v0 is the true maximum; clamp defensively so a
+    # pathological triple can never push the peak outside its own bracket.
+    offset = max(-0.5, min(0.5, offset))
+    # Samples are near-uniform but not guaranteed so: scale by the gap on the
+    # side the vertex actually moves toward.
+    step = (t_next - peak_t) if offset >= 0 else (peak_t - t_prev)
+    return peak_t + offset * step
 
 
 def find_scene_cuts(metrics: list[FrameMetric]) -> list[float]:
