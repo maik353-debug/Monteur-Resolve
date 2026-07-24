@@ -6466,6 +6466,75 @@ class _WindowControls:
             pass
 
 
+#: Instant splash shown in the pywebview window WHILE the server binds and the
+#: app page loads — the blank gap before it was what read as "nothing happened
+#: when I launched". Self-contained (no server, no external assets): brand mark
+#: + a film-strip loader that animates on pure CSS. Swapped for the real app
+#: (``window.load_url``) the moment the server is ready.
+_SPLASH_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: #1b1b1e; color: #d6d7dc; overflow: hidden;
+    font-family: "Segoe UI", -apple-system, system-ui, sans-serif;
+    display: flex; align-items: center; justify-content: center;
+    -webkit-user-select: none; user-select: none;
+  }
+  .splash {
+    text-align: center; animation: rise 0.6s ease both;
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  .mark {
+    font-size: 40px; font-weight: 700; letter-spacing: 0.18em;
+    padding-left: 0.18em; color: #ececf0;
+  }
+  .sub {
+    margin-top: 6px; font-size: 13px; font-weight: 600; letter-spacing: 0.42em;
+    padding-left: 0.42em; color: #e8823c; text-transform: uppercase;
+  }
+  .strip {
+    margin: 28px auto 0; display: flex; gap: 6px; justify-content: center;
+  }
+  .frame {
+    width: 22px; height: 15px; border-radius: 2px;
+    background: #33333b; box-shadow: inset 0 0 0 1px #3f3f48;
+    animation: flick 1.1s ease-in-out infinite;
+  }
+  .frame:nth-child(1) { animation-delay: 0s; }
+  .frame:nth-child(2) { animation-delay: 0.11s; }
+  .frame:nth-child(3) { animation-delay: 0.22s; }
+  .frame:nth-child(4) { animation-delay: 0.33s; }
+  .frame:nth-child(5) { animation-delay: 0.44s; }
+  .frame:nth-child(6) { animation-delay: 0.55s; }
+  .frame:nth-child(7) { animation-delay: 0.66s; }
+  @keyframes flick {
+    0%, 100% { background: #33333b; box-shadow: inset 0 0 0 1px #3f3f48; transform: scaleY(1); }
+    40% { background: #e8823c; box-shadow: inset 0 0 0 1px #f0a062, 0 0 10px rgba(232,130,60,0.5); transform: scaleY(1.25); }
+  }
+  .status { margin-top: 22px; font-size: 12px; color: #6c6c76; letter-spacing: 0.05em; }
+</style></head>
+<body>
+  <div class="splash">
+    <div class="mark">MONTEUR</div>
+    <div class="sub">Studio</div>
+    <div class="strip">
+      <span class="frame"></span><span class="frame"></span><span class="frame"></span>
+      <span class="frame"></span><span class="frame"></span><span class="frame"></span>
+      <span class="frame"></span>
+    </div>
+    <div class="status">Starting up&hellip;</div>
+  </div>
+</body></html>"""
+
+#: Shown if the server never binds (the 20 s timeout) — the frameless window has
+#: no OS close button, so it names the manual way out.
+_SPLASH_ERROR_HTML = _SPLASH_HTML.replace(
+    "Starting up&hellip;",
+    "Monteur could not start its engine. Close this window (Alt+F4) and try again.",
+).replace("animation: flick 1.1s ease-in-out infinite;", "background: #5a3030;")
+
+
 def serve_app(
     port: int = 8765,
     project_root: str = ".",
@@ -6537,15 +6606,15 @@ def serve_app(
         daemon=True,
     )
     thread.start()
-    if not ready.wait(timeout=20) or not holder.get("url"):
-        raise RuntimeError("Monteur Studio's server did not start in time")
 
-    print(f"Monteur Studio window open ({holder['url']}). Close it to stop.", flush=True)
-    # frameless: app.html draws its own Fluent title bar (drag region + caption
-    # buttons) and drives min/maximize/close through this js_api bridge
-    webview.create_window(
+    # Show the window IMMEDIATELY with a splash (no wait), so a launch looks
+    # instant instead of "nothing happening" while the server binds and the
+    # page loads. frameless: app.html draws its own Fluent title bar (drag
+    # region + caption buttons) and drives min/maximize/close through this
+    # js_api bridge — the splash rides in the same frameless window.
+    window = webview.create_window(
         title,
-        holder["url"],
+        html=_SPLASH_HTML,
         width=size[0],
         height=size[1],
         min_size=(900, 600),
@@ -6555,7 +6624,21 @@ def serve_app(
         easy_drag=False,  # the title bar's -webkit-app-region owns dragging
         js_api=_WindowControls(webview),
     )
-    webview.start()  # blocks on the main thread until the window is closed
+
+    def _swap_to_app() -> None:
+        # runs on a pywebview worker thread once the GUI loop is up: wait for
+        # the server, then navigate the same window from the splash to the app.
+        if ready.wait(timeout=20) and holder.get("url"):
+            print(
+                f"Monteur Studio window open ({holder['url']}). Close it to stop.",
+                flush=True,
+            )
+            window.load_url(holder["url"])
+        else:
+            print("Monteur Studio's server did not start in time.", flush=True)
+            window.load_html(_SPLASH_ERROR_HTML)
+
+    webview.start(_swap_to_app)  # blocks on the main thread until the window closes
 
 
 def _open_browser_safely(url: str) -> None:

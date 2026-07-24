@@ -8152,9 +8152,29 @@ class TestNativeShell:
         from monteur.web import server
 
         calls = {}
+
+        class _Window:
+            def load_url(self, url):
+                calls["loaded_url"] = url
+
+            def load_html(self, html):
+                calls["loaded_html"] = html
+
+        window = _Window()
         fake = types.ModuleType("webview")
-        fake.create_window = lambda title, url, **kw: calls.update(window=(title, url, kw))
-        fake.start = lambda: calls.update(started=True)
+
+        def _create_window(title, url=None, html=None, **kw):
+            calls["window"] = (title, url, html, kw)
+            return window
+
+        fake.create_window = _create_window
+
+        def _start(func=None):
+            calls["started"] = True
+            if func:
+                func()  # run the swap-to-app worker inline (real: a GUI thread)
+
+        fake.start = _start
         monkeypatch.setitem(sys.modules, "webview", fake)
 
         class _Srv:
@@ -8162,7 +8182,7 @@ class TestNativeShell:
 
         def fake_serve(**kw):
             # a real server would bind, fire on_bind + ready, then loop; the
-            # stub just hands back a URL so the window can open
+            # stub just hands back a URL so the window can swap to it
             kw["on_bind"](_Srv())
             kw["ready"].set()
 
@@ -8170,14 +8190,18 @@ class TestNativeShell:
         server.serve_app(port=8801, title="Monteur Studio")
 
         assert calls.get("started") is True
-        title, url, kw = calls["window"]
+        title, url, html, kw = calls["window"]
         assert title == "Monteur Studio"
-        assert url == "http://127.0.0.1:8801/"
+        # the window opens IMMEDIATELY on the splash (no url yet) so the launch
+        # feels instant, then swaps to the app once the server is ready
+        assert url is None and html and "MONTEUR" in html
         assert kw.get("width") and kw.get("height")  # a real window size
         # frameless: app.html draws its own Fluent title bar + drives the
         # window through the js_api bridge
         assert kw.get("frameless") is True
         assert isinstance(kw.get("js_api"), server._WindowControls)
+        # the same window navigated from the splash to the real app
+        assert calls.get("loaded_url") == "http://127.0.0.1:8801/"
 
     def test_window_controls_bridge_drives_the_window(self):
         import types
