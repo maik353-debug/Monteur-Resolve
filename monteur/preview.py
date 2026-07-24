@@ -823,7 +823,11 @@ def render_preview(
             chain = (
                 f"[1:a]{music_chain}[m];"
                 f"[0:a]volume={MIX_ORIGINAL_LEVEL:g}[o];"
-                "[m][o]amix=inputs=2:duration=first:dropout_transition=0"
+                # duration=longest, not first: keyed to `first` (the music) the
+                # mix ended when the SONG ended, dropping the original-sound
+                # tail whenever the song is shorter than the montage. The final
+                # -t trims to plan.duration, so the common case is unchanged.
+                "[m][o]amix=inputs=2:duration=longest:dropout_transition=0"
                 ":normalize=0"
             )
             if af:
@@ -1160,7 +1164,10 @@ def _export_audio_graph(
             orig_chain += "," + ",".join(lift)
         parts.append(f"[{bed_label}]{orig_chain}[xo]")
         parts.append(
-            "[xm][xo]amix=inputs=2:duration=first:dropout_transition=0"
+            # duration=longest (not first): the original bed is authoritative
+            # for length, so a song shorter than the montage no longer cuts the
+            # original-sound tail. The final -t trims to plan.duration.
+            "[xm][xo]amix=inputs=2:duration=longest:dropout_transition=0"
             ":normalize=0[xbed]"
         )
         base = "[xbed]"

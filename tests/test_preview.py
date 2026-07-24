@@ -383,6 +383,38 @@ def test_render_export_high_profile(tmp_path):
 
 @needs_ffmpeg
 @needs_demo
+def test_export_mix_keeps_the_original_tail_when_the_song_is_short(tmp_path):
+    # mix mode used amix=duration=first (keyed to the music), so a song shorter
+    # than the montage cut the original-sound tail. duration=longest keeps it.
+    import subprocess
+
+    import numpy as np
+
+    from monteur.media import find_ffmpeg
+
+    song = tmp_path / "short.wav"
+    _tiny_wav(song, seconds=2.0)  # a 2 s song under a 6 s montage
+    plan = demo_plan()
+    plan.music_path = str(song)
+    plan.song_duration = 2.0
+    plan.music_start = 0.0
+    out = tmp_path / "mix.mp4"
+    render_export(plan, str(out), size=(320, 180), audio="mix")
+    # sample the audio AFTER the song ends (3..5.5 s) — the original sound must
+    # still be there, not silence.
+    raw = subprocess.run(
+        [find_ffmpeg(), "-v", "error", "-ss", "3.0", "-i", str(out),
+         "-map", "0:a", "-t", "2.5", "-f", "f32le", "-ac", "1", "-ar", "44100", "-"],
+        capture_output=True,
+    ).stdout
+    assert raw, "could not sample the tail audio"
+    tail = np.frombuffer(raw, dtype=np.float32)
+    rms = float(np.sqrt(np.mean(tail**2))) if tail.size else 0.0
+    assert rms > 1e-3  # the original-sound tail carries, not cut to silence
+
+
+@needs_ffmpeg
+@needs_demo
 def test_export_keeps_the_black_dip_black_under_a_grade(tmp_path):
     # The grade bakes per CLIP now, not over the assembled cut — so a strongly
     # LIFTING grade (which used to turn the structural black dip grey) leaves
