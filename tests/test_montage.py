@@ -2744,6 +2744,122 @@ class TestFreeEdits:
         )
 
 
+class TestTrackLayout:
+    """Multi-track: fixed roles the engine understands, plus the editor's own.
+
+    The contract that makes hand-built material safe is the ROLE: a rebuild
+    fills the tracks it understands and never plans into a "custom" one.
+    """
+
+    def test_a_plan_without_tracks_uses_the_defaults_and_keeps_its_bytes(self):
+        from monteur.montage import DEFAULT_TRACKS, plan_tracks, plan_to_dict
+
+        plan = make_boundary_plan()
+        assert [r["id"] for r in plan_tracks(plan)] == [r["id"] for r in DEFAULT_TRACKS]
+        data = plan_to_dict(plan)
+        # multi-track costs nothing until it is used — no new keys anywhere
+        assert "tracks" not in data
+        assert all("track" not in entry for entry in data["entries"])
+
+    def test_a_shot_moves_to_another_picture_track(self):
+        from monteur.montage import entry_track, set_entry_track
+
+        plan = make_boundary_plan()
+        adjusted = set_entry_track(plan, 1, "V2")
+        assert entry_track(adjusted.entries[1]) == "V2"
+        assert entry_track(adjusted.entries[0]) == "V1"  # "" reads as V1
+        assert entry_track(plan.entries[1]) == "V1"      # original untouched
+        # the record and source windows are untouched — only the layer changed
+        assert adjusted.entries[1].record_start == plan.entries[1].record_start
+        assert adjusted.entries[1].source_start == plan.entries[1].source_start
+
+    def test_overlap_is_allowed_across_tracks_but_not_within_one(self):
+        # the whole point of V2: a cutaway sits OVER V1
+        from monteur.montage import MontageEntry, MontagePlan, set_entry_track
+
+        plan = MontagePlan(
+            music_path="/m.wav", duration=10.0,
+            entries=[
+                MontageEntry("/f/a.mp4", 0, 2, 0.0, 2.0, 0.9, clip_duration=30.0),
+                MontageEntry("/f/b.mp4", 0, 2, 1.0, 3.0, 0.8, clip_duration=30.0),
+            ],
+        )
+        stacked = set_entry_track(plan, 0, "V2")  # now overlapping ACROSS tracks
+        assert [e.record_start for e in stacked.entries] == [0.0, 1.0]
+        with pytest.raises(ValueError, match="already has a shot"):
+            set_entry_track(stacked, 1, "V2")
+
+    def test_picture_cannot_go_on_an_audio_track(self):
+        from monteur.montage import set_entry_track
+
+        with pytest.raises(ValueError, match="does not carry picture"):
+            set_entry_track(make_boundary_plan(), 0, "A1")
+        with pytest.raises(ValueError, match="no track"):
+            set_entry_track(make_boundary_plan(), 0, "nope")
+
+    def test_a_muted_track_still_exports_but_marked(self):
+        # dropping a shot the editor can still SEE would be a lie; it travels
+        # disabled instead, so muting stays reversible
+        from monteur.montage import montage_to_timeline, set_entry_track, set_track_muted
+
+        plan = set_entry_track(make_boundary_plan(), 1, "V2")
+        muted = set_track_muted(plan, "V2", True)
+        clips = [c for c in montage_to_timeline(muted, fps=25.0).clips if c.track == "V2"]
+        assert len(clips) == 1
+        assert clips[0].metadata.get("muted") is True
+        # and un-muting clears it again
+        clear = set_track_muted(muted, "V2", False)
+        clips = [c for c in montage_to_timeline(clear, fps=25.0).clips if c.track == "V2"]
+        assert not clips[0].metadata.get("muted")
+
+    def test_v2_lands_on_its_own_export_track(self):
+        from monteur.montage import montage_to_timeline, set_entry_track
+
+        plan = set_entry_track(make_boundary_plan(), 1, "V2")
+        timeline = montage_to_timeline(plan, fps=25.0)
+        assert len([c for c in timeline.clips if c.track == "V1"]) == 2
+        assert len([c for c in timeline.clips if c.track == "V2"]) == 1
+
+    def test_an_added_track_is_the_editors_own(self):
+        from monteur.montage import add_track, plan_tracks
+
+        plan = add_track(make_boundary_plan(), name="My B-roll")
+        rows = plan_tracks(plan)
+        assert rows[0]["id"] == "U1"
+        assert rows[0]["role"] == "custom"   # the engine never plans into it
+        assert rows[0]["name"] == "My B-roll"
+        # a second one does not collide
+        assert plan_tracks(add_track(plan))[0]["id"] == "U2"
+
+    def test_a_track_with_shots_on_it_cannot_be_removed(self):
+        from monteur.montage import remove_track, set_entry_track
+
+        plan = set_entry_track(make_boundary_plan(), 1, "V2")
+        with pytest.raises(ValueError, match="still has shots"):
+            remove_track(plan, "V2")
+        # ...but an empty one goes
+        assert "V2" not in {
+            r["id"] for r in __import__("monteur.montage", fromlist=["x"]).plan_tracks(
+                remove_track(make_boundary_plan(), "V2")
+            )
+        }
+
+    def test_tracks_survive_a_round_trip(self):
+        from monteur.montage import (
+            add_track, plan_from_dict, plan_to_dict, plan_tracks,
+            set_entry_track, set_track_muted, entry_track,
+        )
+
+        plan = set_track_muted(
+            set_entry_track(add_track(make_boundary_plan(), name="Mine"), 1, "V2"),
+            "A2", True,
+        )
+        back = plan_from_dict(plan_to_dict(plan))
+        assert [r["id"] for r in plan_tracks(back)] == [r["id"] for r in plan_tracks(plan)]
+        assert entry_track(back.entries[1]) == "V2"
+        assert [r for r in plan_tracks(back) if r["id"] == "A2"][0]["muted"] is True
+
+
 def _sfx_plan():
     """A boundary plan carrying a full music-bed strip + SFX layer."""
     from monteur.montage import SfxCue

@@ -969,6 +969,53 @@ _BOUNDARY_EPS = 0.05
 # Arrangement (the editor's own scene order; see the module docstring).
 # Valid "after" boundary requests and "sfx" boundary cues per item.
 ARRANGEMENT_TRANSITIONS = ("cut", "dissolve", "smash")
+
+# --- track layout -------------------------------------------------------------
+#
+# The roles the ENGINE understands. A rebuild uses them to know where each kind
+# of material belongs; "custom" is the role for a track the editor added, which
+# Monteur exports and plays but never plans into — so hand-built material can
+# never be overwritten by asking for a rebuild.
+TRACK_ROLES = ("picture", "title", "music", "sfx", "voice", "custom")
+
+#: The built-in layout, top to bottom as the studio stacks it. A plan with no
+#: ``tracks`` of its own behaves exactly as this — which is every generated
+#: plan, so the default serialization stays byte-identical.
+DEFAULT_TRACKS: tuple[dict, ...] = (
+    {"id": "V2", "role": "picture", "name": "V2", "muted": False},
+    {"id": "V1", "role": "picture", "name": "V1", "muted": False},
+    {"id": "title", "role": "title", "name": "Title", "muted": False},
+    {"id": "A1", "role": "music", "name": "A1 music", "muted": False},
+    {"id": "A2", "role": "sfx", "name": "A2 sound", "muted": False},
+    {"id": "A3", "role": "voice", "name": "A3 original", "muted": False},
+)
+
+#: Where a shot with no explicit track lives.
+DEFAULT_PICTURE_TRACK = "V1"
+
+
+def plan_tracks(plan: "MontagePlan") -> list[dict]:
+    """The plan's track layout, falling back to :data:`DEFAULT_TRACKS`.
+
+    Always returns copies, so a caller can hand them to the UI (or mutate a
+    working list) without reaching into the plan.
+    """
+    rows = list(getattr(plan, "tracks", None) or DEFAULT_TRACKS)
+    return [dict(row) for row in rows]
+
+
+def track_muted(plan: "MontagePlan", track: str) -> bool:
+    """Whether ``track`` is silenced/hidden in this plan."""
+    wanted = track or DEFAULT_PICTURE_TRACK
+    for row in plan_tracks(plan):
+        if str(row.get("id")) == wanted:
+            return bool(row.get("muted"))
+    return False
+
+
+def entry_track(entry: "MontageEntry") -> str:
+    """A shot's picture track — "" means the default V1."""
+    return str(getattr(entry, "track", "") or DEFAULT_PICTURE_TRACK)
 ARRANGEMENT_SFX_KINDS = ("impact", "whoosh", "riser")
 # A moment trimmed by less than this (seconds) is not worth a trim note.
 _ARR_TRIM_NOTE_MIN = 0.05
@@ -1277,6 +1324,17 @@ class MontagePlan:
     # (music_flow="deliberate"); serialized only when set, tolerant on
     # load like title_texts.
     music_gaps: list[tuple[float, float]] = field(default_factory=list)
+    # The timeline's TRACK LAYOUT, newest-on-top order as the studio shows it:
+    # ``{"id", "role", "name", "muted"}`` per track. Empty = the built-in
+    # layout every generated plan has (see :data:`DEFAULT_TRACKS`), so a plan
+    # that never grew a track keeps its exact bytes.
+    #
+    # ``role`` is what the ENGINE understands — "picture", "title", "music",
+    # "sfx", "voice" — which is how a rebuild knows where to put things again.
+    # A track the user added carries role "custom": Monteur reads it (it
+    # exports, it plays) but never plans into it, so hand-built material is
+    # never overwritten by a rebuild.
+    tracks: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -1301,6 +1359,11 @@ class MontageEntry:
     # pattern), so plans without J/L cuts keep their exact bytes.
     audio_lead: float = 0.0
     audio_lag: float = 0.0
+    # Which picture track this shot lives on. "" = the default V1, which is
+    # every generated plan — so plans that never used a second track keep
+    # their exact bytes (the ``audio_lead`` pattern). A shot on V2 sits ABOVE
+    # V1 and covers it for its span (B-roll, an overlay, a cutaway).
+    track: str = ""
     # Self-critique support (blueprint 4.1): the chosen moment's sifted
     # ``peak_time`` (:attr:`monteur.sift.Moment.peak_time`), in this clip's
     # own file coordinates — the same axis as ``source_start``. -1.0 means
@@ -6442,7 +6505,7 @@ def montage_to_timeline(
             src_out = seconds_to_frames(entry.source_end, fps)
         clip = Clip(
             name=stem,
-            track="V1",
+            track=entry_track(entry),  # "" -> V1; a cutaway rides V2 above it
             kind=VIDEO,
             source_in=src_in,
             source_out=src_out,
@@ -6451,6 +6514,11 @@ def montage_to_timeline(
             source_name=stem,
             source_file=entry.clip_path,
         )
+        # A muted track still EXPORTS — silently dropping a shot the editor can
+        # still see would be a lie. It travels disabled instead, so Resolve (and
+        # our own preview) skip it while the material stays in the timeline.
+        if track_muted(plan, entry_track(entry)):
+            clip.metadata["muted"] = True
         # Real source metadata for the exporters: the file's embedded start
         # timecode and true duration. Resolve refuses to link media whose
         # claimed source ranges don't match the actual file, so the FCPXML/EDL
@@ -6698,6 +6766,9 @@ def plan_to_dict(plan: MontagePlan) -> dict:
                 # plans without decoupled audio edits serialize exactly as
                 # before the fields existed, and old readers keep loading them.
                 if not (key in ("audio_lead", "audio_lag") and not value)
+                # ...and the same for the picture track: "" is V1, which is
+                # every generated plan, so multi-track costs nothing until used
+                and not (key == "track" and not value)
                 # peak_source / shot_size (blueprint 4.1) are in-memory
                 # critique aids, and reframe_focus (auto-reframe 9:16) is an
                 # in-memory render aid — NEVER serialized, so the default plan
@@ -6750,6 +6821,8 @@ def plan_to_dict(plan: MontagePlan) -> dict:
         data["drop_marks"] = [float(t) for t in plan.drop_marks]
     if plan.tempo:
         data["tempo"] = plan.tempo
+    if plan.tracks:
+        data["tracks"] = [dict(row) for row in plan.tracks]
     return data
 
 
@@ -6807,6 +6880,9 @@ def plan_from_dict(data: dict) -> MontagePlan:
                 (float(start), float(end))
                 for start, end in data.get("music_gaps", [])
             ],
+            # The track layout, absent on every plan built before multi-track
+            # existed — those fall back to DEFAULT_TRACKS via plan_tracks().
+            tracks=[dict(row) for row in data.get("tracks", [])],
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"malformed plan JSON: {exc}") from exc
@@ -7349,6 +7425,112 @@ def lift_entry(plan: MontagePlan, slot: int) -> MontagePlan:
     entries = [e for i, e in enumerate(plan.entries) if i != slot]
     return _free_edit(
         plan, entries, f"lift: removed slot {slot + 1} ({name}), gap left open"
+    )
+
+
+def set_entry_track(plan: MontagePlan, slot: int, track: str) -> MontagePlan:
+    """Move ONE shot to another picture track — pure plan surgery.
+
+    The shot keeps its record window and its source window; only which layer it
+    lives on changes. Overlap is checked WITHIN the destination track only, so
+    a cutaway on V2 may legitimately sit over a V1 shot — that is the whole
+    point of a second picture track.
+    """
+    try:
+        slot = int(slot)
+    except (TypeError, ValueError):
+        raise ValueError("slot must be an entry index (0-based)")
+    if slot < 0 or slot >= len(plan.entries):
+        raise ValueError(
+            f"slot {slot + 1} is not in this plan (it has {len(plan.entries)} entries)"
+        )
+    track = str(track or DEFAULT_PICTURE_TRACK)
+    known = {str(row.get("id")) for row in plan_tracks(plan)}
+    if track not in known:
+        raise ValueError(f"there is no track {track!r} on this timeline")
+    picture = {
+        str(row.get("id"))
+        for row in plan_tracks(plan)
+        if row.get("role") in ("picture", "custom")
+    }
+    if track not in picture:
+        raise ValueError(f"{track} does not carry picture — pick a video track")
+    entry = plan.entries[slot]
+    for i, other in enumerate(plan.entries):
+        if i == slot or entry_track(other) != track:
+            continue
+        if (
+            entry.record_start < other.record_end - _EPS
+            and other.record_start < entry.record_end - _EPS
+        ):
+            raise ValueError(
+                f"{track} already has a shot at {other.record_start:.2f}s"
+            )
+    entries = list(plan.entries)
+    entries[slot] = replace(entry, track="" if track == DEFAULT_PICTURE_TRACK else track)
+    return _free_edit(plan, entries, f"track: slot {slot + 1} -> {track}")
+
+
+def set_track_muted(plan: MontagePlan, track: str, muted: bool) -> MontagePlan:
+    """Silence (or un-silence) one track — pure plan surgery.
+
+    A muted track is skipped by the preview and travels to the export marked
+    disabled; its material is never dropped, so muting is always reversible.
+    """
+    rows = plan_tracks(plan)
+    ids = [str(row.get("id")) for row in rows]
+    if str(track) not in ids:
+        raise ValueError(f"there is no track {track!r} on this timeline")
+    for row in rows:
+        if str(row.get("id")) == str(track):
+            row["muted"] = bool(muted)
+    word = "muted" if muted else "unmuted"
+    return replace(
+        plan, tracks=rows, notes=list(plan.notes) + [f"track: {track} {word}"]
+    )
+
+
+def add_track(plan: MontagePlan, name: str = "", role: str = "custom") -> MontagePlan:
+    """Add a track the editor owns — Monteur exports it but never plans into it.
+
+    That is the contract that makes hand-built material safe: a rebuild fills
+    the ROLE tracks it understands and leaves everything else exactly alone.
+    """
+    role = str(role or "custom")
+    if role not in TRACK_ROLES:
+        raise ValueError(f"role must be one of: {', '.join(TRACK_ROLES)}")
+    rows = plan_tracks(plan)
+    used = {str(row.get("id")) for row in rows}
+    n = 1
+    while f"U{n}" in used:
+        n += 1
+    track_id = f"U{n}"
+    rows.insert(0, {
+        "id": track_id, "role": role,
+        "name": str(name or track_id), "muted": False,
+    })
+    return replace(
+        plan, tracks=rows, notes=list(plan.notes) + [f"track: added {track_id}"]
+    )
+
+
+def remove_track(plan: MontagePlan, track: str) -> MontagePlan:
+    """Remove an EMPTY track. A track still carrying shots is refused — losing
+    material to a stray click is never worth the convenience."""
+    rows = plan_tracks(plan)
+    if str(track) not in {str(row.get("id")) for row in rows}:
+        raise ValueError(f"there is no track {track!r} on this timeline")
+    if any(entry_track(e) == str(track) for e in plan.entries):
+        raise ValueError(
+            f"{track} still has shots on it — move or remove them first"
+        )
+    if len([r for r in rows if r.get("role") == "picture"]) <= 1 and any(
+        r.get("id") == str(track) and r.get("role") == "picture" for r in rows
+    ):
+        raise ValueError("a timeline needs at least one picture track")
+    rows = [row for row in rows if str(row.get("id")) != str(track)]
+    return replace(
+        plan, tracks=rows, notes=list(plan.notes) + [f"track: removed {track}"]
     )
 
 

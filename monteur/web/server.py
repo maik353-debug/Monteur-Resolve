@@ -4793,13 +4793,17 @@ class MonteurHandler(BaseHTTPRequestHandler):
         """
         from monteur.montage import (
             ARRANGEMENT_TRANSITIONS,
+            add_track,
             adjust_entry_boundary,
             delete_entry,
             lift_entry,
             move_entry,
             move_entry_to,
             plan_from_dict,
+            remove_track,
             resync_audio,
+            set_entry_track,
+            set_track_muted,
             trim_entry,
         )
 
@@ -4871,6 +4875,36 @@ class MonteurHandler(BaseHTTPRequestHandler):
             plan = plan_from_dict(payload["plan_json"])
             adjusted = move_entry_to(plan, slot, start)  # ValueError -> 400
             _persist_plan_edit(payload, adjusted, "move")
+            self._send_json(_plan_export_result(adjusted, payload))
+            return
+        if "set_track" in payload:
+            try:
+                slot = int(payload.get("set_track"))
+            except (TypeError, ValueError):
+                raise ApiError(400, "'set_track' must be an entry index (0-based)")
+            plan = plan_from_dict(payload["plan_json"])
+            adjusted = set_entry_track(plan, slot, str(payload.get("track") or ""))
+            _persist_plan_edit(payload, adjusted, "track")
+            self._send_json(_plan_export_result(adjusted, payload))
+            return
+        if "mute_track" in payload:
+            plan = plan_from_dict(payload["plan_json"])
+            adjusted = set_track_muted(
+                plan, str(payload.get("mute_track")), bool(payload.get("muted"))
+            )
+            _persist_plan_edit(payload, adjusted, "mute")
+            self._send_json(_plan_export_result(adjusted, payload))
+            return
+        if payload.get("add_track"):
+            plan = plan_from_dict(payload["plan_json"])
+            adjusted = add_track(plan, name=str(payload.get("name") or ""))
+            _persist_plan_edit(payload, adjusted, "track")
+            self._send_json(_plan_export_result(adjusted, payload))
+            return
+        if "remove_track" in payload:
+            plan = plan_from_dict(payload["plan_json"])
+            adjusted = remove_track(plan, str(payload.get("remove_track")))
+            _persist_plan_edit(payload, adjusted, "track")
             self._send_json(_plan_export_result(adjusted, payload))
             return
         if "trim" in payload:

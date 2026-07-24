@@ -1236,6 +1236,43 @@ class TestPlanAdjustSurgery:
         # the source window followed the edge 1:1 — a trim, not a speed change
         assert e["source_end"] == pytest.approx(first["source_end"] - 0.5)
 
+    def test_track_moves_mute_and_custom_tracks(self, server):
+        pj = _tiny_plan_json()
+        # a shot onto V2 (a cutaway over V1)
+        moved = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": pj, "set_track": 0, "track": "V2"},
+        )["plan_json"]
+        assert sorted(moved["entries"], key=lambda e: e["record_start"])[0]["track"] == "V2"
+        # mute travels on the plan...
+        muted = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": moved, "mute_track": "V2", "muted": True},
+        )["plan_json"]
+        assert [t for t in muted["tracks"] if t["id"] == "V2"][0]["muted"] is True
+        # ...and a track the editor owns is added with role "custom", so a
+        # rebuild never plans into it
+        added = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": muted, "add_track": True, "name": "Mine"},
+        )["plan_json"]
+        assert added["tracks"][0]["role"] == "custom"
+        assert added["tracks"][0]["name"] == "Mine"
+
+    def test_track_edits_reject_bad_input(self, server):
+        pj = _tiny_plan_json()
+        for body in (
+            {"set_track": 0, "track": "A1"},      # picture onto an audio track
+            {"set_track": 0, "track": "nope"},    # unknown track
+            {"mute_track": "nope", "muted": True},
+            {"remove_track": "V1"},               # V1 still carries the shots
+        ):
+            payload = dict(body)
+            payload["plan_json"] = pj
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                _post(f"{server}/api/plan/adjust", payload)
+            assert exc.value.code == 400, body
+
     def test_free_edits_reject_bad_input(self, server):
         pj = _tiny_plan_json()
         for body, why in (
