@@ -531,18 +531,25 @@ def git_pull(root: Path | None = None, *, runner: GitRunner | None = None) -> Ap
     fast-forward, it refuses and returns git's own message so the user can
     resolve it, rather than clobbering anything. On success the running app
     still holds the OLD code, so the result asks for a restart.
+
+    The pre-check ignores UNTRACKED files (``--untracked-files=no``): a stray
+    ``.bat`` launcher, a project folder or generated media sitting inside the
+    checkout does not block a fast-forward, so it must not block the update.
+    Only tracked modifications do — and if an untracked file genuinely would be
+    overwritten by the incoming commits, the ``--ff-only`` pull itself refuses
+    and surfaces git's own message.
     """
     root = root or git_root()
     if root is None:
         return ApplyResult(applied=False, message="not a git checkout")
     try:
-        dirty = _run_git(["status", "--porcelain"], root, runner)
+        dirty = _run_git(["status", "--porcelain", "--untracked-files=no"], root, runner)
         if dirty.returncode == 0 and dirty.stdout.strip():
             return ApplyResult(
                 applied=False,
                 message=(
-                    "you have uncommitted local changes — commit or stash them, "
-                    "then update again (nothing was touched)"
+                    "you have uncommitted changes to tracked files — commit or "
+                    "stash them, then update again (nothing was touched)"
                 ),
             )
         pulled = _run_git(["pull", "--ff-only"], root, runner)

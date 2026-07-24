@@ -423,10 +423,24 @@ def test_git_pull_fast_forwards_cleanly(tmp_path):
 
 
 def test_git_pull_refuses_a_dirty_tree(tmp_path):
+    # tracked modifications DO block a fast-forward
     runner = _git_runner({"status --porcelain": _Proc(0, " M monteur/x.py\n")})
     res = update.git_pull(tmp_path, runner=runner)
     assert res.applied is False
-    assert "uncommitted local changes" in res.message
+    assert "uncommitted changes to tracked files" in res.message
+
+
+def test_git_pull_ignores_untracked_files(tmp_path):
+    # a stray .bat launcher / project folder in the checkout is UNTRACKED and
+    # never blocks a fast-forward — the dirty check runs with
+    # --untracked-files=no, so `git status` reports nothing and the pull runs
+    runner = _git_runner({
+        "status --porcelain --untracked-files=no": _Proc(0, ""),  # untracked hidden
+        "pull --ff-only": _Proc(0, "Updating a1b2..c3d4\n"),
+    })
+    res = update.git_pull(tmp_path, runner=runner)
+    assert res.applied is True
+    assert "Restart Monteur" in res.message
 
 
 def test_git_pull_refuses_when_it_cannot_fast_forward(tmp_path):
