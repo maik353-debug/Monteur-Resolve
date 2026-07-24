@@ -7174,6 +7174,184 @@ def move_entry(plan: MontagePlan, slot: int, to: int) -> MontagePlan:
     )
 
 
+# --- free positioning (the NLE edits) ------------------------------------------
+#
+# The generated plan is contiguous and gapless — _resequence_entries re-lays it
+# from record 0 on every structural edit. The hand edits below deliberately do
+# NOT do that: a slot keeps the record position the editor gave it, and the
+# space between two slots is simply a HOLE. Holes are wanted (a short black
+# pause is an editorial choice), montage_to_timeline already places clips at
+# their absolute record time, so a hole renders as black with no extra model.
+#
+# Because none of these change ``duration``, the music bed never moves: record
+# second t still sounds song time music_start + t, so the drops, downbeats,
+# energy samples and arc phases all stay exactly where they were.
+
+
+def _entry_span_free(plan: MontagePlan, keep: int) -> list[tuple[float, float]]:
+    """Record spans of every entry EXCEPT index ``keep`` (the one being moved)."""
+    return [
+        (e.record_start, e.record_end)
+        for i, e in enumerate(plan.entries)
+        if i != keep
+    ]
+
+
+def _check_free_window(
+    plan: MontagePlan, slot: int, start: float, end: float, what: str
+) -> None:
+    """Validate a hand-placed record window; raises ValueError with a reason.
+
+    The three rules a free edit must still obey: it stays inside the montage,
+    it never becomes a sliver (the same :data:`_MIN_SLOT_SECONDS` floor the
+    generator honours, so a drag cannot create what the engine forbids), and
+    it never lands on top of another shot.
+    """
+    if end - start < _MIN_SLOT_SECONDS - _EPS:
+        raise ValueError(
+            f"{what} would leave a {end - start:.2f}s sliver — "
+            f"shots stay at least {_MIN_SLOT_SECONDS:g}s"
+        )
+    if start < -_EPS:
+        raise ValueError(f"{what} would start before the montage")
+    if end > plan.duration + _EPS:
+        raise ValueError(
+            f"{what} would run past the end of the montage ({plan.duration:.2f}s)"
+        )
+    for other_start, other_end in _entry_span_free(plan, slot):
+        if start < other_end - _EPS and other_start < end - _EPS:
+            raise ValueError(
+                f"{what} would overlap the shot at {other_start:.2f}s — "
+                "move that one first, or drop this into the gap"
+            )
+
+
+def _free_edit(
+    plan: MontagePlan, entries: list[MontageEntry], note: str
+) -> MontagePlan:
+    """A plan with hand-placed ``entries`` — record order restored, duration kept.
+
+    Entries are re-sorted by record start (a move can reorder them), but their
+    positions are taken verbatim: no re-flow, so holes survive exactly as the
+    editor left them.
+    """
+    ordered = sorted(entries, key=lambda e: (e.record_start, e.record_end))
+    adjusted = replace(plan, entries=ordered, notes=list(plan.notes) + [note])
+    _prune_music_gaps(adjusted)  # in place, like every other surgery op
+    return adjusted
+
+
+def move_entry_to(plan: MontagePlan, slot: int, record_start: float) -> MontagePlan:
+    """Move ONE shot to a free record position — pure plan surgery.
+
+    The shot keeps its length and its source window verbatim; only where it
+    sits changes. Nothing else moves: the hole it leaves behind stays open and
+    the shots around it are untouched (that is the whole point — a nudge must
+    never re-flow the cut). Raises ValueError when the target overlaps another
+    shot or leaves the montage.
+    """
+    try:
+        slot = int(slot)
+        record_start = float(record_start)
+    except (TypeError, ValueError):
+        raise ValueError("slot must be an entry index and record_start a number")
+    if slot < 0 or slot >= len(plan.entries):
+        raise ValueError(
+            f"slot {slot + 1} is not in this plan (it has {len(plan.entries)} entries)"
+        )
+    entry = plan.entries[slot]
+    span = entry.record_end - entry.record_start
+    start = max(0.0, record_start)
+    _check_free_window(plan, slot, start, start + span, "that move")
+    moved = replace(entry, record_start=start, record_end=start + span)
+    entries = list(plan.entries)
+    entries[slot] = moved
+    return _free_edit(
+        plan, entries, f"move: slot {slot + 1} to {start:.2f}s"
+    )
+
+
+def trim_entry(
+    plan: MontagePlan,
+    slot: int,
+    *,
+    record_start: float | None = None,
+    record_end: float | None = None,
+) -> MontagePlan:
+    """Trim ONE shot's edges — the first op that changes a slot's LENGTH.
+
+    Dragging the head later reveals footage further into the clip; dragging the
+    tail earlier ends it sooner. The source window follows the record window
+    1:1 (this is a trim, not a speed change), so the picture under the playhead
+    never shifts — exactly what an editor expects from a trim handle.
+
+    Clamped to the material that actually exists: never before the clip's
+    start, and never past its real duration when the plan knows it. Raises
+    ValueError for a sliver, an overlap, or a trim beyond the media.
+    """
+    try:
+        slot = int(slot)
+    except (TypeError, ValueError):
+        raise ValueError("slot must be an entry index (0-based)")
+    if slot < 0 or slot >= len(plan.entries):
+        raise ValueError(
+            f"slot {slot + 1} is not in this plan (it has {len(plan.entries)} entries)"
+        )
+    entry = plan.entries[slot]
+    start = entry.record_start if record_start is None else float(record_start)
+    end = entry.record_end if record_end is None else float(record_end)
+    _check_free_window(plan, slot, start, end, "that trim")
+    # the source window follows the record window 1:1
+    source_start = entry.source_start + (start - entry.record_start)
+    source_end = entry.source_end + (end - entry.record_end)
+    if source_start < -_EPS:
+        raise ValueError(
+            "that trim reaches before the start of the clip — there is no "
+            "footage there"
+        )
+    if entry.clip_duration > _EPS and source_end > entry.clip_duration + _EPS:
+        raise ValueError(
+            f"that trim reaches past the end of the clip "
+            f"({entry.clip_duration:.2f}s of footage)"
+        )
+    trimmed = replace(
+        entry,
+        record_start=start,
+        record_end=end,
+        source_start=max(0.0, source_start),
+        source_end=source_end,
+    )
+    entries = list(plan.entries)
+    entries[slot] = trimmed
+    return _free_edit(
+        plan, entries, f"trim: slot {slot + 1} to {end - start:.2f}s"
+    )
+
+
+def lift_entry(plan: MontagePlan, slot: int) -> MontagePlan:
+    """Remove ONE shot and LEAVE THE HOLE — the non-rippling delete.
+
+    The counterpart to :func:`delete_entry`: nothing slides, so every other
+    shot keeps its position and the removed span stays as black. ``duration``
+    is unchanged, so the music is untouched too. Unlike a ripple delete this
+    may empty the picture track completely — an empty timeline is a legal
+    starting point, not an error.
+    """
+    try:
+        slot = int(slot)
+    except (TypeError, ValueError):
+        raise ValueError("slot must be an entry index (0-based)")
+    if slot < 0 or slot >= len(plan.entries):
+        raise ValueError(
+            f"slot {slot + 1} is not in this plan (it has {len(plan.entries)} entries)"
+        )
+    name = PurePath(plan.entries[slot].clip_path).name
+    entries = [e for i, e in enumerate(plan.entries) if i != slot]
+    return _free_edit(
+        plan, entries, f"lift: removed slot {slot + 1} ({name}), gap left open"
+    )
+
+
 def resync_audio(plan: MontagePlan) -> MontagePlan:
     """Re-lay the sound-design cues onto the edited timeline — pure surgery.
 

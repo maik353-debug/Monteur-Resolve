@@ -2592,6 +2592,158 @@ class TestMoveEntry:
             move_entry(plan, "x", 0)
 
 
+class TestFreeEdits:
+    """The NLE edits: nothing on the timeline moves except what you grabbed.
+
+    The generated plan is contiguous; these deliberately break that, because a
+    hole is an editorial choice (a short black pause), not damage to repair.
+    """
+
+    def test_lift_leaves_the_hole_and_keeps_the_duration(self):
+        from monteur.montage import lift_entry
+
+        plan = make_boundary_plan()  # 3 x 2s slots, 6s total
+        adjusted = lift_entry(plan, 1)
+        assert len(adjusted.entries) == 2
+        assert len(plan.entries) == 3  # the original is untouched
+        # the survivors did NOT slide: the middle 2s is now an open hole
+        assert [(e.record_start, e.record_end) for e in adjusted.entries] == [
+            (0.0, 2.0), (4.0, 6.0),
+        ]
+        assert adjusted.duration == pytest.approx(6.0)  # the music is untouched
+        assert any(n.startswith("lift: removed slot 2") for n in adjusted.notes)
+
+    def test_ripple_delete_still_closes_the_gap(self):
+        # the OTHER delete is unchanged — both behaviours stay available
+        from monteur.montage import delete_entry, lift_entry
+
+        plan = make_boundary_plan()
+        assert delete_entry(plan, 1).duration == pytest.approx(4.0)
+        assert lift_entry(plan, 1).duration == pytest.approx(6.0)
+
+    def test_lift_may_empty_the_picture_track(self):
+        # an empty timeline is a legal starting point, not an error
+        from monteur.montage import lift_entry
+
+        plan = make_boundary_plan()
+        for _ in range(3):
+            plan = lift_entry(plan, 0)
+        assert plan.entries == []
+        assert plan.duration == pytest.approx(6.0)
+
+    def test_move_to_a_free_position_moves_nothing_else(self):
+        from monteur.montage import lift_entry, move_entry_to
+
+        plan = lift_entry(make_boundary_plan(), 1)  # hole at 2..4
+        adjusted = move_entry_to(plan, 1, 2.5)      # slide shot c into it
+        assert [(e.record_start, e.record_end) for e in adjusted.entries] == [
+            (0.0, 2.0), (2.5, 4.5),
+        ]
+        # its source window rode along verbatim — a move is not a trim
+        moved = adjusted.entries[1]
+        assert (moved.source_start, moved.source_end) == (20.0, 22.0)
+        assert adjusted.duration == pytest.approx(6.0)
+
+    def test_move_past_a_neighbour_reorders_the_entry_list(self):
+        # dragging a shot beyond its neighbour genuinely reorders the cut —
+        # the entries come back in record order, whatever the old index was
+        from monteur.montage import MontageEntry, MontagePlan, move_entry_to
+
+        plan = MontagePlan(
+            music_path="/music/song.wav", duration=10.0,
+            entries=[
+                MontageEntry("/f/a.mp4", 0.0, 1.0, 0.0, 1.0, 0.9, clip_duration=30.0),
+                MontageEntry("/f/b.mp4", 0.0, 1.0, 2.0, 3.0, 0.8, clip_duration=30.0),
+            ],
+        )
+        adjusted = move_entry_to(plan, 0, 5.0)  # drag a past b
+        assert [e.clip_path for e in adjusted.entries] == ["/f/b.mp4", "/f/a.mp4"]
+        assert [(e.record_start, e.record_end) for e in adjusted.entries] == [
+            (2.0, 3.0), (5.0, 6.0),
+        ]
+
+    def test_trim_moves_the_source_window_with_the_edge(self):
+        from monteur.montage import trim_entry
+
+        plan = make_boundary_plan()
+        # drag slot 0's tail 0.5s earlier
+        adjusted = trim_entry(plan, 0, record_end=1.5)
+        e = adjusted.entries[0]
+        assert (e.record_start, e.record_end) == (0.0, 1.5)
+        assert (e.source_start, e.source_end) == (10.0, 11.5)  # follows 1:1
+        # drag its head 0.5s later: the picture under the head does not shift
+        adjusted = trim_entry(plan, 0, record_start=0.5)
+        e = adjusted.entries[0]
+        assert (e.record_start, e.record_end) == (0.5, 2.0)
+        assert (e.source_start, e.source_end) == (10.5, 12.0)
+
+    def test_trim_refuses_a_sliver(self):
+        from monteur.montage import _MIN_SLOT_SECONDS, trim_entry
+
+        plan = make_boundary_plan()
+        with pytest.raises(ValueError, match="sliver"):
+            trim_entry(plan, 0, record_end=0.1)
+        # exactly at the floor is fine
+        ok = trim_entry(plan, 0, record_end=_MIN_SLOT_SECONDS)
+        assert ok.entries[0].record_end == pytest.approx(_MIN_SLOT_SECONDS)
+
+    def test_trim_refuses_to_reach_past_the_media(self):
+        # room in the MONTAGE, but no footage left in the clip
+        from monteur.montage import MontageEntry, MontagePlan, trim_entry
+
+        plan = MontagePlan(
+            music_path="/music/song.wav", duration=10.0,
+            entries=[
+                # the last half-second of a 5s clip
+                MontageEntry("/f/a.mp4", 4.0, 4.5, 0.0, 0.5, 0.9, clip_duration=5.0),
+            ],
+        )
+        with pytest.raises(ValueError, match="past the end of the clip"):
+            trim_entry(plan, 0, record_end=2.0)  # would need 6s of a 5s clip
+        # ...and a head trim never reaches before the clip's own start
+        plan_head = MontagePlan(
+            music_path="/music/song.wav", duration=10.0,
+            entries=[
+                MontageEntry("/f/a.mp4", 0.2, 2.0, 1.0, 2.8, 0.9, clip_duration=5.0),
+            ],
+        )
+        with pytest.raises(ValueError, match="before the start of the clip"):
+            trim_entry(plan_head, 0, record_start=0.0)  # needs source -0.2
+
+    def test_free_edits_refuse_to_overlap(self):
+        from monteur.montage import move_entry_to, trim_entry
+
+        plan = make_boundary_plan()
+        with pytest.raises(ValueError, match="overlap"):
+            move_entry_to(plan, 0, 1.0)   # onto slot 1
+        with pytest.raises(ValueError, match="overlap"):
+            trim_entry(plan, 0, record_end=3.0)  # into slot 1
+
+    def test_free_edits_stay_inside_the_montage(self):
+        from monteur.montage import move_entry_to
+
+        plan = make_boundary_plan()
+        with pytest.raises(ValueError, match="past the end"):
+            move_entry_to(plan, 0, 5.0)  # a 2s shot cannot start at 5s of 6s
+
+    def test_a_hole_exports_as_black(self):
+        # the payoff: montage_to_timeline already places clips at absolute
+        # record time, so a lifted span is simply ABSENT from V1 — black.
+        from monteur.montage import lift_entry, montage_to_timeline
+
+        plan = lift_entry(make_boundary_plan(), 1)
+        timeline = montage_to_timeline(plan, fps=25.0)
+        v1 = sorted(
+            (c for c in timeline.clips if c.track == "V1"),
+            key=lambda c: c.record_in,
+        )
+        assert [(c.record_in, c.record_out) for c in v1] == [(0, 50), (100, 150)]
+        # the hole is real: frames 50..100 carry no picture at all
+        assert not any(
+            c.record_in < 100 and 50 < c.record_out for c in v1[1:]
+        )
+
+
 def _sfx_plan():
     """A boundary plan carrying a full music-bed strip + SFX layer."""
     from monteur.montage import SfxCue

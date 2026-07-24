@@ -4778,14 +4778,28 @@ class MonteurHandler(BaseHTTPRequestHandler):
         * resync_audio — ``{"resync_audio": true}``:
           monteur.montage.resync_audio re-lays the SFX layer onto the
           current cut so the sounds land on the drops again after an edit.
+
+        ...plus the FREE edits, where nothing else on the timeline moves —
+        the hole a shot leaves behind is an editorial choice (black), not
+        something to close:
+
+        * lift — ``{"lift": <slot>}``: remove the shot, leave the gap.
+        * move_to — ``{"move_to": <slot>, "start": <seconds>}``: put the shot
+          at a free record position; its length and source window are kept.
+        * trim — ``{"trim": <slot>, "start"?: <s>, "end"?: <s>}``: drag an
+          edge; the source window follows 1:1. Slivers, overlaps and trims
+          past the media are ValueErrors -> 400s.
         """
         from monteur.montage import (
             ARRANGEMENT_TRANSITIONS,
             adjust_entry_boundary,
             delete_entry,
+            lift_entry,
             move_entry,
+            move_entry_to,
             plan_from_dict,
             resync_audio,
+            trim_entry,
         )
 
         payload = self._read_json()
@@ -4832,6 +4846,49 @@ class MonteurHandler(BaseHTTPRequestHandler):
             plan = plan_from_dict(payload["plan_json"])  # bad -> ValueError -> 400
             adjusted = move_entry(plan, slot, to)
             _persist_plan_edit(payload, adjusted, "move")
+            self._send_json(_plan_export_result(adjusted, payload))
+            return
+        # --- the free (NLE) edits: nothing else on the timeline moves --------
+        if "lift" in payload:
+            try:
+                slot = int(payload.get("lift"))
+            except (TypeError, ValueError):
+                raise ApiError(400, "'lift' must be an entry index (0-based)")
+            plan = plan_from_dict(payload["plan_json"])
+            adjusted = lift_entry(plan, slot)  # ValueError -> 400
+            _persist_plan_edit(payload, adjusted, "lift")
+            self._send_json(_plan_export_result(adjusted, payload))
+            return
+        if "move_to" in payload:
+            try:
+                slot = int(payload.get("move_to"))
+                start = float(payload.get("start"))
+            except (TypeError, ValueError):
+                raise ApiError(
+                    400, "'move_to' must be an entry index and 'start' a time in seconds"
+                )
+            plan = plan_from_dict(payload["plan_json"])
+            adjusted = move_entry_to(plan, slot, start)  # ValueError -> 400
+            _persist_plan_edit(payload, adjusted, "move")
+            self._send_json(_plan_export_result(adjusted, payload))
+            return
+        if "trim" in payload:
+            try:
+                slot = int(payload.get("trim"))
+            except (TypeError, ValueError):
+                raise ApiError(400, "'trim' must be an entry index (0-based)")
+            edges: dict = {}
+            for key, field in (("start", "record_start"), ("end", "record_end")):
+                if payload.get(key) is not None:
+                    try:
+                        edges[field] = float(payload[key])
+                    except (TypeError, ValueError):
+                        raise ApiError(400, f"'{key}' must be a time in seconds")
+            if not edges:
+                raise ApiError(400, "a trim needs 'start', 'end' or both")
+            plan = plan_from_dict(payload["plan_json"])
+            adjusted = trim_entry(plan, slot, **edges)  # ValueError -> 400
+            _persist_plan_edit(payload, adjusted, "trim")
             self._send_json(_plan_export_result(adjusted, payload))
             return
         transition = str(payload.get("transition") or "")

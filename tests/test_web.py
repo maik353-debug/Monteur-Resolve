@@ -1195,6 +1195,62 @@ class TestPlanAdjustSurgery:
             )
         assert exc.value.code == 400
 
+    def test_lift_leaves_the_gap_while_delete_closes_it(self, server):
+        # the two deletes are both available and genuinely differ: lift keeps
+        # the montage length (the hole is a black pause you asked for), the
+        # ripple delete closes it
+        lifted = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": _tiny_plan_json(), "lift": 0},
+        )["plan_json"]
+        deleted = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": _tiny_plan_json(), "delete": 0},
+        )["plan_json"]
+        assert len(lifted["entries"]) == len(deleted["entries"]) == 1
+        assert lifted["duration"] > deleted["duration"]
+        # the survivor did NOT slide back to 0 in the lift
+        assert lifted["entries"][0]["record_start"] > 0
+        assert deleted["entries"][0]["record_start"] == 0
+
+    def test_move_to_a_free_position(self, server):
+        lifted = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": _tiny_plan_json(), "lift": 0},
+        )["plan_json"]
+        moved = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": lifted, "move_to": 0, "start": 0.5},
+        )["plan_json"]
+        assert moved["entries"][0]["record_start"] == pytest.approx(0.5)
+
+    def test_trim_drags_one_edge(self, server):
+        pj = _tiny_plan_json()
+        first = sorted(pj["entries"], key=lambda e: e["record_start"])[0]
+        trimmed = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": pj, "trim": 0, "end": first["record_end"] - 0.5},
+        )["plan_json"]
+        e = sorted(trimmed["entries"], key=lambda x: x["record_start"])[0]
+        assert e["record_end"] == pytest.approx(first["record_end"] - 0.5)
+        # the source window followed the edge 1:1 — a trim, not a speed change
+        assert e["source_end"] == pytest.approx(first["source_end"] - 0.5)
+
+    def test_free_edits_reject_bad_input(self, server):
+        pj = _tiny_plan_json()
+        for body, why in (
+            ({"lift": "x"}, "non-numeric slot"),
+            ({"move_to": 0, "start": "x"}, "non-numeric time"),
+            ({"trim": 0}, "no edge given"),
+            ({"trim": 0, "end": 0.05}, "sliver"),
+            ({"move_to": 0, "start": 999.0}, "past the end"),
+        ):
+            payload = dict(body)
+            payload["plan_json"] = pj
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                _post(f"{server}/api/plan/adjust", payload)
+            assert exc.value.code == 400, why
+
     def test_sfx_add_update_delete(self, server):
         pj = self._plan_with_sfx()  # ambience@0, impact@8
         # add a whoosh
