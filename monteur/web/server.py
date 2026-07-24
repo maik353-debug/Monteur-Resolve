@@ -1048,7 +1048,7 @@ def _start_proxies_job(folder: str) -> dict:
     return job
 
 
-def _new_job(kind: str) -> dict:
+def _new_job(kind: str, context: dict | None = None) -> dict:
     job = {
         "id": secrets.token_hex(4),
         "kind": kind,  # "scan" | "build" | "pick" | "kit" | "revise" | "direct" | "direct-apply" | "coverage" | "distill" | "preview" | "proxies" | "export-video" | "resolve-build" | "resolve-render" | "resolve-detect" | "movie" | "scene-check" | "movie-assemble" | "ai-test" | "youtube-upload"
@@ -1058,6 +1058,10 @@ def _new_job(kind: str) -> dict:
         "result": None,  # dict when state == "done"
         "created": time.time(),
         "cancel": threading.Event(),
+        # reattach hints (JSON-safe): the UI queries GET /api/jobs to find a
+        # still-running job it navigated away from — folder/project for a scan,
+        # the build body for a build — so nothing has to live in the browser.
+        "context": dict(context or {}),
     }
     with _JOBS_LOCK:
         _JOBS[job["id"]] = job
@@ -1078,6 +1082,7 @@ def _job_view(job: dict) -> dict:
     with _JOBS_LOCK:
         view = {k: job[k] for k in ("id", "kind", "state", "message", "result", "created")}
         view["progress"] = list(job["progress"])
+        view["context"] = dict(job.get("context") or {})
     return view
 
 
@@ -4033,6 +4038,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/update/install"): self._update_install,
             ("GET", "/api/cache"): self._cache_get,
             ("POST", "/api/cache/clear"): self._cache_clear,
+            ("GET", "/api/jobs"): self._jobs_list,
         }
         if (method, path) in routes:
             return routes[(method, path)]
@@ -4322,7 +4328,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
         folder = payload.get("folder", "")
         if not folder:
             raise ApiError(400, "missing 'folder' (path to your footage)")
-        job = _new_job("scan")
+        job = _new_job("scan", {"folder": folder})
         threading.Thread(
             target=_run_scan_job,
             args=(job, folder, bool(payload.get("see"))),
@@ -4354,7 +4360,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             raise ApiError(400, "missing 'project' (or 'folder') to build from")
         _validate_arrangement(payload)
         _validate_platform(payload)
-        job = _new_job("build")
+        job = _new_job("build", {"body": payload})
         threading.Thread(
             target=_run_build_job,
             args=(job, payload),
@@ -5395,7 +5401,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
         as a cancellable job the scan panel drives; optionally runs vision when
         ``see`` is set. Returns ``{"job": id}``."""
         clips, see = self._pool_clip_list(project_id)
-        job = _new_job("scan")
+        job = _new_job("scan", {"project": project_id})
         threading.Thread(
             target=_run_analyze_job,
             args=(job, clips, see, project_id),
@@ -5411,7 +5417,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
         ones judged after analysis), as its own explicit cancellable job.
         Returns ``{"job": id}``."""
         clips, _see = self._pool_clip_list(project_id)
-        job = _new_job("scan")
+        job = _new_job("scan", {"project": project_id})
         threading.Thread(
             target=_run_see_job,
             args=(job, clips, project_id),
@@ -5779,6 +5785,29 @@ class MonteurHandler(BaseHTTPRequestHandler):
 
     def _jobs_get(self, job_id: str) -> None:
         self._send_json(_job_view(self._find_job(job_id)))
+
+    def _jobs_list(self) -> None:
+        """GET /api/jobs?state=running[&kind=scan] — the job registry, filtered.
+
+        The single source of truth for "what is still running", so the UI can
+        reattach to a job it navigated away from (a scan the footage page left
+        behind, a build the storyboard left behind) WITHOUT storing anything in
+        the browser. Newest first; the ``cancel`` Event is never serialised."""
+        from urllib.parse import parse_qs, urlsplit
+
+        query = parse_qs(urlsplit(self.path).query)
+        want_state = (query.get("state") or [""])[0].strip()
+        want_kind = (query.get("kind") or [""])[0].strip()
+        with _JOBS_LOCK:
+            snapshot = list(_JOBS.values())  # copy out, then view without the lock
+        snapshot.sort(key=lambda j: j["created"], reverse=True)
+        views = [
+            _job_view(job)
+            for job in snapshot
+            if (not want_state or job["state"] == want_state)
+            and (not want_kind or job["kind"] == want_kind)
+        ]
+        self._send_json({"jobs": views})
 
     def _jobs_cancel(self, job_id: str) -> None:
         # Setting the event on a finished job is a harmless no-op — the

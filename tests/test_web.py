@@ -750,6 +750,29 @@ class TestCreateApi:
         assert _post(f"{server}/api/jobs/{job_id}/cancel", {})["ok"] is True
         assert _get(f"{server}/api/jobs/{job_id}")["state"] == job["state"]
 
+    def test_jobs_list_reports_the_scan_with_context(self, server):
+        # the scan appears in the server's job registry with its folder in
+        # context, so the UI reattaches to it without any browser storage
+        job_id = self._scan(server)
+        listing = _get(f"{server}/api/jobs?kind=scan")["jobs"]
+        mine = [j for j in listing if j["id"] == job_id]
+        assert mine, "the scan job is missing from /api/jobs"
+        assert mine[0]["kind"] == "scan"
+        assert mine[0]["context"].get("folder") == self.DEMO
+        # a kind filter never leaks the scan into another kind's listing
+        builds = _get(f"{server}/api/jobs?kind=build")["jobs"]
+        assert all(j["id"] != job_id for j in builds)
+        _wait_for_job(server, job_id)  # let the daemon thread wrap up cleanly
+
+    def test_jobs_list_state_filter(self, server):
+        # once the scan finishes it drops out of the running-only listing but is
+        # still fetchable by id — the reattach query (state=running) sees nothing
+        job_id = self._scan(server)
+        _wait_for_job(server, job_id)
+        running = _get(f"{server}/api/jobs?state=running&kind=scan")["jobs"]
+        assert all(j["id"] != job_id for j in running)
+        assert _get(f"{server}/api/jobs/{job_id}")["state"] == "done"
+
     def test_scan_missing_folder_is_400(self, server):
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             _post(f"{server}/api/create/scan", {})
@@ -1505,17 +1528,31 @@ class TestWizardStepsUi:
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_rebuild_draft_survives_navigation(self):
-        # a running build is remembered and reattached, so leaving the
-        # storyboard (or reloading) never orphans the build
+        # a running build is reattached from the SERVER registry, so leaving the
+        # storyboard (or reloading) never orphans the build — nothing is stored
+        # in the browser
         html = _APP_HTML.read_text(encoding="utf-8")
         assert "function attachBuildJob" in html
         assert "function reattachBuildJob" in html
-        # startBuild persists the job with kind "build"
-        assert 'kind: "build"' in html
-        # every terminal build handler and the reattach paths reuse the store
+        # reattach asks the server which build is still running (no localStorage)
+        assert 'findRunningJob("build")' in html
         assert "reattachBuildJob()" in html  # wired into creShowStep(storyboard)
-        # the reload path recovers a build too (not only a scan)
-        assert 'rec.kind === "build"' in html
+        # the reattach recovers the build body from the job's server-side context
+        assert "job.context && job.context.body" in html
+        # the browser job store is gone entirely — the server is the source of truth
+        assert "saveActiveJob" not in html
+        assert "loadActiveJob" not in html
+        assert "monteur:activeJob" not in html
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_scan_survives_navigation(self):
+        # the footage scan is reattached the same server-query way, and the
+        # reattach is wired into the footage page's entry so returning mid-scan
+        # re-shows the live progress (and re-arms Cancel)
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert "function reattachScanJob" in html
+        assert 'findRunningJob("scan")' in html
+        assert "reattachScanJob()" in html  # wired into creShowStep(footage)
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_color_is_its_own_page(self):

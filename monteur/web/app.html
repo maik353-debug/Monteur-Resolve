@@ -6386,6 +6386,7 @@ function creShowStep(n, focusHeading) {
   if (step.key === "footage") {
     if (!wsExplorer.loaded) wsExplorerLoad("");  // first visit: list the home dir
     renderFolderFaves();  // reflect saved favorites whenever the page opens
+    reattachScanJob();    // a scan started here keeps running across nav — re-show it
   } else {
     wsPause();  // never play the workspace clip off-screen
   }
@@ -7152,25 +7153,20 @@ function renderVisionExtras(result) {
   }
 }
 
-/* reload-safety: remember the single active long job (the scan) so a browser
-   reload can reattach to it — the server keeps running either way. All access
-   is guarded: localStorage may throw in private mode, and a malformed record
-   is treated as absent. */
-var ACTIVE_JOB_KEY = "monteur:activeJob";
-function saveActiveJob(rec) {
-  try { window.localStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify(rec)); } catch (e) { /* private mode */ }
-}
-function clearActiveJob() {
-  try { window.localStorage.removeItem(ACTIVE_JOB_KEY); } catch (e) { /* private mode */ }
-}
-function loadActiveJob() {
-  try {
-    var raw = window.localStorage.getItem(ACTIVE_JOB_KEY);
-    if (!raw) return null;
-    var rec = JSON.parse(raw);
-    if (!rec || typeof rec !== "object" || !rec.jobId) return null;
-    return rec;
-  } catch (e) { return null; }
+/* reload/navigation-safety: the server's job registry is the single source of
+   truth for what is still running, so reattach ASKS THE SERVER — nothing about
+   a long job is stored in the browser. Navigating away leaves the server job
+   running; coming back re-finds it here and re-wires the live poll, so progress,
+   the heartbeat, Cancel and the eventual result all work as if we never left.
+   Returns a Promise of the newest running job of `kind` (full view, incl.
+   context: folder/project for a scan, the build body for a build), or null. */
+function findRunningJob(kind) {
+  return api("/api/jobs?state=running&kind=" + encodeURIComponent(kind))
+    .then(function (data) {
+      var jobs = (data && data.jobs) || [];
+      return jobs.length ? jobs[0] : null; // the server sorts newest-first
+    })
+    .catch(function () { return null; });  // no server / no match — nothing to reattach
 }
 
 /* Wire the scan panel's handlers to a job id — shared by the fresh-start path
@@ -7231,7 +7227,6 @@ function attachScanJob(jobId) {
   scanPanel.start(jobId, {
     onProgress: function (pr) { animateScanProgress(pr); },
     onDone: function (result) {
-      clearActiveJob();
       setScanBusy(false);
       cre.clips = (result && result.clips) || [];
       creUpdatePages(); // footage sifted — light the Footage tick
@@ -7248,7 +7243,6 @@ function attachScanJob(jobId) {
       toast("Analyzed " + n + (n === 1 ? " clip." : " clips."), "success");
     },
     onCancelled: function () {
-      clearActiveJob();
       setScanBusy(false);
       loadPool(); // clips analyzed before the cancel are kept — show them green
       creNote("cre-scan-msg", "Analysis cancelled — the clips already analyzed are kept. Your files are untouched.");
@@ -7256,7 +7250,6 @@ function attachScanJob(jobId) {
       $("cre-scan-btn").focus();
     },
     onError: function (message) {
-      clearActiveJob();
       setScanBusy(false);
       loadPool(); // anything analyzed before the error is kept
       creNote("cre-scan-msg", message, true);
@@ -7266,34 +7259,41 @@ function attachScanJob(jobId) {
   });
 }
 
-/* On page load, reattach to a still-running scan the browser forgot about — so
-   progress, the heartbeat, Cancel and the eventual result all work as if the
-   user never left. No stored record → nothing happens (startup is unchanged). */
+/* Return to the Footage page mid-scan: the poll loop was stopped on the way out
+   (pages own their loops), but the server job is still running — re-find it and
+   re-wire the live poll so progress, the heartbeat, Cancel and the result all
+   land as if we never left. No running scan → nothing happens. This is what
+   makes navigating away never LOOK like it aborted the analysis. */
+function reattachScanJob() {
+  if (scanPanel.running()) return; // already watching
+  findRunningJob("scan").then(function (job) {
+    if (!job) return; // nothing running — leave the page as it is
+    var ctx = job.context || {};
+    // a staged analysis is tied to a project; never wire THIS project's footage
+    // page to another project's scan (switching projects mid-scan)
+    if (ctx.project && cre.projectId && String(ctx.project) !== String(cre.projectId)) return;
+    if (ctx.folder && $("cre-folder")) $("cre-folder").value = ctx.folder;
+    setScanBusy(true);
+    attachScanJob(job.id);
+  });
+}
+
+/* On page load, reattach to a still-running job the browser forgot about — so a
+   full reload behaves like in-app navigation. Asks the server what is running
+   (nothing is stored client-side); a running scan reopens the Footage page, a
+   running build reopens the Storyboard. Nothing running → startup is unchanged. */
 function reattachActiveJob() {
-  var rec = loadActiveJob();
-  if (!rec) return;
-  if (rec.kind === "build") {
-    // navigate to the storyboard; creShowStep's reattachBuildJob re-wires the
-    // poll (it fetches the job state and attaches, or clears a dead record)
-    setView("create");
-    creShowStep(creStepIndex("storyboard"));
-    return;
-  }
-  if (rec.kind !== "scan") return;
-  api("/api/jobs/" + rec.jobId).then(function (job) {
-    if (job.state === "running" || job.state === "done") {
-      // running: restore the footage step and re-wire the live poll.
-      // done: reattach too, so the clips appear from the finished result.
+  findRunningJob("build").then(function (build) {
+    if (build) {
       setView("create");
-      creShowStep(1);
-      $("cre-folder").value = rec.folder || "";
-      setScanBusy(true);
-      attachScanJob(rec.jobId);
-    } else {
-      clearActiveJob(); // cancelled / error — nothing to show, no scary note
+      creShowStep(creStepIndex("storyboard")); // its reattachBuildJob re-wires the poll
+      return;
     }
-  }).catch(function () {
-    clearActiveJob(); // 404 (job gone, e.g. server restarted) — clear silently
+    findRunningJob("scan").then(function (scan) {
+      if (!scan) return;
+      setView("create");
+      creShowStep(1); // its reattachScanJob re-wires the poll
+    });
   });
 }
 
@@ -7331,8 +7331,7 @@ function runStagedAnalysis(endpoint, opts) {
   if (endpoint === "analyze" && (opts.see || seeEnabled())) body.see = true;
   api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/" + endpoint,
     { method: "POST", body: body }).then(function (data) {
-    // remember this job so a browser reload can reattach to it while it runs
-    saveActiveJob({ jobId: data.job, kind: "scan", folder: poolScanFolder(), ts: Date.now() });
+    // the server registry tracks the running job — nothing to store client-side
     attachScanJob(data.job);
   }).catch(function (err) {
     setScanBusy(false);
@@ -8786,12 +8785,10 @@ function startBuild(andThen) {
   setBuildBusy(true);
   startBuildStage(); // live feedback from the first moment, before the POST resolves
   api("/api/create/build", { method: "POST", body: body }).then(function (data) {
-    // remember the running build so navigating away (or a reload) can
-    // reattach — the server keeps building either way
-    saveActiveJob({ jobId: data.job, kind: "build", body: body });
+    // the server registry tracks the running build (with its body in context),
+    // so navigating away or reloading can reattach — nothing stored client-side
     attachBuildJob(data.job, body, andThen);
   }).catch(function (err) {
-    clearActiveJob();
     setBuildBusy(false);
     var message = err && err.message ? err.message : String(err);
     creNote("cre-build-msg", message, true);
@@ -8810,7 +8807,6 @@ function attachBuildJob(jobId, body, andThen) {
   buildPanel.start(jobId, {
     onProgress: function (pr) { animateBuildProgress(pr); },
     onDone: function (result) {
-      clearActiveJob();
       stopBuildStage();
       setBuildBusy(false);
       cre.result = { data: result, format: body.format, body: body, kind: "build" };
@@ -8834,14 +8830,12 @@ function attachBuildJob(jobId, body, andThen) {
       if (andThen) andThen(result);
     },
     onCancelled: function () {
-      clearActiveJob();
       stopBuildStage();
       setBuildBusy(false);
       creNote("cre-build-msg", "Build cancelled — nothing was written. Build again whenever you're ready.");
       $("cre-build-btn").focus();
     },
     onError: function (message) {
-      clearActiveJob();
       stopBuildStage();
       setBuildBusy(false);
       creNote("cre-build-msg", message, true);
@@ -8855,17 +8849,11 @@ function attachBuildJob(jobId, body, andThen) {
    the live poll so progress + the eventual draft land as if we never left. */
 function reattachBuildJob() {
   if (buildPanel.running()) return; // already watching
-  var rec = loadActiveJob();
-  if (!rec || rec.kind !== "build") return;
-  api("/api/jobs/" + rec.jobId).then(function (job) {
-    if (job.state === "running" || job.state === "done") {
-      setBuildBusy(true);
-      attachBuildJob(rec.jobId, rec.body || creBuildBody(), null);
-    } else {
-      clearActiveJob(); // cancelled / error while away — nothing to reattach
-    }
-  }).catch(function () {
-    clearActiveJob(); // 404 (job gone / server restarted) — clear silently
+  findRunningJob("build").then(function (job) {
+    if (!job) return; // nothing building — leave the storyboard as it is
+    var body = (job.context && job.context.body) || creBuildBody();
+    setBuildBusy(true);
+    attachBuildJob(job.id, body, null);
   });
 }
 $("cre-build-btn").addEventListener("click", function () { startBuild(null); });
