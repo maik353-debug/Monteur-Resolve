@@ -1416,10 +1416,43 @@ class TestWizardStepsUi:
             "window.monteurBuildAnim",
             "@keyframes tlBlockIn",
             "tl-anim-in",
-            "animateTimelineBuild(); // a fresh build assembles into the timeline",
+            "revealTimelineWhenVisible(); // a fresh build assembles into the timeline",
             "prefers-reduced-motion: reduce",
         ):
             assert needle in html, needle
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_build_reveal_waits_until_the_storyboard_is_on_screen(self):
+        # A build usually finishes while the user is still on Options, where
+        # the storyboard section is hidden — animating there would play into
+        # nothing and the cut would just BE there on arrival. The reveal is
+        # remembered and played on storyboard entry instead.
+        html = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            "function revealTimelineWhenVisible",
+            "function maybeRevealTimeline",
+            "cre.pendingReveal",
+            'maybeRevealTimeline(); // a build that finished on Options reveals HERE',
+        ):
+            assert needle in html, needle
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_build_film_strip_shows_moments_not_clip_heads(self):
+        # The build stage's film strip shows the MOMENTS Claude casts. A
+        # reopened project has no in-memory scan result, so it pulls the
+        # project's stored moments rather than falling back to clip heads.
+        html = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            "function buildStageShots",
+            "function ensureMomentsCache",
+            "function renderBuildFilm",
+            "cre.momentsCache",
+            "/clips",
+        ):
+            assert needle in html, needle
+        # the cache is per project — a switch must never show the old moments
+        assert "forProject" in html
+        assert "cre.momentsCache = null" in html
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_build_stage_live_feedback_is_wired(self):

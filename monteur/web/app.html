@@ -5867,6 +5867,9 @@ $("plan-btn").addEventListener("click", function () { buildPlan($("plan-btn")); 
 var cre = {
   step: 1,
   clips: null,            // clips array from the last finished scan job
+  momentsCache: null,     // the PROJECT's stored clips+moments, for when a
+                          // reopened project has no in-memory scan result
+  pendingReveal: false,   // a fresh build is waiting to fly into the timeline
   pool: [],               // the media pool: {path, kind} references (Increment B)
   poolClips: [],          // the pool resolved to clip cards (name, thumb, status)
   poolSel: {},            // selected clip paths (staged flow) — {path: true}
@@ -6419,6 +6422,7 @@ function creShowStep(n, focusHeading) {
     if ($("cre-arrange-tools").open) arrRender();
     applyGradeToBoard();  // reflect the current Look & color grade on the board
     reattachBuildJob();   // a rebuild started here keeps running across nav
+    maybeRevealTimeline(); // a build that finished on Options reveals HERE
   }
   if (step.key === "options") syncContinueHint(); // fresh look at "would this click rebuild?"
   if (step.key === "color") applyGradePreview(); // reflect the grade on the controls
@@ -7332,6 +7336,7 @@ function runStagedAnalysis(endpoint, opts) {
   $("cre-vision-msg").hidden = true;
   startProxyWatch(null); // fresh analysis restarts the proxy status line
   cre.clips = null;
+  cre.momentsCache = null; // re-analysis rewrites the project's moments
   cre.result = null;  // footage knowledge changed — any previous build is stale
   cre.buildFp = null; // ...so the next storyboard visit builds fresh
   cre.arrange.seq = [];
@@ -8583,23 +8588,67 @@ var BUILD_COMPOSE_CAPTIONS = [
 function buildStageShots() {
   // the real material at MOMENT grain: each moment's own frame (thumbnail at
   // its start), so the strip shows the stretches Claude actually casts — not
-  // whole clips. Falls back to clip heads if a scan carried no moment list.
-  var shots = [];
-  (cre.clips || []).forEach(function (c) {
-    if (!c || !c.path) return;
-    var moments = c.moments || [];
-    if (moments.length) {
-      moments.forEach(function (m) {
+  // whole clips. Sources, in order: this session's scan result, the PROJECT's
+  // stored moments (a reopened project has no in-memory scan), and only then
+  // clip heads — the honest last resort when nothing is analyzed yet.
+  function fromClips(list) {
+    var shots = [];
+    (list || []).forEach(function (c) {
+      if (!c || !c.path) return;
+      (c.moments || []).forEach(function (m) {
         shots.push({ path: c.path, t: (m && typeof m.start === "number") ? m.start : 0 });
       });
-    } else {
-      shots.push({ path: c.path, t: 0 });
-    }
-  });
+    });
+    return shots;
+  }
+  var shots = fromClips(cre.clips);
+  if (!shots.length) shots = fromClips(cre.momentsCache);
   if (!shots.length) {
-    (cre.poolClips || []).forEach(function (c) { if (c && c.path) shots.push({ path: c.path, t: 0 }); });
+    // nothing analyzed anywhere: clip heads, so the strip is never empty
+    // (an EMPTY array is truthy in JS, so pick by length, not by ||)
+    var heads = [cre.clips, cre.momentsCache, cre.poolClips].filter(function (l) {
+      return l && l.length;
+    })[0] || [];
+    heads.forEach(function (c) { if (c && c.path) shots.push({ path: c.path, t: 0 }); });
   }
   return shots.slice(0, 16);
+}
+
+/* The project's stored clips+moments (the durable analysis), cached per
+   project. Best-effort: a failure just leaves the cache empty and the film
+   strip keeps whatever it already had. */
+function ensureMomentsCache(done) {
+  if (!cre.projectId) { if (done) done(); return; }
+  if (cre.momentsCache && cre.momentsCache.forProject === cre.projectId) {
+    if (done) done();
+    return;
+  }
+  api("/api/projects/" + encodeURIComponent(String(cre.projectId)) + "/clips")
+    .then(function (data) {
+      var clips = (data && data.clips) || [];
+      clips.forProject = cre.projectId;  // so a project switch refetches
+      cre.momentsCache = clips;
+      if (done) done();
+    })
+    .catch(function () { if (done) done(); });
+}
+
+function renderBuildFilm() {
+  var film = $("bstage-film");
+  if (!film) return;
+  clear(film);
+  buildStageShots().forEach(function (s, i) {
+    var shot = el("div", "bstage-shot");
+    var img = document.createElement("img");
+    img.loading = "lazy";
+    img.alt = "";
+    img.src = thumbUrl(s.path, 160) + "&t=" + encodeURIComponent(String(s.t || 0));
+    shot.appendChild(img);
+    film.appendChild(shot);
+    buildStage.timers.push(
+      window.setTimeout(function () { shot.classList.add("in"); }, 90 + i * 90)
+    );
+  });
 }
 
 function clearBuildStageTimers() {
@@ -8629,18 +8678,12 @@ function startBuildStage() {
     rail.appendChild(chip);
   });
   // the real material — the MOMENTS — revealed one at a time
-  var film = $("bstage-film");
-  clear(film);
-  var shots = buildStageShots();
-  shots.forEach(function (s, i) {
-    var shot = el("div", "bstage-shot");
-    var img = document.createElement("img");
-    img.loading = "lazy";
-    img.alt = "";
-    img.src = thumbUrl(s.path, 160) + "&t=" + encodeURIComponent(String(s.t || 0));
-    shot.appendChild(img);
-    film.appendChild(shot);
-    buildStage.timers.push(window.setTimeout(function () { shot.classList.add("in"); }, 90 + i * 90));
+  renderBuildFilm();
+  // A reopened project has no in-memory scan result, so the strip would fall
+  // back to clip HEADS. Pull the project's stored moments and re-render the
+  // moment we have them — the build takes far longer than the fetch.
+  ensureMomentsCache(function () {
+    if (!$("cre-build-stage").hidden) renderBuildFilm();
   });
   var script = $("bstage-script");
   if (script) { script.hidden = true; script.textContent = ""; script.classList.remove("thinking"); }
@@ -8840,7 +8883,7 @@ function attachBuildJob(jobId, body, andThen) {
       $("cre-rev-msg").hidden = true;
       creUpdatePages(); // a working draft exists — light the Storyboard tick
       renderStoryboard();
-      animateTimelineBuild(); // a fresh build assembles into the timeline
+      revealTimelineWhenVisible(); // a fresh build assembles into the timeline
       resetDirectorNotes(); // a fresh cut makes any previous review stale
       resetPreview();       // ...and any previous preview shows the old cut
       renderCreResult(result);
@@ -9343,6 +9386,8 @@ function newProject() {
   $("cre-draft-name").value = "";
   $("cre-draft-msg").hidden = true;
   cre.clips = null;
+  cre.momentsCache = null;  // never carry one project's moments into the next
+  cre.pendingReveal = false;
   cre.result = null;
   // buildFp is only ever consulted while cre.result + rev.planJson exist
   // (both cleared here), so it needs no reset — leaving the 4-place invariant
@@ -11433,6 +11478,23 @@ function cssVar(name) {
    the timeline in record order (staggered), so you SEE the cut assemble —
    the sibling of the analysis scan animation. Re-adds the class on the next
    frame so the CSS animation restarts; capped delay keeps a long cut snappy. */
+/* A finished build usually lands while the user is still on Options — the
+   storyboard section is hidden, so replaying the reveal there would animate
+   into nothing and the cut would just BE there on arrival. Remember it instead
+   and play it the moment the storyboard is actually on screen. */
+function revealTimelineWhenVisible() {
+  cre.pendingReveal = true;
+  maybeRevealTimeline();
+}
+function maybeRevealTimeline() {
+  if (!cre.pendingReveal) return;
+  var sec = $("cre-step-3");
+  if (!sec || sec.hidden) return;  // not on screen yet — keep it pending
+  if (!document.querySelector("#cre-strip-blocks .tl-block")) return;
+  cre.pendingReveal = false;
+  animateTimelineBuild();
+}
+
 function animateTimelineBuild() {
   var blocks = document.querySelectorAll("#cre-strip-blocks .tl-block");
   Array.prototype.forEach.call(blocks, function (block, i) {
