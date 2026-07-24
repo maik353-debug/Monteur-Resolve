@@ -417,17 +417,17 @@ class TestAssignElements:
         filed = [c for c in plan.sfx if c.file]
         assert len(filed) == 1  # the second would overlap the first's span
 
-    def test_no_file_reuse_within_ten_seconds(self) -> None:
+    def test_no_file_reuse_within_the_kind_gap(self) -> None:
         plan = make_plan()
         plan.sfx = [
             SfxCue(5.0, 0.6, "whoosh", "q", "fast cut"),
-            SfxCue(9.0, 0.6, "whoosh", "q", "fast cut"),
+            SfxCue(7.5, 0.6, "whoosh", "q", "fast cut"),
             SfxCue(25.0, 0.6, "whoosh", "q", "fast cut"),
         ]
         pool = [element("/sfx/w.wav", "whoosh", 0.6)]
         assign_elements(plan, MusicAnalysis("/m.wav", 40.0, 120.0), pool)
         filed_times = [c.time for c in plan.sfx if c.file]
-        # 5.0 files; 9.0 is the same file within 10s; 25.0 is far enough
+        # 5.0 files; 7.5 is the same file within the 4s whoosh gap; 25.0 is far
         assert filed_times == pytest.approx([5.0, 25.0])
 
     def test_travel_density_is_sparse(self) -> None:
@@ -444,8 +444,10 @@ class TestAssignElements:
         ]
         assign_elements(plan, make_music(), pool)
         filed = [c for c in plan.sfx if c.kind == "whoosh" and c.file]
-        assert len(filed) == 1  # sparse: one whoosh at most
-        assert filed[0].time == pytest.approx(4.7)  # the stutter zone stays clean
+        # travel stays sparse (budget 2) — the two clean cuts file, the one in
+        # the pre-drop stutter zone (16-20s) never does
+        assert sorted(round(c.time, 1) for c in filed) == [4.7, 9.7]
+        assert all(c.time < 16.0 for c in filed)  # the stutter zone stays clean
 
     def test_wedding_density_is_minimal(self) -> None:
         plan = make_plan(style="wedding")

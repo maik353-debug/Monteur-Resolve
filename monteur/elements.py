@@ -148,8 +148,8 @@ _CONFIDENCE_FLOOR = 0.1  # a classified element is never 0-confidence
 # breathe a little longer, braams ring out; risers are once-per-ramp by
 # construction, the gap only guards pathological plans. Unknown kinds keep
 # the old conservative gap.
-_KIND_REUSE_GAP = {"impact": 4.0, "whoosh": 6.0, "braam": 6.0, "riser": 8.0}
-_DEFAULT_REUSE_GAP = 10.0
+_KIND_REUSE_GAP = {"impact": 2.5, "whoosh": 4.0, "braam": 5.0, "riser": 6.0}
+_DEFAULT_REUSE_GAP = 8.0
 # Riser integrity: a riser plays at least max(_RISER_MIN_PLAY seconds,
 # _RISER_MIN_SHARE of its file) or it is not placed there at all.
 _RISER_MIN_PLAY = 2.0
@@ -406,11 +406,11 @@ class _StyleRules:
 
 
 _STYLE_RULES: dict[str, _StyleRules] = {
-    "trailer": _StyleRules(3, True, False, 0.0),  # the full program
-    "music_video": _StyleRules(3, True, False, 0.0),  # punchy
-    "travel": _StyleRules(1, True, False, 4.0),  # sparse
-    "wedding": _StyleRules(0, False, True, 4.0),  # minimal
-    "auto": _StyleRules(2, True, False, 0.0),
+    "trailer": _StyleRules(5, True, False, 0.0),  # the full program
+    "music_video": _StyleRules(5, True, False, 0.0),  # punchy
+    "travel": _StyleRules(2, True, False, 4.0),  # sparse
+    "wedding": _StyleRules(0, False, True, 4.0),  # minimal — stays hands-off
+    "auto": _StyleRules(4, True, False, 0.0),
 }
 
 _STYLE_NOTE_RE = re.compile(r'^style "([a-z_]+)"')

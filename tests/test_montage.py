@@ -1682,20 +1682,20 @@ def test_sfx_travel_places_ambience_risers_impact_whooshes():
     assert len(impacts) == 1
     assert impacts[0].time == pytest.approx(16.0)
     assert impacts[0].query == "cinematic impact hit"
-    # whooshes: centered on real cuts (fastest slots live in the climax),
-    # 0.6s each, filling the density cap of ceil(40 / 5) = 8 cues
+    # whooshes: centered on real cuts, 0.6s each, filling the looser density cap
+    # of ceil(40 / 3.5) = 12 cues (they spread across the fastest cuts, no longer
+    # confined to the climax now that the whoosh budget is higher)
     whooshes = [c for c in plan.sfx if c.kind == "whoosh"]
-    assert len(whooshes) == 3
+    assert len(whooshes) == 6
     cut_times = {e.record_start for e in plan.entries}
     for c in whooshes:
         assert c.duration == pytest.approx(0.6)
         assert c.query == "whoosh transition fast"
         center = c.time + c.duration / 2.0
         assert any(abs(center - t) < 1e-6 for t in cut_times)
-        assert 16.0 <= center <= 32.0  # the fastest (0.5s) slots are the climax
-    assert len(plan.sfx) == 8
+    assert len(plan.sfx) == 11
     assert any(
-        "sfx layer: 8 cues planned "
+        "sfx layer: 11 cues planned "
         "(markers on the timeline; queries for your SFX library)" in n
         for n in plan.notes
     )
@@ -1714,7 +1714,7 @@ def test_sfx_trailer_with_drops_and_dips():
     assert times == sorted(times)
     for c in plan.sfx:
         assert 0.0 <= c.time and c.time + c.duration <= 40.0 + 1e-6
-    assert len(plan.sfx) <= 8  # ceil(40 / 5)
+    assert len(plan.sfx) <= 12  # ceil(40 / 3.5)
     # ambience at 0 under the opening
     assert plan.sfx[0].kind == "ambience" and plan.sfx[0].time == 0.0
     # risers end exactly on the act changes (the split build gets none)
@@ -1734,18 +1734,19 @@ def test_sfx_trailer_with_drops_and_dips():
 
 
 def test_sfx_density_cap_drops_whooshes_then_risers():
-    # travel over the 12s song: cap = ceil(12 / 5) = 3 cues. Whooshes never
-    # make it in; of the three act-change risers only the one INTO the
-    # climax survives; the backbone (ambience + impact) always stays.
+    # travel over the 12s song: cap = ceil(12 / 3.5) = 4 cues. Whooshes never
+    # make it in (dropped first); the act-change risers fill the room left after
+    # the backbone (ambience + impact), which always stays.
     plan = plan_montage(
         make_reports(), make_music(), style="travel", cut_lead=0.0, sfx=True
     )
-    assert len(plan.sfx) == 3
+    assert len(plan.sfx) == 4
     kinds = [c.kind for c in plan.sfx]
-    assert sorted(kinds) == ["ambience", "impact", "riser"]
-    riser = next(c for c in plan.sfx if c.kind == "riser")
-    assert riser.note == "build -> climax"
-    assert any("sfx layer: 3 cues planned" in n for n in plan.notes)
+    assert "whoosh" not in kinds  # whooshes are dropped first under the cap
+    assert kinds.count("ambience") == 1 and kinds.count("impact") == 1
+    risers = [c for c in plan.sfx if c.kind == "riser"]
+    assert risers and any(c.note == "build -> climax" for c in risers)
+    assert any("sfx layer: 4 cues planned" in n for n in plan.notes)
 
 
 def test_sfx_impact_on_auto_drop_cut():
@@ -1808,7 +1809,7 @@ def test_sfx_works_without_music():
         cut_lead=0.0, sfx=True,
     )
     assert plan.sfx
-    assert len(plan.sfx) <= 4  # ceil(20 / 5)
+    assert len(plan.sfx) <= 6  # ceil(20 / 3.5)
     assert plan.sfx[0].kind == "ambience" and plan.sfx[0].time == 0.0
     impacts = [c for c in plan.sfx if c.kind == "impact"]
     # pseudo-grid phases use the raw arc shares: climax starts at 50% of 20s

@@ -969,8 +969,9 @@ _ARR_SFX_QUERIES = {
 # SFX layer (plan_montage(..., sfx=True)) — see the module docstring.
 # Density cap: at most ~one cue per this many seconds of cut, so the plan
 # never drowns in cues. Whooshes are dropped first, then risers; ambience,
-# impacts and sub-drops are the backbone and always survive.
-_SFX_SECONDS_PER_CUE = 5.0
+# impacts and sub-drops are the backbone and always survive. (Loosened from 5s
+# so a supplied library is actually used, not left mostly on the shelf.)
+_SFX_SECONDS_PER_CUE = 3.5
 # Riser length: min(this, half the phase it builds out of) — it must grow
 # out of the prior act, not drown it.
 _SFX_RISER_MAX = 2.0
@@ -980,7 +981,7 @@ _SFX_IMPACT_LENGTH = 1.0
 # Whoosh length, centered on its cut, and how many at most (the montage's
 # fastest cuts get them).
 _SFX_WHOOSH_LENGTH = 0.6
-_SFX_MAX_WHOOSHES = 3
+_SFX_MAX_WHOOSHES = 6
 # A whoosh keeps this much clearance (seconds) from every other cue, so two
 # effects never pile onto the same moment.
 _SFX_WHOOSH_CLEARANCE = 1.0
