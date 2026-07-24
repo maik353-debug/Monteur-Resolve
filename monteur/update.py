@@ -34,10 +34,17 @@ from pathlib import Path
 from typing import Callable
 
 import monteur
+from monteur.procio import NO_WINDOW
 from monteur.settings import settings_path
 
 #: How long any single git subprocess may run before we give up.
 GIT_TIMEOUT = 45.0
+
+
+def _default_run(*args, **kwargs):
+    """Default git runner: :func:`subprocess.run` with the Windows
+    console-window flash suppressed (no-op off Windows)."""
+    return subprocess.run(*args, **kwargs, **NO_WINDOW)
 
 #: An injectable subprocess runner so the git path is testable without a real
 #: repo (mirrors the module's "everything network/IO is injected" ethos).
@@ -450,7 +457,7 @@ def apply_pending() -> ApplyResult | None:
 
 def _run_git(args: list[str], root: Path, runner: GitRunner | None = None):
     """Run one git command in ``root``; captured, text, bounded by GIT_TIMEOUT."""
-    run = runner or subprocess.run
+    run = runner or _default_run
     return run(
         ["git", *args],
         cwd=str(root),

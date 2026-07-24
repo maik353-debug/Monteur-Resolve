@@ -57,6 +57,7 @@ from pathlib import Path, PurePath
 from urllib.parse import quote
 
 from monteur.montage import MontagePlan
+from monteur.procio import NO_WINDOW
 from monteur.sift import ClipReport
 
 # YouTube requires chapters >= 10s apart (and at least three of them).
@@ -173,7 +174,7 @@ def extract_thumbnails(
             "-y", str(target),
         ]
         try:
-            subprocess.run(cmd, check=True, capture_output=True, timeout=60)
+            subprocess.run(cmd, check=True, capture_output=True, timeout=60, **NO_WINDOW)
         except (subprocess.SubprocessError, OSError):
             continue  # a broken source loses its thumbnail, not the kit
         if target.exists() and target.stat().st_size > 0:

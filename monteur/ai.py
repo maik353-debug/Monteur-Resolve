@@ -59,6 +59,7 @@ from dataclasses import asdict
 
 from monteur.analysis import PacingStats
 from monteur.model import Transcript
+from monteur.procio import NO_WINDOW
 
 DEFAULT_MODEL = "claude-opus-4-8"
 
@@ -386,6 +387,7 @@ def _complete_cli(
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            **NO_WINDOW,
         )
     except OSError as exc:
         raise MonteurAIError(f"could not run the 'claude' CLI: {exc}") from exc

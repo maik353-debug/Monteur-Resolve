@@ -17,6 +17,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from monteur.procio import NO_WINDOW
+
 MEDIA_EXTENSIONS = {
     ".mov", ".mp4", ".mxf", ".mkv", ".avi", ".m4v", ".mts", ".webm",
 }
@@ -90,10 +92,13 @@ def _run(cmd: list[str], runner=None, cancel=None) -> subprocess.CompletedProces
     poll-and-kill path engages ONLY when a real cancel object is passed.
     """
     if cancel is None:
-        runner = runner or subprocess.run
-        return runner(cmd, capture_output=True)
+        if runner is None:  # the real spawn: hide the console window on Windows
+            return subprocess.run(cmd, capture_output=True, **NO_WINDOW)
+        return runner(cmd, capture_output=True)  # an injected runner is left alone
     # Cancellable path: run ffmpeg under our own control and poll the flag.
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **NO_WINDOW
+    )
     while True:
         try:
             stdout, stderr = proc.communicate(timeout=_CANCEL_POLL_S)

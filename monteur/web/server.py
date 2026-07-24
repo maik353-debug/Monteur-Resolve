@@ -6529,9 +6529,11 @@ class _WindowControls:
             # A frozen build IS the launcher (sys.executable = monteur.exe); a
             # source run is `python -m monteur <args>`, so rebuild that form —
             # otherwise the relaunch would run `python ui …` and die instantly.
+            from monteur.procio import NO_WINDOW
+
             frozen = bool(getattr(sys, "frozen", False))
             base = [sys.executable] if frozen else [sys.executable, "-m", "monteur"]
-            subprocess.Popen(base + sys.argv[1:])  # noqa: S603 - our own app
+            subprocess.Popen(base + sys.argv[1:], **NO_WINDOW)  # noqa: S603 - our own app
         except Exception:  # noqa: BLE001 — never strand the user
             return
         self.close()
@@ -6706,8 +6708,10 @@ def serve_app(
         if applied and applied.applied and applied.relaunch:
             import subprocess
 
+            from monteur.procio import NO_WINDOW
+
             print(applied.message, flush=True)
-            subprocess.Popen(applied.relaunch)  # noqa: S603 - our own exe
+            subprocess.Popen(applied.relaunch, **NO_WINDOW)  # noqa: S603 - our own exe
             return
     except Exception:  # noqa: BLE001 - an update must never block startup
         pass

@@ -31,6 +31,7 @@ from typing import Callable
 from monteur.io.srt import read_srt
 from monteur.io.whisperjson import read_whisper_json
 from monteur.model import Transcript
+from monteur.procio import NO_WINDOW
 
 __all__ = [
     "MonteurTranscribeError",
@@ -57,6 +58,12 @@ _INSTALL_HELP = (
     "    Note: whisper.cpp needs 16 kHz mono WAV input; Monteur converts other\n"
     "    media automatically when ffmpeg is on PATH."
 )
+
+
+def _default_run(*args, **kwargs):
+    """Default :func:`subprocess.run` with the Windows console-window flash
+    suppressed (no-op off Windows)."""
+    return subprocess.run(*args, **kwargs, **NO_WINDOW)
 
 
 class MonteurTranscribeError(RuntimeError):
@@ -264,7 +271,7 @@ def transcribe_file(
     installed, the tool exits nonzero (message carries a stderr excerpt), or
     no parseable JSON output appears.
     """
-    run = runner if runner is not None else subprocess.run
+    run = runner if runner is not None else _default_run
     media = Path(path)
     if not media.is_file():
         raise MonteurTranscribeError(f"media file not found: {media}")

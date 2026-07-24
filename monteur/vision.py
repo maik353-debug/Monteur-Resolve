@@ -50,6 +50,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from monteur.media import find_ffmpeg, phash_distance
+from monteur.procio import NO_WINDOW
 from monteur.sift import ClipReport, Moment
 
 DEFAULT_VISION_MODEL = "claude-haiku-4-5-20251001"  # cheap+fast vision; env MONTEUR_VISION_MODEL overrides
@@ -320,7 +321,7 @@ def _extract_frame(path: str, t: float, height: int) -> bytes:
         "-frames:v", "1", "-vf", f"scale=-2:{height}",
         "-f", "image2", "-c:v", "mjpeg", "-q:v", str(_JPEG_QUALITY), "-",
     ]
-    result = subprocess.run(cmd, capture_output=True)
+    result = subprocess.run(cmd, capture_output=True, **NO_WINDOW)
     if result.returncode != 0 or not result.stdout:
         stderr = result.stderr.decode("utf-8", "replace")[-300:]
         raise MonteurVisionError(f"could not extract a frame from {path}: {stderr}")

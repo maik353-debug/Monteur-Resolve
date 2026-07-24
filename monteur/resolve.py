@@ -102,6 +102,7 @@ from types import ModuleType
 from typing import Any
 
 from monteur.model import AUDIO, VIDEO, Clip, Marker, Timeline, format_timecode
+from monteur.procio import NO_WINDOW
 
 _MODULE_NAME = "DaVinciResolveScript"
 
@@ -556,6 +557,7 @@ def _run_worker(
             capture_output=True,
             text=True,
             timeout=timeout,
+            **NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
         return False, {
@@ -707,6 +709,7 @@ def load_test_isolated(timeout: float = 25.0, interpreter: str | None = None) ->
             capture_output=True,
             text=True,
             timeout=timeout,
+            **NO_WINDOW,
         )
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout or ""
@@ -1107,7 +1110,7 @@ def _windows_py_launcher_pythons() -> list[str]:
     for flag in ("-0p", "--list-paths"):
         try:
             result = subprocess.run(
-                [launcher, flag], capture_output=True, text=True, timeout=10
+                [launcher, flag], capture_output=True, text=True, timeout=10, **NO_WINDOW
             )
         except Exception:  # noqa: BLE001 - discovery must never raise
             continue
@@ -1532,6 +1535,7 @@ def _stream_worker(
             stdout=subprocess.PIPE,
             stderr=stderr_spool,
             text=True,
+            **NO_WINDOW,
         )
     except FileNotFoundError:
         stderr_spool.close()

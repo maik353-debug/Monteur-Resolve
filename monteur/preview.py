@@ -70,6 +70,7 @@ import re
 
 from monteur import reframe as _reframe
 from monteur.color import Grade, grade_to_ffmpeg
+from monteur.procio import NO_WINDOW
 from monteur.media import (
     MediaCancelled,
     MonteurMediaError,
@@ -221,8 +222,10 @@ def _subprocess_run_cancellable(cmd: list[str], cancel):
     Mirrors :func:`monteur.media._run`'s poll-and-kill loop.
     """
     if cancel is None:
-        return subprocess.run(cmd, capture_output=True)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return subprocess.run(cmd, capture_output=True, **NO_WINDOW)
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **NO_WINDOW
+    )
     while True:
         try:
             stdout, stderr = proc.communicate(timeout=_CANCEL_POLL_S)
@@ -878,7 +881,7 @@ def _supports_drawtext() -> bool:
     if binary not in _DRAWTEXT_CACHE:
         try:
             result = subprocess.run(
-                [binary, "-hide_banner", "-filters"], capture_output=True
+                [binary, "-hide_banner", "-filters"], capture_output=True, **NO_WINDOW
             )
             _DRAWTEXT_CACHE[binary] = b"drawtext" in result.stdout
         except OSError:
