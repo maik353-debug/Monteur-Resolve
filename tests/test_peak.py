@@ -245,6 +245,44 @@ def test_drop_hold_aims_peak_at_the_drop_and_extends_past_it():
     assert drop_entry.source_end > 11.0 + 1e-6
 
 
+def test_drop_prefers_a_candidate_whose_peak_can_land_on_the_drop():
+    # Two equal candidates for the drop (same highlight AND score): one has a
+    # placeable peak (hittable), the other has no peak signal at all. The drop
+    # must go to the HITTABLE one so its action lands on the hit — not to the
+    # earlier-in-pool one the old tie-break would have picked.
+    music = MusicAnalysis(
+        path="/music/song.wav", duration=40.0, tempo=120.0,
+        beats=[i * 0.5 for i in range(80)],
+        sections=[MusicSection(0.0, 40.0, 0.5, "mid")],
+        drops=[20.0],
+    )
+    # flat is FIRST in the pool (old tie-break would pick it), no peak signal
+    flat = ClipReport(
+        path="/footage/flat.mp4", duration=30.0,
+        segments=[ClipSegment(0.0, 30.0, USABLE, 0.6)],
+        moments=[Moment(10.0, 11.0, 0.5, highlight=0.9)],
+    )
+    # hittable: same highlight + score, but its peak can be aimed onto the drop
+    hittable = ClipReport(
+        path="/footage/hittable.mp4", duration=30.0,
+        segments=[ClipSegment(0.0, 30.0, USABLE, 0.6)],
+        moments=[peaked_moment(10.0, 11.0, 10.5, score=0.5, highlight=0.9)],
+    )
+    fillers = [
+        ClipReport(path=f"/footage/f{i:02d}.mp4", duration=30.0, moments=[Moment(2.0, 4.0, 0.8)])
+        for i in range(40)
+    ]
+    plan = plan_montage([flat, hittable] + fillers, music, style="auto", allow_repeats=True)
+    # the slot on the drop (starts cut_lead before 20 s) went to the hittable clip
+    drop_entry = next(
+        e for e in plan.entries
+        if abs(e.record_start - (20.0 - CUT_LEAD)) < 0.05
+    )
+    assert drop_entry.clip_path == "/footage/hittable.mp4"
+    peak_record = drop_entry.record_start + (10.5 - drop_entry.source_start)
+    assert peak_record == pytest.approx(20.0)
+
+
 # --- 1.9: first-frame gate (shorts) ---------------------------------------------
 
 

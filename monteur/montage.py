@@ -3311,6 +3311,8 @@ def _fill(
             break
         if drop_slot in reserved:
             continue  # the hook/loop reservation got there first
+        drop_len = slots[drop_slot][1] - slots[drop_slot][0]
+        drop_lead = cut_lead if drop_slot > 0 else 0.0
         pos = max(
             range(len(unused)),
             key=lambda p: (
@@ -3318,6 +3320,11 @@ def _fill(
                 # audio highlight (identical to before when hero is 0).
                 pool[unused[p]].moment.highlight + _HERO_WEIGHT * pool[unused[p]].hero,
                 pool[unused[p]].moment.score,
+                # Tie-break: a candidate whose picture peak can actually LAND on
+                # the drop (its hold aim is placeable) beats one that can't — so
+                # the impact shot syncs its action to the hit, not just its
+                # highlight. Only breaks exact highlight+score ties.
+                _aim_start(pool[unused[p]], drop_len, drop_lead, drop=True) is not None,
                 -unused[p],  # ties: earliest in pool order
             ),
         )
