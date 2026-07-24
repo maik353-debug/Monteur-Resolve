@@ -4072,6 +4072,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("GET", "/api/cache"): self._cache_get,
             ("POST", "/api/cache/clear"): self._cache_clear,
             ("GET", "/api/jobs"): self._jobs_list,
+            ("GET", "/api/sfx/library"): self._sfx_library,
         }
         if (method, path) in routes:
             return routes[(method, path)]
@@ -4951,7 +4952,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             elif action == "update":
                 fields = {
                     k: spec[k]
-                    for k in ("time", "duration", "kind", "query", "note")
+                    for k in ("time", "duration", "kind", "query", "note", "file")
                     if k in spec
                 }
                 adjusted = update_sfx_cue(plan, spec.get("index"), **fields)
@@ -5841,6 +5842,41 @@ class MonteurHandler(BaseHTTPRequestHandler):
             and (not want_kind or job["kind"] == want_kind)
         ]
         self._send_json({"jobs": views})
+
+    def _sfx_library(self) -> None:
+        """GET /api/sfx/library?path=<folder> — the user's classified sounds.
+
+        Lists the sound files under ``path`` with the kind Monteur classified
+        each as (impact/whoosh/riser/braam/other) and its duration, so the
+        storyboard's sound inspector can offer the editor THEIR own files to
+        drop onto a cue — not just the abstract kind + a search query. The scan
+        is cached (``.monteur-elements.json`` next to the folder), so after a
+        build this is instant. An empty/missing/undecodable folder returns an
+        empty list, never an error."""
+        from urllib.parse import parse_qs, urlsplit
+
+        query = parse_qs(urlsplit(self.path).query)
+        folder = (query.get("path") or [""])[0].strip()
+        elements: list[dict] = []
+        if folder:
+            try:
+                from monteur.elements import scan_elements
+
+                for el in scan_elements(folder):
+                    elements.append(
+                        {
+                            "path": el.path,
+                            "name": os.path.basename(el.path),
+                            "kind": el.kind,
+                            "duration": round(el.duration, 3),
+                        }
+                    )
+            except Exception:  # noqa: BLE001 — a picker source must never 500
+                elements = []
+        # a stable order: by kind (the cue taxonomy first), then name
+        order = {"impact": 0, "whoosh": 1, "riser": 2, "braam": 3, "other": 4}
+        elements.sort(key=lambda e: (order.get(e["kind"], 9), e["name"].lower()))
+        self._send_json({"folder": folder, "elements": elements})
 
     def _jobs_cancel(self, job_id: str) -> None:
         # Setting the event on a finished job is a harmless no-op — the

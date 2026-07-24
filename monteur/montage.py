@@ -7195,8 +7195,11 @@ def update_sfx_cue(
     """Edit ONE SFX cue's fields — pure plan surgery (never in place).
 
     ``index`` is the 0-based position in the TIME-SORTED layer. Recognised
-    ``fields``: ``time``, ``duration``, ``kind``, ``query``, ``note``. The
-    layer is re-sorted after the edit (a time change can reorder it). Raises
+    ``fields``: ``time``, ``duration``, ``kind``, ``query``, ``note``, ``file``.
+    The layer is re-sorted after the edit (a time change can reorder it).
+    ``file`` picks an actual clip from the user's library (``""`` clears it back
+    to Auto); choosing a file plays it from its start (``source_offset`` reset),
+    since the auto peak-alignment only applies to Monteur's own choices. Raises
     ValueError for a bad index or an unknown kind.
     """
     cues = _sfx_sorted(list(plan.sfx))
@@ -7223,10 +7226,19 @@ def update_sfx_cue(
         )
     except (TypeError, ValueError):
         raise ValueError("time and duration must be numbers")
+    # a hand-picked file plays from its start; clearing it (file="") hands the
+    # cue back to the auto placer on the next build.
+    if "file" in fields:
+        new_file = str(fields.get("file") or "")
+        source_offset = 0.0
+    else:
+        new_file = cur.file
+        source_offset = cur.source_offset
     cues[index] = replace(
         cur, time=time, duration=duration, kind=kind,
         query=str(fields.get("query", cur.query)),
         note=str(fields.get("note", cur.note)),
+        file=new_file, source_offset=source_offset,
     )
     return replace(plan, sfx=_sfx_sorted(cues), notes=list(plan.notes) + [
         f"sfx: edited cue {index + 1} ({kind})"

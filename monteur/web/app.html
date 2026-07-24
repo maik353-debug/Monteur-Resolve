@@ -3262,9 +3262,16 @@ window.__MONTEUR_PREFS__ = {};
               </div>
             </div>
             <div class="insp-block">
+              <label class="set-key-label" for="cre-insp-sfx-file">Your sound</label>
+              <select id="cre-insp-sfx-file">
+                <option value="">Auto — let Monteur choose</option>
+              </select>
+              <p class="help-small" id="cre-insp-sfx-file-hint">Drop one of your own files right onto this cue. Add a sound-elements folder in step 1 to fill this list.</p>
+            </div>
+            <div class="insp-block">
               <label class="set-key-label" for="cre-insp-sfx-query">Library search</label>
               <input type="text" id="cre-insp-sfx-query" maxlength="120" spellcheck="false" autocomplete="off" placeholder="e.g. deep cinematic impact">
-              <p class="help-small">Paste this into your SFX library (Artlist &amp; co.) to find the effect.</p>
+              <p class="help-small">For sounds you haven&rsquo;t added as files &mdash; paste this into your SFX library (Artlist &amp; co.) to find the effect.</p>
             </div>
             <div class="insp-block insp-sfx-times">
               <label class="set-key-label" for="cre-insp-sfx-time">Time (s)</label>
@@ -11349,6 +11356,7 @@ var insp = {
   sfx: null,         // selected SFX cue index (time-sorted) for SOUND editing
   titleAnim: "none", // the picked title animation while in title mode
   sfxKind: "impact", // the picked sound kind while in sfx mode
+  sfxFile: "",       // the rendered cue's file, so a save only sends a CHANGE
   infoCache: {}      // clipinfo responses keyed by clip|t0|t1
 };
 
@@ -12138,8 +12146,63 @@ function saveSfxCue() {
   };
   if (!isNaN(time)) spec.time = time;
   if (!isNaN(dur)) spec.duration = dur;
+  // only send `file` when the user actually changed it — so editing time/kind
+  // on an auto-placed cue keeps its file AND its peak-aligned offset
+  var fileSel = $("cre-insp-sfx-file");
+  if (fileSel && String(fileSel.value) !== String(insp.sfxFile || "")) {
+    spec.file = String(fileSel.value);
+  }
   // a time change re-sorts the layer; re-select by matching the new time
   applySfxEdit(spec, "Sound updated.", insp.sfx);
+}
+
+/* The user's classified sound library, fetched once per folder for the sound
+   inspector's file picker. Cached so opening cue after cue never re-scans. */
+var sfxLibraryCache = { folder: null, elements: [] };
+function populateSfxFileSelect() {
+  var sel = $("cre-insp-sfx-file");
+  if (!sel) return;
+  var keep = sel.value;
+  clear(sel);
+  sel.appendChild(new Option("Auto — let Monteur choose", ""));
+  var byKind = {};
+  sfxLibraryCache.elements.forEach(function (e) {
+    (byKind[e.kind] = byKind[e.kind] || []).push(e);
+  });
+  ["impact", "whoosh", "riser", "braam", "other"].forEach(function (k) {
+    var items = byKind[k];
+    if (!items) return;
+    var g = document.createElement("optgroup");
+    g.label = k;
+    items.forEach(function (e) { g.appendChild(new Option(e.name, e.path)); });
+    sel.appendChild(g);
+  });
+  sel.value = keep;
+  var hint = $("cre-insp-sfx-file-hint");
+  if (hint) {
+    hint.textContent = sfxLibraryCache.elements.length
+      ? "Drop one of your own files right onto this cue (grouped by kind)."
+      : "Add a sound-elements folder in step 1, then re-open this to pick from your files.";
+  }
+}
+function loadSfxLibrary(done) {
+  var folder = $("cre-elements") ? $("cre-elements").value.trim() : "";
+  if (!folder) {
+    sfxLibraryCache = { folder: "", elements: [] };
+    populateSfxFileSelect();
+    if (done) done();
+    return;
+  }
+  if (sfxLibraryCache.folder === folder) { populateSfxFileSelect(); if (done) done(); return; }
+  api("/api/sfx/library?path=" + encodeURIComponent(folder)).then(function (d) {
+    sfxLibraryCache = { folder: folder, elements: (d && d.elements) || [] };
+    populateSfxFileSelect();
+    if (done) done();
+  }).catch(function () {
+    sfxLibraryCache = { folder: folder, elements: [] };
+    populateSfxFileSelect();
+    if (done) done();
+  });
 }
 
 function deleteSfxCue() {
@@ -12313,6 +12376,13 @@ function renderSfxInspector() {
   $("cre-insp-sfx-query").value = String(cue.query || "");
   $("cre-insp-sfx-time").value = String(Math.round((cue.time || 0) * 100) / 100);
   $("cre-insp-sfx-dur").value = String(Math.round((cue.duration || 0) * 100) / 100);
+  // reflect the cue's current file (auto-placed or hand-picked); the library
+  // loads async, so set the value once its options exist
+  insp.sfxFile = String(cue.file || "");
+  loadSfxLibrary(function () {
+    var sel = $("cre-insp-sfx-file");
+    if (sel) sel.value = insp.sfxFile;
+  });
   $("cre-insp-msg").hidden = true;
 }
 

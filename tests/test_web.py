@@ -1218,6 +1218,25 @@ class TestPlanAdjustSurgery:
         )["plan_json"]
         assert len(deleted["sfx"]) == len(updated["sfx"]) - 1
 
+    def test_sfx_update_sets_a_hand_picked_file(self, server):
+        pj = self._plan_with_sfx()  # ambience@0, impact@8
+        updated = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": pj, "sfx": {"action": "update", "index": 0,
+                                      "file": "/sfx/my_boom.wav"}},
+        )["plan_json"]
+        cue0 = sorted(updated["sfx"], key=lambda c: c["time"])[0]
+        assert cue0["file"] == "/sfx/my_boom.wav"
+
+    def test_sfx_library_no_folder_is_empty(self, server):
+        data = _get(f"{server}/api/sfx/library")
+        assert data == {"folder": "", "elements": []}
+
+    def test_sfx_library_missing_folder_is_soft(self, server):
+        # a picker source must never 500 — a bad path just yields no files
+        data = _get(f"{server}/api/sfx/library?path=/no/such/sfx/folder")
+        assert data["elements"] == []
+
     def test_sfx_bad_action_is_400(self, server):
         with pytest.raises(urllib.error.HTTPError) as exc:
             _post(

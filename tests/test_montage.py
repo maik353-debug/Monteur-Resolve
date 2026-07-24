@@ -2618,6 +2618,37 @@ class TestSfxCueSurgery:
         with pytest.raises(ValueError, match="not in this plan"):
             update_sfx_cue(_sfx_plan(), 9, query="x")
 
+    def test_update_sets_a_hand_picked_file(self):
+        from monteur.montage import update_sfx_cue
+
+        plan = _sfx_plan()  # index 0 = ambience@0, no file
+        adjusted = update_sfx_cue(plan, 0, file="/sfx/my_boom.wav")
+        assert adjusted.sfx[0].file == "/sfx/my_boom.wav"
+        assert adjusted.sfx[0].source_offset == 0.0  # a picked file plays from 0
+        assert plan.sfx[0].file == ""  # original untouched
+
+    def test_update_clears_the_file_back_to_auto(self):
+        from dataclasses import replace
+
+        from monteur.montage import update_sfx_cue
+
+        plan = _sfx_plan()
+        plan.sfx[0] = replace(plan.sfx[0], file="/sfx/x.wav", source_offset=1.2)
+        adjusted = update_sfx_cue(plan, 0, file="")
+        assert adjusted.sfx[0].file == ""
+
+    def test_update_time_preserves_an_existing_file(self):
+        # editing time WITHOUT touching file keeps the file and its offset
+        from dataclasses import replace
+
+        from monteur.montage import update_sfx_cue
+
+        plan = _sfx_plan()
+        plan.sfx[0] = replace(plan.sfx[0], file="/sfx/x.wav", source_offset=1.2)
+        adjusted = update_sfx_cue(plan, 0, duration=2.0)
+        assert adjusted.sfx[0].file == "/sfx/x.wav"
+        assert adjusted.sfx[0].source_offset == pytest.approx(1.2)
+
     def test_delete_removes_the_indexed_cue(self):
         from monteur.montage import delete_sfx_cue
 
