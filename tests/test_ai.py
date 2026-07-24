@@ -473,6 +473,15 @@ def test_cli_non_success_subtype_raises(cli_backend):
         complete("prompt")
 
 
+def test_cli_auth_failure_suggests_relogin(cli_backend):
+    # an expired subscription login: the CLI's own message says "401 ... token
+    # expired"; Monteur adds the actionable "run 'claude' and sign in again"
+    cli_backend(stdout=_cli_stream("401 OAuth access token has expired", is_error=True))
+    with pytest.raises(MonteurAIError, match="sign in again") as err:
+        complete("prompt")
+    assert "claude" in str(err.value)
+
+
 def test_cli_inactivity_timeout_is_actionable(cli_backend, clean_env):
     # a truly silent process (no events at all) trips the inactivity limit; the
     # message points at Claude Code login, NOT the API key (which would mislead

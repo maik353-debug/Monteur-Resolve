@@ -612,8 +612,16 @@ def _complete_cli(
             + (f": {stderr_text[-300:]!r}" if stderr_text else "")
         )
     if failed:
+        low = result_text.lower()
+        auth = any(w in low for w in ("auth", "401", "login", "expired", "token"))
+        hint = (
+            " — your Claude Code login looks expired: open a terminal, run "
+            "'claude' and sign in again, then retry."
+            if auth
+            else ""
+        )
         raise MonteurAIError(
-            f"the 'claude' CLI reported a failure: {result_text[:200]!r}"
+            f"the 'claude' CLI reported a failure: {result_text[:200]!r}" + hint
         )
     return _strip_fences(result_text) if json_schema is not None else result_text
 
