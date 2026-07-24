@@ -7500,6 +7500,47 @@ class TestProUiStatic:
             assert gone not in source, gone
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_timeline_is_positioned_not_packed(self):
+        # V1 used to be a flexbox of %-widths: clips were siblings in document
+        # order, so a HOLE could not exist and deleting one yanked the whole cut
+        # leftwards. Shots are absolutely positioned at their record time now —
+        # that is what makes lift / free moves / trims expressible at all.
+        source = _APP_HTML.read_text(encoding="utf-8")
+        assert ".tl-blocks {\n  position: relative;" in source
+        assert "position: absolute; top: 0; bottom: 0; min-width: 3px;" in source
+        assert "display: flex; align-items: stretch; height: 34px;" not in source
+        # each shot carries its own record window, so a drag can read it back
+        assert "block.dataset.start" in source and "block.dataset.end" in source
+
+    def test_drag_trim_and_snap_are_wired(self):
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            "function tlBeginDrag",
+            "function tlDragMove",
+            "function tlEndDrag",
+            "function tlSnapTargets",
+            "function tlSnapEdge",
+            'el("span", "tl-grip " + side)',   # a trim handle on each edge
+            "setPointerCapture",               # the drag owns the pointer
+            "tlWouldOverlap",                  # live feedback before the server says no
+            "move_to: d.slot",                 # release commits the free move
+            "var body = { trim: d.slot };",    # ...or the trim
+        ):
+            assert needle in source, needle
+        # the ruler scrubs now: the strip-wide, capture-less scrub that made one
+        # click both seek AND select is gone, because it made dragging impossible
+        assert "if (ruler) ruler.addEventListener(\"pointerdown\", startScrub);" in source
+        assert 'strip.addEventListener("pointerdown", function (e) {\n    if ($("cre-playout").hidden' not in source
+
+    def test_both_removes_exist_with_their_keys(self):
+        # Del leaves the gap (a short black pause is an editorial choice),
+        # Shift+Del closes it — the old behaviour, now on purpose
+        source = _APP_HTML.read_text(encoding="utf-8")
+        assert "function liftShot" in source and "function deleteShot" in source
+        assert "{ lift: i }" in source
+        assert 'e.key === "Delete" || e.key === "Backspace"' in source
+        assert "if (e.shiftKey) { if (!$(\"cre-insp-delete\").disabled) deleteShot(); }" in source
+
     def test_inspector_markup_and_wiring(self):
         source = _APP_HTML.read_text(encoding="utf-8")
         for needle in (
@@ -7513,12 +7554,14 @@ class TestProUiStatic:
             'data-trans="smash"',
             'id="cre-insp-alts-btn"',
             'id="cre-insp-alts"',
-            # structural timeline edits from the inspector
+            # structural timeline edits from the inspector. The move arrows are
+            # GONE: reordering is a drag on the timeline now (the arrows moved
+            # the shot one way and everything else the other, which read as
+            # backwards). Removing comes in both flavours instead.
             'id="cre-insp-delete"',
-            'id="cre-insp-move-left"',
-            'id="cre-insp-move-right"',
+            'id="cre-insp-lift"',
             "function deleteShot",
-            "function moveShot",
+            "function liftShot",
             "function applyPlanSurgery",
             # titles are edited in the inspector (text + animation), opened by
             # clicking a timeline title marker

@@ -1787,19 +1787,39 @@ svg text.axis {
   position: absolute; top: 3px; left: 3px; font-family: var(--mono);
   font-size: 8.5px; line-height: 1; color: var(--ink-muted); white-space: nowrap;
 }
+/* V1 is POSITIONED, not packed: every shot sits at its own record time, so a
+   hole between two shots is simply empty track — which is what makes lift,
+   free moves and trims expressible at all. (It was a flexbox of %-widths,
+   where clips were siblings in document order and a gap could not exist.) */
 .tl-blocks {
-  display: flex; align-items: stretch; height: 34px;
+  position: relative; height: 34px;
   border: 1px solid var(--border); border-top: 0;
   overflow: hidden; background: var(--input-bg);
 }
 .tl-block {
-  position: relative; flex: 0 0 auto; min-width: 3px;
-  border: 0; border-left: 1px solid var(--page); padding: 0; margin: 0;
-  cursor: pointer; background: var(--clip); border-radius: 0;
+  position: absolute; top: 0; bottom: 0; min-width: 3px;
+  border: 0; padding: 0; margin: 0;
+  cursor: grab; background: var(--clip); border-radius: 0;
+  box-shadow: -1px 0 0 var(--page);  /* the cut line, was border-left */
+  touch-action: none;                /* we drive the pointer ourselves */
 }
-.tl-block:first-child { border-left: 0; }
 .tl-block:hover, .tl-block:focus-visible { filter: brightness(1.22); }
 .tl-block.sel { box-shadow: inset 0 0 0 2px var(--accent); filter: none; z-index: 2; }
+.tl-block.dragging { cursor: grabbing; opacity: 0.85; z-index: 5; filter: brightness(1.3); }
+.tl-block.invalid { outline: 2px solid var(--danger, #e5484d); outline-offset: -2px; }
+/* trim handles: the outer 7px of a block grab its edge instead of the whole clip */
+.tl-grip {
+  position: absolute; top: 0; bottom: 0; width: 7px; z-index: 3;
+  cursor: ew-resize; background: transparent;
+}
+.tl-grip.l { left: 0; }
+.tl-grip.r { right: 0; }
+.tl-block:hover .tl-grip { background: rgba(255, 255, 255, 0.28); }
+/* the line a dragged edge is snapping to */
+.tl-snapline {
+  position: absolute; top: 0; bottom: 0; width: 1px; margin-left: -0.5px;
+  background: var(--accent); opacity: 0.9; pointer-events: none; z-index: 6;
+}
 .tl-block-lbl {
   position: absolute; top: 3px; left: 4px; right: 3px;
   font-family: var(--mono); font-size: 9px; line-height: 1.2;
@@ -1834,7 +1854,7 @@ svg text.axis {
 .tl-block.ph-build, .tl-legend i.ph-build { background: var(--phase-build); }
 .tl-block.ph-climax, .tl-legend i.ph-climax { background: var(--phase-climax); }
 .tl-block.ph-outro, .tl-legend i.ph-outro { background: var(--phase-outro); }
-.tl-dip { flex: 0 0 auto; min-width: 3px; background: #000; border-left: 1px solid var(--page); }
+.tl-dip { position: absolute; top: 0; bottom: 0; min-width: 3px; background: #000; box-shadow: -1px 0 0 var(--page); }
 .tl-flag {
   position: absolute; top: 3px; right: 3px; width: 7px; height: 7px;
   border-radius: 50%; background: var(--warning);
@@ -3203,7 +3223,7 @@ window.__MONTEUR_PREFS__ = {};
       <aside class="inspector" id="cre-inspector" hidden aria-label="Shot inspector">
         <div class="insp-head">
           <span class="insp-title" id="cre-insp-title">Shot</span>
-          <span class="insp-keys" title="Keyboard: ← → switch shots · P pins · Esc closes">←→ · P · Esc</span>
+          <span class="insp-keys" title="Keyboard: ← → switch shots · P pins · Del removes (gap stays) · Shift+Del removes and closes the gap · Esc closes">←→ · P · Del · Esc</span>
           <button class="btn ghost small insp-close" id="cre-insp-close" type="button" aria-label="Close the inspector (Esc)" title="Close (Esc)">×</button>
         </div>
         <div class="insp-body">
@@ -3213,9 +3233,8 @@ window.__MONTEUR_PREFS__ = {};
           <div id="cre-insp-issues"></div>
           <div class="insp-actions">
             <button class="pin-btn" id="cre-insp-pin" type="button" aria-pressed="false">Pin</button>
-            <button class="btn ghost small" id="cre-insp-move-left" type="button" title="Move this shot earlier" aria-label="Move shot earlier">◀ Move</button>
-            <button class="btn ghost small" id="cre-insp-move-right" type="button" title="Move this shot later" aria-label="Move shot later">Move ▶</button>
-            <button class="btn ghost small insp-del" id="cre-insp-delete" type="button" title="Remove this shot from the cut" aria-label="Delete shot">Delete</button>
+            <button class="btn ghost small insp-del" id="cre-insp-lift" type="button" title="Remove this shot and leave the gap open (Del)" aria-label="Remove shot, leave the gap">Remove</button>
+            <button class="btn ghost small insp-del" id="cre-insp-delete" type="button" title="Remove this shot and close the gap — everything after it slides earlier (Shift+Del)" aria-label="Remove shot and close the gap">Remove + close</button>
           </div>
           <div class="insp-block">
             <p class="seg-heading">Transition into this shot</p>
@@ -11054,6 +11073,157 @@ function snapScrubTime(t) {
   });
 })();
 
+/* ================= dragging and trimming on V1 ==========================
+   The magnet: an edge being dragged snaps to the song's downbeats AND to the
+   other shots' edges (plus 0 and the end). Beats keep the cut musical, edges
+   let you butt two shots together exactly. The same Snap button governs both,
+   so turning the magnet off gives fully free placement.
+
+   Everything is optimistic: the block follows the pointer locally and only the
+   RELEASE talks to the server. A rejected edit (overlap, sliver, past the
+   media) snaps back and says why — the engine is the referee, not the UI. */
+var tlDrag = null;
+
+function tlSnapTargets(skipSlot) {
+  var plan = rev.planJson || {};
+  var targets = [0];
+  if (plan.duration) targets.push(plan.duration);
+  (plan.beat_marks || []).forEach(function (t) { targets.push(t); });
+  planSortedEntries().forEach(function (e, i) {
+    if (i === skipSlot) return;  // a shot never snaps to its own edges
+    targets.push(e.record_start || 0);
+    targets.push(e.record_end || 0);
+  });
+  return targets;
+}
+
+/* Snap `t` to the nearest target within `tolSec`; returns {t, hit} so the
+   caller can draw the line it locked onto. */
+function tlSnapEdge(t, targets, tolSec) {
+  if (!tlSnap.on) return { t: t, hit: null };
+  var best = null, bestD = tolSec;
+  targets.forEach(function (target) {
+    var d = Math.abs(target - t);
+    if (d <= bestD) { bestD = d; best = target; }
+  });
+  return best === null ? { t: t, hit: null } : { t: best, hit: best };
+}
+
+function tlShowSnapLine(at) {
+  var blocks = $("cre-strip-blocks");
+  var line = blocks ? blocks.querySelector(".tl-snapline") : null;
+  var plan = rev.planJson || {};
+  if (at === null || !plan.duration) { if (line) line.remove(); return; }
+  if (!line) { line = el("div", "tl-snapline"); blocks.appendChild(line); }
+  line.style.left = (100 * at / plan.duration) + "%";
+}
+
+function tlBeginDrag(e, block, mode) {
+  if (e.button !== 0) return;
+  var plan = rev.planJson || {};
+  if (!plan.duration) return;
+  var strip = $("cre-strip");
+  var slot = parseInt(block.dataset.slot, 10);
+  e.preventDefault();
+  e.stopPropagation();          // the strip must not start a scrub underneath
+  block.setPointerCapture(e.pointerId);
+  tlDrag = {
+    mode: mode, slot: slot, block: block,
+    x0: e.clientX,
+    start0: parseFloat(block.dataset.start),
+    end0: parseFloat(block.dataset.end),
+    start: parseFloat(block.dataset.start),
+    end: parseFloat(block.dataset.end),
+    pxPerSec: strip.getBoundingClientRect().width / plan.duration,
+    targets: tlSnapTargets(slot),
+    moved: false
+  };
+  block.classList.add("dragging");
+}
+
+function tlDragMove(e) {
+  if (!tlDrag) return;
+  var plan = rev.planJson || {};
+  var d = tlDrag;
+  var deltaSec = (e.clientX - d.x0) / Math.max(1, d.pxPerSec);
+  if (Math.abs(e.clientX - d.x0) > 3) d.moved = true;
+  var tol = 8 / Math.max(1, d.pxPerSec);   // ~8px of magnet, zoom-aware
+  var span = d.end0 - d.start0;
+  var hit = null, start = d.start0, end = d.end0;
+  if (d.mode === "move") {
+    var snapped = tlSnapEdge(d.start0 + deltaSec, d.targets, tol);
+    start = Math.max(0, Math.min(snapped.t, plan.duration - span));
+    end = start + span;
+    hit = snapped.hit;
+    if (hit === null) {  // the tail may find a target the head missed
+      var tailSnap = tlSnapEdge(end, d.targets, tol);
+      if (tailSnap.hit !== null) { end = tailSnap.t; start = end - span; hit = tailSnap.hit; }
+    }
+  } else if (d.mode === "trim-l") {
+    var sl = tlSnapEdge(d.start0 + deltaSec, d.targets, tol);
+    start = Math.max(0, Math.min(sl.t, d.end0 - TL_MIN_SLOT));
+    hit = sl.hit;
+  } else {
+    var sr = tlSnapEdge(d.end0 + deltaSec, d.targets, tol);
+    end = Math.min(plan.duration, Math.max(sr.t, d.start0 + TL_MIN_SLOT));
+    hit = sr.hit;
+  }
+  d.start = start; d.end = end;
+  d.block.style.left = (100 * start / plan.duration) + "%";
+  d.block.style.width = (100 * (end - start) / plan.duration) + "%";
+  // live overlap feedback: the engine will refuse it, so say so before release
+  d.block.classList.toggle("invalid", tlWouldOverlap(d.slot, start, end));
+  tlShowSnapLine(d.moved ? hit : null);
+}
+
+var TL_MIN_SLOT = 0.3;  // mirrors the engine's _MIN_SLOT_SECONDS sliver floor
+
+function tlWouldOverlap(slot, start, end) {
+  return planSortedEntries().some(function (e, i) {
+    if (i === slot) return false;
+    return start < (e.record_end || 0) - 1e-6 && (e.record_start || 0) < end - 1e-6;
+  });
+}
+
+function tlEndDrag(e) {
+  if (!tlDrag) return;
+  var d = tlDrag;
+  tlDrag = null;
+  d.block.classList.remove("dragging", "invalid");
+  tlShowSnapLine(null);
+  try { d.block.releasePointerCapture(e.pointerId); } catch (err) { /* already gone */ }
+  if (!d.moved) { selectSlot(d.slot); return; }   // a click, not a drag
+  var changedStart = Math.abs(d.start - d.start0) > 1e-4;
+  var changedEnd = Math.abs(d.end - d.end0) > 1e-4;
+  if (!changedStart && !changedEnd) { renderTimelineStrip(); return; }
+  if (d.mode === "move") {
+    applyPlanSurgery(
+      { move_to: d.slot, start: Math.round(d.start * 1000) / 1000 },
+      "Shot moved to " + fmt1(d.start) + "s.", d.slot
+    );
+  } else {
+    var body = { trim: d.slot };
+    if (changedStart) body.start = Math.round(d.start * 1000) / 1000;
+    if (changedEnd) body.end = Math.round(d.end * 1000) / 1000;
+    applyPlanSurgery(body, "Shot trimmed to " + fmt1(d.end - d.start) + "s.", d.slot);
+  }
+}
+
+/* one delegated listener on the lane — blocks are rebuilt constantly */
+(function () {
+  var blocks = $("cre-strip-blocks");
+  if (!blocks) return;
+  blocks.addEventListener("pointerdown", function (e) {
+    var block = e.target.closest ? e.target.closest(".tl-block") : null;
+    if (!block || e.target.classList.contains("tl-play")) return;
+    var grip = e.target.dataset ? e.target.dataset.grip : null;
+    tlBeginDrag(e, block, grip === "l" ? "trim-l" : grip === "r" ? "trim-r" : "move");
+  });
+  blocks.addEventListener("pointermove", tlDragMove);
+  blocks.addEventListener("pointerup", tlEndDrag);
+  blocks.addEventListener("pointercancel", tlEndDrag);
+})();
+
 /* timeline zoom: widen the strip (the frame scrolls) so tight cuts get room.
    Every strip child is positioned in % of the strip, so setting --tl-zoom
    scales them all; the sticky gutter stays pinned. */
@@ -11074,20 +11244,28 @@ var tlZoom = 1;
   apply();
 })();
 
-/* the timeline strip is the scrubber: click/drag = seek the virtual clock */
+/* The RULER is the scrubber. It used to be the whole strip, without pointer
+   capture, so one click both sought and selected — which makes dragging a clip
+   impossible (the scrub would follow the mouse the whole way). Splitting them
+   is what buys real editing: over the ruler you scrub, over a clip you drag.
+   The empty area beside the lanes still scrubs, so there is plenty of target. */
 (function () {
   var strip = $("cre-strip");
+  var ruler = $("cre-strip-ruler");
   function timeAt(e) {
     var rect = strip.getBoundingClientRect();
     var x = Math.max(rect.left, Math.min(rect.right, e.clientX));
     return snapScrubTime((x - rect.left) / Math.max(1, rect.width) * po.duration);
   }
-  strip.addEventListener("pointerdown", function (e) {
+  function startScrub(e) {
     if ($("cre-playout").hidden || !po.segs.length || e.button !== 0) return;
-    // NO pointer capture: a plain click must still reach the tl-block
-    // underneath (click-to-seek AND click-to-select are the same gesture).
     po.scrubbing = true;
     poSeek(timeAt(e));
+  }
+  if (ruler) ruler.addEventListener("pointerdown", startScrub);
+  strip.addEventListener("pointerdown", function (e) {
+    // a click on the bare strip (not on a clip, marker or grip) still scrubs
+    if (e.target === strip || e.target === $("cre-strip-blocks")) startScrub(e);
   });
   document.addEventListener("pointermove", function (e) {
     if (po.scrubbing) poSeek(timeAt(e)); // drag anywhere once started
@@ -11539,23 +11717,24 @@ function renderTimelineStrip() {
     return (a[0] || 0) - (b[0] || 0);
   });
   var phases = plan.phases || [];
-  var dipIndex = 0;
-  function addDip(dip) {
+  // Dips sit at their own record time now — they are not packed between the
+  // shots, so they survive a lift or a free move like everything else.
+  dips.forEach(function (dip) {
     var notch = el("div", "tl-dip");
+    notch.style.left = (100 * (dip[0] || 0) / duration) + "%";
     notch.style.width = (100 * (dip[1] || 0) / duration) + "%";
     notch.title = "Dip to black — " + fmt1(dip[1] || 0) + "s";
     blocks.appendChild(notch);
-  }
+  });
   entries.forEach(function (entry, i) {
-    while (dipIndex < dips.length && (dips[dipIndex][0] || 0) <= (entry.record_start || 0) + 0.001) {
-      addDip(dips[dipIndex]);
-      dipIndex += 1;
-    }
     var length = (entry.record_end || 0) - (entry.record_start || 0);
     var block = el("button", "tl-block");
     block.type = "button";
+    block.style.left = (100 * (entry.record_start || 0) / duration) + "%";
     block.style.width = (100 * length / duration) + "%";
     block.dataset.slot = String(i);
+    block.dataset.start = String(entry.record_start || 0);
+    block.dataset.end = String(entry.record_end || 0);
     var phase = phaseLabelAt(phases, entry.record_start || 0);
     if (phase) block.classList.add("ph-" + phase);
     var title = "Shot " + (i + 1) + " · " + baseName(entry.clip_path) +
@@ -11570,7 +11749,13 @@ function renderTimelineStrip() {
     });
     block.appendChild(el("span", "tl-block-lbl",
       String(i + 1) + (onDrop ? " · drop" : "")));
-    block.addEventListener("click", function () { selectSlot(i); });
+    // selection is handled by the drag engine's release (a click = a drag that
+    // never moved), so no click listener here — it would double-fire after a
+    // drag and act on a stale index once the re-render replaced this node.
+    // Keyboard still selects, since the block is a real <button>.
+    block.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectSlot(i); }
+    });
     // a ▶ affordance to watch just this shot's segment in the mini-player —
     // its click is isolated so the block body still opens the inspector
     var play = el("span", "tl-play sb-play", "▶");
@@ -11585,9 +11770,15 @@ function renderTimelineStrip() {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); openMiniPlayer(pClip, pS, pE, pLbl); }
     });
     block.appendChild(play);
+    // trim handles on both edges; the body drags the whole shot
+    ["l", "r"].forEach(function (side) {
+      var grip = el("span", "tl-grip " + side);
+      grip.dataset.grip = side;
+      grip.title = side === "l" ? "Trim the start" : "Trim the end";
+      block.appendChild(grip);
+    });
     blocks.appendChild(block);
   });
-  for (; dipIndex < dips.length; dipIndex++) addDip(dips[dipIndex]);
   // phase legend (only the phases this cut actually has)
   var legend = $("cre-strip-legend");
   clear(legend);
@@ -12083,18 +12274,17 @@ function deleteShot() {
   applyPlanSurgery({ "delete": i }, "Shot " + (i + 1) + " removed.", i);
 }
 
-function moveShot(dir) {
+/* The other remove: the gap stays open (a short black pause is an editorial
+   choice). This is the DEFAULT now — nothing on the timeline should move
+   because you removed something somewhere else. */
+function liftShot() {
   if (insp.slot === null || !rev.planJson) return;
   var i = insp.slot;
-  var count = ((rev.planJson || {}).entries || []).length;
-  var to = i + dir;
-  if (to < 0 || to >= count) return;
-  applyPlanSurgery({ move: i, to: to }, "Shot moved to position " + (to + 1) + ".", to);
+  applyPlanSurgery({ lift: i }, "Shot " + (i + 1) + " removed, gap left open.", null);
 }
 
 $("cre-insp-delete").addEventListener("click", deleteShot);
-$("cre-insp-move-left").addEventListener("click", function () { moveShot(-1); });
-$("cre-insp-move-right").addEventListener("click", function () { moveShot(1); });
+$("cre-insp-lift").addEventListener("click", liftShot);
 
 /* Re-lay the sound cues onto the CURRENT cut (a timeline-wide op, not
    shot-specific — so it does not go through applyPlanSurgery's slot path).
@@ -12460,9 +12650,8 @@ function renderInspector() {
   var entry = entries[i];
   var plan = rev.planJson || {};
   $("cre-insp-title").textContent = "Shot " + (i + 1) + " of " + entries.length;
-  // structural-edit buttons: can't move past the ends, can't delete the last shot
-  $("cre-insp-move-left").disabled = i <= 0;
-  $("cre-insp-move-right").disabled = i >= entries.length - 1;
+  // "Remove + close" re-flows the cut, so it still needs a survivor; a plain
+  // "Remove" may empty the track — an empty timeline is a legal state.
   $("cre-insp-delete").disabled = entries.length <= 1;
   var thumb = $("cre-insp-thumb");
   thumb.src = sbThumbUrl(entry);
@@ -12537,6 +12726,12 @@ document.addEventListener("keydown", function (e) {
   else if (e.key === "ArrowRight") { e.preventDefault(); selectSlot(insp.slot + 1); }
   else if (e.key === "ArrowLeft") { e.preventDefault(); selectSlot(insp.slot - 1); }
   else if (e.key === "p" || e.key === "P") { e.preventDefault(); $("cre-insp-pin").click(); }
+  // Del removes and LEAVES the gap; Shift+Del closes it (the ripple).
+  else if (e.key === "Delete" || e.key === "Backspace") {
+    e.preventDefault();
+    if (e.shiftKey) { if (!$("cre-insp-delete").disabled) deleteShot(); }
+    else liftShot();
+  }
 });
 
 /* ---- step 3: build the cut directly in DaVinci Resolve ----------------
