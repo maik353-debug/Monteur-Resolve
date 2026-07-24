@@ -2687,6 +2687,14 @@ def _run_revise_job(job: dict, payload: dict) -> None:
             pins = [float(t) for t in payload.get("pins") or []]
         except (TypeError, ValueError):
             raise ValueError("'pins' must be a list of record times in seconds")
+        # Pins that ride the ENTRIES are the reliable ones: they are read off
+        # the plan being revised, so a trim or a move can never have staled
+        # them. Any stamps the caller still sends are merged in (older clients).
+        from monteur.montage import pinned_times
+
+        for t in pinned_times(plan):
+            if not any(abs(t - other) < 1e-6 for other in pins):
+                pins.append(t)
         audio = payload.get("audio") or ("music" if plan.music_path else "original")
         if not plan.music_path and audio != "original":
             raise ValueError(f"the plan has no music; audio mode {audio!r} needs a song")
@@ -4802,6 +4810,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             plan_from_dict,
             remove_track,
             resync_audio,
+            set_entry_pinned,
             set_entry_track,
             set_track_muted,
             trim_entry,
@@ -4886,6 +4895,16 @@ class MonteurHandler(BaseHTTPRequestHandler):
             _persist_plan_edit(payload, adjusted, "move")
             self._send_json(_plan_export_result(adjusted, payload))
             return
+        if "pin" in payload:
+            try:
+                slot = int(payload.get("pin"))
+            except (TypeError, ValueError):
+                raise ApiError(400, "'pin' must be an entry index (0-based)")
+            plan = plan_from_dict(payload["plan_json"])
+            adjusted = set_entry_pinned(plan, slot, bool(payload.get("pinned", True)))
+            _persist_plan_edit(payload, adjusted, "pin")
+            self._send_json(_plan_export_result(adjusted, payload))
+            return
         if "set_track" in payload:
             try:
                 slot = int(payload.get("set_track"))
@@ -4932,6 +4951,23 @@ class MonteurHandler(BaseHTTPRequestHandler):
                 raise ApiError(400, "a trim needs 'start', 'end' or both")
             plan = plan_from_dict(payload["plan_json"])
             adjusted = trim_entry(plan, slot, **edges)  # ValueError -> 400
+            # Learn from the correction (blueprint 4.3): a shot the editor
+            # consistently SHORTENS says the generated pace is too slow for
+            # this material, and vice versa. One trim tips nothing —
+            # preferences needs the pattern to repeat.
+            if 0 <= slot < len(plan.entries):
+                was = plan.entries[slot].record_end - plan.entries[slot].record_start
+                now = None
+                for e in adjusted.entries:
+                    if e.clip_path == plan.entries[slot].clip_path and abs(
+                        e.source_start - plan.entries[slot].source_start
+                    ) < 1.0:
+                        now = e.record_end - e.record_start
+                        break
+                if now is not None and abs(now - was) > 0.15:
+                    self._learn_signal(
+                        "shot_length", "*", "shorter" if now < was else "longer"
+                    )
             _persist_plan_edit(payload, adjusted, "trim")
             self._send_json(_plan_export_result(adjusted, payload))
             return

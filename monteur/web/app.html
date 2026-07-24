@@ -12338,7 +12338,9 @@ function syncInspPin() {
   var entries = planSortedEntries();
   var entry = entries[insp.slot];
   if (!entry) return;
-  var pinned = rev.pins.indexOf(revPinStamp(entry)) !== -1;
+  // The pin lives ON the shot now, so it survives every trim and move. It used
+  // to be a record-time stamp in a browser array, which any edit staled.
+  var pinned = !!entry.pinned;
   var btn = $("cre-insp-pin");
   btn.setAttribute("aria-pressed", String(pinned));
   btn.textContent = pinned ? "Pinned — survives revisions" : "Pin this shot";
@@ -12346,13 +12348,13 @@ function syncInspPin() {
 
 $("cre-insp-pin").addEventListener("click", function () {
   if (insp.slot === null) return;
-  var entries = planSortedEntries();
-  var entry = entries[insp.slot];
+  var entry = planSortedEntries()[insp.slot];
   if (!entry) return;
-  var stamp = revPinStamp(entry);
-  var at = rev.pins.indexOf(stamp);
-  if (at === -1) rev.pins.push(stamp); else rev.pins.splice(at, 1);
-  syncInspPin();
+  applyPlanSurgery(
+    { pin: insp.slot, pinned: !entry.pinned },
+    entry.pinned ? "Shot unpinned." : "Shot pinned — a revision keeps it.",
+    insp.slot
+  );
 });
 
 function renderInspTransitions(i) {

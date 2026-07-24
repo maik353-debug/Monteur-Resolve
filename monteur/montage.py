@@ -1364,6 +1364,11 @@ class MontageEntry:
     # their exact bytes (the ``audio_lead`` pattern). A shot on V2 sits ABOVE
     # V1 and covers it for its span (B-roll, an overlay, a cutaway).
     track: str = ""
+    # "Keep this shot" — a rebuild/revision must not recast or re-pace it.
+    # The flag rides the ENTRY, which is the whole point: pins used to be
+    # record-time midpoints held in the browser, so any trim or move silently
+    # invalidated them. Only-when-set, so unpinned plans keep their bytes.
+    pinned: bool = False
     # Self-critique support (blueprint 4.1): the chosen moment's sifted
     # ``peak_time`` (:attr:`monteur.sift.Moment.peak_time`), in this clip's
     # own file coordinates — the same axis as ``source_start``. -1.0 means
@@ -6769,6 +6774,7 @@ def plan_to_dict(plan: MontagePlan) -> dict:
                 # ...and the same for the picture track: "" is V1, which is
                 # every generated plan, so multi-track costs nothing until used
                 and not (key == "track" and not value)
+                and not (key == "pinned" and not value)
                 # peak_source / shot_size (blueprint 4.1) are in-memory
                 # critique aids, and reframe_focus (auto-reframe 9:16) is an
                 # in-memory render aid — NEVER serialized, so the default plan
@@ -7426,6 +7432,44 @@ def lift_entry(plan: MontagePlan, slot: int) -> MontagePlan:
     return _free_edit(
         plan, entries, f"lift: removed slot {slot + 1} ({name}), gap left open"
     )
+
+
+def set_entry_pinned(plan: MontagePlan, slot: int, pinned: bool) -> MontagePlan:
+    """Pin (or unpin) ONE shot — pure plan surgery.
+
+    A pinned shot survives a revision verbatim. The flag lives ON the entry, so
+    it follows the shot through every trim, move and track change; the old
+    record-time stamps could not, and quietly went stale the moment you edited.
+    """
+    try:
+        slot = int(slot)
+    except (TypeError, ValueError):
+        raise ValueError("slot must be an entry index (0-based)")
+    if slot < 0 or slot >= len(plan.entries):
+        raise ValueError(
+            f"slot {slot + 1} is not in this plan (it has {len(plan.entries)} entries)"
+        )
+    entries = list(plan.entries)
+    entries[slot] = replace(entries[slot], pinned=bool(pinned))
+    word = "pinned" if pinned else "unpinned"
+    return replace(
+        plan, entries=entries, notes=list(plan.notes) + [f"pin: slot {slot + 1} {word}"]
+    )
+
+
+def pinned_times(plan: MontagePlan) -> list[float]:
+    """Record-time midpoints of every pinned shot — what a revision needs.
+
+    The bridge to the existing pin machinery (``revise_plan(pinned=…)``,
+    ``apply_review(pinned=…)``), which locates a pin by where it sits. Deriving
+    them HERE, at the moment of the rebuild, is what makes them reliable: they
+    are read off the current plan rather than remembered from an older one.
+    """
+    return [
+        (e.record_start + e.record_end) / 2.0
+        for e in plan.entries
+        if getattr(e, "pinned", False)
+    ]
 
 
 def set_entry_track(plan: MontagePlan, slot: int, track: str) -> MontagePlan:

@@ -2744,6 +2744,63 @@ class TestFreeEdits:
         )
 
 
+class TestPinsRideTheEntry:
+    """A pin used to be a record-time midpoint held in the browser, so ANY
+    trim or move silently staled it. It lives on the entry now."""
+
+    def test_pinning_is_only_when_set(self):
+        from monteur.montage import plan_to_dict, set_entry_pinned
+
+        plan = make_boundary_plan()
+        assert all("pinned" not in e for e in plan_to_dict(plan)["entries"])
+        pinned = set_entry_pinned(plan, 1, True)
+        entries = plan_to_dict(pinned)["entries"]
+        assert entries[1]["pinned"] is True
+        assert "pinned" not in entries[0]      # untouched shots stay clean
+        assert plan.entries[1].pinned is False  # the original is untouched
+
+    def test_a_pin_survives_a_trim_and_a_move(self):
+        # THE regression: the old record-time stamp pointed at nothing the
+        # moment the shot changed length or position
+        from monteur.montage import (
+            move_entry_to, pinned_times, set_entry_pinned, trim_entry,
+        )
+
+        plan = set_entry_pinned(make_boundary_plan(), 1, True)
+        assert pinned_times(plan) == pytest.approx([3.0])  # midpoint of 2..4
+        trimmed = trim_entry(plan, 1, record_end=3.0)
+        assert trimmed.entries[1].pinned is True
+        assert pinned_times(trimmed) == pytest.approx([2.5])  # follows the shot
+        # the trim opened a 3..4 hole; slide the pinned shot into it
+        moved = move_entry_to(trimmed, 1, 3.0)
+        assert [e.pinned for e in moved.entries].count(True) == 1
+        assert pinned_times(moved) == pytest.approx([3.5])
+
+    def test_a_pin_survives_a_track_change_and_a_round_trip(self):
+        from monteur.montage import (
+            plan_from_dict, plan_to_dict, pinned_times, set_entry_pinned,
+            set_entry_track,
+        )
+
+        plan = set_entry_track(set_entry_pinned(make_boundary_plan(), 1, True), 1, "V2")
+        assert pinned_times(plan) == pytest.approx([3.0])
+        back = plan_from_dict(plan_to_dict(plan))
+        assert pinned_times(back) == pytest.approx([3.0])
+
+    def test_unpinning_clears_it(self):
+        from monteur.montage import pinned_times, set_entry_pinned
+
+        plan = set_entry_pinned(make_boundary_plan(), 0, True)
+        assert pinned_times(set_entry_pinned(plan, 0, False)) == []
+
+    def test_lift_takes_its_pin_with_it(self):
+        from monteur.montage import lift_entry, pinned_times, set_entry_pinned
+
+        plan = set_entry_pinned(make_boundary_plan(), 1, True)
+        assert pinned_times(lift_entry(plan, 1)) == []   # the pinned shot is gone
+        assert pinned_times(lift_entry(plan, 0)) == pytest.approx([3.0])
+
+
 class TestTrackLayout:
     """Multi-track: fixed roles the engine understands, plus the editor's own.
 

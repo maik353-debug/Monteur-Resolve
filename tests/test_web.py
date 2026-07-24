@@ -1259,6 +1259,31 @@ class TestPlanAdjustSurgery:
         assert added["tracks"][0]["role"] == "custom"
         assert added["tracks"][0]["name"] == "Mine"
 
+    def test_a_pin_rides_the_shot_through_an_edit(self, server):
+        # the regression this replaces: pins were record-time midpoints held in
+        # the browser, so any trim or move silently pointed them at nothing
+        pj = _tiny_plan_json()
+        pinned = _post(
+            f"{server}/api/plan/adjust", {"plan_json": pj, "pin": 0, "pinned": True}
+        )["plan_json"]
+        first = sorted(pinned["entries"], key=lambda e: e["record_start"])[0]
+        assert first["pinned"] is True
+        # trim it — the pin must still be on that shot afterwards
+        trimmed = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": pinned, "trim": 0, "end": first["record_end"] - 0.4},
+        )["plan_json"]
+        still = sorted(trimmed["entries"], key=lambda e: e["record_start"])[0]
+        assert still["pinned"] is True
+        assert still["record_end"] == pytest.approx(first["record_end"] - 0.4)
+        # ...and unpinning clears it again
+        clear = _post(
+            f"{server}/api/plan/adjust", {"plan_json": trimmed, "pin": 0, "pinned": False}
+        )["plan_json"]
+        assert "pinned" not in sorted(
+            clear["entries"], key=lambda e: e["record_start"]
+        )[0]
+
     def test_track_edits_reject_bad_input(self, server):
         pj = _tiny_plan_json()
         for body in (
