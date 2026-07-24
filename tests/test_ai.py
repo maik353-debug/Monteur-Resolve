@@ -95,7 +95,7 @@ def test_backend_env_forces_api_without_credentials(clean_env):
 def test_backend_env_cli_without_executable_raises(clean_env):
     clean_env.setenv("MONTEUR_AI_BACKEND", "claude-cli")
     clean_env.setattr(ai, "_cli_path", lambda: None)
-    with pytest.raises(MonteurAIError, match="PATH"):
+    with pytest.raises(MonteurAIError, match="MONTEUR_CLAUDE_BIN"):
         ai._resolve_backend()
 
 
@@ -103,6 +103,64 @@ def test_backend_env_unknown_value_raises(clean_env):
     clean_env.setenv("MONTEUR_AI_BACKEND", "gemini")
     with pytest.raises(MonteurAIError, match="MONTEUR_AI_BACKEND"):
         ai._resolve_backend()
+
+
+# --- claude CLI discovery (finds it even when PATH is stripped) ----------------------
+
+
+def _fake_claude(tmp_path, name="claude"):
+    """A dummy executable file standing in for the claude binary."""
+    exe = tmp_path / name
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    return exe
+
+
+def test_cli_path_env_override_wins(clean_env, tmp_path):
+    # MONTEUR_CLAUDE_BIN points straight at the binary — used even when PATH
+    # (shutil.which) has nothing, which is the pythonw/GUI-launch case
+    exe = _fake_claude(tmp_path)
+    clean_env.setenv("MONTEUR_CLAUDE_BIN", str(exe))
+    clean_env.setattr(ai.shutil, "which", lambda _n: None)
+    assert ai._cli_path() == str(exe)
+
+
+def test_cli_path_env_override_directory(clean_env, tmp_path):
+    # a directory override -> look for the binary inside it
+    _fake_claude(tmp_path)
+    clean_env.setenv("MONTEUR_CLAUDE_BIN", str(tmp_path))
+    clean_env.setattr(ai.shutil, "which", lambda _n: None)
+    assert ai._cli_path() == str(tmp_path / "claude")
+
+
+def test_cli_path_settings_override(clean_env, tmp_path):
+    # the path saved in Studio's settings is honoured when no env override
+    exe = _fake_claude(tmp_path)
+    _write_settings(claude_path=str(exe))
+    clean_env.setattr(ai.shutil, "which", lambda _n: None)
+    assert ai._cli_path() == str(exe)
+
+
+def test_cli_path_falls_back_to_candidate_sweep(clean_env, tmp_path):
+    # nothing on PATH, but a well-known install location has it — the sweep
+    # rescues a launch whose PATH omits npm-global / ~/.local/bin
+    exe = _fake_claude(tmp_path)
+    clean_env.setattr(ai.shutil, "which", lambda _n: None)
+    clean_env.setattr(ai, "_cli_candidates", lambda: [tmp_path / "nope", exe])
+    assert ai._cli_path() == str(exe)
+
+
+def test_cli_path_none_when_truly_absent(clean_env, tmp_path):
+    clean_env.setattr(ai.shutil, "which", lambda _n: None)
+    clean_env.setattr(ai, "_cli_candidates", lambda: [tmp_path / "nope"])
+    assert ai._cli_path() is None
+
+
+def test_cli_path_prefers_which_over_candidates(clean_env, tmp_path):
+    # the normal case: claude IS on PATH — that wins, no sweep needed
+    clean_env.setattr(ai.shutil, "which", lambda _n: "/usr/bin/claude")
+    clean_env.setattr(ai, "_cli_candidates", lambda: pytest.fail("swept despite PATH hit"))
+    assert ai._cli_path() == "/usr/bin/claude"
 
 
 # --- backend selection via the settings file (Studio's settings panel) ---------------
@@ -131,7 +189,7 @@ def test_settings_force_cli_over_credentials(clean_env):
 def test_settings_force_cli_without_executable_raises(clean_env):
     _write_settings(ai_backend="claude-cli")
     clean_env.setattr(ai, "_cli_path", lambda: None)
-    with pytest.raises(MonteurAIError, match="PATH"):
+    with pytest.raises(MonteurAIError, match="Claude Code"):
         ai._resolve_backend()
 
 

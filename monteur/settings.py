@@ -12,6 +12,9 @@ Keys currently in use:
 * ``ai_backend`` — ``"auto"`` (default), ``"api"`` or ``"claude-cli"``:
   how :mod:`monteur.ai` reaches Claude. Set from Studio's settings panel.
 * ``api_key`` — the Anthropic API key pasted into Studio; ``""`` = none.
+* ``claude_path`` — an explicit path to the ``claude`` executable, for when
+  automatic discovery misses it (unusual install, stripped PATH under a
+  ``pythonw`` launch); ``""`` = rely on discovery.
 * ``resolve_python`` — path to the Python interpreter the isolated DaVinci
   Resolve worker runs under (Resolve's native module needs a 64-bit Python
   ~3.6–3.11); ``""`` = unset. Normally written by Studio's "Find a
@@ -111,6 +114,17 @@ def ai_backend() -> str:
 def api_key() -> str:
     """The stored Anthropic API key, or ``""`` when none is saved."""
     value = load_settings().get("api_key", "")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def claude_path() -> str:
+    """An explicit path to the ``claude`` executable, or ``""`` when unset.
+
+    The manual escape hatch for a Claude Code install that Monteur's automatic
+    discovery misses (an unusual location, or a ``pythonw`` launch with a
+    stripped PATH). ``MONTEUR_CLAUDE_BIN`` overrides this (see
+    :func:`monteur.ai._cli_path`)."""
+    value = load_settings().get("claude_path", "")
     return value.strip() if isinstance(value, str) else ""
 
 

@@ -52,10 +52,12 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict
+from pathlib import Path
 
 from monteur.analysis import PacingStats
 from monteur.model import Transcript
@@ -129,13 +131,97 @@ def _client():
         ) from exc
 
 
+#: Env var pointing straight at the ``claude`` executable (highest precedence).
+CLI_PATH_ENV = "MONTEUR_CLAUDE_BIN"
+
+
+def _cli_candidates() -> list[Path]:
+    """Well-known install locations for the ``claude`` CLI, per platform.
+
+    A GUI launch — ``pythonw`` or a bundled ``.exe`` double-clicked from a
+    ``.bat`` — does NOT inherit the interactive shell's PATH, so a ``claude``
+    installed by npm-global or the native installer is invisible to
+    ``shutil.which``. These are the two common install roots, swept as a
+    fallback so Claude Code works without the user touching PATH.
+    """
+    home = Path.home()
+    if sys.platform == "win32":
+        appdata = Path(os.environ.get("APPDATA") or home / "AppData" / "Roaming")
+        local = Path(os.environ.get("LOCALAPPDATA") or home / "AppData" / "Local")
+        dirs = [
+            appdata / "npm",                    # npm install -g @anthropic-ai/claude-code
+            local / "Programs" / "claude",      # native installer (machine)
+            home / ".local" / "bin",            # native installer (user)
+            home / ".claude" / "local",
+        ]
+        names = ("claude.cmd", "claude.exe", "claude")
+        return [d / n for d in dirs for n in names]
+    dirs = [
+        home / ".local" / "bin",                # native installer
+        home / ".claude" / "local",
+        home / ".npm-global" / "bin",           # npm -g with a custom prefix
+        home / "bin",
+        Path("/usr/local/bin"),
+        Path("/opt/homebrew/bin"),              # Homebrew on Apple Silicon
+        Path("/usr/bin"),
+    ]
+    return [d / "claude" for d in dirs]
+
+
+def _cli_override() -> str:
+    """An explicit ``claude`` path: env ``MONTEUR_CLAUDE_BIN`` wins, else the
+    ``claude_path`` saved in Studio's settings; ``""`` when neither is set."""
+    env = os.environ.get(CLI_PATH_ENV, "").strip()
+    if env:
+        return env
+    try:
+        from monteur.settings import claude_path
+
+        return claude_path()
+    except Exception:  # noqa: BLE001 — settings are a convenience, never a gate
+        return ""
+
+
+def _is_exe(p: Path) -> bool:
+    try:
+        return p.is_file() and (os.name == "nt" or os.access(p, os.X_OK))
+    except OSError:
+        return False
+
+
 def _cli_path() -> str | None:
     """Absolute path of the ``claude`` executable, or None.
 
-    ``shutil.which`` resolves ``claude.cmd``/``claude.exe`` on Windows
-    automatically. Kept as its own seam so tests can monkeypatch it.
+    Resolution, first hit wins:
+
+    1. an explicit override — ``MONTEUR_CLAUDE_BIN`` or the ``claude_path``
+       saved in Studio's settings (the manual escape hatch for an unusual
+       install);
+    2. ``shutil.which`` (resolves ``claude.cmd``/``claude.exe`` on Windows) —
+       the normal case when Monteur runs from a shell that has ``claude`` on
+       PATH;
+    3. a sweep of :func:`_cli_candidates` — the fallback that rescues a
+       ``pythonw`` / bundled-exe launch whose PATH omits npm-global or
+       ``~/.local/bin``.
+
+    Kept as its own seam so tests can monkeypatch it.
     """
-    return shutil.which("claude")
+    override = _cli_override()
+    if override:
+        p = Path(override).expanduser()
+        if _is_exe(p):
+            return str(p)
+        # a directory was given — look for the binary inside it
+        for name in ("claude.cmd", "claude.exe", "claude") if os.name == "nt" else ("claude",):
+            if _is_exe(p / name):
+                return str(p / name)
+    found = shutil.which("claude")
+    if found:
+        return found
+    for cand in _cli_candidates():
+        if _is_exe(cand):
+            return str(cand)
+    return None
 
 
 _NO_BACKEND_MESSAGE = (
@@ -165,9 +251,9 @@ def _resolve_backend() -> str:
             )
         if forced == "claude-cli" and _cli_path() is None:
             raise MonteurAIError(
-                f"{BACKEND_ENV}=claude-cli, but no 'claude' executable is on "
-                "PATH — install Claude Code (https://claude.com/claude-code) "
-                f"or unset {BACKEND_ENV}"
+                f"{BACKEND_ENV}=claude-cli, but no 'claude' executable could be "
+                "found — install Claude Code (https://claude.com/claude-code), "
+                f"point {CLI_PATH_ENV} at the binary, or unset {BACKEND_ENV}"
             )
         return forced
     from monteur.settings import ai_backend
@@ -176,10 +262,12 @@ def _resolve_backend() -> str:
     if chosen == "claude-cli":
         if _cli_path() is None:
             raise MonteurAIError(
-                "Monteur is set to use Claude Code (Studio settings), but no "
-                "'claude' executable is on PATH — install Claude Code "
-                "(https://claude.com/claude-code), or switch the setting "
-                "back to Auto"
+                "Monteur is set to use Claude Code (Studio settings), but the "
+                "'claude' program could not be found — install Claude Code "
+                "(https://claude.com/claude-code), paste its path in Studio's "
+                "settings (or set MONTEUR_CLAUDE_BIN), or switch the setting "
+                "back to Auto. Tip: run 'where claude' (Windows) / 'which "
+                "claude' (macOS/Linux) in a terminal to find the path."
             )
         return "claude-cli"
     if chosen == "api":

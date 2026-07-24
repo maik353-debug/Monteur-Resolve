@@ -3596,6 +3596,17 @@ window.__MONTEUR_PREFS__ = {};
       <span id="set-badge-key"></span>
     </div>
 
+    <div class="set-key-block" id="set-cli-block">
+      <label class="set-key-label" for="set-cli-path">Claude Code location (optional)</label>
+      <div class="set-key-row">
+        <input type="text" id="set-cli-path" placeholder="/path/to/claude" autocomplete="off" spellcheck="false">
+        <button class="btn small" id="set-cli-save" type="button"><span class="spin" aria-hidden="true"></span>Save</button>
+        <button class="btn ghost small" id="set-cli-clear" type="button"><span class="spin" aria-hidden="true"></span>Clear</button>
+      </div>
+      <p class="help-small" id="set-cli-hint">Monteur finds the <code>claude</code> command by itself. Only set this if it can&rsquo;t (an unusual install, or a launcher with a stripped PATH). Run <code>where claude</code> (Windows) or <code>which claude</code> (macOS/Linux) to find the path.</p>
+      <p class="help-small" id="set-cli-env-note" hidden>MONTEUR_CLAUDE_BIN is set on this machine &mdash; it overrides this field.</p>
+    </div>
+
     <div class="set-key-block">
       <label class="set-key-label" for="set-key">Anthropic API key</label>
       <div class="set-key-row">
@@ -14085,6 +14096,7 @@ function renderSettings(s) {
     radio.disabled = !!s.backend_forced_by_env; // the machine's env var wins
   });
   $("set-badge-cli").textContent = "Claude Code: " + (s.cli_found ? "found" : "not found");
+  renderClaudePathSettings(s);
   var key;
   if (s.env_key_set) key = "from this machine's environment";
   else if (s.api_key_set) key = "saved (" + s.api_key_hint + ")";
@@ -14093,6 +14105,29 @@ function renderSettings(s) {
   $("set-key-clear").disabled = !s.api_key_set;
   renderResolveSettings(s);
   renderUpdateSettings(s);
+}
+
+/* The manual "Claude Code location" field: normally empty (discovery finds
+   claude on its own), it's the escape hatch for an install Monteur can't see.
+   When a MONTEUR_CLAUDE_BIN env override is set it wins, so the field disables
+   itself — the same "environment wins" pattern as the AI backend + Resolve
+   Python. The hint reports WHERE claude was found, so the user gets confirmation
+   the connection will work. */
+function renderClaudePathSettings(s) {
+  var envForced = !!s.claude_path_env_set;
+  $("set-cli-env-note").hidden = !envForced;
+  var input = $("set-cli-path");
+  if (document.activeElement !== input) input.value = s.claude_path || "";
+  input.disabled = envForced;
+  $("set-cli-save").disabled = envForced;
+  $("set-cli-clear").disabled = envForced || !s.claude_path;
+  var hint = $("set-cli-hint");
+  if (s.cli_found && s.cli_path) {
+    hint.innerHTML = "Found at <code></code>. Only change this if you want a different install.";
+    hint.querySelector("code").textContent = s.cli_path;
+  } else {
+    hint.innerHTML = "Monteur finds the <code>claude</code> command by itself. Only set this if it can’t (an unusual install, or a launcher with a stripped PATH). Run <code>where claude</code> (Windows) or <code>which claude</code> (macOS/Linux) to find the path.";
+  }
 }
 
 /* the Updates settings: current version + the stable/dev channel toggle */
@@ -14515,6 +14550,38 @@ $("set-rv-clear").addEventListener("click", function () {
   }).then(function () {
     // busy() re-enables its button; re-apply "nothing saved -> Clear disabled".
     if (settingsState) renderResolveSettings(settingsState);
+  });
+});
+
+/* ---- settings: manual Claude Code location (the discovery escape hatch) ---- */
+$("set-cli-save").addEventListener("click", function () {
+  var path = $("set-cli-path").value.trim();
+  if (!path) {
+    toast("Paste the full path to the claude program first.", "error");
+    $("set-cli-path").focus();
+    return;
+  }
+  busy($("set-cli-save"), function () {
+    return saveSettings({ claude_path: path }).then(function () {
+      toast("Claude Code location saved.", "success");
+    });
+  }).then(function () {
+    if (!settingsState) return;
+    var typed = $("set-cli-path").value;
+    renderClaudePathSettings(settingsState); // busy() re-enabled; re-apply env lock
+    if (typed && typed !== settingsState.claude_path) $("set-cli-path").value = typed;
+  });
+});
+$("set-cli-path").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); $("set-cli-save").click(); }
+});
+$("set-cli-clear").addEventListener("click", function () {
+  busy($("set-cli-clear"), function () {
+    return saveSettings({ claude_path: "" }).then(function () {
+      toast("Cleared — Monteur will find claude automatically.", "success");
+    });
+  }).then(function () {
+    if (settingsState) renderClaudePathSettings(settingsState);
   });
 });
 

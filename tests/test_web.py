@@ -4925,6 +4925,9 @@ class TestSettingsApi:
             "api_key_hint": "",
             "env_key_set": False,
             "cli_found": False,
+            "cli_path": "",  # nothing discovered
+            "claude_path": "",  # no manual override saved
+            "claude_path_env_set": False,
             "backend_forced_by_env": False,
             "effective": "none",  # nothing to reach Claude with yet
             "resolve_python": "",  # no Resolve worker Python saved yet
@@ -4985,6 +4988,31 @@ class TestSettingsApi:
             _post(f"{server}/api/settings", {"backend": "gemini"})
         assert exc_info.value.code == 400
         assert "backend" in json.loads(exc_info.value.read())["error"]
+
+    def test_post_claude_path_saves(self, server, tmp_path):
+        # the manual escape hatch: an explicit claude path is saved and read
+        # back (discovery's use of it is covered by test_ai unit tests)
+        exe = tmp_path / "claude"
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+        data = _post(f"{server}/api/settings", {"claude_path": str(exe)})
+        assert data["claude_path"] == str(exe)
+        from monteur.settings import claude_path
+
+        assert claude_path() == str(exe)
+
+    def test_post_claude_path_nonexistent_is_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _post(f"{server}/api/settings", {"claude_path": "/no/such/claude"})
+        assert exc_info.value.code == 400
+
+    def test_post_claude_path_clears(self, server, tmp_path):
+        exe = tmp_path / "claude"
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+        _post(f"{server}/api/settings", {"claude_path": str(exe)})
+        data = _post(f"{server}/api/settings", {"claude_path": ""})
+        assert data["claude_path"] == ""
 
     def test_update_channel_roundtrip(self, server):
         # defaults to stable, and reports the running version

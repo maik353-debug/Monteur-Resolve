@@ -3697,13 +3697,20 @@ def _settings_view() -> dict:
     for a forced backend).
     """
     from monteur import ai as ai_mod
-    from monteur.settings import ai_backend, api_key, resolve_python, update_channel
+    from monteur.settings import (
+        ai_backend,
+        api_key,
+        claude_path,
+        resolve_python,
+        update_channel,
+    )
 
     key = api_key()
     try:
         effective = ai_mod._resolve_backend()
     except ai_mod.MonteurAIError:
         effective = "none"
+    cli_path = ai_mod._cli_path()
     return {
         "backend": ai_backend(),
         "api_key_set": bool(key),
@@ -3712,7 +3719,10 @@ def _settings_view() -> dict:
             os.environ.get("ANTHROPIC_API_KEY")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN")
         ),
-        "cli_found": ai_mod._cli_path() is not None,
+        "cli_found": cli_path is not None,
+        "cli_path": cli_path or "",          # WHERE Monteur found claude (for display)
+        "claude_path": claude_path(),         # the saved manual override ("" = auto)
+        "claude_path_env_set": bool(os.environ.get(ai_mod.CLI_PATH_ENV, "").strip()),
         "backend_forced_by_env": bool(os.environ.get(ai_mod.BACKEND_ENV, "").strip()),
         "effective": effective,
         "resolve_python": resolve_python(),
@@ -5978,6 +5988,19 @@ class MonteurHandler(BaseHTTPRequestHandler):
                     "unbroken string with no spaces",
                 )
             updates["api_key"] = key
+        if "claude_path" in payload:
+            raw_cli = payload.get("claude_path")
+            if not isinstance(raw_cli, str):
+                raise ApiError(400, "'claude_path' must be a string ('' clears it)")
+            cli_path = raw_cli.strip()
+            if cli_path and not os.path.isfile(cli_path):
+                raise ApiError(
+                    400,
+                    f"there is no file at {cli_path!r} — point this at the "
+                    "'claude' program (Claude Code), or clear it to let Monteur "
+                    "find it automatically",
+                )
+            updates["claude_path"] = cli_path
         if "resolve_python" in payload:
             raw_path = payload.get("resolve_python")
             if not isinstance(raw_path, str):
