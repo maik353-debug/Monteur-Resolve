@@ -3793,8 +3793,13 @@ def _run_ai_test_job(job: dict) -> None:
         backend = ai_mod._resolve_backend()
         with _JOBS_LOCK:
             job["progress"].append({"stage": "ai-test", "name": backend})
+        # A connection TEST must fail fast, not hang for the full compose budget:
+        # a stuck CLI (not signed in) should report back in seconds, not minutes.
         reply = ai_mod.complete(
-            "Reply with the single word OK.", max_tokens=200, effort="low"
+            "Reply with the single word OK.",
+            max_tokens=200,
+            effort="low",
+            cli_timeout=45.0,
         )
         job["result"] = {"backend": backend, "reply": reply.strip()}
         job["state"] = "done"
@@ -6001,6 +6006,11 @@ class MonteurHandler(BaseHTTPRequestHandler):
                     "find it automatically",
                 )
             updates["claude_path"] = cli_path
+        if "vision_api_opt_in" in payload:
+            raw_opt = payload.get("vision_api_opt_in")
+            if not isinstance(raw_opt, bool):
+                raise ApiError(400, "'vision_api_opt_in' must be true or false")
+            updates["vision_api_opt_in"] = raw_opt
         if "resolve_python" in payload:
             raw_path = payload.get("resolve_python")
             if not isinstance(raw_path, str):

@@ -104,6 +104,14 @@ def _clean_model_env(monkeypatch):
     monkeypatch.delenv("MONTEUR_VISION_MODEL", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _force_api_backend(monkeypatch):
+    # Most tests exercise the API transport (they mock `_client`). Pin the
+    # backend to "api" so a real `claude` on the dev machine's PATH never
+    # diverts analyze_reports to the CLI path; the CLI-path tests set their own.
+    monkeypatch.setenv("MONTEUR_AI_BACKEND", "api")
+
+
 def use_client(monkeypatch, client):
     monkeypatch.setattr(vision, "_client", lambda: client)
     return client
@@ -225,6 +233,95 @@ def test_no_cancel_flag_is_unchanged(tmp_path, monkeypatch, fake_frames):
     notes = analyze_reports([report])  # no cancel kwarg
     assert notes[0].endswith("from cache") or "analyzed" in notes[0]
     assert report.moments[0].label
+
+
+# ------------------------------------------------------ Claude Code CLI backend
+
+
+def _cli_result_line(moments):
+    """A stream-json 'result' event carrying the model's JSON reply as text."""
+    payload = json.dumps({"moments": moments})
+    return (
+        json.dumps(
+            {"type": "result", "subtype": "success", "is_error": False, "result": payload}
+        )
+        + "\n"
+    )
+
+
+class _FakeRun:
+    def __init__(self, stdout, returncode=0, stderr=""):
+        self.stdout = stdout
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+def test_cli_backend_annotates_over_the_subscription(tmp_path, monkeypatch, fake_frames):
+    # footage vision on the Claude Code CLI: no API client, images sent via
+    # stream-json input, and the API-key env stripped so the subscription is used
+    from monteur import ai as ai_mod
+
+    a = make_report(tmp_path, "a.mp4", [make_moment(10.0, 0.9)])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-be-stripped")
+    monkeypatch.setattr(vision, "_client", lambda: pytest.fail("no API client on the CLI backend"))
+    monkeypatch.setattr(ai_mod, "_cli_path", lambda: "/fake/claude")
+
+    captured = {}
+
+    def fake_run(cmd, input=None, capture_output=None, text=None, timeout=None, env=None, **kw):
+        captured.update(cmd=cmd, input=input, env=env)
+        return _FakeRun(
+            _cli_result_line(
+                [{"index": 1, "label": "a road", "tags": ["road"], "role": "build",
+                  "hero": 0.5, "group": "g"}]
+            )
+        )
+
+    monkeypatch.setattr(vision.subprocess, "run", fake_run)
+    notes = analyze_reports([a], backend="claude-cli")
+
+    assert a.moments[0].label == "a road"
+    assert a.moments[0].tags == ["road"]
+    assert notes[0] == "1 moments analyzed, 0 from cache"
+    # sent as multimodal stream-json input (text + image blocks)
+    assert "--input-format" in captured["cmd"] and "stream-json" in captured["cmd"]
+    assert '"type": "image"' in captured["input"]
+    # subscription: the key env never reaches the CLI child
+    assert "ANTHROPIC_API_KEY" not in (captured["env"] or {})
+
+
+def test_cli_backend_missing_claude_raises(tmp_path, monkeypatch, fake_frames):
+    from monteur import ai as ai_mod
+
+    a = make_report(tmp_path, "a.mp4", [make_moment(10.0, 0.9)])
+    monkeypatch.setattr(ai_mod, "_cli_path", lambda: None)
+    with pytest.raises(MonteurVisionError, match="Claude Code"):
+        analyze_reports([a], backend="claude-cli")
+
+
+def test_backend_none_follows_the_provider_setting(tmp_path, monkeypatch, fake_frames):
+    # backend=None resolves like every other Claude call — force claude-cli and
+    # confirm vision took the CLI path (no API client touched)
+    from monteur import ai as ai_mod
+
+    a = make_report(tmp_path, "a.mp4", [make_moment(10.0, 0.9)])
+    monkeypatch.setenv("MONTEUR_AI_BACKEND", "claude-cli")
+    monkeypatch.setattr(ai_mod, "_cli_path", lambda: "/fake/claude")
+    monkeypatch.setattr(vision, "_client", lambda: pytest.fail("resolver picked API, not CLI"))
+    ran = {"n": 0}
+
+    def fake_run(cmd, input=None, env=None, **kw):
+        ran["n"] += 1
+        return _FakeRun(
+            _cli_result_line(
+                [{"index": 1, "label": "x", "tags": ["t"], "role": "", "hero": 0.1, "group": "g"}]
+            )
+        )
+
+    monkeypatch.setattr(vision.subprocess, "run", fake_run)
+    analyze_reports([a])  # backend not passed → resolves to claude-cli
+    assert ran["n"] == 1
+    assert a.moments[0].label == "x"
 
 
 # ---------------------------------------------------------------------- cache

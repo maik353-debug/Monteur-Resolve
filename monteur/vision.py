@@ -393,16 +393,18 @@ def _mmss(t: float) -> str:
 # --- the API call -------------------------------------------------------------------
 
 
-def _describe_batch(client, model: str, batch: list[tuple]) -> dict[int, dict]:
-    """One vision request for up to _BATCH_SIZE moments; {index: clean entry}.
+#: How long the vision CLI may run for ONE batch before we give up (a batch is
+#: up to _BATCH_SIZE moments × several images — bounded, but Opus can take a
+#: while over many frames).
+VISION_CLI_TIMEOUT = 180.0
 
-    Each moment is a text block ("Moment N: <clipname> at MM:SS — K frames,
-    start -> end") followed by its K consecutive keyframes as base64 JPEG
-    image blocks; the structured-output schema (guaranteed JSON, like
-    monteur.brief) carries the annotations back keyed by that index. The
-    several frames let the model read motion instead of guessing from a
-    single still.
-    """
+
+def _batch_content(batch: list[tuple]) -> list[dict]:
+    """The user-message content for one batch: per moment a text header then its
+    K consecutive keyframes as base64 JPEG image blocks, then one instruction.
+
+    Shared by both transports (API and CLI) so they send the model IDENTICAL
+    input — the several frames let it read motion, not guess from one still."""
     content: list[dict] = []
     for n, (_i, report, moment, _key, jpegs) in enumerate(batch, start=1):
         midpoint = (moment.start + moment.end) / 2
@@ -435,29 +437,11 @@ def _describe_batch(client, model: str, batch: list[tuple]) -> dict[int, dict]:
             ),
         }
     )
-    try:
-        response = client.messages.create(
-            model=model,
-            max_tokens=_MAX_TOKENS,
-            system=_SYSTEM,
-            output_config={"format": {"type": "json_schema", "schema": _SCHEMA}},
-            messages=[{"role": "user", "content": content}],
-        )
-    except MonteurVisionError:
-        raise
-    except Exception as exc:  # broad: missing ANTHROPIC_API_KEY surfaces here
-        raise MonteurVisionError(
-            f"Claude vision request failed: {exc} — footage vision sends "
-            "images, so unlike Monteur's writing features it cannot use the "
-            "Claude Code CLI: it needs the 'anthropic' package (pip install "
-            "'monteur[ai]') and an Anthropic API key (ANTHROPIC_API_KEY, or "
-            "a key pasted in Studio's settings)."
-        ) from exc
-    if getattr(response, "stop_reason", None) == "refusal":
-        raise MonteurVisionError(
-            "The request was declined by the model's safety system."
-        )
-    raw = "".join(b.text for b in response.content if b.type == "text")
+    return content
+
+
+def _parse_described(raw: str) -> dict[int, dict]:
+    """Parse the model's JSON reply into ``{index: clean entry}``."""
     try:
         data = json.loads(raw)
     except (TypeError, ValueError) as exc:
@@ -478,6 +462,121 @@ def _describe_batch(client, model: str, batch: list[tuple]) -> dict[int, dict]:
             if clean is not None:
                 described[index] = clean
     return described
+
+
+def _describe_batch(client, model: str, batch: list[tuple]) -> dict[int, dict]:
+    """One vision request over the Anthropic API (structured output enforced)."""
+    content = _batch_content(batch)
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=_MAX_TOKENS,
+            system=_SYSTEM,
+            output_config={"format": {"type": "json_schema", "schema": _SCHEMA}},
+            messages=[{"role": "user", "content": content}],
+        )
+    except MonteurVisionError:
+        raise
+    except Exception as exc:  # broad: missing ANTHROPIC_API_KEY surfaces here
+        raise MonteurVisionError(
+            f"Claude vision request failed: {exc} — the API backend needs the "
+            "'anthropic' package (pip install 'monteur[ai]') and an Anthropic "
+            "API key (ANTHROPIC_API_KEY, or a key pasted in Studio's settings). "
+            "Or switch the provider to Claude Code, which runs vision on your "
+            "subscription."
+        ) from exc
+    if getattr(response, "stop_reason", None) == "refusal":
+        raise MonteurVisionError(
+            "The request was declined by the model's safety system."
+        )
+    raw = "".join(b.text for b in response.content if b.type == "text")
+    return _parse_described(raw)
+
+
+def _describe_batch_cli(model: str, batch: list[tuple]) -> dict[int, dict]:
+    """One vision request over the Claude Code CLI — subscription, no API key.
+
+    The CLI accepts real multimodal input via ``--input-format stream-json``: a
+    single user message whose content carries the same text+image blocks the API
+    path sends. The CLI cannot ENFORCE a schema, so the schema is appended as an
+    instruction and the JSON is parsed from the reply (fences stripped) — exactly
+    how :mod:`monteur.ai`'s CLI backend handles structured output.
+    """
+    from monteur import ai as ai_mod
+
+    exe = ai_mod._cli_path()
+    if exe is None:
+        raise MonteurVisionError(
+            "Claude Code (the 'claude' command) was not found for footage vision "
+            "— install it (https://claude.com/claude-code) and sign in, or switch "
+            "the provider to “API key” in Settings."
+        )
+    content = _batch_content(batch)
+    content.append(
+        {
+            "type": "text",
+            "text": (
+                "Respond with ONLY a single JSON object matching this schema — "
+                "no prose, no markdown fences:\n" + json.dumps(_SCHEMA)
+            ),
+        }
+    )
+    message = {"type": "user", "message": {"role": "user", "content": content}}
+    cmd = [
+        exe, "-p",
+        "--input-format", "stream-json",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--model", model,
+        "--system-prompt", _SYSTEM,
+        "--no-session-persistence",
+    ]
+    # Strip the API-key env so the CLI uses the SUBSCRIPTION (see monteur.ai) —
+    # a stray key would 401, or worse, silently bill the API for vision.
+    cli_env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+    }
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=json.dumps(message) + "\n",
+            capture_output=True,
+            text=True,
+            timeout=VISION_CLI_TIMEOUT,
+            env=cli_env,
+            **NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise MonteurVisionError(
+            "Claude Code did not respond in time for footage vision — make sure "
+            "it is signed in (run 'claude' in a terminal once)."
+        ) from exc
+    except OSError as exc:
+        raise MonteurVisionError(f"could not run the 'claude' CLI: {exc}") from exc
+
+    result_text: str | None = None
+    failed = False
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            evt = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(evt, dict) or evt.get("type") != "result":
+            continue
+        if evt.get("is_error") or evt.get("subtype") not in (None, "success"):
+            failed = True
+        if isinstance(evt.get("result"), str):
+            result_text = evt["result"]
+    if result_text is None or failed:
+        err = (proc.stderr or "").strip()
+        detail = result_text or err[-300:] or f"exit {proc.returncode}"
+        raise MonteurVisionError(f"Claude Code vision failed: {detail}")
+    return _parse_described(ai_mod._strip_fences(result_text))
 
 
 def _call_progress(progress, index, total, name, stage) -> None:
@@ -502,6 +601,7 @@ def analyze_reports(
     progress: Callable | None = None,
     cache_path: str | Path | None = None,
     cancel=None,
+    backend: str | None = None,
 ) -> list[str]:
     """Annotate the reports' best moments with Claude vision, IN PLACE.
 
@@ -519,10 +619,17 @@ def analyze_reports(
     swallowed. ``cache_path`` defaults to ``.monteur-vision.json`` in the
     folder of the first report's footage.
 
-    Raises :class:`MonteurVisionError` when the ``anthropic`` package is
-    missing or a request fails (e.g. no ``ANTHROPIC_API_KEY``); because the
-    cache is written after each successful batch, an interrupted run keeps
-    its progress. A clip whose frame extraction fails only gets a note.
+    ``backend`` picks the transport: ``"claude-cli"`` sends the frames through
+    the Claude Code CLI (the user's subscription — no API key, no per-use cost),
+    ``"api"`` uses the Anthropic API. ``None`` (default) resolves it exactly like
+    every other Claude call (:func:`monteur.ai._resolve_backend`), so footage
+    vision follows the same provider setting as the rest of Monteur.
+
+    Raises :class:`MonteurVisionError` when the request fails — on the API
+    backend a missing key/package, on the CLI backend a missing or signed-out
+    ``claude``. Because the cache is written after each successful batch, an
+    interrupted run keeps its progress. A clip whose frame extraction fails
+    only gets a note.
 
     ``cancel`` — anything with ``.is_set()`` — is checked before every moment's
     frame extraction and before every API batch; the moment it is set the run
@@ -571,13 +678,29 @@ def analyze_reports(
             continue
         pending.append((i, report, moment, key, jpegs))
 
+    # Which transport carries the images to Claude: the Claude Code CLI (the
+    # user's subscription, no API key, no per-use cost) or the Anthropic API.
+    # Vision follows the SAME provider setting as every other Claude call, so a
+    # "Claude Code" user gets footage vision on their subscription too.
+    if backend is None:
+        from monteur import ai as ai_mod
+
+        try:
+            backend = ai_mod._resolve_backend()
+        except ai_mod.MonteurAIError:
+            backend = "api"  # let _client() surface the real "no key" message
+    use_cli = backend == "claude-cli"
+
     client = None  # created lazily: an all-cache run never needs credentials
     for start in range(0, len(pending), _BATCH_SIZE):
-        _check_cancel(cancel)  # stop before each (billed) API batch
+        _check_cancel(cancel)  # stop before each batch
         batch = pending[start : start + _BATCH_SIZE]
-        if client is None:
-            client = _client()
-        described = _describe_batch(client, model, batch)
+        if use_cli:
+            described = _describe_batch_cli(model, batch)
+        else:
+            if client is None:
+                client = _client()
+            described = _describe_batch(client, model, batch)
         for n, (i, report, moment, key, _jpegs) in enumerate(batch, start=1):
             entry = described.get(n)
             if entry is None:

@@ -3582,12 +3582,12 @@ window.__MONTEUR_PREFS__ = {};
       <label class="set-radio">
         <input type="radio" name="set-backend" value="api" id="set-b-api">
         <span class="set-radio-text"><strong>API key</strong>
-          <span class="help-small">Always the key (pay per use, also powers footage vision).</span></span>
+          <span class="help-small">Always the key (pay per use) for everything, footage vision included.</span></span>
       </label>
       <label class="set-radio">
         <input type="radio" name="set-backend" value="claude-cli" id="set-b-cli">
         <span class="set-radio-text"><strong>Claude Code</strong>
-          <span class="help-small">Always the installed claude app (covered by your Claude subscription; footage vision still needs a key).</span></span>
+          <span class="help-small">Always the installed claude app &mdash; covered by your Claude subscription, no per-use cost. Footage vision runs on it too now (no API key needed).</span></span>
       </label>
     </fieldset>
 
@@ -3614,7 +3614,7 @@ window.__MONTEUR_PREFS__ = {};
         <button class="btn small" id="set-key-save" type="button"><span class="spin" aria-hidden="true"></span>Save</button>
         <button class="btn ghost small" id="set-key-clear" type="button"><span class="spin" aria-hidden="true"></span>Clear</button>
       </div>
-      <p class="help-small">Stored only on this computer (~/.monteur/settings.json), sent only to Anthropic. Get one at console.anthropic.com. Also unlocks &ldquo;Let Claude watch your clips&rdquo;.</p>
+      <p class="help-small">Stored only on this computer (~/.monteur/settings.json), sent only to Anthropic. Get one at console.anthropic.com. Only needed on the &ldquo;API key&rdquo; provider &mdash; with Claude Code, footage vision runs on your subscription instead.</p>
     </div>
 
     <div class="set-test-row">
