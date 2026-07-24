@@ -1392,6 +1392,20 @@ def _plan_export_result(plan, payload: dict) -> dict:
     }
 
 
+def _phase_at(plan, entry) -> str:
+    """The story-arc phase a shot plays in, or ``"*"`` when the plan has none.
+
+    The context half of a learned preference: "close-ups in the climax" is
+    a different lesson from "close-ups everywhere". An arc-less plan (the
+    "auto" style) honestly has no phase to name, so it learns globally.
+    """
+    mid = (entry.record_start + entry.record_end) / 2.0
+    for start, end, label in getattr(plan, "phases", []) or []:
+        if start - 1e-6 <= mid < end + 1e-6:
+            return str(label)
+    return "*"
+
+
 def _persist_plan_edit(payload: dict, plan, label: str) -> None:
     """Persist a timeline edit back into its project — the durable timeline.
 
@@ -4787,6 +4801,11 @@ class MonteurHandler(BaseHTTPRequestHandler):
         * resync_audio — ``{"resync_audio": true}``:
           monteur.montage.resync_audio re-lays the SFX layer onto the
           current cut so the sounds land on the drops again after an edit.
+        * rebuild_layers — ``{"rebuild_layers": true}``: the iteration
+          loop's light half. monteur.montage.rebuild_layers re-lays the
+          sound cues AND re-derives the dissolves, the title slots and the
+          music bed against the cut as edited — the picture is left
+          untouched, shot for shot.
 
         ...plus the FREE edits, where nothing else on the timeline moves —
         the hole a shot leaves behind is an editorial choice (black), not
@@ -4808,6 +4827,7 @@ class MonteurHandler(BaseHTTPRequestHandler):
             move_entry,
             move_entry_to,
             plan_from_dict,
+            rebuild_layers,
             remove_track,
             resync_audio,
             set_entry_pinned,
@@ -4826,6 +4846,17 @@ class MonteurHandler(BaseHTTPRequestHandler):
             return
         if isinstance(payload.get("sfx"), dict):
             self._plan_adjust_sfx(payload)
+            return
+        if payload.get("rebuild_layers"):
+            # rebuild EVERY layer that hangs off the cut — sound cues,
+            # dissolves, title slots, the music bed — with the picture left
+            # exactly as the editor arranged it. Pure plan surgery.
+            plan = plan_from_dict(payload["plan_json"])  # bad -> ValueError -> 400
+            if not plan.entries:
+                raise ApiError(400, "the plan has no entries — nothing to rebuild")
+            adjusted = rebuild_layers(plan)
+            _persist_plan_edit(payload, adjusted, "rebuild")
+            self._send_json(_plan_export_result(adjusted, payload))
             return
         if payload.get("resync_audio"):
             # re-lay the SFX layer onto the CURRENT cut (after a delete/move
@@ -4870,6 +4901,16 @@ class MonteurHandler(BaseHTTPRequestHandler):
                 raise ApiError(400, "'lift' must be an entry index (0-based)")
             plan = plan_from_dict(payload["plan_json"])
             adjusted = lift_entry(plan, slot)  # ValueError -> 400
+            # Learn from the correction (blueprint 4.3): lifting a shot out
+            # of the cut is the honest inverse of casting one in — "not this
+            # size, here". Recorded only when the shot's size is actually
+            # known; a repeat turns into a small negative casting bias.
+            if 0 <= slot < len(plan.entries):
+                size = str(getattr(plan.entries[slot], "shot_size", "") or "")
+                if size:
+                    self._learn_signal(
+                        "avoid_shot_size", _phase_at(plan, plan.entries[slot]), size
+                    )
             _persist_plan_edit(payload, adjusted, "lift")
             self._send_json(_plan_export_result(adjusted, payload))
             return

@@ -3762,3 +3762,133 @@ def test_transition_overrides_ignore_the_content():
         )
         assert entries[1].transition == pytest.approx(expect)
         assert entries[2].transition == pytest.approx(expect)
+
+
+class TestRebuildLayers:
+    """The iteration loop's light half: the picture is yours, the layers
+    are the tool's. A rebuild re-derives everything that hangs off the cut
+    and touches not one frame of picture."""
+
+    def make_layered_plan(self):
+        from monteur.montage import MontageEntry, MontagePlan
+
+        entries = [
+            MontageEntry(f"/footage/{c}.mp4", 0.0, 4.0, i * 4.0, i * 4.0 + 4.0,
+                         1.0, transition=0.5 if i else 0.0, clip_duration=30.0)
+            for i, c in enumerate("abcd")
+        ]
+        return MontagePlan(
+            music_path="/music/song.wav", duration=16.0, entries=entries,
+            tempo=120.0, beat_marks=[i * 2.0 for i in range(8)],
+            drop_marks=[8.0],
+            phases=[(0.0, 4.0, "opening"), (4.0, 8.0, "build"),
+                    (8.0, 12.0, "climax"), (12.0, 16.0, "outro")],
+        )
+
+    def test_the_picture_is_never_touched(self):
+        from monteur.montage import lift_entry, rebuild_layers, trim_entry
+
+        plan = self.make_layered_plan()
+        edited = trim_entry(lift_entry(plan, 1), 1, record_end=10.5)
+        before = [
+            (e.clip_path, e.source_start, e.source_end,
+             e.record_start, e.record_end, e.track)
+            for e in edited.entries
+        ]
+        rebuilt = rebuild_layers(edited)
+        after = [
+            (e.clip_path, e.source_start, e.source_end,
+             e.record_start, e.record_end, e.track)
+            for e in rebuilt.entries
+        ]
+        assert after == before
+        assert rebuilt.duration == pytest.approx(edited.duration)
+        assert edited.entries is not rebuilt.entries  # the original is untouched
+
+    def test_a_dissolve_left_hanging_over_black_is_cleared(self):
+        from monteur.montage import lift_entry, rebuild_layers
+
+        plan = self.make_layered_plan()
+        edited = lift_entry(plan, 1)  # opens a hole before slot 3
+        assert edited.entries[1].transition == pytest.approx(0.5)  # still stale
+        rebuilt = rebuild_layers(edited)
+        assert rebuilt.entries[1].transition == 0.0  # nothing to dissolve out of
+        assert any("cleared 1 dissolve over black" in n for n in rebuilt.notes)
+
+    def test_a_dissolve_on_a_real_boundary_survives_but_refits(self):
+        from monteur.montage import rebuild_layers, trim_entry
+
+        plan = self.make_layered_plan()
+        # pull slot 2's OUT point in to 0.6s — the boundary it dissolves
+        # across is untouched, but half of it is now under the 0.5s ceiling
+        edited = trim_entry(plan, 1, record_end=4.6)
+        assert edited.entries[1].transition == pytest.approx(0.5)  # still stale
+        rebuilt = rebuild_layers(edited)
+        kept = rebuilt.entries[1].transition
+        assert 0 < kept <= 0.3 + 1e-6  # the half-slot rule, re-applied
+        assert any("re-fitted 1 to the new slot" in n for n in rebuilt.notes)
+
+    def test_an_orphaned_title_slot_is_dropped_with_its_title(self):
+        from dataclasses import replace
+
+        from monteur.montage import lift_entry, rebuild_layers
+
+        plan = self.make_layered_plan()
+        # a dip carved out of slot 2's tail, with its act title
+        entries = list(plan.entries)
+        entries[1] = replace(entries[1], record_end=7.6, source_end=3.6)
+        plan = replace(plan, entries=entries, dips=[(7.6, 0.4)],
+                       title_texts=["Act II"])
+        rebuilt = rebuild_layers(lift_entry(plan, 1))  # the carrier shot is gone
+        assert not any(abs(s - 7.6) < 0.05 for s, _ in rebuilt.dips)
+        assert "Act II" not in rebuilt.title_texts  # the title went with it
+        assert any("dropped 1 orphaned title slot" in n for n in rebuilt.notes)
+
+    def test_a_gap_at_an_act_change_becomes_a_title_slot_again(self):
+        from dataclasses import replace
+
+        from monteur.montage import lift_entry, rebuild_layers
+
+        plan = self.make_layered_plan()
+        plan = replace(plan, dips=[(4.0, 0.4)], title_texts=["Act II"])
+        # lift the shot that opens the climax: 8..12 is now deliberate black
+        rebuilt = rebuild_layers(lift_entry(plan, 2))
+        assert any(abs(start - 8.0) < 0.05 for start, _len in rebuilt.dips)
+        assert any("opened 1 title slot in your gaps" in n for n in rebuilt.notes)
+
+    def test_a_cut_that_never_spoke_titles_grows_none(self):
+        from monteur.montage import lift_entry, rebuild_layers
+
+        plan = self.make_layered_plan()  # no dips, no titles anywhere
+        rebuilt = rebuild_layers(lift_entry(plan, 2))
+        assert rebuilt.dips == []  # a rebuild does not invent a style
+
+    def test_rebuilding_twice_changes_nothing_the_second_time(self):
+        from monteur.montage import lift_entry, plan_to_dict, rebuild_layers
+
+        plan = self.make_layered_plan()
+        once = rebuild_layers(lift_entry(plan, 1))
+        twice = rebuild_layers(once)
+        a, b = plan_to_dict(once), plan_to_dict(twice)
+        a.pop("notes"), b.pop("notes")  # only the rebuild note is appended
+        assert a == b
+
+    def test_a_cutaway_over_a_hole_is_not_black(self):
+        from monteur.montage import (
+            add_track, lift_entry, rebuild_layers, set_entry_track,
+        )
+        from dataclasses import replace
+
+        plan = self.make_layered_plan()
+        plan = replace(plan, dips=[(4.0, 0.4)], title_texts=["Act II"])
+        edited = lift_entry(plan, 2)          # hole at 8..12 on V1
+        edited = add_track(edited, role="picture")
+        v2 = [r["id"] for r in edited.tracks if r["role"] == "picture"][0]
+        # drop a cutaway onto the new track, covering the hole
+        entries = list(edited.entries)
+        entries.append(replace(entries[-1], record_start=8.0, record_end=12.0,
+                               track=v2))
+        edited = replace(edited, entries=entries)
+        rebuilt = rebuild_layers(edited)
+        # picture covers the act change now, so there is no slot to open
+        assert not any(abs(s - 8.0) < 0.05 for s, _ in rebuilt.dips)

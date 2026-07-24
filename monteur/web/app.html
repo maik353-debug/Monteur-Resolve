@@ -2929,7 +2929,7 @@ window.__MONTEUR_PREFS__ = {};
                 <button class="tl-toggle" id="tl-zoom-in" type="button" title="Zoom in" aria-label="Zoom in">+</button>
               </span>
               <button class="tl-toggle" id="tl-add-sfx" type="button" hidden title="Add a sound cue at the current playhead">+ Sound</button>
-              <button class="tl-toggle" id="tl-resync" type="button" hidden title="Re-lay the sound cues so they land on the drops of the edited cut">Re-lay sound</button>
+              <button class="tl-toggle" id="tl-resync" type="button" hidden title="Re-lay the sound cues, dissolves and title slots onto your cut — your shots stay exactly where you put them">Rebuild layers</button>
             </div>
             <div class="tl-frame" id="cre-tl-frame" hidden>
               <div class="tl-gutter">
@@ -11837,10 +11837,17 @@ function renderTimelineStrip() {
   host.hidden = false;
   frame.hidden = false;
   bar.hidden = false;
-  // Re-lay sound is only meaningful once a plan carries an SFX layer;
-  // adding a sound is always available once there is a timeline
+  // Rebuilding the layers needs a layer to rebuild: sound cues, dissolves
+  // or title slots. Adding a sound is always available once there is a
+  // timeline.
   var resyncBtn = $("tl-resync");
-  if (resyncBtn) resyncBtn.hidden = !((plan.sfx || []).length);
+  if (resyncBtn) {
+    resyncBtn.hidden = !(
+      (plan.sfx || []).length ||
+      (plan.dips || []).length ||
+      entries.some(function (e) { return (e.transition || 0) > 0; })
+    );
+  }
   var addSfxBtn = $("tl-add-sfx");
   if (addSfxBtn) addSfxBtn.hidden = false;
   // BPM readout from the plan's tempo; "beat grid" when downbeats exist
@@ -12487,10 +12494,27 @@ function liftShot() {
 $("cre-insp-delete").addEventListener("click", deleteShot);
 $("cre-insp-lift").addEventListener("click", liftShot);
 
-/* Re-lay the sound cues onto the CURRENT cut (a timeline-wide op, not
-   shot-specific — so it does not go through applyPlanSurgery's slot path).
-   After a delete/move the impacts no longer land on the drops; this asks
-   the engine to re-place the whole SFX layer over the edited timeline. */
+/* The engine's own account of what a rebuild changed ("rebuild: re-laid 7
+   sound cues, cleared 2 dissolves over black"), sentence-cased for the
+   toast. Empty when the plan carries no such note. */
+function rebuildNote(result) {
+  var notes = (result && result.plan && result.plan.notes) || [];
+  for (var i = notes.length - 1; i >= 0; i--) {
+    var note = String(notes[i] || "");
+    if (note.indexOf("rebuild: ") === 0) {
+      var body = note.slice(9);
+      return body.charAt(0).toUpperCase() + body.slice(1) + ".";
+    }
+  }
+  return "";
+}
+
+/* Rebuild every layer that hangs off the CURRENT cut (a timeline-wide op,
+   not shot-specific — so it does not go through applyPlanSurgery's slot
+   path). After a lift/drag/trim the impacts no longer land on the drops,
+   dissolves are left hanging over black and title slots have gone stale;
+   this asks the engine to re-derive all of them against the timeline as
+   edited. The picture is never touched — that is the whole contract. */
 function resyncAudio() {
   if (!rev.planJson) return;
   if (buildPanel.running() || revisePanel.running() || directPanel.running()) return;
@@ -12499,7 +12523,7 @@ function resyncAudio() {
     plan_json: rev.planJson,
     project: cre.projectId || undefined,
     fps: built.fps || fpsFrom($("cre-fps")), format: cre.format,
-    resync_audio: true
+    rebuild_layers: true
   };
   if (built.audio) body.audio = built.audio;
   if (built.canvas) body.canvas = built.canvas;
@@ -12524,7 +12548,7 @@ function resyncAudio() {
     renderCreResult(result);
     renderStoryboard();
     resetPreview(); // the cut's sound changed — the old preview is stale
-    toast("Sound re-laid onto the edited cut.", "success");
+    toast(rebuildNote(result) || "Layers rebuilt onto your cut.", "success");
   }).catch(function (err) {
     toast(err && err.message ? err.message : String(err), "error");
   }).then(function () {

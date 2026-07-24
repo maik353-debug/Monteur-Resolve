@@ -149,7 +149,14 @@ def casting_bias() -> CastingBias | None:
 
     * ``shot_size`` (climax/phase, direction close/medium/wide) → a small
       per-phase casting bonus for that size;
-    * ``transition`` direction ``cut`` → ``fewer_dissolves``.
+    * ``avoid_shot_size`` (same shape) → the SAME weight with the opposite
+      sign. Lifting a shot out of the cut is the honest inverse of casting
+      one in: it says "not this size here", which the casting score can act
+      on directly because :meth:`CastingBias.size_bonus` sums the weights;
+    * ``transition`` direction ``cut`` → ``fewer_dissolves``;
+    * ``shot_length`` direction ``shorter``/``longer`` → one pace notch
+      faster/slower. Both directions active cancel out, which is the right
+      answer: an editor who trims both ways has no pace preference.
 
     Other recorded signals stay inspectable but do not (yet) actuate.
     """
@@ -158,12 +165,23 @@ def casting_bias() -> CastingBias | None:
         return None
     shot: list[tuple[str, str, float]] = []
     fewer = False
+    notches = 0
     for family, context, direction, _count in active:
         if family == "shot_size" and direction in _SHOT_SIZES:
             shot.append((context, direction, _PREF_SHOT_WEIGHT))
+        elif family == "avoid_shot_size" and direction in _SHOT_SIZES:
+            shot.append((context, direction, -_PREF_SHOT_WEIGHT))
         elif family == "transition" and direction == "cut":
             fewer = True
-    bias = CastingBias(shot_size=tuple(shot), fewer_dissolves=fewer)
+        elif family == "shot_length" and direction == "shorter":
+            notches -= 1
+        elif family == "shot_length" and direction == "longer":
+            notches += 1
+    bias = CastingBias(
+        shot_size=tuple(shot),
+        fewer_dissolves=fewer,
+        pace_notches=max(-1, min(1, notches)),
+    )
     return None if bias.is_neutral() else bias
 
 

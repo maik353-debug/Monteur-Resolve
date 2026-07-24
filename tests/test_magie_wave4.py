@@ -405,3 +405,49 @@ def test_fewer_dissolves_bias_reduces_dissolves():
     fewer_diss = sum(1 for e in fewer.entries if e.transition > 1e-6)
     assert base_diss > 0  # the default cut does dissolve in the calm song
     assert fewer_diss < base_diss  # the preference thinned them out
+
+
+def test_lift_signal_becomes_a_negative_casting_bias(prefs):
+    # Lifting a shot is the honest inverse of casting one: "not this size,
+    # here". The weight is the same magnitude, the other way round.
+    prefs.record_signal("avoid_shot_size", "climax", "wide")
+    prefs.record_signal("avoid_shot_size", "climax", "wide")
+    bias = prefs.casting_bias()
+    assert bias is not None
+    assert bias.size_bonus("climax", "wide") < 0
+    assert bias.size_bonus("opening", "wide") == 0  # the lesson stays in context
+
+
+def test_trim_signals_become_a_pace_notch(prefs):
+    prefs.record_signal("shot_length", "*", "shorter")
+    prefs.record_signal("shot_length", "*", "shorter")
+    bias = prefs.casting_bias()
+    assert bias is not None and bias.pace_notches == -1
+
+    # Trimming both ways is not a preference — the notches cancel out.
+    prefs.record_signal("shot_length", "*", "longer")
+    prefs.record_signal("shot_length", "*", "longer")
+    assert prefs.casting_bias() is None
+
+
+def test_a_learned_pace_notch_actually_moves_the_cut():
+    reports = make_peaked_reports(60)
+    music = make_music()
+    base = plan_montage(reports, music, style="trailer")
+    slower = plan_montage(
+        reports, music, style="trailer", casting_bias=CastingBias(pace_notches=1)
+    )
+    faster = plan_montage(
+        reports, music, style="trailer", casting_bias=CastingBias(pace_notches=-1)
+    )
+    assert len(slower.entries) < len(base.entries) < len(faster.entries)
+    assert any(n.startswith("learned pace:") for n in slower.notes)
+    # An explicit pace is the editor speaking NOW; the learned notch must
+    # not argue with it.
+    pinned = plan_montage(
+        reports, music, style="trailer", pace=1.5,
+        casting_bias=CastingBias(pace_notches=1),
+    )
+    assert len(pinned.entries) == len(
+        plan_montage(reports, music, style="trailer", pace=1.5).entries
+    )

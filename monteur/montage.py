@@ -1455,12 +1455,20 @@ class CastingBias:
     fewer_dissolves: bool = False
     #: Multiplier on the shot-grammar ordering term (refine's grammar knob).
     grammar_scale: float = 1.0
+    #: Learned pace notches, in the same currency as :func:`_auto_pace_bias`:
+    #: +1 = one notch SLOWER (every phase base doubles), -1 = one notch
+    #: faster. Earned by an editor who keeps trimming shots in the same
+    #: direction. Folded in only where the auto-pace bias itself applies —
+    #: arc styles with no explicit ``pace`` — and clamped to one notch,
+    #: because a preference is a tie-breaker, not a new style.
+    pace_notches: int = 0
 
     def is_neutral(self) -> bool:
         """True when the bias changes nothing (byte-parity fast path)."""
         return (
             not self.shot_size
             and not self.fewer_dissolves
+            and not self.pace_notches
             and abs(self.grammar_scale - 1.0) <= _EPS
         )
 
@@ -5174,15 +5182,31 @@ def plan_montage(
         notches, bias_note = _auto_pace_bias(
             reports, grid_music.sections if music is not None else []
         )
-        if notches:
-            factor = 2**notches
+        # A learned pace preference (blueprint 4.3) rides the same notch
+        # currency: an editor who keeps trimming shots shorter has asked
+        # for one notch faster, and vice versa. It is clamped to one notch
+        # and can only pull the derived pace, never an explicit one.
+        learned = 0
+        if casting_bias is not None and casting_bias.pace_notches:
+            learned = max(-1, min(1, int(casting_bias.pace_notches)))
+        if notches or learned:
+            factor = 2.0 ** (notches + learned)
             chosen = replace(
                 chosen,
                 beats_per_cut={
-                    k: v * factor for k, v in chosen.beats_per_cut.items()
+                    k: max(1, int(round(v * factor)))
+                    for k, v in chosen.beats_per_cut.items()
                 },
             )
-            plan.notes.append(bias_note)
+            if bias_note:
+                plan.notes.append(bias_note)
+            if learned:
+                plan.notes.append(
+                    "learned pace: your trims say "
+                    + ("shorter" if learned < 0 else "longer")
+                    + " shots — cutting one notch "
+                    + ("faster" if learned < 0 else "slower")
+                )
 
     phases: list[tuple[float, float, str]] = []
     highlight_phase: str | None = None
@@ -7169,7 +7193,8 @@ def _resequence_entries(
     # downbeats, energy and arc phases, it never shifts them (music_start is
     # unchanged). sfx cues are left verbatim here: some are music-anchored
     # (impacts on drops) and some picture-anchored (sub-drops on dips), so
-    # they cannot be shifted 1:1 — `resync_audio` re-lays the whole layer.
+    # they cannot be shifted 1:1 — `rebuild_layers` re-lays the whole layer
+    # (along with the dissolves and title slots the re-flow also staled).
     bed = _music_bed_to(plan, new_duration)
     adjusted = replace(
         plan,
@@ -7623,6 +7648,187 @@ def resync_audio(plan: MontagePlan) -> MontagePlan:
         f"resync: re-laid {len(adjusted.sfx)} sound cues onto the edited cut"
     )
     return adjusted
+
+
+def _picture_boundaries(entries: list[MontageEntry]) -> dict[int, int]:
+    """For each entry index, the index of the shot it cuts OUT of, or -1.
+
+    A shot cuts out of another only when they share a picture track AND the
+    earlier one's ``record_end`` meets this one's ``record_start`` within
+    :data:`_BOUNDARY_EPS`. That is the whole difference between a boundary
+    and a black gap — and after a free edit the plan is full of both.
+    """
+    by_track: dict[str, list[int]] = {}
+    for i, entry in enumerate(entries):
+        by_track.setdefault(entry_track(entry), []).append(i)
+    out: dict[int, int] = {}
+    for indices in by_track.values():
+        order = sorted(indices, key=lambda i: entries[i].record_start)
+        for prev, cur in zip(order, order[1:]):
+            if abs(entries[prev].record_end - entries[cur].record_start) <= _BOUNDARY_EPS:
+                out[cur] = prev
+    return {i: out.get(i, -1) for i in range(len(entries))}
+
+
+def rebuild_layers(plan: MontagePlan) -> MontagePlan:
+    """Rebuild every layer that hangs off the cut — the picture stays put.
+
+    The iteration loop's light half. A full revision re-cuts the picture;
+    this does the opposite — it takes the picture EXACTLY as the editor left
+    it (every record window, every source window, every track, byte for
+    byte) and re-derives the layers that were laid against the OLD cut and
+    have been quietly wrong ever since:
+
+    * **transitions** — a dissolve only means something where two shots on
+      the same track actually MEET. After a lift or a drag, a dissolve can
+      be left hanging over black, dissolving out of nothing; those are
+      cleared. The ones that still sit on a real boundary are re-quantized
+      to the current slot through the planner's own
+      :func:`_dissolve_seconds`, so a trimmed shot no longer carries a
+      dissolve longer than half of itself;
+    * **title slots** (``dips`` + ``title_texts`` + ``title_anims``) — a dip
+      is kept only while its span is genuinely black and still hangs off a
+      shot; an orphaned one is dropped with its title. When this cut speaks
+      the title-slot language already (it has phases and had dips or
+      titles), a black gap the editor left AT an act change is promoted to a
+      title slot — the gap was deliberate, so the act change gets its card
+      back;
+    * **the music bed** — re-clipped to the current duration, and deliberate
+      silences whose carrier dip or drop is gone are pruned;
+    * **the sound cues** — re-laid onto the current structure exactly as
+      :func:`resync_audio` does.
+
+    Nothing about the song changes (record ``t`` still sounds song time
+    ``music_start + t``), no entry is added, removed, moved or trimmed. The
+    original plan is never modified; the returned plan carries a
+    ``rebuild:`` note saying what was re-laid.
+    """
+    entries = [replace(e) for e in plan.entries]
+    bed = _music_bed_to(plan, plan.duration)
+    adjusted = replace(
+        plan,
+        entries=entries,
+        sfx=[],
+        dips=list(plan.dips),
+        title_texts=list(plan.title_texts),
+        title_anims=list(plan.title_anims),
+        phases=bed["phases"],
+        music_energy=bed["music_energy"],
+        beat_marks=bed["beat_marks"],
+        drop_marks=bed["drop_marks"],
+        notes=list(plan.notes),
+    )
+
+    # 1. Transitions: a dissolve needs a real boundary under it.
+    cuts_out_of = _picture_boundaries(entries)
+    cleared = 0
+    requantized = 0
+    for i, entry in enumerate(entries):
+        if entry.transition <= _EPS:
+            continue
+        if cuts_out_of[i] < 0:
+            entry.transition = 0.0  # dissolving out of black is a ghost
+            cleared += 1
+            continue
+        length = _dissolve_seconds(adjusted, entry)
+        if abs(length - entry.transition) > _EPS:
+            entry.transition = length
+            requantized += 1
+
+    # 2. Title slots: keep the dips that are still black, drop the orphans.
+    kept: list[tuple[float, float]] = []
+    kept_titles: list[str] = []
+    kept_anims: list[str] = []
+    ends = sorted(e.record_end for e in entries)
+    orphaned = 0
+    for k, (d_start, d_len) in enumerate(adjusted.dips):
+        covered = any(
+            e.record_start < d_start + d_len - _EPS
+            and d_start < e.record_end - _EPS
+            for e in entries
+        )
+        hangs_off = any(abs(end - d_start) <= _BOUNDARY_EPS for end in ends)
+        if covered or not hangs_off:
+            orphaned += 1
+            continue
+        kept.append((d_start, d_len))
+        kept_titles.append(
+            adjusted.title_texts[k] if k < len(adjusted.title_texts) else ""
+        )
+        kept_anims.append(
+            adjusted.title_anims[k] if k < len(adjusted.title_anims) else ""
+        )
+
+    # 2b. A gap the editor left at an act change is a title slot again —
+    #     but only for a cut that already speaks that language.
+    added = 0
+    if adjusted.phases and (adjusted.dips or adjusted.title_texts):
+        dip_len = _dip_seconds(adjusted)
+        gaps = _black_gaps(entries)
+        for p_start, _p_end, _label in adjusted.phases[1:]:
+            # The planner's own act-change tolerance (cut-lead safe): the
+            # gap must OPEN on the boundary, which is where the title sits.
+            gap = next(
+                (g for g in gaps if abs(g[0] - p_start) <= 0.25 + _EPS), None
+            )
+            if gap is None or gap[1] - gap[0] < dip_len - _EPS:
+                continue
+            lo = gap[0]
+            if any(abs(d_start - lo) <= _BOUNDARY_EPS for d_start, _ in kept):
+                continue
+            if not any(abs(end - lo) <= _BOUNDARY_EPS for end in ends):
+                continue  # a gap floating free of any shot is not a slot
+            kept.append((lo, dip_len))
+            kept_titles.append("")
+            kept_anims.append("")
+            added += 1
+
+    order = sorted(range(len(kept)), key=lambda k: kept[k][0])
+    adjusted.dips = [kept[k] for k in order]
+    adjusted.title_texts = (
+        [kept_titles[k] for k in order] if any(kept_titles) else []
+    )
+    adjusted.title_anims = (
+        [kept_anims[k] for k in order]
+        if any(a and a != "none" for a in kept_anims)
+        else []
+    )
+
+    # 3. The music bed and 4. the sound cues.
+    if entries and adjusted.duration > _EPS:
+        _plan_sfx(adjusted, list(adjusted.phases), list(adjusted.drop_marks))
+    _prune_music_gaps(adjusted)
+
+    bits = [f"re-laid {len(adjusted.sfx)} sound cues"]
+    if cleared:
+        bits.append(f"cleared {cleared} dissolve{'s' if cleared != 1 else ''} over black")
+    if requantized:
+        bits.append(f"re-fitted {requantized} to the new slot lengths")
+    if orphaned:
+        bits.append(f"dropped {orphaned} orphaned title slot{'s' if orphaned != 1 else ''}")
+    if added:
+        bits.append(f"opened {added} title slot{'s' if added != 1 else ''} in your gaps")
+    adjusted.notes.append("rebuild: " + ", ".join(bits))
+    return adjusted
+
+
+def _black_gaps(entries: list[MontageEntry]) -> list[tuple[float, float]]:
+    """The INTERIOR black spans of a cut: ``(start, end)`` in record time.
+
+    Black is the absence of picture on EVERY track, so the spans are read
+    off the union of all shots — a cutaway on V2 over a hole in V1 is not
+    black. Only interior gaps are reported: the head before the first shot
+    and the tail after the last are not holes in the cut, they are its
+    edges (and the tail is what ``duration`` already describes).
+    """
+    spans = sorted((e.record_start, e.record_end) for e in entries)
+    out: list[tuple[float, float]] = []
+    lo = spans[0][1] if spans else 0.0
+    for start, end in spans[1:]:
+        if start > lo + _EPS:
+            out.append((lo, start))
+        lo = max(lo, end)
+    return out
 
 
 SFX_KINDS = ("riser", "impact", "whoosh", "sub-drop", "ambience")

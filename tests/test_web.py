@@ -1195,6 +1195,65 @@ class TestPlanAdjustSurgery:
             )
         assert exc.value.code == 400
 
+    def test_rebuild_layers_relays_everything_but_the_picture(self, server):
+        # lift a shot, then ask the engine to re-derive the layers: the
+        # sound moves, the stale dissolve over the hole goes, the picture
+        # stays exactly where the editor left it
+        pj = self._plan_with_sfx()
+        pj["entries"][2]["transition"] = 0.5  # a dissolve into the last shot
+        edited = _post(f"{server}/api/plan/adjust", {"plan_json": pj, "lift": 1})
+        before = [
+            (e["record_start"], e["record_end"], e["source_start"], e["source_end"])
+            for e in edited["plan_json"]["entries"]
+        ]
+        rebuilt = _post(
+            f"{server}/api/plan/adjust",
+            {"plan_json": edited["plan_json"], "rebuild_layers": True},
+        )
+        out = rebuilt["plan_json"]
+        after = [
+            (e["record_start"], e["record_end"], e["source_start"], e["source_end"])
+            for e in out["entries"]
+        ]
+        assert after == before  # not one frame of picture moved
+        assert out["sfx"]
+        assert all(c["time"] <= out["duration"] + 1e-6 for c in out["sfx"])
+        assert not any(e.get("transition") for e in out["entries"])  # over black
+        assert any(n.startswith("rebuild:") for n in out["notes"])
+
+    def test_rebuild_layers_empty_plan_is_400(self, server):
+        from monteur.montage import MontagePlan, plan_to_dict
+
+        pj = plan_to_dict(MontagePlan(music_path=None, duration=0.0, entries=[]))
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(
+                f"{server}/api/plan/adjust",
+                {"plan_json": pj, "rebuild_layers": True},
+            )
+        assert exc.value.code == 400
+
+    def test_lifting_a_shot_teaches_the_size_to_avoid(self, server):
+        # blueprint 4.3: a lift is the inverse of a cast — "not this size,
+        # here". Recorded with the phase it happened in, never the clip.
+        # (the store is the autouse _isolated_settings one, never ~/.monteur)
+        from monteur.montage import MontageEntry, MontagePlan, plan_to_dict
+
+        pj = plan_to_dict(MontagePlan(
+            music_path="/song.wav", duration=12.0,
+            entries=[
+                MontageEntry("a.mp4", 0.0, 4.0, 0.0, 4.0, 0.9, shot_size="wide"),
+                MontageEntry("b.mp4", 0.0, 4.0, 4.0, 8.0, 0.8, shot_size="wide"),
+                MontageEntry("c.mp4", 0.0, 4.0, 8.0, 12.0, 0.7, shot_size="close"),
+            ],
+            phases=[(0.0, 4.0, "opening"), (4.0, 8.0, "build"),
+                    (8.0, 12.0, "climax")],
+        ))
+        _post(f"{server}/api/plan/adjust", {"plan_json": pj, "lift": 1})
+        view = _get(f"{server}/api/preferences")
+        rows = [r for r in view["signals"] if r["family"] == "avoid_shot_size"]
+        assert rows and rows[0]["direction"] == "wide"
+        assert rows[0]["context"] == "build"  # where the shot actually played
+
     def test_lift_leaves_the_gap_while_delete_closes_it(self, server):
         # the two deletes are both available and genuinely differ: lift keeps
         # the montage length (the hole is a black pause you asked for), the
@@ -1525,15 +1584,19 @@ class TestWizardStepsUi:
         assert "music enters|music window" in html
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
-    def test_relay_sound_button_is_wired(self):
-        # the timeline carries a "Re-lay sound" action that re-lays the SFX
-        # layer onto the edited cut via the resync_audio adjust mode
+    def test_rebuild_layers_button_is_wired(self):
+        # the timeline carries a "Rebuild layers" action that re-derives the
+        # sound cues, dissolves and title slots onto the edited cut
         html = _APP_HTML.read_text(encoding="utf-8")
         assert 'id="tl-resync"' in html
+        assert ">Rebuild layers<" in html
         assert "function resyncAudio" in html
-        assert "resync_audio: true" in html
-        # it is only revealed when the plan carries an SFX layer
-        assert 'resyncBtn.hidden = !((plan.sfx || []).length)' in html
+        assert "rebuild_layers: true" in html
+        # it is revealed once ANY of those layers exists, not just sound
+        assert "(plan.sfx || []).length ||" in html
+        assert "(plan.dips || []).length ||" in html
+        # the toast repeats the engine's own account of what changed
+        assert "function rebuildNote" in html
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_build_reveal_animation_is_wired(self):
