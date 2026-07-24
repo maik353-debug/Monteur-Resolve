@@ -6466,12 +6466,42 @@ class _WindowControls:
             pass
 
 
+#: Minimum time (seconds) the splash stays on screen even when the server binds
+#: instantly — otherwise a fast machine swaps to the app before the splash is
+#: ever really seen. Just long enough to register the brand, not a stall.
+_SPLASH_MIN_SECONDS = 1.5
+
+
+def _brand_asset(name: str) -> "Path | None":
+    """The packaged brand asset ``packaging/<name>`` (repo/editable installs), or
+    None when it isn't reachable (e.g. a non-editable wheel without the file)."""
+    from pathlib import Path as _Path
+
+    cand = _Path(__file__).resolve().parents[2] / "packaging" / name
+    return cand if cand.is_file() else None
+
+
+def _splash_bgmark() -> str:
+    """The brand mark as a big, faint background ``<img>`` (data URI, so the
+    splash stays self-contained), or "" when the PNG asset isn't found."""
+    png = _brand_asset("monteur.png")
+    if png is None:
+        return ""
+    try:
+        import base64
+
+        data = base64.b64encode(png.read_bytes()).decode("ascii")
+    except OSError:
+        return ""
+    return f'<img class="bgmark" src="data:image/png;base64,{data}" alt="">'
+
+
 #: Instant splash shown in the pywebview window WHILE the server binds and the
 #: app page loads — the blank gap before it was what read as "nothing happened
-#: when I launched". Self-contained (no server, no external assets): brand mark
-#: + a film-strip loader that animates on pure CSS. Swapped for the real app
-#: (``window.load_url``) the moment the server is ready.
-_SPLASH_HTML = """<!doctype html>
+#: when I launched". Self-contained (no server, no external assets): the brand
+#: mark large and faded behind the wordmark + a film-strip loader, all pure CSS.
+#: Swapped for the real app (``window.load_url``) once the server is ready.
+_SPLASH_TEMPLATE = """<!doctype html>
 <html><head><meta charset="utf-8"><style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; }
@@ -6481,9 +6511,14 @@ _SPLASH_HTML = """<!doctype html>
     display: flex; align-items: center; justify-content: center;
     -webkit-user-select: none; user-select: none;
   }
-  .splash {
-    text-align: center; animation: rise 0.6s ease both;
+  .bgmark {
+    position: fixed; top: 50%; left: 50%;
+    width: 440px; height: 440px; object-fit: contain;
+    transform: translate(-50%, -56%); opacity: 0.10; pointer-events: none;
+    animation: breathe 4.5s ease-in-out infinite;
   }
+  @keyframes breathe { 0%, 100% { opacity: 0.07; } 50% { opacity: 0.14; } }
+  .splash { position: relative; z-index: 1; text-align: center; animation: rise 0.6s ease both; }
   @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
   .mark {
     font-size: 40px; font-weight: 700; letter-spacing: 0.18em;
@@ -6493,9 +6528,7 @@ _SPLASH_HTML = """<!doctype html>
     margin-top: 6px; font-size: 13px; font-weight: 600; letter-spacing: 0.42em;
     padding-left: 0.42em; color: #e8823c; text-transform: uppercase;
   }
-  .strip {
-    margin: 28px auto 0; display: flex; gap: 6px; justify-content: center;
-  }
+  .strip { margin: 28px auto 0; display: flex; gap: 6px; justify-content: center; }
   .frame {
     width: 22px; height: 15px; border-radius: 2px;
     background: #33333b; box-shadow: inset 0 0 0 1px #3f3f48;
@@ -6515,6 +6548,7 @@ _SPLASH_HTML = """<!doctype html>
   .status { margin-top: 22px; font-size: 12px; color: #6c6c76; letter-spacing: 0.05em; }
 </style></head>
 <body>
+  __BGMARK__
   <div class="splash">
     <div class="mark">MONTEUR</div>
     <div class="sub">Studio</div>
@@ -6523,16 +6557,16 @@ _SPLASH_HTML = """<!doctype html>
       <span class="frame"></span><span class="frame"></span><span class="frame"></span>
       <span class="frame"></span>
     </div>
-    <div class="status">Starting up&hellip;</div>
+    <div class="status">__STATUS__</div>
   </div>
 </body></html>"""
 
-#: Shown if the server never binds (the 20 s timeout) — the frameless window has
-#: no OS close button, so it names the manual way out.
-_SPLASH_ERROR_HTML = _SPLASH_HTML.replace(
-    "Starting up&hellip;",
-    "Monteur could not start its engine. Close this window (Alt+F4) and try again.",
-).replace("animation: flick 1.1s ease-in-out infinite;", "background: #5a3030;")
+
+def _splash_html(status: str = "Starting up&hellip;") -> str:
+    """The splash page with the brand mark embedded and a status line."""
+    return _SPLASH_TEMPLATE.replace("__BGMARK__", _splash_bgmark()).replace(
+        "__STATUS__", status
+    )
 
 
 def serve_app(
@@ -6587,6 +6621,20 @@ def serve_app(
         serve(port=port, project_root=project_root, open_browser=True)
         return
 
+    # Windows: give the process its OWN taskbar identity so the button shows
+    # Monteur's icon (below) grouped as Monteur, not lumped under python.exe.
+    # (The guaranteed clean taskbar icon still ships with the packaged .exe,
+    # which embeds the same .ico — this is the best a scripted launch can do.)
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "Monteur.Studio"
+            )
+        except Exception:  # noqa: BLE001 - cosmetic only, never block startup
+            pass
+
     ready = threading.Event()
     holder: dict = {}
 
@@ -6607,14 +6655,14 @@ def serve_app(
     )
     thread.start()
 
-    # Show the window IMMEDIATELY with a splash (no wait), so a launch looks
+    # Show the window IMMEDIATELY with the splash (no wait), so a launch looks
     # instant instead of "nothing happening" while the server binds and the
     # page loads. frameless: app.html draws its own Fluent title bar (drag
     # region + caption buttons) and drives min/maximize/close through this
     # js_api bridge — the splash rides in the same frameless window.
     window = webview.create_window(
         title,
-        html=_SPLASH_HTML,
+        html=_splash_html(),
         width=size[0],
         height=size[1],
         min_size=(900, 600),
@@ -6627,8 +6675,15 @@ def serve_app(
 
     def _swap_to_app() -> None:
         # runs on a pywebview worker thread once the GUI loop is up: wait for
-        # the server, then navigate the same window from the splash to the app.
+        # the server, hold the splash a beat so it's actually seen, then
+        # navigate the same window from the splash to the app.
+        import time
+
+        started = time.monotonic()
         if ready.wait(timeout=20) and holder.get("url"):
+            shortfall = _SPLASH_MIN_SECONDS - (time.monotonic() - started)
+            if shortfall > 0:
+                time.sleep(shortfall)
             print(
                 f"Monteur Studio window open ({holder['url']}). Close it to stop.",
                 flush=True,
@@ -6636,9 +6691,24 @@ def serve_app(
             window.load_url(holder["url"])
         else:
             print("Monteur Studio's server did not start in time.", flush=True)
-            window.load_html(_SPLASH_ERROR_HTML)
+            window.load_html(
+                _splash_html(
+                    "Monteur could not start its engine. "
+                    "Close this window (Alt+F4) and try again."
+                )
+            )
 
-    webview.start(_swap_to_app)  # blocks on the main thread until the window closes
+    # Pass the brand icon to pywebview where the backend accepts it (window /
+    # alt-tab / taskbar on the GTK/Qt/Windows backends); older builds without
+    # the kwarg just fall back to the iconless start.
+    ico = _brand_asset("monteur.ico")
+    try:
+        if ico is not None:
+            webview.start(_swap_to_app, icon=str(ico))
+        else:
+            webview.start(_swap_to_app)
+    except TypeError:  # pywebview too old for the icon kwarg
+        webview.start(_swap_to_app)
 
 
 def _open_browser_safely(url: str) -> None:

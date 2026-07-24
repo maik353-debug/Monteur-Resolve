@@ -8169,13 +8169,15 @@ class TestNativeShell:
 
         fake.create_window = _create_window
 
-        def _start(func=None):
+        def _start(func=None, **kw):
             calls["started"] = True
+            calls["start_kw"] = kw
             if func:
                 func()  # run the swap-to-app worker inline (real: a GUI thread)
 
         fake.start = _start
         monkeypatch.setitem(sys.modules, "webview", fake)
+        monkeypatch.setattr(server, "_SPLASH_MIN_SECONDS", 0.0)  # no min-splash sleep in the test
 
         class _Srv:
             server_address = ("127.0.0.1", 8801)
@@ -8202,6 +8204,9 @@ class TestNativeShell:
         assert isinstance(kw.get("js_api"), server._WindowControls)
         # the same window navigated from the splash to the real app
         assert calls.get("loaded_url") == "http://127.0.0.1:8801/"
+        # the brand icon is handed to pywebview (present in the repo checkout)
+        icon = calls.get("start_kw", {}).get("icon")
+        assert icon is None or icon.endswith("monteur.ico")
 
     def test_window_controls_bridge_drives_the_window(self):
         import types
