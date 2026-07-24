@@ -1035,9 +1035,12 @@ def _export_video_graph(
             acc += lengths[i]
         cur = out
     tail: list[str] = []
-    # the colour grade rides on the assembled cut, BEFORE the fades — so the
-    # fades still resolve to true black instead of grading the black itself.
-    # Empty (a neutral grade) leaves the chain byte-identical to before.
+    # NOTE: render_export now bakes the grade PER CLIP segment (so structural
+    # black dips/titles stay true black and the export matches the preview) and
+    # passes grade="" here. This tail-grade path is kept for the general graph
+    # (and its unit test): when a grade IS given it rides the assembled cut
+    # BEFORE the fades, so the fades still resolve to true black. Empty (the
+    # render_export default now) leaves the chain byte-identical to before.
     if grade:
         tail.append(grade)
     if fade_in > 0:
@@ -1547,6 +1550,13 @@ def render_export(
     # Auto-reframe 9:16 caches each clip's probed source size (shift is a pure
     # function of source dims x canvas dims x focus; nothing else touched).
     reframe_dims: dict[str, tuple[int, int]] = {}
+    # The colour grade rides on each CLIP segment (like render_preview), NOT on
+    # the assembled tail: grading the tail also lifted/tinted the structural
+    # black dips and title cards (eq brightness is additive, contrast pivots at
+    # 0.5, so pure black stopped being black) — so the export no longer matched
+    # the preview. Per-clip keeps the picture byte-identical and leaves the
+    # dips true black. Empty (neutral) grade changes nothing.
+    grade_ff = grade_to_ffmpeg(grade) if grade else ""
 
     tmpdir = tempfile.mkdtemp(prefix="monteur-export-")
     try:
@@ -1560,6 +1570,8 @@ def render_export(
             if kind == "clip":
                 name = Path(entry.clip_path).name
                 seg_cover = _reframe_cover(entry, cover, w, h, fps, reframe_dims)
+                if grade_ff:  # grade the picture, per clip (matches the preview)
+                    seg_cover = seg_cover + "," + grade_ff
                 _run_ffmpeg(
                     [
                         "-ss", f"{max(0.0, entry.source_start):.3f}",
@@ -1900,7 +1912,7 @@ def render_export(
         graph = (
             _export_video_graph(
                 lengths, trans, fade_in, fade_out, plan.duration,
-                grade=grade_to_ffmpeg(grade) if grade else "",
+                grade="",  # grade is baked per-clip above, not over the black dips
             )
             + ";"
             + _audio_graph(len(paths), loudnorm_final)

@@ -383,6 +383,36 @@ def test_render_export_high_profile(tmp_path):
 
 @needs_ffmpeg
 @needs_demo
+def test_export_keeps_the_black_dip_black_under_a_grade(tmp_path):
+    # The grade bakes per CLIP now, not over the assembled cut — so a strongly
+    # LIFTING grade (which used to turn the structural black dip grey) leaves
+    # the dip true black, matching the preview.
+    import subprocess
+
+    import numpy as np
+
+    from monteur.color import Grade
+    from monteur.media import find_ffmpeg
+
+    out = tmp_path / "graded_export.mp4"
+    render_export(
+        demo_plan(), str(out), size=(320, 180), audio="music",
+        grade=Grade(brightness=0.5, contrast=-0.2, warmth=0.5),
+    )
+    assert out.is_file()
+    # sample the dip interior (record 2.0..2.4 is the black dip) as one gray frame
+    raw = subprocess.run(
+        [find_ffmpeg(), "-v", "error", "-ss", "2.2", "-i", str(out),
+         "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+        capture_output=True,
+    ).stdout
+    assert raw, "could not sample the dip frame"
+    mean = float(np.frombuffer(raw, dtype=np.uint8).mean())
+    assert mean < 12.0  # true black, not the ~127 a lifting grade would produce
+
+
+@needs_ffmpeg
+@needs_demo
 def test_render_preview_no_music_original_carries_sound(tmp_path):
     # Field bug: no-music builds lost their sound. The preview of a plan
     # without a song renders the clips' own audio.
