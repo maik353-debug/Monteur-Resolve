@@ -1637,6 +1637,52 @@ def test_energy_matching_neutral_when_all_static():
     assert [e.clip_path for e in plan.entries] == ["/f/a.mp4", "/f/b.mp4"]
 
 
+def _sectionless(music):
+    """The same song with its section data removed."""
+    from dataclasses import replace
+
+    return replace(music, sections=[])
+
+
+def test_arc_energy_blend_only_applies_with_real_sections(monkeypatch):
+    # An arc style's _PHASE_ENERGY is the FALLBACK for a song with no section
+    # data. With sections present the slot energy blends toward what the music
+    # actually does — but a section-less song must plan exactly as before, at
+    # any blend weight (neutral degradation).
+    import monteur.montage as mm
+    from monteur.montage import plan_to_dict
+
+    reports = make_long_reports()
+    bare = _sectionless(make_arc_music())
+    plans = []
+    for weight in (0.0, 0.35, 1.0):
+        monkeypatch.setattr(mm, "_ARC_ENERGY_SONG_WEIGHT", weight)
+        plans.append(
+            plan_to_dict(plan_montage(reports, bare, style="trailer", cut_lead=0.0))
+        )
+    assert plans[0] == plans[1] == plans[2], "no sections -> the blend must be inert"
+
+
+def test_arc_energy_blend_is_arc_dominant():
+    # The blend's contract: a real lull inside a "climax" phase pulls that
+    # slot's demand for motion DOWN, but never past the arc's own intent —
+    # the style keeps its promise, the song only modulates within it.
+    from monteur.montage import _ARC_ENERGY_SONG_WEIGHT, _blend_arc_energy
+
+    assert _ARC_ENERGY_SONG_WEIGHT < 0.5, "the arc must stay dominant"
+    # agreement is a no-op
+    for value in (0.0, 0.3, 0.65, 1.0):
+        assert _blend_arc_energy(value, value) == pytest.approx(value)
+    # a lull under a climax pulls down, a surge under an outro pulls up
+    assert 0.5 < _blend_arc_energy(1.0, 0.05) < 1.0
+    assert 0.3 < _blend_arc_energy(0.3, 0.9) < 0.6
+    # ...and the result always lands nearer the ARC than the song
+    for nominal, song in ((1.0, 0.05), (0.3, 0.9), (0.65, 0.1), (0.35, 1.0)):
+        blended = _blend_arc_energy(nominal, song)
+        assert abs(blended - nominal) < abs(blended - song)
+        assert min(nominal, song) <= blended <= max(nominal, song)
+
+
 # --- sfx layer (film mode) -------------------------------------------------------
 
 

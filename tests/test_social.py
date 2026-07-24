@@ -413,6 +413,15 @@ def _parity_reports() -> list[ClipReport]:
 # music-bearing golden shifts by exactly that one key and "travel-no-music"
 # stays byte-identical — the additive-only contract, field-by-field
 # verified.
+# Regenerated 2026-07 for the sanctioned ARC ENERGY BLEND: an arc style's
+# _PHASE_ENERGY is the fallback for a song with NO section data, but it was
+# used even when the song carried real sections — flattening genuine lulls and
+# surges inside a phase into one constant. Slot energy now blends 0.35 toward
+# the measured section energy (arc-dominant). Only "music_video" moved: one
+# extra slot at the tail, no reuse introduced (verified), mean shot score
+# unchanged; the other four styles hashed byte-identically, so the blend leans
+# rather than tips, exactly as the energy term is sized to.
+#
 # Regenerated 2026-07 for the sanctioned SFX-density change: the cue-planning
 # caps were loosened (_SFX_SECONDS_PER_CUE 5 -> 3.5, _SFX_MAX_WHOOSHES 3 -> 6)
 # so a supplied library is actually used, not left mostly on the shelf. Only the
@@ -423,7 +432,7 @@ _PARITY_GOLDEN = {
     "auto": "09f1b492cb86c52fab8a6a784f90f2fb5a32108925c890c36e76f5b6b67b7555",
     "travel": "9068fe62b7da34d892558d1f617e012d5108dde14f13ea0c7a8b1068938d86aa",
     "wedding": "1f432913ca4d0480df5ac64dd70d72d4a0e56d21ca2a8d31b882b4ebe3c16ccb",
-    "music_video": "c525ebd3ac8711bf852986b7acc65a059d764f44ab95822cd2dcbe4e73db16b9",
+    "music_video": "1a5e2de3eafc0ca6746eb4a72e82cfecb4d984b587bfba795948c35e6b82c7b1",
     "trailer": "9ee1d21b746ab9a7a185eccd1b9c718b475bb9509dbaae25ac95baa92b920437",
     "trailer-best-paced": "b999e7c73754f2922642d1008c69cf1f26ea83f363c08d2794cadce0f0283000",
     "travel-no-music": "2bdeb6c1d0e6752e4d81715255874393a5ac7a13308a27367025a588a5d8d00f",
@@ -439,7 +448,7 @@ _PARITY_GOLDEN_CONTINUOUS = {
     "auto": "d4088cf2e30a50b8f2d2643e45e7fd12b64def7f08d457a107aeefe5433589ef",
     "travel": "ce97f8ddf946dd7186749211998ea00b4d91b7fa62977657635f339a6280f2dc",
     "wedding": "b08662eb23be3531877d8ce79bbbbd50192b7e23027f241df03db13bc3ceb307",
-    "music_video": "d0102ff53ad0b70ab1d70e130a4f050f4d0504aaf492323f74683abedc0c322d",
+    "music_video": "36fc8b00905a3ba80fa55966809059ee013f643a693491f37db9c361a2537684",
     "trailer": "6b1927ed410156ad7bc58c04c770048995a632c6b12e0f513e6c13fa7d03fb2b",
     "trailer-best-paced": "91ab38332c5c5d9571018845a172283479b79d18990fc39851a8cb7a297462ff",
 }

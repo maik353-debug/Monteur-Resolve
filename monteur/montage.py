@@ -168,7 +168,10 @@ wins, so behavior without motion data is unchanged.
 
 Energy-motion matching adds ``_ENERGY_MATCH_WEIGHT x (1 - |slot_energy -
 candidate_motion|)`` to the same blend: slot energy comes from the song's
-sections ("auto") or the arc phase's nominal energy (:data:`_PHASE_ENERGY`),
+sections ("auto"), or for an arc style from its phase's nominal energy
+(:data:`_PHASE_ENERGY`) blended :data:`_ARC_ENERGY_SONG_WEIGHT` toward those
+same sections when the song has them — the arc keeps the narrative spine, the
+song's real lulls and surges still modulate within it;
 candidate motion is the moment's mean entry/exit motion magnitude
 normalised to the pool's fastest moment. Loud passages meet moving
 footage, calm passages calm footage; the full weight only tips the scale
@@ -774,6 +777,24 @@ _PHASE_ENERGY = {
     "opening": 0.35, "build": 0.65, "climax": 1.0, "outro": 0.3,
     "hook": 1.0, "punch": 0.85, "loop": 0.5,
 }
+# ...but the nominal is a FALLBACK for songs with no section data. When the
+# song does carry sections, an arc style blended this much toward what the
+# music actually does at that slot: the arc keeps the narrative spine (a
+# climax still asks for bold footage), while a genuine lull or surge inside
+# a phase still reaches the energy-motion match instead of being flattened
+# into one constant. Deliberately arc-dominant — the style's promise wins.
+_ARC_ENERGY_SONG_WEIGHT = 0.35
+
+
+def _blend_arc_energy(nominal: float, song: float) -> float:
+    """An arc phase's nominal energy, pulled toward what the song really does.
+
+    Arc-dominant by construction (:data:`_ARC_ENERGY_SONG_WEIGHT` < 0.5): the
+    result always stays nearer the phase's own number than the song's, so the
+    style keeps its promise while a real lull or surge still registers.
+    Agreement between the two is a no-op.
+    """
+    return (1.0 - _ARC_ENERGY_SONG_WEIGHT) * nominal + _ARC_ENERGY_SONG_WEIGHT * song
 _ROLE_WEIGHT = 0.2
 # Hook casting (the "short" style; see the module docstring): slot 0 is
 # reserved for the PATTERN INTERRUPT — the moment with the highest
@@ -5338,6 +5359,15 @@ def plan_montage(
         slot_energies = [
             _PHASE_ENERGY.get(_phase_label_at(phases, s) or "", 0.5) for s, _ in slots
         ]
+        if music is not None and grid_music.sections:
+            # The song HAS real dynamics — don't flatten them into the phase
+            # constant (that number is the no-section fallback). Blend toward
+            # the measured energy so a lull inside a climax, or a surge inside
+            # a build, still reaches the energy-motion match.
+            slot_energies = [
+                _blend_arc_energy(nominal, _energy_at(grid_music.sections, s))
+                for nominal, (s, _end) in zip(slot_energies, slots)
+            ]
     elif music is not None and grid_music.sections:
         slot_energies = [_energy_at(grid_music.sections, s) for s, _ in slots]
     # Act/section label per slot — the jump-cut guard's "would the
