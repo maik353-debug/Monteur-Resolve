@@ -121,6 +121,21 @@ class MonteurVisionError(RuntimeError):
     """Raised when vision analysis is unavailable or a request fails."""
 
 
+class VisionCancelled(RuntimeError):
+    """Raised out of :func:`analyze_reports` when its ``cancel`` flag is set.
+
+    Distinct from :class:`MonteurVisionError` (the soft "vision unavailable"
+    contract) so a user-requested Cancel is never mistaken for a failure — the
+    job body catches it and marks the job *cancelled*, not *error*."""
+
+
+def _check_cancel(cancel) -> None:
+    """Raise :class:`VisionCancelled` the moment ``cancel`` is set (no-op when
+    ``cancel`` is None)."""
+    if cancel is not None and cancel.is_set():
+        raise VisionCancelled("vision annotation cancelled")
+
+
 def _client():
     """Create the Claude client; tests monkeypatch this single seam.
 
@@ -486,6 +501,7 @@ def analyze_reports(
     frame_height: int = 360,
     progress: Callable | None = None,
     cache_path: str | Path | None = None,
+    cancel=None,
 ) -> list[str]:
     """Annotate the reports' best moments with Claude vision, IN PLACE.
 
@@ -507,6 +523,12 @@ def analyze_reports(
     missing or a request fails (e.g. no ``ANTHROPIC_API_KEY``); because the
     cache is written after each successful batch, an interrupted run keeps
     its progress. A clip whose frame extraction fails only gets a note.
+
+    ``cancel`` — anything with ``.is_set()`` — is checked before every moment's
+    frame extraction and before every API batch; the moment it is set the run
+    stops with :class:`VisionCancelled` (any batch already annotated is cached,
+    so nothing is wasted). This is what lets Studio's Cancel button stop the
+    vision phase, not just the sift.
     """
     model = model or os.environ.get("MONTEUR_VISION_MODEL") or DEFAULT_VISION_MODEL
     selected = _select_moments(reports, max_moments)
@@ -530,6 +552,7 @@ def analyze_reports(
     pending: list[tuple[int, ClipReport, Moment, str, list[bytes]]] = []
 
     for i, (report, moment) in enumerate(selected, start=1):
+        _check_cancel(cancel)  # stop between moments (frame extraction ahead)
         name = Path(report.path).name
         key = _moment_key(report.path, model, moment)
         entry = cache.get(key)
@@ -550,6 +573,7 @@ def analyze_reports(
 
     client = None  # created lazily: an all-cache run never needs credentials
     for start in range(0, len(pending), _BATCH_SIZE):
+        _check_cancel(cancel)  # stop before each (billed) API batch
         batch = pending[start : start + _BATCH_SIZE]
         if client is None:
             client = _client()

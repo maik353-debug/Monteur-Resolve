@@ -2314,7 +2314,7 @@ class TestCreateExportApi:
         assert exc_info.value.code == 400
 
 
-def _fake_vision(fail_with=None):
+def _fake_vision(fail_with=None, cancel_raises=False):
     """A stand-in for monteur.vision, injected via sys.modules.
 
     The server resolves the vision module at CALL time with
@@ -2325,17 +2325,33 @@ def _fake_vision(fail_with=None):
     complete test hook: it works in the same process as the server threads
     and whether or not the real module exists on disk. No production code
     path changes for tests.
+
+    ``cancel_raises`` makes ``analyze_reports`` honour the ``cancel`` flag the
+    server now threads in: when set, it raises ``VisionCancelled`` — exactly
+    what a real Cancel during the vision phase does, so the job body can be
+    tested for the *cancelled* (not *error*) outcome.
     """
     module = types.ModuleType("monteur.vision")
 
     class MonteurVisionError(RuntimeError):
         pass
 
+    class VisionCancelled(RuntimeError):
+        pass
+
     calls: list[int] = []
 
     def analyze_reports(reports, *, model=None, max_moments=48,
-                        frame_height=360, progress=None, cache_path=None):
+                        frame_height=360, progress=None, cache_path=None,
+                        cancel=None):
         calls.append(len(reports))
+        if cancel_raises:
+            # the server MUST thread a real cancel flag in — simulate the user
+            # pressing Cancel mid-vision by setting it, then honouring it
+            assert cancel is not None, "server did not pass cancel to vision"
+            cancel.set()
+            if cancel.is_set():
+                raise VisionCancelled("cancelled during vision")
         if fail_with:
             raise MonteurVisionError(fail_with)
         total = len(reports)
@@ -2352,6 +2368,7 @@ def _fake_vision(fail_with=None):
         return [f"fake vision annotated {total} clips"]
 
     module.MonteurVisionError = MonteurVisionError
+    module.VisionCancelled = VisionCancelled
     module.analyze_reports = analyze_reports
     module.calls = calls
     return module
@@ -2880,6 +2897,17 @@ class TestVisionApi:
         assert fake.calls == []
         assert "vision_notes" not in job["result"]
         assert "vision_error" not in job["result"]
+
+    def test_cancel_during_vision_marks_the_job_cancelled(self, server, monkeypatch):
+        # the vision phase (Claude calls) is now cancellable: the server threads
+        # the job's cancel flag into analyze_reports, and a VisionCancelled from
+        # it ends the job as *cancelled*, not *error*. Regression guard for
+        # "Cancel does nothing while Claude is watching".
+        fake = _fake_vision(cancel_raises=True)
+        monkeypatch.setitem(sys.modules, "monteur.vision", fake)
+        job = self._scan_see(server)
+        assert job["state"] == "cancelled"  # not "done", not "error"
+        assert job["result"] is None
 
     def test_build_with_see_reuses_annotated_scan(self, server, monkeypatch):
         fake = _fake_vision()

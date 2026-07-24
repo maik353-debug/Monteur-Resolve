@@ -178,6 +178,55 @@ def test_no_moments_returns_calm_note(tmp_path, monkeypatch):
     assert analyze_reports([]) == ["no moments to analyze"]
 
 
+# ---------------------------------------------------------------- cancellation
+
+
+class _Flag:
+    """A minimal threading.Event stand-in (only .is_set/.set are used)."""
+
+    def __init__(self, value=False):
+        self._v = value
+
+    def is_set(self):
+        return self._v
+
+    def set(self):
+        self._v = True
+
+
+def test_cancel_before_any_moment_stops_the_run(tmp_path, monkeypatch, fake_frames):
+    # a flag already set means Cancel was pressed — no frames, no API call
+    report = make_report(tmp_path, "a.mp4", [make_moment(10.0, 0.9)])
+    monkeypatch.setattr(vision, "_client", lambda: pytest.fail("no API call expected"))
+    with pytest.raises(vision.VisionCancelled):
+        analyze_reports([report], cancel=_Flag(True))
+
+
+def test_cancel_before_the_api_batch_stops_the_run(tmp_path, monkeypatch):
+    # frames extract fine, but the flag is set by the time the (billed) batch
+    # would fire — so the API is never called
+    report = make_report(tmp_path, "a.mp4", [make_moment(10.0, 0.9)])
+    flag = _Flag(False)
+
+    def frame_then_cancel(path, t, height):
+        flag.set()  # user hits Cancel during frame extraction
+        return FAKE_JPEG
+
+    monkeypatch.setattr(vision, "_extract_frame", frame_then_cancel)
+    monkeypatch.setattr(vision, "_client", lambda: pytest.fail("no API call expected"))
+    with pytest.raises(vision.VisionCancelled):
+        analyze_reports([report], cancel=flag)
+
+
+def test_no_cancel_flag_is_unchanged(tmp_path, monkeypatch, fake_frames):
+    # the default (cancel=None) path never checks a flag — behaviour is identical
+    report = make_report(tmp_path, "a.mp4", [make_moment(10.0, 0.9)])
+    use_client(monkeypatch, FakeClient())
+    notes = analyze_reports([report])  # no cancel kwarg
+    assert notes[0].endswith("from cache") or "analyzed" in notes[0]
+    assert report.moments[0].label
+
+
 # ---------------------------------------------------------------------- cache
 
 

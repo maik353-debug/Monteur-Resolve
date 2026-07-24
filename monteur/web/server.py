@@ -1460,10 +1460,28 @@ def _apply_vision(job: dict, reports: list) -> tuple[list, str]:
     except ImportError as exc:  # an older/partial install — same soft contract
         return [], f"vision support is not installed: {exc}"
     try:
-        notes = vision.analyze_reports(reports, progress=progress)
+        # cancel is threaded in so the Cancel button stops the vision phase too
+        # (the Claude calls), not just the sift; VisionCancelled propagates OUT
+        # (it is not a MonteurVisionError) so the job body marks it *cancelled*.
+        notes = vision.analyze_reports(reports, progress=progress, cancel=job["cancel"])
     except vision.MonteurVisionError as exc:
         return [], str(exc)
     return list(notes or []), ""
+
+
+def _vision_cancelled_exc() -> type:
+    """The vision Cancel exception (``VisionCancelled``), or a sentinel that is
+    never raised when vision is not installed — so a job body's cancel
+    ``except`` can always name it without an import guard of its own."""
+    try:
+        from monteur.vision import VisionCancelled
+
+        return VisionCancelled
+    except ImportError:
+        class _NeverRaised(Exception):
+            pass
+
+        return _NeverRaised
 
 
 def _run_scan_job(job: dict, folder: str, see: bool = False) -> None:
@@ -1499,7 +1517,7 @@ def _run_scan_job(job: dict, folder: str, see: bool = False) -> None:
             pass
         job["result"] = result
         job["state"] = "done"
-    except SiftCancelled:
+    except (SiftCancelled, _vision_cancelled_exc()):
         job["state"] = "cancelled"
     except (MonteurMediaError, ValueError) as exc:
         job["message"] = str(exc)
@@ -1698,7 +1716,7 @@ def _run_analyze_job(job: dict, clips: list, see: bool = False, project_id: str 
             pass
         job["result"] = result
         job["state"] = "done"
-    except (SiftCancelled, MediaCancelled):
+    except (SiftCancelled, MediaCancelled, _vision_cancelled_exc()):
         job["state"] = "cancelled"
     except (MonteurMediaError, ValueError) as exc:
         job["message"] = str(exc)
@@ -1743,7 +1761,7 @@ def _run_see_job(job: dict, clips: list, project_id: str = "") -> None:
         result["clips"] = [asdict(r) for r in reports]
         job["result"] = result
         job["state"] = "done"
-    except (SiftCancelled, MediaCancelled):
+    except (SiftCancelled, MediaCancelled, _vision_cancelled_exc()):
         job["state"] = "cancelled"
     except (MonteurMediaError, ValueError) as exc:
         job["message"] = str(exc)
