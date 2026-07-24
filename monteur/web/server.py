@@ -4000,6 +4000,10 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ("POST", "/api/pick"): self._pick,
             ("GET", "/api/settings"): self._settings_get,
             ("POST", "/api/settings"): self._settings_set,
+            ("GET", "/api/prefs"): self._prefs_get,
+            ("POST", "/api/prefs"): self._prefs_set,
+            ("GET", "/api/favorites"): self._favorites_get,
+            ("POST", "/api/favorites"): self._favorites_set,
             ("POST", "/api/settings/test"): self._settings_test,
             ("GET", "/api/youtube/status"): self._youtube_status,
             ("POST", "/api/youtube/credentials"): self._youtube_credentials,
@@ -4117,7 +4121,22 @@ class MonteurHandler(BaseHTTPRequestHandler):
     # -- endpoints --------------------------------------------------------
 
     def _app(self) -> None:
-        body = _APP_HTML.read_bytes()
+        # Inject the saved UI preferences (theme, fps, 'see') into the page so
+        # the client reads them SYNCHRONOUSLY at load — no browser localStorage,
+        # and no theme flash. A missing marker just leaves the {} default.
+        from monteur.settings import ui_prefs
+
+        try:
+            text = _APP_HTML.read_text(encoding="utf-8")
+            prefs_json = json.dumps(ui_prefs()).replace("<", "\\u003c")
+            text = text.replace(
+                "window.__MONTEUR_PREFS__ = {};",
+                f"window.__MONTEUR_PREFS__ = {prefs_json};",
+                1,
+            )
+            body = text.encode("utf-8")
+        except OSError:
+            body = _APP_HTML.read_bytes()
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -5814,6 +5833,60 @@ class MonteurHandler(BaseHTTPRequestHandler):
 
     # -- AI connection settings ---------------------------------------------
 
+    def _prefs_get(self) -> None:
+        """GET /api/prefs -> {prefs: {...}}. The small global UI preferences
+        (theme, fps, 'see'), also injected into the page at serve time."""
+        from monteur.settings import ui_prefs
+
+        self._send_json({"prefs": ui_prefs()})
+
+    def _prefs_set(self) -> None:
+        """POST /api/prefs {prefs: {key: value}} — merge scalar UI preferences
+        into settings.json (server-side, not browser localStorage)."""
+        from monteur.settings import save_settings, ui_prefs
+
+        payload = self._read_json()
+        incoming = payload.get("prefs")
+        if not isinstance(incoming, dict):
+            raise ApiError(400, "'prefs' must be an object of preference key/values")
+        merged = ui_prefs()
+        for key, value in incoming.items():
+            if isinstance(key, str) and isinstance(value, (str, int, float, bool)):
+                merged[key] = value
+        save_settings({"ui_prefs": merged})
+        self._send_json({"prefs": merged})
+
+    def _favorites_get(self) -> None:
+        """GET /api/favorites -> {favorites: [paths]}. The footage-folder
+        favourites, persisted in settings.json so they survive a relaunch (the
+        old browser-localStorage store was lost on a port/origin change)."""
+        from monteur.settings import folder_favorites
+
+        self._send_json({"favorites": folder_favorites()})
+
+    def _favorites_set(self) -> None:
+        """POST /api/favorites {favorites: [paths]} — replace the whole list.
+        The client sends the full list on every add/remove; the server
+        normalises (strings, stripped, de-duped, capped) and saves it."""
+        from monteur.settings import (
+            _MAX_FOLDER_FAVORITES,
+            folder_favorites,
+            save_settings,
+        )
+
+        payload = self._read_json()
+        raw = payload.get("favorites")
+        if not isinstance(raw, list):
+            raise ApiError(400, "'favorites' must be a list of folder paths")
+        cleaned: list[str] = []
+        for p in raw:
+            if isinstance(p, str) and p.strip() and p.strip() not in cleaned:
+                cleaned.append(p.strip())
+            if len(cleaned) >= _MAX_FOLDER_FAVORITES:
+                break
+        save_settings({"folder_favorites": cleaned})
+        self._send_json({"favorites": folder_favorites()})
+
     def _settings_get(self) -> None:
         self._send_json(_settings_view())
 
@@ -6469,7 +6542,7 @@ class _WindowControls:
 #: Minimum time (seconds) the splash stays on screen even when the server binds
 #: instantly — otherwise a fast machine swaps to the app before the splash is
 #: ever really seen. Just long enough to register the brand, not a stall.
-_SPLASH_MIN_SECONDS = 1.5
+_SPLASH_MIN_SECONDS = 2.5
 
 
 def _brand_asset(name: str) -> "Path | None":

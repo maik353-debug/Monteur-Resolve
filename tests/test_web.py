@@ -1152,6 +1152,35 @@ class TestWizardStepsUi:
     """
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_new_project_and_open_reset_all_options(self):
+        # A new cut (and opening a project) resets EVERY build option to its
+        # default via resetWizardOptions — nothing bleeds over from the last one.
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert "function resetWizardOptions" in html
+        # called both when opening a project (restore) and on a new cut
+        assert "resetWizardOptions();  // start from defaults" in html
+        assert "resetWizardOptions();       // every build option back to its default" in html
+        # it actually resets the options that used to carry over
+        for needle in ('setStyle("auto")', 'setAudio("music")', "setPace(null)",
+                       'setPlatform("custom", false)', 'setBriefText("")',
+                       'setCreFormat("fcpxml")'):
+            assert needle in html, needle
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_views_share_one_consistent_frame(self):
+        # every top-level view uses the same gutter + reading width tokens, so
+        # the suite feels like one app (no per-page centered/edge-to-edge drift)
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert "--view-pad:" in html and "--view-max:" in html
+        assert "#home, #dashboard, #assembly, #distill, #shorts, #movie {" in html
+        # the old divergent per-view widths are gone
+        assert "#dashboard { max-width: 980px" not in html
+        assert "#home { max-width: 1080px" not in html
+        # the redundant in-content back buttons are gone (the header owns "back")
+        assert 'id="shorts-back"' not in html
+        assert 'id="distill-back"' not in html
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_options_changes_autosave(self):
         # every Options control autosaves — not just folder/music. The bug was
         # that "All saved" showed while length/brief/audio/etc. never persisted.
@@ -1314,7 +1343,8 @@ class TestWizardStepsUi:
             'id="cre-faves"',
             'id="cre-fav-add"',
             'id="cre-fav-list"',
-            'FOLDER_FAVES_KEY = "monteur:folderFaves"',
+            "function initFolderFaves",   # loads from the server on open
+            '"/api/favorites"',           # persisted server-side, not localStorage
             "function loadFolderFaves",
             "function saveFolderFaves",
             "function addFolderFave",
@@ -1322,6 +1352,20 @@ class TestWizardStepsUi:
             "function renderFolderFaves",
         ):
             assert needle in html, needle
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_no_persistent_state_in_localstorage(self):
+        # Preferences live in the server config (settings.json), never browser
+        # localStorage. The only localStorage left is the transient active-job
+        # reconnect token (a live-session id, not a saved preference/config).
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert 'localStorage.setItem("monteur-theme"' not in html
+        assert 'localStorage.setItem("monteur:fps"' not in html
+        assert 'localStorage.setItem("monteur:see"' not in html
+        assert 'localStorage.setItem(FOLDER_FAVES_KEY' not in html
+        # prefs come from the injected object + /api/prefs
+        assert "window.__MONTEUR_PREFS__" in html
+        assert '"/api/prefs"' in html and "function setPref" in html
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
     def test_project_is_renamable_from_the_topbar(self):
@@ -4656,6 +4700,45 @@ class TestResolveRenderApi:
         )
 
 
+class TestPrefsFavoritesApi:
+    """UI preferences + folder favorites — persisted server-side in settings.json
+    (the autouse _isolated_settings fixture points it at a scratch file), never
+    browser localStorage."""
+
+    def test_prefs_round_trip_and_injection(self, server):
+        assert _get(f"{server}/api/prefs")["prefs"] == {}
+        out = _post(f"{server}/api/prefs", {"prefs": {"theme": "light", "fps": 30}})
+        assert out["prefs"] == {"theme": "light", "fps": 30}
+        # a second POST MERGES (keeps theme, adds see)
+        out = _post(f"{server}/api/prefs", {"prefs": {"see": True}})
+        assert out["prefs"] == {"theme": "light", "fps": 30, "see": True}
+        # ...and the saved prefs are injected into the served page (no flash,
+        # no localStorage)
+        with urllib.request.urlopen(f"{server}/") as r:
+            page = r.read().decode("utf-8")
+        assert '"theme": "light"' in page
+        assert "window.__MONTEUR_PREFS__ = {" in page
+
+    def test_prefs_rejects_a_non_object(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(f"{server}/api/prefs", {"prefs": ["not", "an", "object"]})
+        assert exc.value.code == 400
+
+    def test_favorites_round_trip_and_normalization(self, server):
+        assert _get(f"{server}/api/favorites")["favorites"] == []
+        out = _post(
+            f"{server}/api/favorites",
+            {"favorites": ["/a/b", " /a/b ", "/c/d", "", "/a/b"]},
+        )
+        assert out["favorites"] == ["/a/b", "/c/d"]  # stripped, de-duped, blanks dropped
+        assert _get(f"{server}/api/favorites")["favorites"] == ["/a/b", "/c/d"]
+
+    def test_favorites_rejects_a_non_list(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(f"{server}/api/favorites", {"favorites": {"not": "a list"}})
+        assert exc.value.code == 400
+
+
 class TestSettingsApi:
     """The AI connection settings endpoints (backend choice + API key).
 
@@ -7109,7 +7192,6 @@ class TestProUiStatic:
         for needle in (
             'id="pm-distill"',             # the Home tool card
             'id="distill"',                # the standalone view
-            'id="distill-back"',           # its own back-to-Projects control
             "function openDistillTool",
             '$("pm-distill").addEventListener',
             'distill: "Trailer"',          # topbar title for the view
@@ -7125,6 +7207,7 @@ class TestProUiStatic:
         for gone in (
             'id="cre-distill"',            # the retired <details> wrapper
             "#create.ws-mode #cre-distill",  # the retired hide-in-workspace rule
+            'id="distill-back"',           # back is the header's unified control now
         ):
             assert gone not in source, gone
 

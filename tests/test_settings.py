@@ -16,15 +16,40 @@ from monteur.settings import (
     SETTINGS_PATH_ENV,
     ai_backend,
     api_key,
+    folder_favorites,
     load_settings,
     resolve_python,
     save_settings,
     settings_path,
+    ui_prefs,
     youtube_channel,
     youtube_client_id,
     youtube_client_secret,
     youtube_refresh_token,
 )
+
+
+def test_ui_prefs_default_empty_and_round_trip(settings_file):
+    assert ui_prefs() == {}
+    save_settings({"ui_prefs": {"theme": "light", "fps": 30}})
+    assert ui_prefs() == {"theme": "light", "fps": 30}
+
+
+def test_ui_prefs_non_dict_reads_as_empty(settings_file):
+    save_settings({"ui_prefs": "nonsense"})
+    assert ui_prefs() == {}
+
+
+def test_folder_favorites_default_and_normalization(settings_file):
+    assert folder_favorites() == []
+    save_settings({"folder_favorites": ["/a/b", " /a/b ", "/c/d", "", 7, "/a/b"]})
+    # stripped, de-duped, non-strings dropped, order preserved
+    assert folder_favorites() == ["/a/b", "/c/d"]
+
+
+def test_folder_favorites_non_list_reads_as_empty(settings_file):
+    save_settings({"folder_favorites": {"not": "a list"}})
+    assert folder_favorites() == []
 
 
 @pytest.fixture

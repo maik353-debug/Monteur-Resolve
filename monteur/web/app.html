@@ -390,7 +390,7 @@ h1, h2, h3, p { margin: 0; }
 .dropzone[aria-busy="true"] .dz-busy { display: block; }
 
 /* ---------- dashboard --------------------------------------------------- */
-#dashboard { max-width: 980px; margin: 0 auto; padding: 18px 22px 48px; }
+/* #dashboard spacing comes from the unified view frame (see :root --view-*). */
 .dash-head { display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: flex-end; justify-content: space-between; margin-bottom: 14px; }
 .eyebrow { font-size: 10.5px; font-weight: 650; letter-spacing: 0.09em; text-transform: uppercase; color: var(--ink-muted); margin-bottom: 3px; }
 .dash-title h1 { font-size: 19px; font-weight: 650; line-height: 1.25; overflow-wrap: anywhere; }
@@ -621,7 +621,7 @@ svg text.axis {
 #resolve-fix-settings { margin-top: 8px; }
 
 /* ---------- assembly view ---------- */
-#assembly { max-width: 980px; margin: 0 auto; padding: 18px 22px 48px; }
+/* #assembly spacing comes from the unified view frame (see :root --view-*). */
 .asm-sources { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
 @media (max-width: 900px) { .asm-sources { grid-template-columns: 1fr; } }
 .asm-drop {
@@ -795,7 +795,7 @@ svg text.axis {
 .refetching { opacity: 0.55; pointer-events: none; }
 
 /* ---------- home → project manager ---------- */
-#home { max-width: 1080px; margin: 0 auto; padding: 30px 26px 56px; }
+/* #home spacing comes from the unified view frame (see :root --view-*). */
 .pm-eyebrow {
   font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.24em;
   text-transform: uppercase; color: var(--ember);
@@ -890,7 +890,15 @@ svg text.axis {
 /* full-window like the footage workspace — every step spans the width (the
    footage page always did via .ws-mode; the rest now match it). Inner leads,
    hints and forms keep their own max-widths, so text stays readable. */
-#create { max-width: none; margin: 0 auto; padding: 18px 22px 48px; }
+#create { max-width: none; margin: 0 auto; padding: var(--view-pad); }
+/* One consistent frame for every top-level view — same gutter, same reading
+   width — so the suite feels like ONE app and text never touches the edge.
+   #create alone runs full-width (the build workspace); everything else shares
+   this reading width. Change the two tokens to re-space the whole suite. */
+:root { --view-pad: 24px 30px 56px; --view-max: 1120px; }
+#home, #dashboard, #assembly, #distill, #shorts, #movie {
+  max-width: var(--view-max); margin: 0 auto; padding: var(--view-pad);
+}
 .wiz-progress {
   font-size: 10.5px; font-weight: 650; letter-spacing: 0.09em; text-transform: uppercase;
   color: var(--ink-muted); margin-bottom: 6px;
@@ -2008,7 +2016,7 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
 }
 
 /* ---------- movie view ---------- */
-#movie { max-width: 980px; margin: 0 auto; padding: 18px 22px 48px; }
+/* #movie spacing comes from the unified view frame (see :root --view-*). */
 .mov-entry-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-items: start; }
 @media (max-width: 900px) { .mov-entry-grid { grid-template-columns: 1fr; } }
 #mov-brief, #cre-brief {
@@ -2090,13 +2098,20 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
 }
 </style>
 <script>
+/* Global UI preferences (theme, fps, "see") — the SERVER injects the saved
+   values over the {} below when it serves this page (from ~/.monteur, not
+   browser storage), so the whole UI reads them synchronously. Left as {} when
+   served from a plain file. */
+window.__MONTEUR_PREFS__ = {};
+</script>
+<script>
 /* theme boot — dark is the default; an explicit light choice is stamped on <html> */
 (function () {
   try {
-    if (localStorage.getItem("monteur-theme") === "light") {
+    if ((window.__MONTEUR_PREFS__ || {}).theme === "light") {
       document.documentElement.setAttribute("data-theme", "light");
     }
-  } catch (e) { /* storage may be unavailable; stay dark */ }
+  } catch (e) { /* stay dark */ }
 })();
 </script>
 </head>
@@ -2247,9 +2262,6 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           <h1>Turn a cut into vertical Shorts</h1>
           <p class="dash-meta">Pick a finished cut. Monteur pulls the strongest self-contained beats it already used, reframes each to 9:16 so the subject stays in frame, and saves every Short as its own project you can refine and export. No moment repeats across the set.</p>
         </div>
-        <div class="dash-actions">
-          <button class="btn ghost" id="shorts-back" type="button">← Projects</button>
-        </div>
       </header>
 
       <section class="card" style="margin-top: 14px;">
@@ -2285,9 +2297,6 @@ button.sb-card:hover, button.sb-card:focus-visible { border-color: var(--accent)
           <p class="eyebrow">Trailer</p>
           <h1>Distill a trailer from a finished cut</h1>
           <p class="dash-meta">Your finished film already IS the curation — every shot in it was hand-picked. Drop its timeline export (EDL or FCPXML) and Monteur cuts a short trailer from exactly those shots. Sources that aren&rsquo;t on this machine still work; the export carries their paths through.</p>
-        </div>
-        <div class="dash-actions">
-          <button class="btn ghost" id="distill-back" type="button">← Projects</button>
         </div>
       </header>
 
@@ -3793,6 +3802,31 @@ function api(path, options) {
   });
 }
 
+/* Global UI preferences, persisted server-side (~/.monteur/settings.json) —
+   never browser localStorage. The saved values are injected into the page at
+   serve time (window.__MONTEUR_PREFS__), read synchronously here, and written
+   back through /api/prefs. */
+function getPref(key, dflt) {
+  var p = window.__MONTEUR_PREFS__ || {};
+  return Object.prototype.hasOwnProperty.call(p, key) ? p[key] : dflt;
+}
+function setPref(key, value) {
+  if (!window.__MONTEUR_PREFS__) window.__MONTEUR_PREFS__ = {};
+  window.__MONTEUR_PREFS__[key] = value;
+  var one = {}; one[key] = value;
+  api("/api/prefs", { method: "POST", body: { prefs: one } }).catch(function () { /* offline */ });
+}
+/* One-time lift of the old browser-localStorage prefs into the server config,
+   so an existing user's theme / fps / see choice isn't lost on upgrade. */
+(function migrateLegacyPrefs() {
+  try {
+    var p = window.__MONTEUR_PREFS__ || {};
+    if (!("theme" in p)) { var t = localStorage.getItem("monteur-theme"); if (t === "light" || t === "dark") setPref("theme", t); }
+    if (!("fps" in p)) { var f = parseFloat(localStorage.getItem("monteur:fps")); if (isFinite(f) && f > 0) setPref("fps", f); }
+    if (!("see" in p)) { var s = localStorage.getItem("monteur:see"); if (s === "1" || s === "0") setPref("see", s === "1"); }
+  } catch (e) { /* private mode / no storage */ }
+})();
+
 function busy(button, fn) {
   if (button.classList.contains("busy")) return Promise.resolve();
   button.classList.add("busy");
@@ -5131,14 +5165,10 @@ function readFileText(file) {
 /* fps prompt (EDL only) */
 var fpsResolve = null;
 function storedFps() {
-  try {
-    var v = parseFloat(window.localStorage.getItem("monteur:fps"));
-    return isFinite(v) && v > 0 ? v : 25;
-  } catch (e) { return 25; }
+  var v = parseFloat(getPref("fps", 25));
+  return isFinite(v) && v > 0 ? v : 25;
 }
-function rememberFps(v) {
-  try { window.localStorage.setItem("monteur:fps", String(v)); } catch (e) { /* private mode */ }
-}
+function rememberFps(v) { setPref("fps", Number(v)); }
 /* fill a <select> with the fps presets, preselecting the remembered value */
 function populateFpsSelect(select) {
   var chosen = storedFps();
@@ -6420,7 +6450,7 @@ $("cre-browse-folder").addEventListener("click", function () {
 });
 
 $("cre-fav-add").addEventListener("click", function () { addFolderFave(wsExplorer.path); });
-renderFolderFaves(); // paint any saved favorites on load
+initFolderFaves(); // load saved favorites from the server (migrates old localStorage once)
 
 /* ================= the media pool (Increment B, staged) =================
    The Footage page is a bin of REFERENCED clips. The user picks a SUBSET,
@@ -6704,22 +6734,34 @@ $("cre-pool-path").addEventListener("keydown", function (e) {
 var wsExplorer = { path: "", loaded: false };
 
 /* ===== folder favorites (left rail) ==================================
-   Save folders you use often so you can jump back with one click. Pure
-   client state, persisted in localStorage (guarded, private-mode safe),
-   mirroring the monteur:* key pattern. A favorite is just a folder path;
-   clicking one navigates the Explorer there via /api/browse/list. */
-var FOLDER_FAVES_KEY = "monteur:folderFaves";
-function loadFolderFaves() {
-  try {
-    var raw = window.localStorage.getItem(FOLDER_FAVES_KEY);
-    if (!raw) return [];
-    var arr = JSON.parse(raw);
-    if (!Array.isArray(arr)) return [];
-    return arr.filter(function (p) { return typeof p === "string" && p; });
-  } catch (e) { return []; }
-}
+   Save folders you use often so you can jump back with one click. Persisted
+   SERVER-SIDE (~/.monteur/settings.json via /api/favorites) so they survive a
+   relaunch regardless of the desktop window's port/origin — browser
+   localStorage was lost whenever the app bound a different port. Kept in an
+   in-memory cache the rail reads synchronously; every change POSTs the full
+   list. A favorite is just a folder path; clicking one navigates the Explorer
+   there via /api/browse/list. */
+var FOLDER_FAVES_KEY = "monteur:folderFaves";  // legacy store, migrated once
+var folderFavesCache = [];                     // the source of truth in the UI
+function loadFolderFaves() { return folderFavesCache.slice(); }
 function saveFolderFaves(arr) {
-  try { window.localStorage.setItem(FOLDER_FAVES_KEY, JSON.stringify(arr)); } catch (e) { /* private mode */ }
+  folderFavesCache = (arr || []).filter(function (p) { return typeof p === "string" && p; });
+  api("/api/favorites", { method: "POST", body: { favorites: folderFavesCache } })
+    .then(function (d) { if (d && Array.isArray(d.favorites)) { folderFavesCache = d.favorites; renderFolderFaves(); } })
+    .catch(function () { /* offline: the in-memory cache still reflects the change */ });
+}
+function initFolderFaves() {
+  api("/api/favorites").then(function (d) {
+    var server = (d && Array.isArray(d.favorites)) ? d.favorites : [];
+    if (server.length) { folderFavesCache = server; renderFolderFaves(); return; }
+    // one-time migration: seed the server from any old localStorage favorites
+    var legacy = [];
+    try {
+      var raw = window.localStorage.getItem(FOLDER_FAVES_KEY);
+      if (raw) { var a = JSON.parse(raw); if (Array.isArray(a)) legacy = a.filter(function (p) { return typeof p === "string" && p; }); }
+    } catch (e) { /* private mode */ }
+    if (legacy.length) { saveFolderFaves(legacy); } else { folderFavesCache = []; renderFolderFaves(); }
+  }).catch(function () { renderFolderFaves(); });
 }
 function addFolderFave(path) {
   path = String(path || "").trim();
@@ -7069,14 +7111,10 @@ $("cre-browse-export").addEventListener("click", function () { browsePath("folde
 
 /* ---- step 1: scan the footage folder ---- */
 
-/* "Let Claude watch your clips" — off by default, remembered per browser */
-function storedSee() {
-  try { return window.localStorage.getItem("monteur:see") === "1"; } catch (e) { return false; }
-}
+/* "Let Claude watch your clips" — off by default, remembered in the config */
+function storedSee() { return getPref("see", false) === true; }
 $("cre-see").checked = storedSee();
-$("cre-see").addEventListener("change", function () {
-  try { window.localStorage.setItem("monteur:see", this.checked ? "1" : "0"); } catch (e) { /* private mode */ }
-});
+$("cre-see").addEventListener("change", function () { setPref("see", this.checked); });
 function seeEnabled() { return $("cre-see").checked; }
 
 /* "Claude composes the cut" — auto-suggested ON after a scan that carried
@@ -9095,7 +9133,7 @@ function startShortsBuild() {
 }
 
 $("shorts-build").addEventListener("click", startShortsBuild);
-$("shorts-back").addEventListener("click", function () { setView("home"); refreshProjects(); });
+/* the header's unified "‹ Projects" back control covers this view now */
 
 $("shorts-save").addEventListener("click", function () {
   if (!shortsTool.projectId || !shortsTool.built.length) return;
@@ -9299,8 +9337,8 @@ function newProject() {
   cre.pool = [];              // a fresh project starts with an empty pool
   cre.poolSel = {};
   renderPool({ clips: [], entries: [] });
+  resetWizardOptions();       // every build option back to its default (style, pace, brief, platform, …)
   restoreGrade(null);         // a fresh project starts on a neutral grade
-  cre.treatment = null; renderRegie(); // ...and with no Regie-Vorschlag yet
   cre.series = null; setSeriesCount(1); // ...and as a single cut, not a series
   creResetRevise();       // clear any plan/storyboard left from the previous cut
   creUpdatePages();
@@ -9448,8 +9486,38 @@ var CANVAS_TO_SHAPE = {
   "cine-uhd": ["cine", "uhd"], "cine": ["cine", "hd"]
 };
 
+/* Reset EVERY build option to its default. Called at the top of
+   restoreWizardFromDraft (so opening a project always lands on a clean,
+   fully-specified state — no setting bleeds over from the project that was
+   open before) and by newProject (a fresh cut starts from defaults). Global
+   preferences (fps, "let Claude watch") are NOT reset — they follow the user,
+   not the project. Grade and series are reset by their own helpers. */
+function resetWizardOptions() {
+  setAudio("music");
+  setStyle("auto");
+  setOrder("chronological");
+  setTransitions("auto");
+  setShape("wide"); setRes("uhd");            // Wide 16:9 · 4K
+  setPlatform("custom", false);
+  setPace(null);
+  setCreFormat("fcpxml");
+  cre.lenTouched = false;
+  setLenMode("target");
+  $("cre-maxlen").value = "";
+  $("cre-cutlead").value = "0.04";
+  $("cre-repeats").checked = false;
+  $("cre-sfx").checked = false;
+  $("cre-elements").value = "";
+  $("cre-musicflow").value = "deliberate";
+  setBriefText("");
+  $("cre-ai-cut").checked = false;
+  cre.aiCutTouched = false;
+  cre.treatment = null; renderRegie();
+}
+
 function restoreWizardFromDraft(draft) {
   var s = draft.settings || {};
+  resetWizardOptions();  // start from defaults, then apply THIS project's saved options
   $("cre-folder").value = String(draft.folder || "");
   if (draft.music) $("cre-music").value = String(draft.music);
   if (s.audio && AUDIO_IDS[s.audio]) setAudio(s.audio);
@@ -12890,7 +12958,7 @@ function openDistillTool() {
     if (focus) focus.focus();
   }
 }
-$("distill-back").addEventListener("click", function () { setView("home"); refreshProjects(); });
+/* the header's unified "‹ Projects" back control covers this view now */
 
 [
   ["uhd", "Wide 16:9 · 4K"],
@@ -14606,7 +14674,7 @@ reattachActiveJob(); // ...and reattach the UI to a scan the reload forgot but t
     var light = theme === "light";
     if (light) root.setAttribute("data-theme", "light");
     else root.removeAttribute("data-theme");
-    try { localStorage.setItem("monteur-theme", light ? "light" : "dark"); } catch (e) {}
+    setPref("theme", light ? "light" : "dark");
     reflect();
   }
   function toggle() { set(current() === "light" ? "dark" : "light"); }

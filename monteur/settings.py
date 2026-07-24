@@ -160,3 +160,34 @@ def resolve_python() -> str:
     """
     value = load_settings().get("resolve_python", "")
     return value.strip() if isinstance(value, str) else ""
+
+
+#: Cap on how many footage-folder favourites are kept (the rail is a compact
+#: shortcut list, not a bookmark manager).
+_MAX_FOLDER_FAVORITES = 50
+
+
+def ui_prefs() -> dict:
+    """Small global UI preferences (theme, default fps, the 'let Claude watch'
+    toggle) — persisted server-side so they follow the user across launches
+    instead of living in a per-origin browser store that a changed window port
+    would lose. A non-dict value reads as ``{}``."""
+    value = load_settings().get("ui_prefs", {})
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def folder_favorites() -> list[str]:
+    """The saved footage-folder favourites (absolute paths), in order.
+
+    Persisted server-side (not browser localStorage) so they survive across
+    launches regardless of the window's port/origin or a WebView2 profile.
+    Non-string / blank entries are dropped; a non-list value reads as ``[]``.
+    """
+    value = load_settings().get("folder_favorites", [])
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for p in value:
+        if isinstance(p, str) and p.strip() and p.strip() not in out:
+            out.append(p.strip())
+    return out[:_MAX_FOLDER_FAVORITES]
