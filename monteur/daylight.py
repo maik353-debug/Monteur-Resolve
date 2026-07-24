@@ -114,13 +114,16 @@ def classify_frame(rgb) -> dict:
         and brightness < _GOLDEN_MAX_BRIGHTNESS
         and saturation >= _GOLDEN_MIN_SATURATION
     ):
-        # Confidence: the weaker of "how warm beyond the threshold" and
-        # "how far inside the mid-bright band" (both 0 at a border).
+        # Confidence: the weaker of "how warm beyond the threshold" and "how
+        # DIM inside the band". Golden hour is low, warm sun — a dim warm frame
+        # is more clearly golden than a bright one, so confidence rises as the
+        # brightness falls toward the night border (not, as before, peaking at
+        # the band's mid-point, which is the least golden-looking part of it).
         warm_margin = (warmth - _GOLDEN_MIN_WARMTH) / _GOLDEN_MIN_WARMTH
-        band_half = (_GOLDEN_MAX_BRIGHTNESS - _NIGHT_MAX_BRIGHTNESS) / 2.0
-        band_mid = _NIGHT_MAX_BRIGHTNESS + band_half
-        band_margin = 1.0 - abs(brightness - band_mid) / band_half
-        label, confidence = "golden", _confidence(min(warm_margin, band_margin))
+        dim_margin = (_GOLDEN_MAX_BRIGHTNESS - brightness) / (
+            _GOLDEN_MAX_BRIGHTNESS - _NIGHT_MAX_BRIGHTNESS
+        )
+        label, confidence = "golden", _confidence(min(warm_margin, dim_margin))
     else:
         # Day is the residual class: confident when clearly brighter than
         # night AND clearly not golden (cool, or bright beyond the band).

@@ -89,6 +89,13 @@ def test_confidence_is_bounded_and_monotone():
     weak = classify_frame(flat(140, 125, 118))
     assert strong["label"] == "golden"
     assert strong["confidence"] > 0.5
+    # Golden hour is DIM warm sun: a dim golden frame is MORE confidently
+    # golden than a bright one (confidence rises toward the night border,
+    # not toward the band's mid-brightness).
+    dim_golden = classify_frame(flat(95, 60, 20))    # brightness ~65, warm
+    bright_golden = classify_frame(flat(200, 140, 60))  # brightness ~147, warm
+    assert dim_golden["label"] == bright_golden["label"] == "golden"
+    assert dim_golden["confidence"] >= bright_golden["confidence"]
 
 
 def test_classify_frame_reports_measurements():
