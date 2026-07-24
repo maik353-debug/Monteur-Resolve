@@ -4874,6 +4874,15 @@ class MonteurHandler(BaseHTTPRequestHandler):
                 )
             plan = plan_from_dict(payload["plan_json"])
             adjusted = move_entry_to(plan, slot, start)  # ValueError -> 400
+            # one gesture = one edit: a drag that also crossed lanes carries
+            # its new track, so it lands in a single round trip
+            track = str(payload.get("track") or "")
+            if track:
+                moved = min(
+                    range(len(adjusted.entries)),
+                    key=lambda i: abs(adjusted.entries[i].record_start - start),
+                )
+                adjusted = set_entry_track(adjusted, moved, track)
             _persist_plan_edit(payload, adjusted, "move")
             self._send_json(_plan_export_result(adjusted, payload))
             return

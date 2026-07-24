@@ -1763,6 +1763,20 @@ svg text.axis {
 .tlg-ruler { height: 16px; }
 .tlg-grade { height: 20px; }
 .tlg-v1 { height: 34px; color: var(--ink-2); }
+/* a generated picture row: label + the mute toggle */
+.tlg-track { height: 34px; color: var(--ink-2); justify-content: space-between; }
+.tlg-track.muted { color: var(--ink-muted); }
+.tl-mute {
+  border: 0; background: transparent; cursor: pointer; padding: 0 2px;
+  font: inherit; font-size: 9px; color: var(--ink-muted); line-height: 1;
+}
+.tl-mute:hover { color: var(--ink); }
+.tl-mute[aria-pressed="true"] { color: var(--danger, #e5484d); }
+.tl-addtrack {
+  width: 100%; border: 0; background: transparent; cursor: pointer;
+  color: var(--ink-muted); font: inherit; font-size: 9px; padding: 3px 0;
+}
+.tl-addtrack:hover { color: var(--accent); }
 .tlg-title { height: 18px; }
 .tlg-a1 { height: 30px; color: var(--ink-2); }
 .tlg-a2 { height: 18px; }
@@ -1791,11 +1805,17 @@ svg text.axis {
    hole between two shots is simply empty track — which is what makes lift,
    free moves and trims expressible at all. (It was a flexbox of %-widths,
    where clips were siblings in document order and a gap could not exist.) */
-.tl-blocks {
+/* the picture area is a STACK of track lanes (V2 over V1 over ...), one row
+   each; #cre-strip-blocks is their container, so "#cre-strip-blocks .tl-block"
+   still addresses every shot however many tracks there are */
+.tl-blocks { position: relative; }
+.tl-tracklane {
   position: relative; height: 34px;
   border: 1px solid var(--border); border-top: 0;
   overflow: hidden; background: var(--input-bg);
 }
+.tl-tracklane.muted { opacity: 0.4; }
+.tl-tracklane.drop-target { box-shadow: inset 0 0 0 2px var(--accent); }
 .tl-block {
   position: absolute; top: 0; bottom: 0; min-width: 3px;
   border: 0; padding: 0; margin: 0;
@@ -2912,13 +2932,15 @@ window.__MONTEUR_PREFS__ = {};
               <button class="tl-toggle" id="tl-resync" type="button" hidden title="Re-lay the sound cues so they land on the drops of the edited cut">Re-lay sound</button>
             </div>
             <div class="tl-frame" id="cre-tl-frame" hidden>
-              <div class="tl-gutter" aria-hidden="true">
-                <div class="tlg tlg-ruler"></div>
-                <div class="tlg tlg-grade"><i class="sw-grade"></i>Grade</div>
-                <div class="tlg tlg-v1"><i class="sw-clip"></i>V1</div>
-                <div class="tlg tlg-title"><i class="sw-title"></i>Title</div>
-                <div class="tlg tlg-a1"><i class="sw-music"></i>A1</div>
-                <div class="tlg tlg-a2"><i class="sw-sfx"></i>A2</div>
+              <div class="tl-gutter">
+                <div class="tlg tlg-ruler" aria-hidden="true"></div>
+                <div class="tlg tlg-grade" aria-hidden="true"><i class="sw-grade"></i>Grade</div>
+                <!-- the picture rows are generated from the plan's track layout
+                     (one per video track, newest on top) with their mute -->
+                <div id="cre-gutter-picture"></div>
+                <div class="tlg tlg-title" aria-hidden="true"><i class="sw-title"></i>Title</div>
+                <div class="tlg tlg-a1" data-track="A1"><i class="sw-music"></i>A1</div>
+                <div class="tlg tlg-a2" data-track="A2"><i class="sw-sfx"></i>A2</div>
               </div>
               <div class="tl-strip" id="cre-strip" hidden>
                 <div class="tl-ruler" id="cre-strip-ruler" aria-hidden="true"></div>
@@ -11136,6 +11158,8 @@ function tlBeginDrag(e, block, mode) {
     end: parseFloat(block.dataset.end),
     pxPerSec: strip.getBoundingClientRect().width / plan.duration,
     targets: tlSnapTargets(slot),
+    track0: block.dataset.track || TL_MAIN_TRACK,
+    track: block.dataset.track || TL_MAIN_TRACK,
     moved: false
   };
   block.classList.add("dragging");
@@ -11171,16 +11195,32 @@ function tlDragMove(e) {
   d.start = start; d.end = end;
   d.block.style.left = (100 * start / plan.duration) + "%";
   d.block.style.width = (100 * (end - start) / plan.duration) + "%";
+  // Vertical: which picture lane is the pointer over? Moving a shot to another
+  // track is the same gesture as moving it in time — you just drag upwards.
+  if (d.mode === "move") {
+    var lane = document.elementFromPoint(e.clientX, e.clientY);
+    lane = lane && lane.closest ? lane.closest(".tl-tracklane") : null;
+    var target = lane ? lane.dataset.track : d.track0;
+    d.track = target || d.track0;
+    Array.prototype.forEach.call(
+      document.querySelectorAll(".tl-tracklane"),
+      function (n) { n.classList.toggle("drop-target", d.track !== d.track0 && n.dataset.track === d.track); }
+    );
+  }
   // live overlap feedback: the engine will refuse it, so say so before release
-  d.block.classList.toggle("invalid", tlWouldOverlap(d.slot, start, end));
+  d.block.classList.toggle("invalid", tlWouldOverlap(d.slot, start, end, d.track));
   tlShowSnapLine(d.moved ? hit : null);
 }
 
 var TL_MIN_SLOT = 0.3;  // mirrors the engine's _MIN_SLOT_SECONDS sliver floor
 
-function tlWouldOverlap(slot, start, end) {
+/* Overlap is checked WITHIN one track only — a cutaway on V2 is supposed to
+   sit over a V1 shot; two shots on the SAME track still cannot collide. */
+function tlWouldOverlap(slot, start, end, track) {
+  var lane = track || TL_MAIN_TRACK;
   return planSortedEntries().some(function (e, i) {
     if (i === slot) return false;
+    if ((e.track || TL_MAIN_TRACK) !== lane) return false;
     return start < (e.record_end || 0) - 1e-6 && (e.record_start || 0) < end - 1e-6;
   });
 }
@@ -11191,25 +11231,37 @@ function tlEndDrag(e) {
   tlDrag = null;
   d.block.classList.remove("dragging", "invalid");
   tlShowSnapLine(null);
+  Array.prototype.forEach.call(document.querySelectorAll(".tl-tracklane"),
+    function (n) { n.classList.remove("drop-target"); });
   try { d.block.releasePointerCapture(e.pointerId); } catch (err) { /* already gone */ }
   if (!d.moved) { selectSlot(d.slot); return; }   // a click, not a drag
   var changedStart = Math.abs(d.start - d.start0) > 1e-4;
   var changedEnd = Math.abs(d.end - d.end0) > 1e-4;
-  if (!changedStart && !changedEnd) { renderTimelineStrip(); return; }
+  var changedTrack = d.mode === "move" && d.track !== d.track0;
+  if (!changedStart && !changedEnd && !changedTrack) { renderTimelineStrip(); return; }
   if (d.mode === "move") {
-    applyPlanSurgery(
-      { move_to: d.slot, start: Math.round(d.start * 1000) / 1000 },
-      "Shot moved to " + fmt1(d.start) + "s.", d.slot
-    );
-  } else {
-    var body = { trim: d.slot };
-    if (changedStart) body.start = Math.round(d.start * 1000) / 1000;
-    if (changedEnd) body.end = Math.round(d.end * 1000) / 1000;
-    applyPlanSurgery(body, "Shot trimmed to " + fmt1(d.end - d.start) + "s.", d.slot);
+    // one gesture = one edit: a drag that crosses lanes carries its new track
+    // along with the new time, so it lands in a single round trip
+    var body = { move_to: d.slot, start: Math.round(d.start * 1000) / 1000 };
+    var msg = "Shot moved to " + fmt1(d.start) + "s.";
+    if (changedTrack) {
+      body.track = d.track;
+      msg = "Shot moved to " + d.track + " at " + fmt1(d.start) + "s.";
+    }
+    applyPlanSurgery(body, msg, d.slot);
+    return;
   }
+  var trim = { trim: d.slot };
+  if (changedStart) trim.start = Math.round(d.start * 1000) / 1000;
+  if (changedEnd) trim.end = Math.round(d.end * 1000) / 1000;
+  applyPlanSurgery(trim, "Shot trimmed to " + fmt1(d.end - d.start) + "s.", d.slot);
 }
 
-/* one delegated listener on the lane — blocks are rebuilt constantly */
+/* Start on the lane (delegated — blocks are rebuilt constantly), but track the
+   rest on DOCUMENT. The release must be caught wherever the pointer ends up:
+   once shots live inside per-track lanes a pointerup can land outside the
+   container it started in, and a drag that never commits is worse than one
+   that never starts. Same pattern the scrubber already uses. */
 (function () {
   var blocks = $("cre-strip-blocks");
   if (!blocks) return;
@@ -11219,9 +11271,9 @@ function tlEndDrag(e) {
     var grip = e.target.dataset ? e.target.dataset.grip : null;
     tlBeginDrag(e, block, grip === "l" ? "trim-l" : grip === "r" ? "trim-r" : "move");
   });
-  blocks.addEventListener("pointermove", tlDragMove);
-  blocks.addEventListener("pointerup", tlEndDrag);
-  blocks.addEventListener("pointercancel", tlEndDrag);
+  document.addEventListener("pointermove", tlDragMove);
+  document.addEventListener("pointerup", tlEndDrag);
+  document.addEventListener("pointercancel", tlEndDrag);
 })();
 
 /* timeline zoom: widen the strip (the frame scrolls) so tight cuts get room.
@@ -11304,7 +11356,9 @@ window.monteurPlayout = {
   // test seams for the multi-lane timeline: set a plan and (re)draw the
   // strip without a full scan/build round-trip
   setPlan: function (p) { rev.planJson = p; },
-  renderStrip: renderTimelineStrip
+  renderStrip: renderTimelineStrip,
+  // the live drag state, so a test can see WHY a gesture did or did not commit
+  drag: function () { return tlDrag; }
 };
 
 function startRevise(body, andThen) {
@@ -11688,6 +11742,87 @@ function animateTimelineBuild() {
 // test seam (like window.monteurScanAnim): drive the build reveal directly
 window.monteurBuildAnim = function () { animateTimelineBuild(); };
 
+/* ---- the track layout, as the studio stacks it -------------------------
+   Mirrors monteur.montage.DEFAULT_TRACKS: a plan that never grew a track of
+   its own has no `tracks` key, and behaves exactly as this. */
+var TL_MAIN_TRACK = "V1";
+var TL_DEFAULT_TRACKS = [
+  { id: "V2", role: "picture", name: "V2", muted: false },
+  { id: "V1", role: "picture", name: "V1", muted: false },
+  { id: "title", role: "title", name: "Title", muted: false },
+  { id: "A1", role: "music", name: "A1", muted: false },
+  { id: "A2", role: "sfx", name: "A2", muted: false },
+  { id: "A3", role: "voice", name: "A3", muted: false }
+];
+function tlTracks(plan) {
+  var rows = (plan && plan.tracks && plan.tracks.length) ? plan.tracks : TL_DEFAULT_TRACKS;
+  return rows.map(function (r) { return r; });
+}
+function tlPictureTracks(plan) {
+  return tlTracks(plan).filter(function (r) {
+    return r.role === "picture" || r.role === "custom";
+  });
+}
+function tlTrackMuted(plan, id) {
+  var row = tlTracks(plan).filter(function (r) { return r.id === (id || TL_MAIN_TRACK); })[0];
+  return !!(row && row.muted);
+}
+
+/* The gutter's picture rows: one per video track, each with its mute. Audio
+   rows are static markup but get their mute state from the same place. */
+function renderTrackGutter(plan) {
+  var host = $("cre-gutter-picture");
+  if (!host) return;
+  clear(host);
+  tlPictureTracks(plan).forEach(function (row) {
+    var g = el("div", "tlg tlg-track");
+    if (row.muted) g.classList.add("muted");
+    g.dataset.track = row.id;
+    var label = el("span", null, row.name || row.id);
+    label.title = row.role === "custom"
+      ? "Your own track — Monteur exports it but never plans into it"
+      : row.name || row.id;
+    g.appendChild(label);
+    g.appendChild(tlMuteButton(row));
+    host.appendChild(g);
+  });
+  var add = el("button", "tl-addtrack", "+ track");
+  add.type = "button";
+  add.title = "Add a track of your own — a rebuild never touches it";
+  add.addEventListener("click", function () {
+    applyPlanSurgery({ add_track: true }, "Track added.", insp.slot);
+  });
+  host.appendChild(add);
+  // the static audio rows share the same mute machinery
+  Array.prototype.forEach.call(
+    document.querySelectorAll(".tl-gutter .tlg[data-track]"),
+    function (g) {
+      if (g.querySelector(".tl-mute")) return;
+      var id = g.dataset.track;
+      var row = tlTracks(plan).filter(function (r) { return r.id === id; })[0];
+      if (row) g.appendChild(tlMuteButton(row));
+    }
+  );
+}
+
+function tlMuteButton(row) {
+  var b = el("button", "tl-mute", row.muted ? "muted" : "M");
+  b.type = "button";
+  b.setAttribute("aria-pressed", String(!!row.muted));
+  b.title = row.muted
+    ? "Unmute " + (row.name || row.id)
+    : "Mute " + (row.name || row.id) + " — it still exports, marked disabled";
+  b.addEventListener("click", function (e) {
+    e.stopPropagation();
+    applyPlanSurgery(
+      { mute_track: row.id, muted: !row.muted },
+      (row.muted ? "Unmuted " : "Muted ") + (row.name || row.id) + ".",
+      insp.slot
+    );
+  });
+  return b;
+}
+
 function renderTimelineStrip() {
   var host = $("cre-strip");
   var frame = $("cre-tl-frame");
@@ -11717,6 +11852,18 @@ function renderTimelineStrip() {
     return (a[0] || 0) - (b[0] || 0);
   });
   var phases = plan.phases || [];
+  // One lane per PICTURE track, stacked as the layout says (V2 over V1 over…).
+  // The lanes live inside #cre-strip-blocks, so every selector that addresses
+  // shots through it keeps working however many tracks exist.
+  var lanes = {};
+  tlPictureTracks(plan).forEach(function (row) {
+    var lane = el("div", "tl-tracklane");
+    lane.dataset.track = row.id;
+    if (row.muted) lane.classList.add("muted");
+    lanes[row.id] = lane;
+    blocks.appendChild(lane);
+  });
+  var mainLane = lanes[TL_MAIN_TRACK] || blocks;
   // Dips sit at their own record time now — they are not packed between the
   // shots, so they survive a lift or a free move like everything else.
   dips.forEach(function (dip) {
@@ -11724,7 +11871,7 @@ function renderTimelineStrip() {
     notch.style.left = (100 * (dip[0] || 0) / duration) + "%";
     notch.style.width = (100 * (dip[1] || 0) / duration) + "%";
     notch.title = "Dip to black — " + fmt1(dip[1] || 0) + "s";
-    blocks.appendChild(notch);
+    mainLane.appendChild(notch);
   });
   entries.forEach(function (entry, i) {
     var length = (entry.record_end || 0) - (entry.record_start || 0);
@@ -11777,8 +11924,11 @@ function renderTimelineStrip() {
       grip.title = side === "l" ? "Trim the start" : "Trim the end";
       block.appendChild(grip);
     });
-    blocks.appendChild(block);
+    var lane = lanes[entry.track || TL_MAIN_TRACK] || mainLane;
+    block.dataset.track = entry.track || TL_MAIN_TRACK;
+    lane.appendChild(block);
   });
+  renderTrackGutter(plan);
   // phase legend (only the phases this cut actually has)
   var legend = $("cre-strip-legend");
   clear(legend);
@@ -12272,7 +12422,10 @@ function applyTransition(trans) {
    project, then the strip + storyboard re-render and the selection follows the
    edited shot. */
 function applyPlanSurgery(extra, doneMsg, nextSlot) {
-  if (insp.slot === null || !rev.planJson) return;
+  // NOT gated on an open inspector any more: edits used to come only from the
+  // drawer, but a drag on the timeline (or a track mute) targets its own slot
+  // and must work without selecting anything first.
+  if (!rev.planJson) return;
   if (buildPanel.running() || revisePanel.running() || directPanel.running()) return;
   var built = (cre.result && cre.result.body) || {};
   var body = {

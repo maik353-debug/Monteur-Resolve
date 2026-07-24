@@ -7554,7 +7554,7 @@ class TestProUiStatic:
         # leftwards. Shots are absolutely positioned at their record time now —
         # that is what makes lift / free moves / trims expressible at all.
         source = _APP_HTML.read_text(encoding="utf-8")
-        assert ".tl-blocks {\n  position: relative;" in source
+        assert ".tl-blocks { position: relative; }" in source
         assert "position: absolute; top: 0; bottom: 0; min-width: 3px;" in source
         assert "display: flex; align-items: stretch; height: 34px;" not in source
         # each shot carries its own record window, so a drag can read it back
@@ -7572,7 +7572,7 @@ class TestProUiStatic:
             "setPointerCapture",               # the drag owns the pointer
             "tlWouldOverlap",                  # live feedback before the server says no
             "move_to: d.slot",                 # release commits the free move
-            "var body = { trim: d.slot };",    # ...or the trim
+            "var trim = { trim: d.slot };",    # ...or the trim
         ):
             assert needle in source, needle
         # the ruler scrubs now: the strip-wide, capture-less scrub that made one
@@ -7596,6 +7596,39 @@ class TestProUiStatic:
         # resolution follows the zoom, and one fetch serves every redraw
         assert "600 * (tlZoom || 1)" in source
         assert "if (tlWaveCache.key === key) return tlWaveCache.peaks;" in source
+
+    def test_tracks_are_lanes_with_mute(self):
+        # the picture area is a STACK of lanes driven by the plan's layout;
+        # #cre-strip-blocks is their container, so every selector that reaches
+        # shots through it keeps working however many tracks exist
+        source = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            "function tlPictureTracks",
+            "function renderTrackGutter",
+            "function tlMuteButton",
+            'el("div", "tl-tracklane")',
+            'id="cre-gutter-picture"',
+            "mute_track: row.id",
+            "add_track: true",
+        ):
+            assert needle in source, needle
+        assert ".tl-blocks { position: relative; }" in source
+        # a drag that crosses lanes carries its new track in the SAME edit
+        assert "body.track = d.track;" in source
+        assert 'lane.closest(".tl-tracklane")' in source
+
+    def test_a_timeline_edit_does_not_need_an_open_inspector(self):
+        # edits used to come only from the drawer, so applyPlanSurgery bailed
+        # unless a slot was selected. A drag (or a track mute) targets its own
+        # slot and must work without selecting anything first — otherwise
+        # dragging an unselected clip silently does nothing.
+        source = _APP_HTML.read_text(encoding="utf-8")
+        # (the same old guard still lives in applyTransition, which genuinely
+        # is an inspector-only action — so target applyPlanSurgery precisely)
+        head = source.split("function applyPlanSurgery(extra, doneMsg, nextSlot) {")[1]
+        head = head[:400]
+        assert "if (!rev.planJson) return;" in head
+        assert "insp.slot === null" not in head
 
     def test_both_removes_exist_with_their_keys(self):
         # Del leaves the gap (a short black pause is an editorial choice),
