@@ -6775,11 +6775,18 @@ def plan_to_dict(plan: MontagePlan) -> dict:
                 # every generated plan, so multi-track costs nothing until used
                 and not (key == "track" and not value)
                 and not (key == "pinned" and not value)
-                # peak_source / shot_size (blueprint 4.1) are in-memory
-                # critique aids, and reframe_focus (auto-reframe 9:16) is an
-                # in-memory render aid — NEVER serialized, so the default plan
-                # stays byte-identical.
-                and key not in ("peak_source", "shot_size", "reframe_focus")
+                # peak_source / shot_size (blueprint 4.1) are what critique
+                # scores peak-on-beat and shot grammar from. They used to be
+                # in-memory only, which meant they vanished the moment a plan
+                # was SAVED — i.e. exactly when a hand-edited timeline came
+                # back to be judged, leaving half the acceptance gate blind.
+                # Written only when they carry a real signal, so a plan without
+                # them still serializes byte-identically.
+                and not (key == "peak_source" and (value is None or value < 0))
+                and not (key == "shot_size" and not value)
+                # reframe_focus stays in-memory: it is a pure function of the
+                # plan's geometry, recomputed at render time.
+                and key != "reframe_focus"
             }
             for entry in plan.entries
         ],

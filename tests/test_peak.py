@@ -160,6 +160,44 @@ def test_envelope_peak_degenerate_cases_are_unchanged():
     assert _envelope_peak([(2.0, 0.7)]) == pytest.approx(2.0)
 
 
+def test_the_quality_check_survives_a_save_and_reload():
+    # peak_source used to be in-memory only, so it vanished the moment a plan
+    # was SAVED — i.e. exactly when a hand-edited timeline came back to be
+    # judged. Peak-on-beat is the engine's headline promise; scoring it as
+    # "no sample" on every round-tripped plan left the gate half blind.
+    from monteur.critique import critique
+    from monteur.montage import plan_from_dict, plan_to_dict
+
+    plan = plan_montage(make_peaked_reports(), make_music())
+    fresh = critique(plan).metrics["coincidence"]
+    assert fresh.sample > 0, "the fixture must carry a peak signal at all"
+
+    reloaded = critique(plan_from_dict(plan_to_dict(plan))).metrics["coincidence"]
+    assert reloaded.sample == fresh.sample
+    assert reloaded.value == pytest.approx(fresh.value)
+
+
+def test_the_critique_aids_serialize_only_when_they_carry_a_signal():
+    # ...and a plan without them still serializes byte-identically, which is
+    # what keeps the pinned golden digests from moving
+    from dataclasses import replace
+
+    from monteur.montage import plan_from_dict, plan_to_dict
+
+    plan = plan_montage(make_peaked_reports(), make_music())
+    bare = replace(
+        plan,
+        entries=[replace(e, peak_source=-1.0, shot_size="") for e in plan.entries],
+    )
+    for entry in plan_to_dict(bare)["entries"]:
+        assert "peak_source" not in entry and "shot_size" not in entry
+    # a set shot_size rides along on its own
+    sized = replace(bare, entries=[replace(bare.entries[0], shot_size="wide")])
+    data = plan_to_dict(sized)["entries"][0]
+    assert data["shot_size"] == "wide" and "peak_source" not in data
+    assert plan_from_dict(plan_to_dict(sized)).entries[0].shot_size == "wide"
+
+
 # --- 1.1: coincidence rate (the blueprint's headline metric) --------------------
 
 
