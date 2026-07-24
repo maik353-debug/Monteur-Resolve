@@ -419,6 +419,7 @@ def _complete_cli(
     json_schema: dict | None,
     on_delta: Callable[[str], None] | None = None,
     on_thinking: Callable[[str], None] | None = None,
+    inactivity_timeout: float = CLI_TIMEOUT_SECONDS,
 ) -> str:
     """The Claude Code CLI backend: one headless, tool-less completion, STREAMED.
 
@@ -469,12 +470,25 @@ def _complete_cli(
         cmd += ["--system-prompt", system]
     if effort:
         cmd += ["--effort", effort]
+    # The CLI backend means "use my Claude Code SUBSCRIPTION" — but the claude
+    # CLI prefers ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN over its own login
+    # when either is in the environment. A stray or disabled key there is then
+    # used INSTEAD of the subscription and fails with "401 API key is invalid"
+    # (and, if it were valid, would silently bill the API — breaking the
+    # no-extra-cost promise). Strip both so the CLI falls back to its own
+    # signed-in subscription, which is exactly what this backend promises.
+    cli_env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+    }
     try:
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=cli_env,
             **NO_WINDOW,
         )
     except OSError as exc:
@@ -507,29 +521,46 @@ def _complete_cli(
         except OSError:
             pass
 
-    for target in (_pump_stdout, _pump_stderr, _feed_stdin):
+    stderr_thread = threading.Thread(target=_pump_stderr, daemon=True)
+    for target in (_pump_stdout, _feed_stdin):
         threading.Thread(target=target, daemon=True).start()
+    stderr_thread.start()
+
+    def _stderr_excerpt() -> str:
+        """Whatever the CLI wrote to stderr so far — the real reason a run
+        stalls (an auth prompt, a login nudge) lands here, so surfacing it
+        turns a silent hang into a diagnosis. Best-effort, bounded."""
+        stderr_thread.join(timeout=1.0)  # the pump gets EOF once the proc is killed
+        text = (b"".join(stderr_buf)).decode("utf-8", "replace").strip()
+        return f" It said: {text[-400:]}" if text else ""
+
+    def _cli_stalled_message(what: str) -> str:
+        # NOT "set ANTHROPIC_API_KEY" — on the CLI backend that misleads a user
+        # into thinking Monteur tried the API. Point at Claude Code itself.
+        return (
+            f"Claude Code (the 'claude' command) {what} and was stopped."
+            + _stderr_excerpt()
+            + " This usually means Claude Code isn't signed in on this computer "
+            "— open a terminal, run 'claude', complete the login, then try "
+            "again. (Or switch the provider to “API key” in Settings.)"
+        )
 
     result_text: str | None = None
     failed = False
     started = time.monotonic()
     while True:
         try:
-            line = lines.get(timeout=CLI_TIMEOUT_SECONDS)
+            line = lines.get(timeout=inactivity_timeout)
         except queue.Empty:
             proc.kill()
             raise MonteurAIError(
-                f"the 'claude' CLI went silent for {int(CLI_TIMEOUT_SECONDS)}s "
-                "— try again, or set ANTHROPIC_API_KEY to use the API instead"
+                _cli_stalled_message(f"did not respond for {int(inactivity_timeout)}s")
             )
         if line is None:
             break  # stdout closed — the run finished
         if time.monotonic() - started > CLI_TOTAL_CAP_SECONDS:
             proc.kill()
-            raise MonteurAIError(
-                "the 'claude' CLI ran too long — try again, or set "
-                "ANTHROPIC_API_KEY to use the API instead"
-            )
+            raise MonteurAIError(_cli_stalled_message("ran too long"))
         line = line.strip()
         if not line:
             continue
@@ -597,6 +628,7 @@ def complete(
     json_schema: dict | None = None,
     on_delta: Callable[[str], None] | None = None,
     on_thinking: Callable[[str], None] | None = None,
+    cli_timeout: float | None = None,
 ) -> str:
     """One Claude text completion through the selected backend.
 
@@ -642,6 +674,7 @@ def complete(
         json_schema=json_schema,
         on_delta=on_delta,
         on_thinking=on_thinking,
+        inactivity_timeout=cli_timeout if cli_timeout is not None else CLI_TIMEOUT_SECONDS,
     )
 
 

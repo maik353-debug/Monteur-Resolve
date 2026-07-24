@@ -8,6 +8,7 @@ the CLI path lookup and ``subprocess.run`` are all monkeypatched.
 """
 
 import json
+import os
 import subprocess
 import sys
 from unittest import mock
@@ -390,8 +391,8 @@ def cli_backend(clean_env):
     def install(stdout=b"", returncode=0, stderr=b"", raises=None, block=False):
         proc = _FakePopen(stdout, returncode=returncode, stderr=stderr, block=block)
 
-        def fake_popen(cmd, stdin=None, stdout=None, stderr=None):
-            calls.append({"cmd": list(cmd), "proc": proc})
+        def fake_popen(cmd, stdin=None, stdout=None, stderr=None, env=None, **kw):
+            calls.append({"cmd": list(cmd), "proc": proc, "env": env})
             if raises is not None:
                 raise raises
             return proc
@@ -473,11 +474,32 @@ def test_cli_non_success_subtype_raises(cli_backend):
 
 
 def test_cli_inactivity_timeout_is_actionable(cli_backend, clean_env):
-    # a truly silent process (no events at all) trips the inactivity limit
+    # a truly silent process (no events at all) trips the inactivity limit; the
+    # message points at Claude Code login, NOT the API key (which would mislead
+    # a CLI-backend user into thinking Monteur tried the API)
     clean_env.setattr(ai, "CLI_TIMEOUT_SECONDS", 0.2)
     cli_backend(block=True)
-    with pytest.raises(MonteurAIError, match="went silent"):
+    with pytest.raises(MonteurAIError, match="did not respond") as err:
         complete("prompt")
+    msg = str(err.value)
+    assert "Claude Code" in msg and "signed in" in msg
+    assert "ANTHROPIC_API_KEY" not in msg  # never blame the API on the CLI path
+
+
+def test_cli_strips_api_key_from_env_so_subscription_is_used(cli_backend, clean_env):
+    # the CLI backend means "use my Claude Code subscription" — a stray/disabled
+    # ANTHROPIC_API_KEY in the environment must NOT be handed to the CLI (it would
+    # 401, or silently bill the API). It is stripped from the child's env.
+    clean_env.setenv("ANTHROPIC_API_KEY", "sk-stale-disabled")
+    clean_env.setenv("ANTHROPIC_AUTH_TOKEN", "tok-stale")
+    calls = cli_backend(stdout=_result_line("OK"))
+    complete("prompt")
+    child_env = calls[0]["env"]
+    assert child_env is not None
+    assert "ANTHROPIC_API_KEY" not in child_env
+    assert "ANTHROPIC_AUTH_TOKEN" not in child_env
+    # unrelated environment is preserved (only the two keys are dropped)
+    assert child_env.get("PATH") == os.environ.get("PATH")
 
 
 def test_cli_missing_executable_is_actionable(cli_backend):
