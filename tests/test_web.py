@@ -1232,6 +1232,50 @@ class TestPlanAdjustSurgery:
             )
         assert exc.value.code == 400
 
+    def test_blank_then_insert_builds_a_cut_from_nothing(self, server):
+        # the empty-timeline start: clear the picture, keep the song, then
+        # drop moments in by hand — the whole cooperation loop in one pass
+        pj = self._plan_with_sfx()
+        blanked = _post(f"{server}/api/plan/adjust", {"plan_json": pj, "blank": True})
+        empty = blanked["plan_json"]
+        assert empty.get("entries", []) == []
+        assert empty["duration"] == pytest.approx(12.0)  # the song still rules
+        assert empty["beat_marks"] == pj["beat_marks"]   # and its grid
+
+        out = empty
+        for i, start in enumerate((0.0, 4.0)):
+            out = _post(f"{server}/api/plan/adjust", {
+                "plan_json": out,
+                "insert": {
+                    "clip_path": f"/f/{i}.mp4", "source_start": 0.0,
+                    "source_end": 3.0, "start": start, "label": f"shot {i}",
+                },
+            })["plan_json"]
+        assert [(e["record_start"], e["record_end"]) for e in out["entries"]] == [
+            (0.0, 3.0), (4.0, 7.0),
+        ]
+        assert [e["label"] for e in out["entries"]] == ["shot 0", "shot 1"]
+
+    def test_an_insert_that_collides_is_a_400_that_says_why(self, server):
+        pj = self._plan_with_sfx()
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(f"{server}/api/plan/adjust", {
+                "plan_json": pj,
+                "insert": {"clip_path": "/f/x.mp4", "source_start": 0.0,
+                           "source_end": 2.0, "start": 2.0},
+            })
+        assert exc.value.code == 400
+        assert "overlap" in exc.value.read().decode()
+
+    def test_an_insert_without_a_clip_path_is_a_400(self, server):
+        pj = self._plan_with_sfx()
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(f"{server}/api/plan/adjust", {
+                "plan_json": pj,
+                "insert": {"source_start": 0.0, "source_end": 2.0, "start": 0.0},
+            })
+        assert exc.value.code == 400
+
     def test_lifting_a_shot_teaches_the_size_to_avoid(self, server):
         # blueprint 4.3: a lift is the inverse of a cast — "not this size,
         # here". Recorded with the phase it happened in, never the clip.
@@ -1584,6 +1628,24 @@ class TestWizardStepsUi:
         assert "music enters|music window" in html
 
     @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_the_shot_shelf_and_empty_start_are_wired(self):
+        # Etappe 4: an empty timeline is a starting point — the shelf drops
+        # moments in, "Clear picture" empties it, "Build on this" fills
+        # around what you placed
+        html = _APP_HTML.read_text(encoding="utf-8")
+        for needle in (
+            'id="tl-add-shot"', 'id="cre-tl-shelf"', 'id="tl-shelf-board"',
+            'id="tl-shelf-track"', 'id="tl-blank"', 'id="tl-buildon"',
+            "function insertMoment", "function blankTimeline",
+            "function buildOnThis", "function shelfMoments",
+            "build_on: true",
+        ):
+            assert needle in html, needle
+        # the strip survives an empty picture — that is where you build one
+        assert "if (!duration) { host.hidden = true;" in html
+        # …and so does the playout, so the playhead still scrubs to the beat
+        assert "(plan.duration || 0) > 0.01 || (plan.entries || []).length" in html
+
     def test_rebuild_layers_button_is_wired(self):
         # the timeline carries a "Rebuild layers" action that re-derives the
         # sound cues, dissolves and title slots onto the edited cut
@@ -3976,6 +4038,52 @@ class TestReviseApi:
         )
         assert second["state"] == "done"
         assert "transitions" in second["result"]["rationale"]
+
+    def test_build_on_this_holds_every_hand_placed_shot(self, server):
+        # Etappe 4: you place the shots, Monteur fills around them. No brief
+        # is needed — "build on this" IS the instruction.
+        built = self._build(server)
+        from monteur.montage import blank_plan, insert_entry, plan_from_dict, plan_to_dict
+
+        plan = plan_from_dict(built["plan_json"])
+        kept = plan.entries[2]
+        empty = blank_plan(plan)
+        mine = insert_entry(
+            empty, clip_path=kept.clip_path, source_start=kept.source_start,
+            source_end=kept.source_end, record_start=kept.record_start,
+        )
+        data = _post(f"{server}/api/create/revise", {
+            "plan_json": plan_to_dict(mine), "folder": self.DEMO,
+            "format": "edl", "build_on": True,
+        })
+        job = _wait_for_job(server, data["job"])
+        assert job["state"] == "done", job.get("message")
+        out = job["result"]["plan_json"]
+        assert any("1 pinned shot kept" in n for n in out["notes"])
+        assert len(out["entries"]) > 1  # the rest was filled in around it
+        placed = [
+            e for e in out["entries"]
+            if abs(e["record_start"] - kept.record_start) < 1e-6
+        ]
+        assert placed and placed[0]["clip_path"] == kept.clip_path
+        # holding a shot for one run must not pin it for good
+        assert not any(e.get("pinned") for e in out["entries"])
+
+    def test_build_on_this_needs_no_brief_but_a_revision_still_does(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(
+                f"{server}/api/create/revise",
+                {"folder": self.DEMO, "plan_json": {"monteur_plan": 1}},
+            )
+        assert exc.value.code == 400 and "brief" in json.loads(exc.value.read())["error"]
+        # with build_on the same payload gets past the brief gate (the job
+        # itself then fails on the bogus plan, which is a different error)
+        data = _post(
+            f"{server}/api/create/revise",
+            {"folder": self.DEMO, "plan_json": {"monteur_plan": 1},
+             "build_on": True, "format": "edl"},
+        )
+        assert isinstance(data["job"], str)
 
     def test_revise_bad_plan_json_is_job_error(self, server):
         job = self._revise(server, {"bogus": 1}, "ruhiger")

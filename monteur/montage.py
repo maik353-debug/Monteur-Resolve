@@ -7302,17 +7302,13 @@ def move_entry(plan: MontagePlan, slot: int, to: int) -> MontagePlan:
 # energy samples and arc phases all stay exactly where they were.
 
 
-def _entry_span_free(plan: MontagePlan, keep: int) -> list[tuple[float, float]]:
-    """Record spans of every entry EXCEPT index ``keep`` (the one being moved)."""
-    return [
-        (e.record_start, e.record_end)
-        for i, e in enumerate(plan.entries)
-        if i != keep
-    ]
-
-
 def _check_free_window(
-    plan: MontagePlan, slot: int, start: float, end: float, what: str
+    plan: MontagePlan,
+    slot: int,
+    start: float,
+    end: float,
+    what: str,
+    track: str | None = None,
 ) -> None:
     """Validate a hand-placed record window; raises ValueError with a reason.
 
@@ -7320,6 +7316,11 @@ def _check_free_window(
     it never becomes a sliver (the same :data:`_MIN_SLOT_SECONDS` floor the
     generator honours, so a drag cannot create what the engine forbids), and
     it never lands on top of another shot.
+
+    ``track`` scopes that last rule to ONE picture track. Two shots on the
+    same lane cannot share a second; a cutaway on V2 over a V1 shot is not a
+    collision, it is the reason V2 exists. ``None`` checks every track, which
+    is what a trim (which never changes lanes) wants.
     """
     if end - start < _MIN_SLOT_SECONDS - _EPS:
         raise ValueError(
@@ -7332,10 +7333,12 @@ def _check_free_window(
         raise ValueError(
             f"{what} would run past the end of the montage ({plan.duration:.2f}s)"
         )
-    for other_start, other_end in _entry_span_free(plan, slot):
-        if start < other_end - _EPS and other_start < end - _EPS:
+    for i, other in enumerate(plan.entries):
+        if i == slot or (track is not None and entry_track(other) != track):
+            continue
+        if start < other.record_end - _EPS and other.record_start < end - _EPS:
             raise ValueError(
-                f"{what} would overlap the shot at {other_start:.2f}s — "
+                f"{what} would overlap the shot at {other.record_start:.2f}s — "
                 "move that one first, or drop this into the gap"
             )
 
@@ -7355,14 +7358,20 @@ def _free_edit(
     return adjusted
 
 
-def move_entry_to(plan: MontagePlan, slot: int, record_start: float) -> MontagePlan:
+def move_entry_to(
+    plan: MontagePlan, slot: int, record_start: float, track: str | None = None
+) -> MontagePlan:
     """Move ONE shot to a free record position — pure plan surgery.
 
     The shot keeps its length and its source window verbatim; only where it
     sits changes. Nothing else moves: the hole it leaves behind stays open and
     the shots around it are untouched (that is the whole point — a nudge must
     never re-flow the cut). Raises ValueError when the target overlaps another
-    shot or leaves the montage.
+    shot ON THE SAME picture track or leaves the montage.
+
+    ``track`` is where the shot is HEADED — a drag that also crossed lanes
+    must be checked against the lane it lands on, not the one it left.
+    None keeps the shot on its current track.
     """
     try:
         slot = int(slot)
@@ -7376,7 +7385,8 @@ def move_entry_to(plan: MontagePlan, slot: int, record_start: float) -> MontageP
     entry = plan.entries[slot]
     span = entry.record_end - entry.record_start
     start = max(0.0, record_start)
-    _check_free_window(plan, slot, start, start + span, "that move")
+    lane = str(track) if track else entry_track(entry)
+    _check_free_window(plan, slot, start, start + span, "that move", lane)
     moved = replace(entry, record_start=start, record_end=start + span)
     entries = list(plan.entries)
     entries[slot] = moved
@@ -7463,6 +7473,121 @@ def lift_entry(plan: MontagePlan, slot: int) -> MontagePlan:
     entries = [e for i, e in enumerate(plan.entries) if i != slot]
     return _free_edit(
         plan, entries, f"lift: removed slot {slot + 1} ({name}), gap left open"
+    )
+
+
+def insert_entry(
+    plan: MontagePlan,
+    *,
+    clip_path: str,
+    source_start: float,
+    source_end: float,
+    record_start: float,
+    track: str = "",
+    label: str = "",
+    score: float = 0.0,
+    clip_duration: float = 0.0,
+    media_start: float = 0.0,
+    shot_size: str = "",
+) -> MontagePlan:
+    """Drop ONE shot onto the timeline by hand — pure plan surgery.
+
+    The other half of :func:`lift_entry`, and what makes an EMPTY timeline a
+    real starting point rather than a dead end: material comes off the shelf
+    (a moment from the project's analysis) and lands where you put it. The
+    moment plays 1:1, so its record length IS its source length; nothing
+    else on the timeline moves.
+
+    ``track`` picks the picture lane (default V1); overlap is checked on that
+    lane alone, so a cutaway can legitimately sit over a V1 shot. The record
+    window must fit inside the montage — with a song, the montage is as long
+    as the music window and cannot simply grow. A plan with NO music has no
+    such anchor, so it stretches to hold the new shot.
+
+    Raises ValueError for an unknown track, a backwards or sliver-length
+    source window, a position past the end, or an overlap on the target lane.
+    The original plan is never modified; the returned plan carries an
+    ``insert:`` note.
+    """
+    try:
+        source_start = float(source_start)
+        source_end = float(source_end)
+        record_start = max(0.0, float(record_start))
+    except (TypeError, ValueError):
+        raise ValueError("source_start, source_end and record_start must be numbers")
+    clip_path = str(clip_path or "")
+    if not clip_path:
+        raise ValueError("an inserted shot needs a clip path")
+    span = source_end - source_start
+    if span <= _EPS:
+        raise ValueError("the source window must run forwards")
+
+    track = str(track or DEFAULT_PICTURE_TRACK)
+    rows = plan_tracks(plan)
+    if track not in {str(row.get("id")) for row in rows}:
+        raise ValueError(f"there is no track {track!r} on this timeline")
+    if track not in {
+        str(row.get("id"))
+        for row in rows
+        if row.get("role") in ("picture", "custom")
+    }:
+        raise ValueError(f"{track} does not carry picture — pick a video track")
+
+    record_end = record_start + span
+    duration = plan.duration
+    if not plan.music_path and record_end > duration + _EPS:
+        # No song, no anchor: the montage is exactly as long as its material.
+        duration = record_end
+    staged = replace(plan, duration=duration)
+    _check_free_window(
+        staged, -1, record_start, record_end, "that insert", track
+    )
+    entry = MontageEntry(
+        clip_path=clip_path,
+        source_start=source_start,
+        source_end=source_end,
+        record_start=record_start,
+        record_end=record_end,
+        score=float(score or 0.0),
+        media_start=float(media_start or 0.0),
+        clip_duration=float(clip_duration or 0.0),
+        label=str(label or ""),
+        shot_size=str(shot_size or ""),
+        track="" if track == DEFAULT_PICTURE_TRACK else track,
+    )
+    name = PurePath(clip_path).name or clip_path
+    return _free_edit(
+        staged,
+        list(plan.entries) + [entry],
+        f"insert: {name} at {record_start:.2f}s on {track}",
+    )
+
+
+def blank_plan(plan: MontagePlan) -> MontagePlan:
+    """The same timeline with the PICTURE cleared — an empty canvas.
+
+    The "start empty" half of the cooperation tool. Everything Monteur
+    learned about the song survives — the tempo, the downbeats, the drops,
+    the arc phases, the music window, the track layout — because that is
+    what makes an empty timeline usable: the beat grid to snap to is still
+    there, the ruler still means something. Only what the PLANNER decided
+    goes: the shots, and every layer that hung off them (sound cues, black
+    dips and their titles, the fades, the deliberate silences).
+
+    The original plan is never modified; the returned plan carries a
+    ``blank:`` note.
+    """
+    return replace(
+        plan,
+        entries=[],
+        sfx=[],
+        dips=[],
+        title_texts=[],
+        title_anims=[],
+        music_gaps=[],
+        fade_in=0.0,
+        fade_out=0.0,
+        notes=list(plan.notes) + ["blank: empty timeline — the song and its grid stay"],
     )
 
 

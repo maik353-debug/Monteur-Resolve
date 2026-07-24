@@ -3892,3 +3892,133 @@ class TestRebuildLayers:
         rebuilt = rebuild_layers(edited)
         # picture covers the act change now, so there is no slot to open
         assert not any(abs(s - 8.0) < 0.05 for s, _ in rebuilt.dips)
+
+
+class TestInsertAndBlank:
+    """The empty-timeline start: material goes ON as freely as it comes off."""
+
+    def make_plan(self):
+        from monteur.montage import MontageEntry, MontagePlan
+
+        return MontagePlan(
+            music_path="/music/song.wav", duration=12.0, tempo=120.0,
+            beat_marks=[i * 2.0 for i in range(6)], drop_marks=[6.0],
+            phases=[(0.0, 6.0, "build"), (6.0, 12.0, "climax")],
+            entries=[
+                MontageEntry("/f/a.mp4", 0.0, 4.0, 0.0, 4.0, 0.9,
+                             clip_duration=30.0),
+            ],
+            dips=[(4.0, 0.4)], title_texts=["Act II"], fade_in=0.5,
+        )
+
+    def test_a_moment_lands_where_you_put_it_at_its_own_length(self):
+        from monteur.montage import insert_entry
+
+        plan = self.make_plan()
+        out = insert_entry(
+            plan, clip_path="/f/b.mp4", source_start=10.0, source_end=13.5,
+            record_start=6.0, label="a boat",
+        )
+        assert len(plan.entries) == 1  # the original is untouched
+        added = out.entries[-1]
+        assert (added.record_start, added.record_end) == (6.0, 9.5)
+        assert (added.source_start, added.source_end) == (10.0, 13.5)
+        assert added.label == "a boat"
+        assert added.track == ""  # the default line serializes as absent
+        assert any(n.startswith("insert: b.mp4 at 6.00s on V1") for n in out.notes)
+
+    def test_an_overlap_on_the_same_lane_is_refused_by_name(self):
+        from monteur.montage import insert_entry
+
+        plan = self.make_plan()
+        with pytest.raises(ValueError, match="overlap the shot at 0.00s"):
+            insert_entry(plan, clip_path="/f/b.mp4", source_start=0.0,
+                         source_end=3.0, record_start=2.0)
+
+    def test_a_cutaway_over_a_shot_is_not_an_overlap(self):
+        from monteur.montage import add_track, insert_entry
+
+        plan = add_track(self.make_plan(), role="picture")
+        lane = [
+            r["id"] for r in plan.tracks
+            if r["role"] == "picture" and r["id"] != "V1"
+        ][0]
+        out = insert_entry(plan, clip_path="/f/b.mp4", source_start=0.0,
+                           source_end=2.0, record_start=1.0, track=lane)
+        assert out.entries[-1].track == lane  # sits right over the V1 shot
+
+    def test_a_shot_may_not_run_past_the_song(self):
+        from monteur.montage import insert_entry
+
+        plan = self.make_plan()
+        with pytest.raises(ValueError, match="past the end of the montage"):
+            insert_entry(plan, clip_path="/f/b.mp4", source_start=0.0,
+                         source_end=5.0, record_start=10.0)
+
+    def test_without_music_the_montage_grows_to_hold_the_shot(self):
+        from monteur.montage import MontagePlan, insert_entry
+
+        plan = MontagePlan(music_path="", duration=0.0)
+        out = insert_entry(plan, clip_path="/f/a.mp4", source_start=0.0,
+                           source_end=5.0, record_start=0.0)
+        assert out.duration == pytest.approx(5.0)
+
+    def test_a_track_that_carries_no_picture_is_refused(self):
+        from monteur.montage import insert_entry
+
+        plan = self.make_plan()
+        with pytest.raises(ValueError, match="does not carry picture"):
+            insert_entry(plan, clip_path="/f/b.mp4", source_start=0.0,
+                         source_end=2.0, record_start=6.0, track="A1")
+        with pytest.raises(ValueError, match="no track 'V9'"):
+            insert_entry(plan, clip_path="/f/b.mp4", source_start=0.0,
+                         source_end=2.0, record_start=6.0, track="V9")
+
+    def test_blanking_keeps_the_song_and_drops_what_the_planner_decided(self):
+        from monteur.montage import blank_plan
+
+        plan = self.make_plan()
+        blank = blank_plan(plan)
+        assert blank.entries == [] and blank.dips == [] and blank.title_texts == []
+        assert blank.fade_in == 0.0 and blank.fade_out == 0.0
+        # the grid you build against survives — that is the whole point
+        assert blank.duration == pytest.approx(12.0)
+        assert blank.tempo == pytest.approx(120.0)
+        assert blank.beat_marks == plan.beat_marks
+        assert blank.drop_marks == plan.drop_marks
+        assert blank.phases == plan.phases
+        assert blank.music_path == plan.music_path
+        assert plan.entries  # the original is untouched
+        assert any(n.startswith("blank:") for n in blank.notes)
+
+    def test_you_can_build_a_cut_from_nothing(self):
+        from monteur.montage import blank_plan, insert_entry
+
+        plan = blank_plan(self.make_plan())
+        for i, start in enumerate((0.0, 3.0, 8.0)):
+            plan = insert_entry(
+                plan, clip_path=f"/f/{i}.mp4", source_start=0.0,
+                source_end=2.5, record_start=start,
+            )
+        assert [(e.record_start, e.record_end) for e in plan.entries] == [
+            (0.0, 2.5), (3.0, 5.5), (8.0, 10.5),
+        ]
+        assert plan.duration == pytest.approx(12.0)  # the song still rules
+
+    def test_a_cross_lane_drag_is_checked_against_the_lane_it_lands_on(self):
+        from monteur.montage import add_track, insert_entry, move_entry_to
+
+        plan = add_track(self.make_plan(), role="picture")
+        lane = [
+            r["id"] for r in plan.tracks
+            if r["role"] == "picture" and r["id"] != "V1"
+        ][0]
+        plan = insert_entry(plan, clip_path="/f/b.mp4", source_start=0.0,
+                            source_end=2.0, record_start=8.0, track=lane)
+        # slot 1 is the V2 shot; dragging it over the V1 shot is legal…
+        moved = move_entry_to(plan, 1, 1.0, lane)
+        cutaway = [e for e in moved.entries if e.track == lane][0]
+        assert cutaway.record_start == pytest.approx(1.0)
+        # …but dragging it DOWN onto V1's occupied time is not
+        with pytest.raises(ValueError, match="overlap the shot at 0.00s"):
+            move_entry_to(plan, 1, 1.0, "V1")

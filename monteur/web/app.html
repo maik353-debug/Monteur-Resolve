@@ -1742,6 +1742,21 @@ svg text.axis {
   color: #fff; background: var(--accent); border-color: var(--accent);
 }
 .tl-bar-spacer { flex: 1 1 auto; }
+/* the shot shelf: the project's moments, one click from the timeline */
+.tl-shelf {
+  margin: 6px 0 10px; padding: 10px 12px 4px;
+  background: var(--input-bg); border: 1px solid var(--border); border-radius: 4px;
+}
+.tl-shelf-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px;
+}
+.tl-shelf-head input[type="text"] { flex: 1 1 200px; min-width: 140px; }
+.tl-shelf-head select { flex: 0 0 auto; }
+.tl-shelf-board { max-height: 260px; overflow-y: auto; }
+.tl-empty-hint {
+  padding: 14px 12px; text-align: center; color: var(--ink-muted);
+  font-size: 12px; line-height: 1.5;
+}
 .tl-bpm {
   font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.04em;
   color: var(--ink-muted); white-space: nowrap;
@@ -2928,8 +2943,11 @@ window.__MONTEUR_PREFS__ = {};
                 <span class="tl-zoom-lbl" id="tl-zoom-lbl">100%</span>
                 <button class="tl-toggle" id="tl-zoom-in" type="button" title="Zoom in" aria-label="Zoom in">+</button>
               </span>
+              <button class="tl-toggle" id="tl-add-shot" type="button" aria-pressed="false" title="Open your moments and drop one onto the timeline at the playhead">+ Shot</button>
               <button class="tl-toggle" id="tl-add-sfx" type="button" hidden title="Add a sound cue at the current playhead">+ Sound</button>
               <button class="tl-toggle" id="tl-resync" type="button" hidden title="Re-lay the sound cues, dissolves and title slots onto your cut — your shots stay exactly where you put them">Rebuild layers</button>
+              <button class="tl-toggle" id="tl-buildon" type="button" hidden title="Keep every shot you placed and let Monteur fill the rest around them">Build on this</button>
+              <button class="tl-toggle" id="tl-blank" type="button" hidden title="Clear the picture and keep the song and its beat grid — build the cut yourself">Clear picture</button>
             </div>
             <div class="tl-frame" id="cre-tl-frame" hidden>
               <div class="tl-gutter">
@@ -2953,6 +2971,18 @@ window.__MONTEUR_PREFS__ = {};
               </div>
             </div>
             <p class="tl-legend" id="cre-strip-legend" hidden></p>
+            <div class="tl-shelf" id="cre-tl-shelf" hidden>
+              <div class="tl-shelf-head">
+                <span class="fgroup-title" style="margin: 0;">Your moments</span>
+                <label class="sr-only" for="tl-shelf-filter">Filter moments</label>
+                <input type="text" id="tl-shelf-filter" placeholder="Filter &mdash; kurve, sunset, hero&hellip;" spellcheck="false" autocomplete="off">
+                <label class="sr-only" for="tl-shelf-track">Drop onto track</label>
+                <select id="tl-shelf-track"></select>
+              </div>
+              <div class="sb-board tl-shelf-board" id="tl-shelf-board"></div>
+              <p class="scan-note" id="tl-shelf-msg" role="status" hidden></p>
+              <p class="help-small">Click a moment to drop it on the timeline at the playhead &mdash; it plays at its own length and nothing else moves. Scrub the ruler to choose where; pick a video track to lay cutaways over your main line.</p>
+            </div>
             <p class="help-small">Your cut as one timeline. Click a clip to open the inspector (swap its source, move it, change its boundary, delete or pin it); the ▶ on a clip watches just that moment; the Title lane edits act titles; the A2 lane edits sound. Pinned shots survive every revision exactly where they are.</p>
           </div>
           <details class="fine-tune rank-details" id="cre-find" style="margin-top: 14px;">
@@ -10339,7 +10369,10 @@ function renderStoryboard() {
   var musicNote = sbMusicLine(notes);
   $("cre-sb-music").textContent = musicNote ? "♪ " + musicNote : "";
   $("cre-sb-music").hidden = !musicNote;
-  $("cre-storyboard").hidden = entries.length === 0;
+  // The timeline survives an empty picture — that is where you build one.
+  // Revising and reviewing a cut that does not exist yet do not.
+  var hasPlan = !!(plan.duration || entries.length);
+  $("cre-storyboard").hidden = !hasPlan;
   $("cre-revise").hidden = entries.length === 0;
   $("cre-direct").hidden = entries.length === 0;
   if (insp.slot !== null && insp.slot >= entries.length) closeInspector();
@@ -11008,7 +11041,11 @@ function poJumpCut(direction) {
 function poRebuild() {
   var plan = rev.planJson;
   var host = $("cre-playout");
-  if (!plan || !((plan.entries || []).length)) {
+  // An EMPTY picture still plays: poPlanSegments gives one black segment over
+  // the whole song, so the playhead scrubs and the music runs — which is
+  // exactly what you need to place your first shot ON the beat. Only a plan
+  // with no length at all has nothing to play.
+  if (!plan || !((plan.duration || 0) > 0.01 || (plan.entries || []).length)) {
     poPause();
     po.segs = [];
     po.sig = "";
@@ -11833,7 +11870,10 @@ function renderTimelineStrip() {
   var duration = plan.duration ||
     (entries.length ? entries[entries.length - 1].record_end || 0 : 0);
   var bar = $("cre-tl-bar");
-  if (!entries.length || !duration) { host.hidden = true; frame.hidden = true; bar.hidden = true; return; }
+  // An EMPTY timeline is a legal state, not a missing one: the song's grid
+  // is still there and you build into it. Only a plan with no length at all
+  // has nothing to show.
+  if (!duration) { host.hidden = true; frame.hidden = true; bar.hidden = true; return; }
   host.hidden = false;
   frame.hidden = false;
   bar.hidden = false;
@@ -11850,6 +11890,14 @@ function renderTimelineStrip() {
   }
   var addSfxBtn = $("tl-add-sfx");
   if (addSfxBtn) addSfxBtn.hidden = false;
+  // "Build on this" needs something to build on; "Clear picture" needs
+  // something to clear. Both are hidden on a timeline where they'd be no-ops.
+  var buildOnBtn = $("tl-buildon");
+  if (buildOnBtn) buildOnBtn.hidden = !entries.length;
+  var blankBtn = $("tl-blank");
+  if (blankBtn) blankBtn.hidden = !entries.length;
+  // the shelf's track picker follows the plan's layout
+  if (!$("cre-tl-shelf").hidden) renderShelfTracks();
   // BPM readout from the plan's tempo; "beat grid" when downbeats exist
   var bpm = Math.round(plan.tempo || 0);
   var hasBeats = (plan.beat_marks || []).length > 0;
@@ -11871,6 +11919,15 @@ function renderTimelineStrip() {
     blocks.appendChild(lane);
   });
   var mainLane = lanes[TL_MAIN_TRACK] || blocks;
+  if (!entries.length) {
+    // An empty picture is a starting point — say what to do with it rather
+    // than leaving the editor staring at an empty box.
+    var hint = el("div", "tl-empty-hint",
+      "Empty picture — the song and its beat grid are ready. " +
+      "Scrub the ruler, then “+ Shot” to drop your moments in; " +
+      "“Build on this” lets Monteur fill the rest around them.");
+    mainLane.appendChild(hint);
+  }
   // Dips sit at their own record time now — they are not packed between the
   // shots, so they survive a lift or a free move like everything else.
   dips.forEach(function (dip) {
@@ -12470,7 +12527,11 @@ function applyPlanSurgery(extra, doneMsg, nextSlot) {
     else closeInspector();
     toast(doneMsg, "success");
   }).catch(function (err) {
-    creNote("cre-insp-msg", err && err.message ? err.message : String(err), true);
+    var message = err && err.message ? err.message : String(err);
+    // the inspector note is invisible while the drawer is closed, and a
+    // refused drag/insert comes from the timeline itself — so say it out loud
+    creNote("cre-insp-msg", message, true);
+    toast(message, "error");
   });
 }
 
@@ -12508,6 +12569,195 @@ function rebuildNote(result) {
   }
   return "";
 }
+
+/* ---- the shot shelf: your moments, one click from the timeline ---------
+   The cooperation half of the editor. `lift` takes a shot off the timeline;
+   this puts one ON, wherever the playhead is, on whichever video track you
+   pick. Together with "Clear picture" it makes an empty timeline a real
+   starting point instead of a dead end. */
+
+/* The moments to offer: this session's scan when there is one, otherwise the
+   project's stored analysis (a reopened project has no in-memory scan). An
+   empty array is TRUTHY in JS, so pick by length. */
+function shelfMoments() {
+  if (cre.clips && cre.clips.length) return arrMoments();
+  var cached = cre.momentsCache;
+  if (!(cached && cached.length)) return [];
+  var out = [];
+  cached.forEach(function (clip) {
+    (clip.moments || []).forEach(function (m) {
+      if (!m) return;
+      out.push({
+        clip: String(clip.path || ""), start: m.start || 0, end: m.end || 0,
+        label: String(m.label || ""), role: String(m.role || ""),
+        tags: Array.isArray(m.tags) ? m.tags.map(String) : [],
+        hero: typeof m.hero === "number" ? m.hero : 0
+      });
+    });
+  });
+  return out;
+}
+
+/* The video track a dropped shot lands on — the shelf's own picker, which
+   falls back to the main line whenever the chosen track is gone. */
+function shelfTrack() {
+  var sel = $("tl-shelf-track");
+  var wanted = sel ? String(sel.value || "") : "";
+  var rows = tlPictureTracks(rev.planJson || {});
+  var known = rows.filter(function (r) { return r.id === wanted; }).length;
+  return known ? wanted : TL_MAIN_TRACK;
+}
+
+function renderShelfTracks() {
+  var sel = $("tl-shelf-track");
+  if (!sel) return;
+  var wanted = String(sel.value || TL_MAIN_TRACK);
+  clear(sel);
+  tlPictureTracks(rev.planJson || {}).forEach(function (row) {
+    var opt = document.createElement("option");
+    opt.value = row.id;
+    opt.textContent = "onto " + (row.name || row.id);
+    sel.appendChild(opt);
+  });
+  sel.value = wanted;
+  if (!sel.value) sel.value = TL_MAIN_TRACK;
+}
+
+function renderShelf() {
+  var board = $("tl-shelf-board");
+  if (!board) return;
+  renderShelfTracks();
+  clear(board);
+  var moments = shelfMoments();
+  var query = $("tl-shelf-filter").value.trim();
+  var shown = 0;
+  moments.forEach(function (moment) {
+    if (!arrMatches(moment, query)) return;
+    board.appendChild(shelfCard(moment));
+    shown += 1;
+  });
+  if (!moments.length) {
+    creNote("tl-shelf-msg", "No analyzed moments yet — run a scan on the Footage page and they appear here.");
+  } else if (!shown) {
+    creNote("tl-shelf-msg", "No moment matches “" + query + "” — clear the filter to see all " + moments.length + ".");
+  } else {
+    $("tl-shelf-msg").hidden = true;
+  }
+}
+
+function shelfCard(moment) {
+  var card = document.createElement("button");
+  card.type = "button";
+  card.className = "sb-card arr-pick";
+  card.setAttribute("aria-label", "Drop onto the timeline: " + baseName(moment.clip) +
+    (moment.label ? " — " + moment.label : ""));
+  var wrap = el("div", "sb-thumb-wrap");
+  wrap.appendChild(arrThumb(moment.clip, moment.start, moment.end,
+    "Moment from " + baseName(moment.clip)));
+  wrap.appendChild(el("span", "sb-badge sb-dur", fmt1(moment.end - moment.start) + "s"));
+  if (moment.hero >= 0.7) wrap.appendChild(el("span", "sb-badge sb-hero", "hero"));
+  attachMomentPlayer(wrap, moment.clip, moment.start, moment.end);
+  card.appendChild(wrap);
+  var meta = el("div", "sb-meta");
+  meta.appendChild(el("span", "sb-name", baseName(moment.clip)));
+  if (moment.label) meta.appendChild(el("span", "sb-label", moment.label));
+  card.appendChild(meta);
+  card.addEventListener("click", function () { insertMoment(moment); });
+  return card;
+}
+
+/* Drop one moment on the timeline at the playhead. The engine refuses an
+   overlap or a position past the end and says why — that error reaches the
+   editor as a toast, so a refused drop is never silent. */
+function insertMoment(moment) {
+  if (!rev.planJson) return;
+  var at = tlSnapDrop(po.t || 0);
+  applyPlanSurgery({
+    insert: {
+      clip_path: moment.clip,
+      source_start: moment.start,
+      source_end: moment.end,
+      start: at,
+      track: shelfTrack(),
+      label: moment.label || ""
+    }
+  }, baseName(moment.clip) + " dropped at " + fmtClock(at) + ".", null);
+}
+
+/* The playhead, snapped to the beat grid when Snap is on — the same grid
+   every drag snaps to, so a dropped shot lands where a dragged one would. */
+function tlSnapDrop(t) {
+  if (!$("tl-snap") || $("tl-snap").getAttribute("aria-pressed") !== "true") return t;
+  var beats = ((rev.planJson || {}).beat_marks) || [];
+  var best = t;
+  var bestGap = Infinity;
+  beats.forEach(function (b) {
+    var gap = Math.abs(b - t);
+    if (gap < bestGap) { bestGap = gap; best = b; }
+  });
+  return bestGap <= 0.4 ? best : t;
+}
+
+/* Clear the picture, keep the song and its grid. Destructive but never
+   lossy: the edit is snapshotted into the project's version history like
+   every other one, so History brings the cut back. */
+function blankTimeline() {
+  if (!rev.planJson) return;
+  var n = ((rev.planJson.entries) || []).length;
+  if (n && !window.confirm(
+    "Clear all " + n + " shots from the picture?\n\n" +
+    "The song, the beat grid and the track layout stay. The cut is saved in " +
+    "History first, so you can bring it back."
+  )) return;
+  applyPlanSurgery({ blank: true }, "Picture cleared — the song and its grid stay.", null);
+}
+
+/* "Build on this": every shot you placed by hand is held, and Monteur
+   plans the rest around it. It runs the normal revision job (with no
+   instruction), so the pins are for THIS run only — nothing gets pinned
+   permanently behind your back. */
+function buildOnThis() {
+  if (!rev.planJson) return;
+  if (buildPanel.running() || revisePanel.running() || directPanel.running()) return;
+  var built = (cre.result && cre.result.body) || {};
+  var folder = built.folder || $("cre-folder").value.trim();
+  if (!folder) {
+    toast("Point Monteur at your footage folder first — it needs the material to fill around your shots.", "error");
+    return;
+  }
+  var body = {
+    plan_json: rev.planJson,
+    folder: folder,
+    brief: "",
+    build_on: true,
+    pins: rev.pins.slice(),
+    fps: built.fps || fpsFrom($("cre-fps")),
+    format: cre.format
+  };
+  if (built.audio) body.audio = built.audio;
+  if (built.canvas) body.canvas = built.canvas;
+  if (built.elements) body.elements = built.elements;
+  if (built.music_flow) body.music_flow = built.music_flow;
+  startRevise(body, null);
+}
+
+$("tl-add-shot").addEventListener("click", function () {
+  var shelf = $("cre-tl-shelf");
+  var open = shelf.hidden;
+  shelf.hidden = !open;
+  this.setAttribute("aria-pressed", open ? "true" : "false");
+  if (!open) return;
+  renderShelf();
+  // a reopened project has no in-memory scan — pull its stored moments
+  if (!shelfMoments().length) {
+    ensureMomentsCache(function () {
+      if (!$("cre-tl-shelf").hidden) renderShelf();
+    });
+  }
+});
+$("tl-shelf-filter").addEventListener("input", renderShelf);
+$("tl-blank").addEventListener("click", blankTimeline);
+$("tl-buildon").addEventListener("click", buildOnThis);
 
 /* Rebuild every layer that hangs off the CURRENT cut (a timeline-wide op,
    not shot-specific — so it does not go through applyPlanSurgery's slot

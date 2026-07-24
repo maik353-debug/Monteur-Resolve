@@ -2695,7 +2695,8 @@ def _run_revise_job(job: dict, payload: dict) -> None:
 
     try:
         plan = plan_from_dict(payload.get("plan_json") or {})  # bad -> ValueError
-        if not plan.entries:
+        build_on = bool(payload.get("build_on"))
+        if not plan.entries and not build_on:
             raise ValueError("the plan has no entries — nothing to revise")
         try:
             pins = [float(t) for t in payload.get("pins") or []]
@@ -2706,7 +2707,13 @@ def _run_revise_job(job: dict, payload: dict) -> None:
         # them. Any stamps the caller still sends are merged in (older clients).
         from monteur.montage import pinned_times
 
-        for t in pinned_times(plan):
+        held = pinned_times(plan)
+        if build_on:
+            # "Build on this": everything the editor placed by hand is held
+            # for THIS run — Monteur fills the rest around it. The stored
+            # pin flags are not touched, so the shots stay un-pinned after.
+            held = [(e.record_start + e.record_end) / 2.0 for e in plan.entries]
+        for t in held:
             if not any(abs(t - other) < 1e-6 for other in pins):
                 pins.append(t)
         audio = payload.get("audio") or ("music" if plan.music_path else "original")
@@ -4480,7 +4487,9 @@ class MonteurHandler(BaseHTTPRequestHandler):
             raise ApiError(
                 400, "missing 'plan_json' (the plan a build result carries)"
             )
-        if not str(payload.get("brief") or "").strip():
+        # "Build on this" IS the instruction: hold what the editor placed and
+        # fill the rest. Every other revision still needs a sentence.
+        if not payload.get("build_on") and not str(payload.get("brief") or "").strip():
             raise ApiError(
                 400, "missing 'brief' (say what should change, in one sentence)"
             )
@@ -4811,6 +4820,12 @@ class MonteurHandler(BaseHTTPRequestHandler):
         the hole a shot leaves behind is an editorial choice (black), not
         something to close:
 
+        * insert — ``{"insert": {clip_path, source_start, source_end, start,
+          track?, label?, …}}``: monteur.montage.insert_entry drops a moment
+          onto the timeline where you put it. The other half of lift, and
+          what makes an empty timeline a starting point.
+        * blank — ``{"blank": true}``: monteur.montage.blank_plan clears the
+          picture and keeps the song's grid — "let me do it myself".
         * lift — ``{"lift": <slot>}``: remove the shot, leave the gap.
         * move_to — ``{"move_to": <slot>, "start": <seconds>}``: put the shot
           at a free record position; its length and source window are kept.
@@ -4822,7 +4837,9 @@ class MonteurHandler(BaseHTTPRequestHandler):
             ARRANGEMENT_TRANSITIONS,
             add_track,
             adjust_entry_boundary,
+            blank_plan,
             delete_entry,
+            insert_entry,
             lift_entry,
             move_entry,
             move_entry_to,
@@ -4894,6 +4911,37 @@ class MonteurHandler(BaseHTTPRequestHandler):
             self._send_json(_plan_export_result(adjusted, payload))
             return
         # --- the free (NLE) edits: nothing else on the timeline moves --------
+        if isinstance(payload.get("insert"), dict):
+            # drop a moment from the shelf onto the timeline — the other half
+            # of lift, and what makes an empty timeline a real starting point
+            spec = payload["insert"]
+            plan = plan_from_dict(payload["plan_json"])
+            try:
+                adjusted = insert_entry(
+                    plan,
+                    clip_path=str(spec.get("clip_path") or ""),
+                    source_start=float(spec.get("source_start") or 0.0),
+                    source_end=float(spec.get("source_end") or 0.0),
+                    record_start=float(spec.get("start") or 0.0),
+                    track=str(spec.get("track") or ""),
+                    label=str(spec.get("label") or ""),
+                    score=float(spec.get("score") or 0.0),
+                    clip_duration=float(spec.get("clip_duration") or 0.0),
+                    media_start=float(spec.get("media_start") or 0.0),
+                    shot_size=str(spec.get("shot_size") or ""),
+                )
+            except (TypeError, ValueError) as exc:
+                raise ApiError(400, str(exc))
+            _persist_plan_edit(payload, adjusted, "insert")
+            self._send_json(_plan_export_result(adjusted, payload))
+            return
+        if payload.get("blank"):
+            # clear the picture and keep the song's grid — "let me do it"
+            plan = plan_from_dict(payload["plan_json"])
+            adjusted = blank_plan(plan)
+            _persist_plan_edit(payload, adjusted, "blank")
+            self._send_json(_plan_export_result(adjusted, payload))
+            return
         if "lift" in payload:
             try:
                 slot = int(payload.get("lift"))
@@ -4923,10 +4971,11 @@ class MonteurHandler(BaseHTTPRequestHandler):
                     400, "'move_to' must be an entry index and 'start' a time in seconds"
                 )
             plan = plan_from_dict(payload["plan_json"])
-            adjusted = move_entry_to(plan, slot, start)  # ValueError -> 400
             # one gesture = one edit: a drag that also crossed lanes carries
-            # its new track, so it lands in a single round trip
+            # its new track, so it is placed AND checked against the lane it
+            # lands on in a single round trip
             track = str(payload.get("track") or "")
+            adjusted = move_entry_to(plan, slot, start, track)  # ValueError -> 400
             if track:
                 moved = min(
                     range(len(adjusted.entries)),
