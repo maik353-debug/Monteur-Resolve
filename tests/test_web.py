@@ -187,7 +187,19 @@ class TestAppDataRoot:
 
 
 class TestUpdateApi:
-    """The in-app updater endpoints (network always monkeypatched away)."""
+    """The in-app updater endpoints (network always monkeypatched away).
+
+    These exercise the RELEASE (frozen/wheel) path, so git_root is forced to
+    None — otherwise, since the tests run inside a git checkout, the endpoints
+    would take the git-pull path and ignore the monkeypatched release calls.
+    The git path has its own tests below (TestGitUpdateApi + test_update.py).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _not_a_git_checkout(self, monkeypatch):
+        from monteur import update
+
+        monkeypatch.setattr(update, "git_root", lambda: None)
 
     def test_check_reports_available(self, server, monkeypatch):
         from monteur import update
@@ -282,6 +294,81 @@ class TestUpdateApi:
         job = _wait_for_job(server, started["job"])
         assert job["state"] == "done"
         assert job["result"]["available"] is False
+
+
+class TestGitUpdateApi:
+    """The updater's git-checkout path: /api/update/check compares against the
+    upstream branch, /api/update/install runs `git pull` — no download, no exe
+    swap. git_root is monkeypatched to a fake path so no real git runs."""
+
+    def test_check_uses_git_when_a_checkout(self, server, monkeypatch):
+        from pathlib import Path
+
+        from monteur import update
+
+        monkeypatch.setattr(update, "git_root", lambda: Path("/repo"))
+        info = update.UpdateInfo(
+            current="1.2.0", latest="2 commits behind", available=True,
+            notes="Latest commit", mode="git", kind="git",
+        )
+        monkeypatch.setattr(update, "git_check", lambda *a, **k: info)
+        data = _get(f"{server}/api/update/check")
+        assert data["mode"] == "git" and data["available"] is True
+        assert data["latest"] == "2 commits behind"
+
+    def test_install_pulls_when_a_checkout(self, server, monkeypatch):
+        from pathlib import Path
+
+        from monteur import update
+
+        monkeypatch.setattr(update, "git_root", lambda: Path("/repo"))
+        monkeypatch.setattr(
+            update, "git_pull",
+            lambda *a, **k: update.ApplyResult(
+                applied=True, version="1.2.0",
+                message="Pulled the latest code. Restart Monteur to finish updating.",
+            ),
+        )
+        started = _post(f"{server}/api/update/install", {})
+        job = _wait_for_job(server, started["job"])
+        assert job["state"] == "done"
+        assert job["result"]["staged"] is True
+        assert "Restart Monteur" in job["result"]["message"]
+
+    def test_install_reports_a_blocked_pull_without_crashing(self, server, monkeypatch):
+        from pathlib import Path
+
+        from monteur import update
+
+        monkeypatch.setattr(update, "git_root", lambda: Path("/repo"))
+        monkeypatch.setattr(
+            update, "git_pull",
+            lambda *a, **k: update.ApplyResult(
+                applied=False,
+                message="you have uncommitted local changes — commit or stash them",
+            ),
+        )
+        started = _post(f"{server}/api/update/install", {})
+        job = _wait_for_job(server, started["job"])
+        assert job["state"] == "done"  # informational, not a crash
+        assert job["result"]["staged"] is False
+        assert "uncommitted local changes" in job["result"]["message"]
+
+    @pytest.mark.skipif(not _APP_HTML.exists(), reason="app.html not built yet")
+    def test_git_update_is_wired_in_the_ui(self):
+        html = _APP_HTML.read_text(encoding="utf-8")
+        assert 'info.mode === "git"' in html   # the one-click git branch
+        assert '"Update now"' in html          # the git install button label
+
+    def test_native_restart_rebuilds_the_module_command_for_source(self):
+        # the pywebview restart must relaunch `python -m monteur …` for a
+        # source run (not `python <args>`), or the relaunch dies instantly
+        import inspect
+
+        from monteur.web import server
+
+        code = inspect.getsource(server._WindowControls.restart)
+        assert '[sys.executable, "-m", "monteur"]' in code
 
 
 class TestApi:

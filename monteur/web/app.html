@@ -4653,18 +4653,26 @@ function updateCheck() {
       return;
     }
     var notes = info.notes ? '<div class="update-notes">' + escapeHtml(info.notes) + "</div>" : "";
+    var isGit = info.mode === "git";
     var extra = "";
-    if (info.mode !== "frozen") {
-      // running from source — self-install doesn't apply; guide + link out
+    if (isGit) {
+      // a git checkout updates IN PLACE with one click (git pull --ff-only,
+      // then a restart) — no download, and local changes are never touched
+      extra = '<p class="help-small">One click pulls the latest code (your local changes are never touched); restart Monteur afterwards to finish.</p>';
+    } else if (info.mode !== "frozen") {
       extra = '<p class="help-small">You’re running from source — update with <code>git pull</code> or <code>pip install -U monteur</code>. (The one-click install is for the packaged app.)</p>';
     } else if (!(info.payload_url || info.download_url)) {
       extra = '<p class="help-small">No installable build for your platform is attached to this release yet.</p>';
     }
-    updateSetBody(
-      "<p><strong>Monteur " + escapeHtml(info.latest) + "</strong> is available "
-      + '<span class="help-small">(you have ' + escapeHtml(info.current) + ").</span></p>" + notes + extra
-    );
-    if (info.mode === "frozen" && (info.payload_url || info.download_url)) {
+    var head = isGit
+      ? "<p><strong>An update is available</strong> " + '<span class="help-small">(' + escapeHtml(info.latest) + ").</span></p>"
+      : ("<p><strong>Monteur " + escapeHtml(info.latest) + "</strong> is available "
+         + '<span class="help-small">(you have ' + escapeHtml(info.current) + ").</span></p>");
+    updateSetBody(head + notes + extra);
+    if (isGit) {
+      $("update-install").textContent = "Update now";
+      updateButtons({ install: true });
+    } else if (info.mode === "frozen" && (info.payload_url || info.download_url)) {
       $("update-install").textContent = info.kind === "exe" ? "Download & install (full)" : "Download & install";
       updateButtons({ install: true });
     } else {
@@ -4678,7 +4686,7 @@ function updateCheck() {
 function runUpdateInstall() {
   var btn = $("update-install");
   btn.disabled = true;
-  updateSetBody('<p class="help-small">Downloading the update…</p>');
+  updateSetBody('<p class="help-small">Updating…</p>');
   api("/api/update/install", { method: "POST", body: {} }).then(function (data) {
     (function poll() {
       api("/api/jobs/" + data.job).then(function (job) {

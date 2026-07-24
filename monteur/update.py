@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -33,6 +35,13 @@ from typing import Callable
 
 import monteur
 from monteur.settings import settings_path
+
+#: How long any single git subprocess may run before we give up.
+GIT_TIMEOUT = 45.0
+
+#: An injectable subprocess runner so the git path is testable without a real
+#: repo (mirrors the module's "everything network/IO is injected" ethos).
+GitRunner = Callable[..., "subprocess.CompletedProcess"]
 
 #: owner/repo the releases are published under (GitHub renamed the repo to
 #: Monteur-Resolve). Overridable so a fork / test can point elsewhere.
@@ -430,3 +439,118 @@ def apply_pending() -> ApplyResult | None:
         message=f"Updated to Monteur {version}.",
         relaunch=[str(target)],
     )
+
+
+# --- git-checkout updates -----------------------------------------------------
+#
+# A source install (git clone + `pip install -e .`) can't swap an executable —
+# but it doesn't need to: an update is just `git pull` + a restart. These drive
+# that path so the whole thing happens in-app, no terminal required.
+
+
+def _run_git(args: list[str], root: Path, runner: GitRunner | None = None):
+    """Run one git command in ``root``; captured, text, bounded by GIT_TIMEOUT."""
+    run = runner or subprocess.run
+    return run(
+        ["git", *args],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        timeout=GIT_TIMEOUT,
+    )
+
+
+def git_root() -> Path | None:
+    """The repository root when Monteur runs from a git checkout with ``git``
+    available, else None (a frozen build or a plain wheel install)."""
+    if is_frozen() or shutil.which("git") is None:
+        return None
+    start = Path(monteur.__file__).resolve().parent  # the monteur/ package dir
+    for d in (start, *start.parents):
+        if (d / ".git").exists():
+            return d
+    return None
+
+
+def git_check(root: Path | None = None, *, runner: GitRunner | None = None) -> UpdateInfo:
+    """Fetch and report how far the checkout is behind its upstream branch.
+
+    ``UpdateInfo.mode == "git"``; ``available`` is True when the branch is
+    behind its tracked upstream. Never raises — git failures (no upstream,
+    offline, not a repo) come back as ``error``.
+    """
+    info = UpdateInfo(current=current_version(), mode="git", kind="git")
+    root = root or git_root()
+    if root is None:
+        info.error = "not a git checkout (or git is not installed)"
+        return info
+    try:
+        branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], root, runner)
+        info.notes = ""
+        if branch.returncode == 0:
+            info.asset_name = branch.stdout.strip()  # the branch name, for display
+        fetched = _run_git(["fetch", "--quiet"], root, runner)
+        if fetched.returncode != 0:
+            info.error = (fetched.stderr or "git fetch failed").strip()
+            return info
+        counts = _run_git(
+            ["rev-list", "--left-right", "--count", "HEAD...@{u}"], root, runner
+        )
+        if counts.returncode != 0:
+            info.error = (
+                (counts.stderr or "").strip()
+                or "this branch has no upstream to compare against"
+            )
+            return info
+        parts = counts.stdout.split()
+        behind = int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else 0
+        info.available = behind > 0
+        if behind:
+            subj = _run_git(["log", "-1", "--format=%s", "@{u}"], root, runner)
+            top = subj.stdout.strip() if subj.returncode == 0 else ""
+            info.latest = f"{behind} commit{'s' if behind != 1 else ''} behind"
+            info.notes = top
+            info.url = ""
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        info.error = f"could not check git: {exc}"
+    return info
+
+
+def git_pull(root: Path | None = None, *, runner: GitRunner | None = None) -> ApplyResult:
+    """Fast-forward the checkout to its upstream (``git pull --ff-only``).
+
+    SAFE by design: ``--ff-only`` never rewrites or discards local work — if
+    the branch has diverged or the tree is dirty in a way that blocks a
+    fast-forward, it refuses and returns git's own message so the user can
+    resolve it, rather than clobbering anything. On success the running app
+    still holds the OLD code, so the result asks for a restart.
+    """
+    root = root or git_root()
+    if root is None:
+        return ApplyResult(applied=False, message="not a git checkout")
+    try:
+        dirty = _run_git(["status", "--porcelain"], root, runner)
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            return ApplyResult(
+                applied=False,
+                message=(
+                    "you have uncommitted local changes — commit or stash them, "
+                    "then update again (nothing was touched)"
+                ),
+            )
+        pulled = _run_git(["pull", "--ff-only"], root, runner)
+        if pulled.returncode != 0:
+            return ApplyResult(
+                applied=False,
+                message=(
+                    (pulled.stderr or pulled.stdout or "git pull failed").strip()
+                    + " — resolve it, then update again (nothing was discarded)"
+                ),
+            )
+        return ApplyResult(
+            applied=True,
+            version=current_version(),
+            message="Pulled the latest code. Restart Monteur to finish updating.",
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return ApplyResult(applied=False, message=f"could not update: {exc}")

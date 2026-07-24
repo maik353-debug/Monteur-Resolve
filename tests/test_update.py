@@ -346,3 +346,100 @@ def test_apply_pending_missing_file_clears_marker(tmp_path, monkeypatch):
     result = update.apply_pending()
     assert result.applied is False
     assert update.read_pending() is None
+
+
+# --- git-checkout updates -----------------------------------------------------
+
+
+class _Proc:
+    def __init__(self, rc=0, out="", err=""):
+        self.returncode = rc
+        self.stdout = out
+        self.stderr = err
+
+
+def _git_runner(mapping):
+    """A subprocess.run stand-in dispatching on the git subcommand prefix."""
+    def run(args, cwd=None, capture_output=None, text=None, timeout=None):
+        key = " ".join(args[1:])  # drop the leading 'git'
+        for prefix, proc in mapping.items():
+            if key.startswith(prefix):
+                return proc
+        return _Proc(1, "", "unmapped: " + key)
+    return run
+
+
+def test_git_check_reports_commits_behind(tmp_path):
+    runner = _git_runner({
+        "rev-parse --abbrev-ref": _Proc(0, "main\n"),
+        "fetch": _Proc(0),
+        "rev-list --left-right --count": _Proc(0, "0\t3\n"),  # 0 ahead, 3 behind
+        "log -1": _Proc(0, "Latest and greatest\n"),
+    })
+    info = update.git_check(tmp_path, runner=runner)
+    assert info.mode == "git" and info.available is True
+    assert info.latest == "3 commits behind"
+    assert info.notes == "Latest and greatest"
+    assert info.asset_name == "main"  # the branch name, for display
+
+
+def test_git_check_up_to_date(tmp_path):
+    runner = _git_runner({
+        "rev-parse --abbrev-ref": _Proc(0, "main\n"),
+        "fetch": _Proc(0),
+        "rev-list --left-right --count": _Proc(0, "0\t0\n"),
+    })
+    info = update.git_check(tmp_path, runner=runner)
+    assert info.available is False and not info.error
+
+
+def test_git_check_no_upstream_is_soft(tmp_path):
+    runner = _git_runner({
+        "rev-parse --abbrev-ref": _Proc(0, "wip\n"),
+        "fetch": _Proc(0),
+        "rev-list --left-right --count": _Proc(128, "", "no upstream configured"),
+    })
+    info = update.git_check(tmp_path, runner=runner)
+    assert info.available is False and info.error
+
+
+def test_git_check_fetch_failure_is_soft(tmp_path):
+    runner = _git_runner({
+        "rev-parse --abbrev-ref": _Proc(0, "main\n"),
+        "fetch": _Proc(1, "", "could not resolve host"),
+    })
+    info = update.git_check(tmp_path, runner=runner)
+    assert info.available is False and "could not resolve host" in info.error
+
+
+def test_git_pull_fast_forwards_cleanly(tmp_path):
+    runner = _git_runner({
+        "status --porcelain": _Proc(0, ""),          # clean tree
+        "pull --ff-only": _Proc(0, "Updating a1b2..c3d4\n"),
+    })
+    res = update.git_pull(tmp_path, runner=runner)
+    assert res.applied is True
+    assert "Restart Monteur" in res.message
+
+
+def test_git_pull_refuses_a_dirty_tree(tmp_path):
+    runner = _git_runner({"status --porcelain": _Proc(0, " M monteur/x.py\n")})
+    res = update.git_pull(tmp_path, runner=runner)
+    assert res.applied is False
+    assert "uncommitted local changes" in res.message
+
+
+def test_git_pull_refuses_when_it_cannot_fast_forward(tmp_path):
+    runner = _git_runner({
+        "status --porcelain": _Proc(0, ""),
+        "pull --ff-only": _Proc(1, "", "fatal: Not possible to fast-forward, aborting."),
+    })
+    res = update.git_pull(tmp_path, runner=runner)
+    assert res.applied is False
+    assert "fast-forward" in res.message
+    assert "nothing was discarded" in res.message  # honest, non-destructive
+
+
+def test_git_root_none_when_frozen(monkeypatch):
+    monkeypatch.setattr(update, "is_frozen", lambda: True)
+    assert update.git_root() is None

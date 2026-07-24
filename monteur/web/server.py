@@ -3786,6 +3786,23 @@ def _run_update_job(job: dict) -> None:
     from monteur.settings import update_channel
 
     try:
+        # A git checkout updates in place with `git pull --ff-only` (safe: it
+        # never rewrites or discards local work) — no download, no exe swap.
+        # The running process still holds the old code, so we ask for a restart.
+        git_root = update_mod.git_root()
+        if git_root is not None:
+            with _JOBS_LOCK:
+                job["progress"].append({"stage": "pulling"})
+            res = update_mod.git_pull(git_root)
+            job["result"] = {
+                "available": True,
+                "staged": res.applied,
+                "current": update_mod.current_version(),
+                "latest": update_mod.current_version(),
+                "message": res.message,
+            }
+            job["state"] = "done"  # a blocked pull is informational, not a crash
+            return
         with _JOBS_LOCK:
             job["progress"].append({"stage": "checking"})
         info = update_mod.check(channel=update_channel())
@@ -6228,10 +6245,17 @@ class MonteurHandler(BaseHTTPRequestHandler):
     # -- in-app updates (monteur.update) --------------------------------------
 
     def _update_check(self) -> None:
-        """GET /api/update/check — is there a newer release? Never errors hard."""
+        """GET /api/update/check — is there a newer version? Never errors hard.
+
+        A git checkout compares against its upstream branch (an in-app update
+        is just `git pull`); a frozen/wheel build checks GitHub Releases.
+        """
         from monteur import update as update_mod
         from monteur.settings import update_channel
 
+        if update_mod.git_root() is not None:
+            self._send_json(update_mod.git_check().to_dict())
+            return
         self._send_json(update_mod.check(channel=update_channel()).to_dict())
 
     def _update_install(self) -> None:
@@ -6502,7 +6526,12 @@ class _WindowControls:
             import subprocess
             import sys
 
-            subprocess.Popen([sys.executable] + sys.argv[1:])  # noqa: S603 - our own app
+            # A frozen build IS the launcher (sys.executable = monteur.exe); a
+            # source run is `python -m monteur <args>`, so rebuild that form —
+            # otherwise the relaunch would run `python ui …` and die instantly.
+            frozen = bool(getattr(sys, "frozen", False))
+            base = [sys.executable] if frozen else [sys.executable, "-m", "monteur"]
+            subprocess.Popen(base + sys.argv[1:])  # noqa: S603 - our own app
         except Exception:  # noqa: BLE001 — never strand the user
             return
         self.close()
